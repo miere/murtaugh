@@ -1,8 +1,10 @@
 package workflow
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -105,6 +107,64 @@ func TestEngineSkipsWhenNoRuleMatches(t *testing.T) {
 	}
 }
 
+func TestEngineInstallsDefaultPingPongRule(t *testing.T) {
+	poster := &recordingPoster{}
+	engine := NewEngine(config.Config{}, Options{Poster: poster})
+
+	if err := engine.Execute(context.Background(), pingInteraction()); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if len(poster.bodies) != 1 || poster.urls[0] != "https://hooks.slack.test/ping" {
+		t.Fatalf("unexpected posted responses: urls=%#v bodies=%#v", poster.urls, poster.bodies)
+	}
+	var response map[string]any
+	if err := json.Unmarshal(poster.bodies[0], &response); err != nil {
+		t.Fatalf("default pong body is not JSON: %v", err)
+	}
+	if response["thread_ts"] != "1717450123.000100" || !strings.Contains(string(poster.bodies[0]), ":recycle: The server communication is functional.") {
+		t.Fatalf("unexpected default pong body: %s", poster.bodies[0])
+	}
+}
+
+func TestEngineUsesEmbeddedFallbackTemplateForConfiguredRule(t *testing.T) {
+	poster := &recordingPoster{}
+	engine := NewEngine(config.Config{WorkflowRules: map[string]config.WorkflowRuleConfig{
+		"startup-ping-pong": {
+			RequestEvent: "interactive",
+			Match: map[string]any{
+				"type":    "block_actions",
+				"actions": []any{map[string]any{"action_id": "ping"}},
+			},
+			Triggers: []config.TriggerConfig{{
+				Type:         "reply-to-slack",
+				ReplyToSlack: &config.ReplyToSlackTriggerConfig{Template: "ping/02-pong.json"},
+			}},
+		},
+	}}, Options{Poster: poster})
+
+	if err := engine.Execute(context.Background(), pingInteraction()); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if len(poster.bodies) != 1 || !strings.Contains(string(poster.bodies[0]), ":recycle: The server communication is functional.") {
+		t.Fatalf("unexpected fallback template response: %#v", poster.bodies)
+	}
+}
+
+func TestEngineLogsInfoWhenNoRuleMatches(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	engine := NewEngine(workflowConfig(), Options{Logger: logger})
+	interaction := pingInteraction()
+
+	if err := engine.Execute(context.Background(), interaction); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	output := logs.String()
+	if !strings.Contains(output, "interactive request had no matching workflow rule") || !strings.Contains(output, "action_ids=[ping]") {
+		t.Fatalf("expected info log for unmatched request, got %q", output)
+	}
+}
+
 func TestMatchesPartialNestedArrays(t *testing.T) {
 	actual := map[string]any{
 		"channel": map[string]any{"name": "nc-code-reviews", "id": "C123"},
@@ -146,6 +206,17 @@ func approvalInteraction() slack.InteractionCallback {
 		ActionCallback: slack.ActionCallbacks{BlockActions: []*slack.BlockAction{{
 			BlockID:  "github_pull_request",
 			ActionID: "approve_only",
+		}}},
+	}
+}
+
+func pingInteraction() slack.InteractionCallback {
+	return slack.InteractionCallback{
+		Type:        slack.InteractionTypeBlockActions,
+		ResponseURL: "https://hooks.slack.test/ping",
+		Message:     slack.Message{Msg: slack.Msg{Timestamp: "1717450123.000100"}},
+		ActionCallback: slack.ActionCallbacks{BlockActions: []*slack.BlockAction{{
+			ActionID: "ping",
 		}}},
 	}
 }

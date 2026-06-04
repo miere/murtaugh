@@ -20,9 +20,10 @@ type Config struct {
 }
 
 type SlackConfig struct {
-	AppToken string `yaml:"app_token"`
-	BotToken string `yaml:"bot_token"`
-	Debug    bool   `yaml:"debug"`
+	AppToken  string `yaml:"app_token"`
+	BotToken  string `yaml:"bot_token"`
+	AdminUser string `yaml:"admin_user"`
+	Debug     bool   `yaml:"debug"`
 }
 
 type CommandConfig struct {

@@ -6,11 +6,11 @@ import (
 )
 
 func TestParseValidConfig(t *testing.T) {
-	cfg, err := Parse([]byte("slack:\n  app_token: xapp-test\n  bot_token: xoxb-test\ncommands:\n  - name: /murtaugh\n"))
+	cfg, err := Parse([]byte("slack:\n  app_token: xapp-test\n  bot_token: xoxb-test\n  admin_user: '@admin'\ncommands:\n  - name: /murtaugh\n"))
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
-	if cfg.Slack.AppToken != "xapp-test" || cfg.Slack.BotToken != "xoxb-test" {
+	if cfg.Slack.AppToken != "xapp-test" || cfg.Slack.BotToken != "xoxb-test" || cfg.Slack.AdminUser != "@admin" {
 		t.Fatalf("unexpected Slack tokens parsed")
 	}
 	if len(cfg.Commands) != 1 || cfg.Commands[0].Name != "/murtaugh" {

@@ -1,0 +1,24 @@
+slack:
+  app_token: xapp-fake-socket-mode-token
+  bot_token: xoxb-fake-bot-token
+  admin_user: murtaugh-admin
+  debug: false
+
+commands:
+  - name: /murtaugh
+    description: Entrypoint for Murtaugh commands
+
+workflow-rules:
+  startup-ping-pong:
+    request_event: interactive
+    match:
+      type: block_actions
+      actions:
+        - action_id: ping
+    trigger:
+      - reply-to-slack:
+          template: ping/02-pong.json
+
+# If workflow-rules is omitted entirely, Murtaugh still installs a built-in
+# ping button workflow that renders ping/02-pong.json in the original message
+# thread.

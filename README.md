@@ -16,6 +16,7 @@ Create `~/.config/murtaugh/slack.yaml`:
 slack:
   app_token: xapp-your-socket-mode-app-token
   bot_token: xoxb-your-bot-token
+  admin_user: your-slack-handle
   debug: false
 
 commands:
@@ -41,6 +42,10 @@ workflow-rules:
 The Slack app must have Socket Mode enabled and must subscribe to slash command
 payloads for every command listed in the configuration.
 
+`slack.admin_user` may be a Slack handle with or without `@` or a Slack user ID.
+When Socket Mode reports that it is connected, Murtaugh opens a DM with that user
+and sends the startup ping message from `assets/ping/01-ping.json`.
+
 ## Workflow rules
 
 Workflow rules let Murtaugh respond to Slack interactive form/button submissions.
@@ -56,6 +61,21 @@ POST it to the Slack `response_url` from the interaction payload.
 - Commands are executed directly with explicit args, not through a shell. The
   Slack interaction JSON is passed to commands on stdin.
 - `response_url` is treated as sensitive webhook data and is never logged.
+
+If `workflow-rules` is omitted or empty, Murtaugh installs a built-in ping/pong
+rule. If you already have workflow rules configured, add an explicit
+`startup-ping-pong` rule that points at `ping/02-pong.json`. Murtaugh first
+looks for that template relative to your config directory and then falls back to
+the embedded reference asset. Pressing the startup message's `ping` button posts
+the rendered pong response through Slack's `response_url`, using the original
+startup message timestamp as `thread_ts` so the response appears in the message
+thread.
+
+## Reference assets
+
+The `assets/` directory contains a fake `slack.yaml` plus the default ping and
+pong JSON payloads. They are safe reference files; copy or adapt them to your
+runtime config/template location if you want to override the built-in defaults.
 
 ## Run
 

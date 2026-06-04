@@ -13,11 +13,13 @@ import (
 )
 
 type App struct {
-	api      *slack.Client
-	socket   *socketmode.Client
-	handler  SlashCommandHandler
-	workflow *workflow.Engine
-	logger   *slog.Logger
+	api             *slack.Client
+	socket          *socketmode.Client
+	handler         SlashCommandHandler
+	workflow        *workflow.Engine
+	startupNotifier StartupNotifier
+	startupPingSent bool
+	logger          *slog.Logger
 }
 
 func New(cfg config.Config, logger *slog.Logger) *App {
@@ -26,12 +28,17 @@ func New(cfg config.Config, logger *slog.Logger) *App {
 	}
 	api := slack.New(cfg.Slack.BotToken, slack.OptionAppLevelToken(cfg.Slack.AppToken))
 	socket := socketmode.New(api, socketmode.OptionDebug(cfg.Slack.Debug))
+	startupNotifier, err := NewSlackStartupNotifier(api, cfg.Slack.AdminUser, logger)
+	if err != nil {
+		logger.Error("startup Slack ping disabled", "error", err)
+	}
 	return &App{
-		api:      api,
-		socket:   socket,
-		handler:  NewDefaultSlashCommandHandler(cfg.Commands),
-		workflow: workflow.NewEngine(cfg, workflow.Options{Logger: logger}),
-		logger:   logger,
+		api:             api,
+		socket:          socket,
+		handler:         NewDefaultSlashCommandHandler(cfg.Commands),
+		workflow:        workflow.NewEngine(cfg, workflow.Options{Logger: logger}),
+		startupNotifier: startupNotifier,
+		logger:          logger,
 	}
 }
 
@@ -58,7 +65,10 @@ func (a *App) Run(ctx context.Context) error {
 
 func (a *App) handleEvent(ctx context.Context, event socketmode.Event) {
 	switch event.Type {
-	case socketmode.EventTypeConnecting, socketmode.EventTypeConnected, socketmode.EventTypeHello:
+	case socketmode.EventTypeConnected:
+		a.logger.Debug("socket mode lifecycle event", "type", event.Type)
+		a.notifyStartup(ctx)
+	case socketmode.EventTypeConnecting, socketmode.EventTypeHello:
 		a.logger.Debug("socket mode lifecycle event", "type", event.Type)
 	case socketmode.EventTypeSlashCommand:
 		a.handleSlashCommand(ctx, event)
@@ -67,6 +77,20 @@ func (a *App) handleEvent(ctx context.Context, event socketmode.Event) {
 	default:
 		a.logger.Debug("ignored socket mode event", "type", event.Type)
 	}
+}
+
+func (a *App) notifyStartup(ctx context.Context) {
+	if a.startupNotifier == nil || a.startupPingSent {
+		return
+	}
+	a.startupPingSent = true
+	go func() {
+		pingCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		if err := a.startupNotifier.NotifyStartup(pingCtx); err != nil {
+			a.logger.Error("startup Slack ping failed", "error", err)
+		}
+	}()
 }
 
 func (a *App) handleInteractive(event socketmode.Event) {
