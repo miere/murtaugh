@@ -1,12 +1,21 @@
 # Murtaugh Dev Toolkit
 
-Go service for connecting Murtaugh to Slack via Socket Mode.
+Go toolkit that exposes the same capabilities through three frontends:
+
+- **Slack** — Socket Mode daemon (`murtaugh slack`, the default).
+- **CLI** — direct human-facing commands (`murtaugh <tool> [...]`).
+- **MCP** — JSON-RPC stdio server for AI clients (`murtaugh mcp`).
+
+Every Murtaugh tool is registered exactly once and is automatically available
+through both the CLI and MCP frontends.
 
 ## Goals
 
 - Make it easy to build refined Slack experiences with BlockKit.
 - Handle custom Slack slash commands.
 - Provide integration points for ACP agents, locally or remotely.
+- Expose every capability as a tool that AI clients (over MCP) and humans (over
+  the CLI) can call.
 
 ## Configuration
 
@@ -180,8 +189,49 @@ you want to override the built-in defaults.
 
 ## Run
 
+Build the single binary:
+
 ~~~sh
-go run ./cmd/murtaugh-slack
+go build -o murtaugh ./cmd/murtaugh
 ~~~
 
-Use `--config /path/to/slack.yaml` to load a non-default config file.
+### Slack Socket Mode daemon (default)
+
+~~~sh
+murtaugh slack         # explicit
+murtaugh               # implicit — no command runs the daemon
+~~~
+
+### MCP stdio server
+
+~~~sh
+murtaugh mcp           # speaks MCP JSON-RPC on stdin/stdout
+~~~
+
+Stdout is reserved for the protocol — never parse it as plain text. Diagnostics
+go to stderr.
+
+### CLI tools
+
+Every registered tool is callable directly. Flat tools take one token; nested
+tools (e.g. `jobs.run`) take a namespace + subcommand:
+
+~~~sh
+murtaugh ping                                          # → pong
+
+murtaugh jobs run --name nightly-deploy                # run a job
+
+murtaugh jobs define \
+  --name nightly-deploy \
+  --command /usr/local/bin/deploy \
+  --args --env --args production \
+  --workdir /srv/deploy \
+  --timeout 15m                                        # write the job into jobs.yaml
+~~~
+
+Schema-typed arguments are coerced for you: `--count 5` becomes an integer,
+`--verbose true` becomes a boolean, and array-typed flags (such as `--args`)
+accumulate when repeated.
+
+Use `--config /path/to/slack.yaml` to load a non-default config file. The flag
+applies to every mode.

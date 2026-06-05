@@ -31,16 +31,17 @@ type SlackStartupNotifier struct {
 }
 
 func NewSlackStartupNotifier(api SlackAPI, adminUser string, logger *slog.Logger) (StartupNotifier, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	adminUser = strings.TrimSpace(adminUser)
 	if adminUser == "" {
+		logger.Warn("startup Slack ping disabled: configuration.admin_user is not set")
 		return nil, nil
 	}
 	blocks, err := loadStartupPingBlocks()
 	if err != nil {
 		return nil, err
-	}
-	if logger == nil {
-		logger = slog.Default()
 	}
 	return &SlackStartupNotifier{api: api, adminUser: adminUser, blocks: blocks, logger: logger}, nil
 }

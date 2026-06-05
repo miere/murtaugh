@@ -42,6 +42,9 @@ func New(cfg config.Config, logger *slog.Logger) *App {
 		logger.Error("startup Slack ping disabled", "error", err)
 	}
 	var chat *ChatHandler
+	if !cfg.ACP.Enabled {
+		logger.Warn("ACP chat disabled: set acp.enabled: true in agents.yaml to enable DM and app_mention replies")
+	}
 	if cfg.ACP.Enabled {
 		sessions := make(map[string]ChatSessionManager)
 		for name, profile := range cfg.Agents {

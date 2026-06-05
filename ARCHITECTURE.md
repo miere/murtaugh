@@ -6,23 +6,62 @@ between them, and the conventions you must respect so changes stay consistent.
 
 ## What this service is
 
-A Go service that connects Murtaugh to Slack over **Socket Mode**. It:
+A Go toolkit that ships a single binary with **three frontends** backed by a
+shared Tool registry:
 
-- responds to slash commands,
-- runs YAML-defined **workflow rules** against interactive payloads (Block Kit
-  buttons, etc.),
-- bridges Slack conversations to an **ACP** (Agent Communication Protocol) agent
-  with live response streaming, and
-- renders **custom link unfurls** for shared URLs.
+- **Slack** — Socket Mode daemon (`murtaugh slack`, the default) that responds
+  to slash commands, runs YAML-defined **workflow rules** against interactive
+  payloads (Block Kit buttons, etc.), bridges Slack conversations to an **ACP**
+  (Agent Communication Protocol) agent with live response streaming, and
+  renders **custom link unfurls** for shared URLs.
+- **CLI** — human-facing direct invocation (`murtaugh <tool> [...]`).
+- **MCP** — JSON-RPC stdio server (`murtaugh mcp`) that exposes every
+  registered tool to AI clients.
 
 Module path: `github.com/miere/murtaugh-dev-toolkit`.
+
+## High-level architecture
+
+```
+                          ┌──────────────┐
+                          │ cmd/murtaugh │
+                          └──────┬───────┘
+                                 │
+                          ┌──────▼───────┐
+                          │ internal/app │   ← composition root
+                          └──────┬───────┘
+                  builds Registry + selects Mode
+        ┌────────────────────────┼────────────────────────┐
+        │                        │                        │
+┌───────▼────────┐      ┌────────▼────────┐      ┌────────▼────────┐
+│ frontends/cli  │      │ frontends/mcp   │      │ slackapp (daemon)│
+└───────┬────────┘      └────────┬────────┘      └─────────────────┘
+        │                        │
+        └──────► Tool ◄──────────┘
+                  (internal/tools/*)
+```
+
+- `internal/app` is the only place tools are wired into the registry.
+- CLI and MCP frontends know nothing about each other and reach tools only
+  through `tools.Tool`.
+- The Slack daemon does not use the Tool registry today; it runs side-by-side
+  as a third frontend selected by mode.
 
 ## Repository layout
 
 ```
-cmd/murtaugh-slack/   Entrypoint (flag parsing, logger, signal handling).
+cmd/murtaugh/         Entry point: flag parsing, mode selection, signal handling.
+internal/app/         Composition root + Registry wiring.
+internal/frontends/   CLI and MCP adapters over the Tool registry.
+  cli/                Human frontend: kebab → snake flag mapping, render dispatch.
+  mcp/                MCP stdio adapter wrapping the same Registry.
+internal/tools/       Shared Tool interface + one package per tool.
+  tool.go             Tool interface + Registry.
+  ping/               Health-check tool (the canonical example).
+  jobs/run/           Tool `jobs.run`: execute a job defined in jobs.yaml.
+  jobs/define/        Tool `jobs.define`: register a job in jobs.yaml.
 internal/config/      Config schema, loading, and validation.
-internal/slackapp/    Socket Mode app, event loop, all event handlers.
+internal/slackapp/    Socket Mode app, event loop, all Slack event handlers.
 internal/acp/         ACP process client, session manager, protocol types.
 internal/workflow/    Workflow engine, command runner, template rendering.
 internal/unfurl/      Link matcher and Block Kit attachment renderer.
@@ -31,19 +70,67 @@ assets/               Embedded reference config, JSON templates, agent skills.
 
 `internal/*` is private to this module. Cross-package dependencies flow in one
 direction: `slackapp` orchestrates `config`, `acp`, `workflow`, and `unfurl`;
-those packages do not import `slackapp`.
+those packages do not import `slackapp`. Tool packages depend on `config`
+where they need shared types (e.g. `JobProfile`), never the other way around.
+
+## The Tool contract
+
+```go
+type Tool interface {
+    Name() string
+    Description() string
+    InputSchema() *jsonschema.Schema
+    Invoke(ctx context.Context, args map[string]any) (any, error)
+}
+```
+
+- `Name` is the registry key. A `.`-separated name (e.g. `jobs.run`) declares
+  the tool as belonging to a namespace; the CLI frontend resolves
+  `murtaugh jobs run` to the registered name `jobs.run`.
+- `Description` is a one-line human-readable hint used by MCP clients.
+- `InputSchema` returns the JSON Schema that documents and validates the
+  tool's parameters. Returning `nil` means the tool takes no parameters.
+- `Invoke` receives args keyed by the JSON-Schema property names declared on
+  `InputSchema`. The CLI frontend maps `--kebab-case` flags to `snake_case`
+  keys before invocation; array-typed properties accumulate when the flag is
+  repeated.
+
+### Frontend conventions
+
+- **CLI** writes tool output to stdout and diagnostics to stderr. Tool
+  results dispatch by type via `cli.Render`: `string`, `[]string`,
+  `fmt.Stringer`, and finally `%v` fallback. Tools that own a rich result
+  struct provide a `String()` method for the CLI representation and let the
+  MCP frontend JSON-marshal the same struct.
+- **MCP** wraps every registered tool's result in a single `TextContent`
+  block. Strings pass through; everything else is JSON-marshalled. Tool
+  errors map to `CallToolResult{IsError: true, ...}`.
+
+### Adding a new tool
+
+1. Create `internal/tools/<flat>/` or `internal/tools/<ns>/<sub>/` and
+   implement the `Tool` interface.
+2. Register the new tool in `internal/app/application.go::buildRegistry`.
+3. Add a `_test.go` covering happy-path invocation and schema declarations.
+4. Document the new command in `README.md`.
 
 ## Lifecycle (entrypoint → shutdown)
 
-`cmd/murtaugh-slack/main.go`:
+`cmd/murtaugh/main.go`:
 
-1. Resolves the config path (`config.DefaultPath()` → `~/.config/murtaugh/slack.yaml`,
-   overridable with `--config`).
-2. `config.Load(path)` reads, parses, validates, and records `BaseDir`.
-3. Builds an `slog.Logger` (text handler; debug level when `configuration.debug: true`).
-4. Creates a `signal.NotifyContext` for `SIGINT`/`SIGTERM`.
-5. `slackapp.New(cfg, logger)` then `app.Run(ctx)` blocks until the context is
-   cancelled or Socket Mode returns a fatal error.
+1. Extracts the global `--config` flag from `os.Args` (supports
+   `--config PATH` and `--config=PATH`).
+2. Resolves the config path (`config.DefaultPath()` →
+   `~/.config/murtaugh/slack.yaml`, overridable with `--config`).
+3. Selects the mode: `slack` (default), `mcp`, or `<tool>` → `ModeCLI`.
+4. `config.Bootstrap(path)` seeds the config directory on first run, then
+   `config.Load(path)` reads, parses, validates, and records `BaseDir`.
+5. Builds an `slog.Logger` (text handler; debug level when
+   `configuration.debug: true`; warn level for CLI mode so tool output
+   dominates the terminal).
+6. Creates a `signal.NotifyContext` for `SIGINT`/`SIGTERM`.
+7. `app.New(...)` builds the Registry and the chosen frontend; `Run(ctx)`
+   blocks until the context is cancelled or the frontend returns.
 
 ## Configuration (`internal/config`)
 
