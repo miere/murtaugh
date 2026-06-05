@@ -43,6 +43,9 @@ func Bootstrap(configPath string) error {
 	if err := copyAssetFile("agents.yaml", filepath.Join(baseDir, "agents.yaml")); err != nil {
 		return err
 	}
+	if err := copyAssetFile("jobs.yaml", filepath.Join(baseDir, "jobs.yaml")); err != nil {
+		return err
+	}
 
 	if err := copySkills(filepath.Join(baseDir, "skills")); err != nil {
 		return err

@@ -1,0 +1,10 @@
+# Jobs configuration for Murtaugh.
+# Define jobs here and run them manually with:
+#   murtaugh jobs run <job-name>
+
+jobs:
+  example-job:
+    command: /bin/echo
+    args: ["hello from murtaugh"]
+    # workdir: /path/to/working/directory
+    # timeout: 5m

@@ -102,6 +102,49 @@ func TestBootstrapDoesNotOverwriteExistingFiles(t *testing.T) {
 	}
 }
 
+func TestBootstrapCopiesJobsYAML(t *testing.T) {
+	baseDir := filepath.Join(t.TempDir(), "murtaugh")
+	configPath := filepath.Join(baseDir, "slack.yaml")
+
+	if err := Bootstrap(configPath); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+
+	wantJobs, err := assets.FS.ReadFile("jobs.yaml")
+	if err != nil {
+		t.Fatalf("read embedded jobs.yaml: %v", err)
+	}
+	gotJobs, err := os.ReadFile(filepath.Join(baseDir, "jobs.yaml"))
+	if err != nil {
+		t.Fatalf("read bootstrapped jobs.yaml: %v", err)
+	}
+	if string(gotJobs) != string(wantJobs) {
+		t.Fatalf("jobs.yaml content mismatch: got %q want %q", gotJobs, wantJobs)
+	}
+}
+
+func TestBootstrapDoesNotOverwriteExistingJobsYAML(t *testing.T) {
+	baseDir := filepath.Join(t.TempDir(), "murtaugh")
+	configPath := filepath.Join(baseDir, "slack.yaml")
+	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+		t.Fatalf("seed dir: %v", err)
+	}
+
+	const customJobs = "jobs:\n  my-job:\n    command: /bin/true\n"
+	jobsPath := filepath.Join(baseDir, "jobs.yaml")
+	if err := os.WriteFile(jobsPath, []byte(customJobs), 0o644); err != nil {
+		t.Fatalf("seed jobs.yaml: %v", err)
+	}
+
+	if err := Bootstrap(configPath); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+
+	if got, _ := os.ReadFile(jobsPath); string(got) != customJobs {
+		t.Fatalf("jobs.yaml was overwritten: got %q", got)
+	}
+}
+
 func TestBootstrapIsIdempotent(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "murtaugh", "slack.yaml")
 

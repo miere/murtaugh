@@ -256,6 +256,77 @@ unfurl-rules:
 	}
 }
 
+func TestParseJobsConfig(t *testing.T) {
+	cfg, err := Parse([]byte(`
+slack:
+  app_token: xapp-test
+  bot_token: xoxb-test
+`))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	// Inject jobs manually (as Load() would, from jobs.yaml)
+	cfg.Jobs = map[string]JobProfile{
+		"cleanup-logs": {
+			Command: "/usr/bin/find",
+			Args:    []string{"/var/log", "-mtime", "+7", "-delete"},
+			WorkDir: "/tmp",
+			Timeout: "5m",
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate returned error: %v", err)
+	}
+	job, ok := cfg.Jobs["cleanup-logs"]
+	if !ok {
+		t.Fatal("expected cleanup-logs job")
+	}
+	if job.Command != "/usr/bin/find" || len(job.Args) != 4 || job.Timeout != "5m" {
+		t.Fatalf("unexpected job parsed: %#v", job)
+	}
+}
+
+func TestJobValidationRequiresCommand(t *testing.T) {
+	cfg, err := Parse([]byte("slack:\n  app_token: xapp-test\n  bot_token: xoxb-test\n"))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	cfg.Jobs = map[string]JobProfile{
+		"bad-job": {Command: ""},
+	}
+	err = cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "jobs[bad-job].command is required") {
+		t.Fatalf("expected job command validation error, got: %v", err)
+	}
+}
+
+func TestJobValidationRejectsBadTimeout(t *testing.T) {
+	cfg, err := Parse([]byte("slack:\n  app_token: xapp-test\n  bot_token: xoxb-test\n"))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	cfg.Jobs = map[string]JobProfile{
+		"bad-timeout": {Command: "/bin/echo", Timeout: "nope"},
+	}
+	err = cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "jobs[bad-timeout].timeout") {
+		t.Fatalf("expected job timeout validation error, got: %v", err)
+	}
+}
+
+func TestJobValidationAcceptsOptionalFields(t *testing.T) {
+	cfg, err := Parse([]byte("slack:\n  app_token: xapp-test\n  bot_token: xoxb-test\n"))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	cfg.Jobs = map[string]JobProfile{
+		"minimal": {Command: "/bin/echo"},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate returned error: %v", err)
+	}
+}
+
 func TestParseUnfurlRejectsBadRegex(t *testing.T) {
 	cfg, err := Parse([]byte(`
 slack:

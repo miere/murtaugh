@@ -14,12 +14,14 @@ import (
 
 const defaultRelativePath = ".config/murtaugh/slack.yaml"
 const defaultAgentsRelativePath = ".config/murtaugh/agents.yaml"
+const defaultJobsRelativePath = ".config/murtaugh/jobs.yaml"
 
 type Config struct {
 	BaseDir       string                        `yaml:"-"`
 	Slack         SlackConfig                   `yaml:"slack"`
 	ACP           ACPConfig                     `yaml:"acp"`
 	Agents        map[string]AgentProfile       `yaml:"-"`
+	Jobs          map[string]JobProfile         `yaml:"-"`
 	Commands      []CommandConfig               `yaml:"commands"`
 	WorkflowRules map[string]WorkflowRuleConfig `yaml:"workflow-rules"`
 	UnfurlRules   map[string]UnfurlRuleConfig   `yaml:"unfurl-rules"`
@@ -55,6 +57,13 @@ type AgentProfile struct {
 	Command string   `yaml:"command"`
 	Args    []string `yaml:"args"`
 	WorkDir string   `yaml:"workdir"`
+}
+
+type JobProfile struct {
+	Command string   `yaml:"command"`
+	Args    []string `yaml:"args"`
+	WorkDir string   `yaml:"workdir"`
+	Timeout string   `yaml:"timeout"`
 }
 
 type WorkflowRuleConfig struct {
@@ -141,6 +150,14 @@ func DefaultAgentsPath() (string, error) {
 	return filepath.Join(home, defaultAgentsRelativePath), nil
 }
 
+func DefaultJobsPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve user home: %w", err)
+	}
+	return filepath.Join(home, defaultJobsRelativePath), nil
+}
+
 func Load(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -164,6 +181,20 @@ func Load(path string) (Config, error) {
 		cfg.Agents = agents.Agents
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return Config{}, fmt.Errorf("read agents config %q: %w", agentsPath, err)
+	}
+
+	jobsPath := filepath.Join(cfg.BaseDir, "jobs.yaml")
+	jobsData, err := os.ReadFile(jobsPath)
+	if err == nil {
+		var jobs struct {
+			Jobs map[string]JobProfile `yaml:"jobs"`
+		}
+		if err := yaml.Unmarshal(jobsData, &jobs); err != nil {
+			return Config{}, fmt.Errorf("parse jobs config %q: %w", jobsPath, err)
+		}
+		cfg.Jobs = jobs.Jobs
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return Config{}, fmt.Errorf("read jobs config %q: %w", jobsPath, err)
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -214,6 +245,17 @@ func (c Config) Validate() error {
 		for channel, agent := range c.Slack.ChannelAgents {
 			if _, ok := c.Agents[agent]; !ok {
 				errs = append(errs, fmt.Errorf("slack.channel_agents[%s] references unknown agent %q", channel, agent))
+			}
+		}
+	}
+
+	for name, job := range c.Jobs {
+		if strings.TrimSpace(job.Command) == "" {
+			errs = append(errs, fmt.Errorf("jobs[%s].command is required", name))
+		}
+		if job.Timeout != "" {
+			if _, err := time.ParseDuration(job.Timeout); err != nil {
+				errs = append(errs, fmt.Errorf("jobs[%s].timeout must be a valid duration: %w", name, err))
 			}
 		}
 	}
