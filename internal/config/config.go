@@ -13,21 +13,26 @@ import (
 )
 
 const defaultRelativePath = ".config/murtaugh/slack.yaml"
+const defaultAgentsRelativePath = ".config/murtaugh/agents.yaml"
 
 type Config struct {
 	BaseDir       string                        `yaml:"-"`
 	Slack         SlackConfig                   `yaml:"slack"`
 	ACP           ACPConfig                     `yaml:"acp"`
+	Agents        map[string]AgentProfile       `yaml:"-"`
 	Commands      []CommandConfig               `yaml:"commands"`
 	WorkflowRules map[string]WorkflowRuleConfig `yaml:"workflow-rules"`
 	UnfurlRules   map[string]UnfurlRuleConfig   `yaml:"unfurl-rules"`
 }
 
 type SlackConfig struct {
-	AppToken  string `yaml:"app_token"`
-	BotToken  string `yaml:"bot_token"`
-	AdminUser string `yaml:"admin_user"`
-	Debug     bool   `yaml:"debug"`
+	AppToken      string            `yaml:"app_token"`
+	BotToken      string            `yaml:"bot_token"`
+	AdminUser     string            `yaml:"admin_user"`
+	Debug         bool              `yaml:"debug"`
+	ChannelAgents map[string]string `yaml:"channel_agents"`
+	DMAgent       string            `yaml:"dm_agent"`
+	DefaultAgent  string            `yaml:"default_agent"`
 }
 
 type CommandConfig struct {
@@ -36,17 +41,20 @@ type CommandConfig struct {
 }
 
 type ACPConfig struct {
-	Enabled              bool     `yaml:"enabled"`
-	Command              string   `yaml:"command"`
-	Args                 []string `yaml:"args"`
-	WorkDir              string   `yaml:"workdir"`
-	StartupTimeout       string   `yaml:"startup_timeout"`
-	RequestTimeout       string   `yaml:"request_timeout"`
-	SessionIdleTimeout   string   `yaml:"session_idle_timeout"`
-	MaxSessions          int      `yaml:"max_sessions"`
-	StreamAppendInterval string   `yaml:"stream_append_interval"`
-	StreamMinChunkChars  int      `yaml:"stream_min_chunk_chars"`
-	StreamFinalFeedback  bool     `yaml:"stream_final_feedback"`
+	Enabled              bool   `yaml:"enabled"`
+	StartupTimeout       string `yaml:"startup_timeout"`
+	RequestTimeout       string `yaml:"request_timeout"`
+	SessionIdleTimeout   string `yaml:"session_idle_timeout"`
+	MaxSessions          int    `yaml:"max_sessions"`
+	StreamAppendInterval string `yaml:"stream_append_interval"`
+	StreamMinChunkChars  int    `yaml:"stream_min_chunk_chars"`
+	StreamFinalFeedback  bool   `yaml:"stream_final_feedback"`
+}
+
+type AgentProfile struct {
+	Command string   `yaml:"command"`
+	Args    []string `yaml:"args"`
+	WorkDir string   `yaml:"workdir"`
 }
 
 type WorkflowRuleConfig struct {
@@ -125,6 +133,14 @@ func DefaultPath() (string, error) {
 	return filepath.Join(home, defaultRelativePath), nil
 }
 
+func DefaultAgentsPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve user home: %w", err)
+	}
+	return filepath.Join(home, defaultAgentsRelativePath), nil
+}
+
 func Load(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -135,6 +151,24 @@ func Load(path string) (Config, error) {
 		return Config{}, err
 	}
 	cfg.BaseDir = filepath.Dir(path)
+
+	agentsPath := filepath.Join(cfg.BaseDir, "agents.yaml")
+	agentsData, err := os.ReadFile(agentsPath)
+	if err == nil {
+		var agents struct {
+			Agents map[string]AgentProfile `yaml:"agents"`
+		}
+		if err := yaml.Unmarshal(agentsData, &agents); err != nil {
+			return Config{}, fmt.Errorf("parse agents config %q: %w", agentsPath, err)
+		}
+		cfg.Agents = agents.Agents
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return Config{}, fmt.Errorf("read agents config %q: %w", agentsPath, err)
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
 }
 
@@ -142,9 +176,6 @@ func Parse(data []byte) (Config, error) {
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parse config: %w", err)
-	}
-	if err := cfg.Validate(); err != nil {
-		return Config{}, err
 	}
 	return cfg, nil
 }
@@ -165,6 +196,28 @@ func (c Config) Validate() error {
 	if err := c.ACP.Validate(); err != nil {
 		errs = append(errs, err)
 	}
+
+	if c.ACP.Enabled {
+		if len(c.Agents) == 0 {
+			errs = append(errs, errors.New("acp is enabled but no agents are defined in agents.yaml"))
+		}
+		if strings.TrimSpace(c.Slack.DefaultAgent) == "" {
+			errs = append(errs, errors.New("slack.default_agent is required when acp is enabled"))
+		} else if _, ok := c.Agents[c.Slack.DefaultAgent]; !ok {
+			errs = append(errs, fmt.Errorf("slack.default_agent %q not found in agents.yaml", c.Slack.DefaultAgent))
+		}
+		if c.Slack.DMAgent != "" {
+			if _, ok := c.Agents[c.Slack.DMAgent]; !ok {
+				errs = append(errs, fmt.Errorf("slack.dm_agent %q not found in agents.yaml", c.Slack.DMAgent))
+			}
+		}
+		for channel, agent := range c.Slack.ChannelAgents {
+			if _, ok := c.Agents[agent]; !ok {
+				errs = append(errs, fmt.Errorf("slack.channel_agents[%s] references unknown agent %q", channel, agent))
+			}
+		}
+	}
+
 	for name, rule := range c.WorkflowRules {
 		if strings.TrimSpace(rule.RequestEvent) != "interactive" {
 			errs = append(errs, fmt.Errorf("workflow-rules[%s].request_event must be interactive", name))
@@ -191,9 +244,6 @@ func (c Config) Validate() error {
 
 func (c ACPConfig) Validate() error {
 	var errs []error
-	if c.Enabled && strings.TrimSpace(c.Command) == "" {
-		errs = append(errs, errors.New("acp.command is required when acp.enabled is true"))
-	}
 	for field, value := range map[string]string{
 		"startup_timeout":        c.StartupTimeout,
 		"request_timeout":        c.RequestTimeout,
@@ -214,6 +264,13 @@ func (c ACPConfig) Validate() error {
 		errs = append(errs, errors.New("acp.stream_min_chunk_chars must be greater than or equal to zero"))
 	}
 	return errors.Join(errs...)
+}
+
+func (p AgentProfile) Validate() error {
+	if strings.TrimSpace(p.Command) == "" {
+		return errors.New("agent profile command is required")
+	}
+	return nil
 }
 
 func (c ACPConfig) EffectiveStartupTimeout() time.Duration {

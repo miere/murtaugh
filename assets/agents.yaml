@@ -1,0 +1,5 @@
+agents:
+  default:
+    command: /path/to/acp-agent
+    args: [--stdio]
+    workdir: /path/to/workspace

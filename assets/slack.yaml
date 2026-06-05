@@ -3,12 +3,10 @@ slack:
   bot_token: xoxb-fake-bot-token
   admin_user: murtaugh-admin
   debug: false
+  default_agent: default
 
 acp:
   enabled: false
-  command: /path/to/acp-agent
-  args: [--stdio]
-  workdir: /path/to/workspace
   startup_timeout: 10s
   request_timeout: 10m
   session_idle_timeout: 30m

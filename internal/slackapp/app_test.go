@@ -54,15 +54,17 @@ func TestNewWithoutAdminUserDoesNotInstallTypedNilStartupNotifier(t *testing.T) 
 
 func TestAppMentionEventRoutesToACPChat(t *testing.T) {
 	api := &fakeStreamAPI{}
-	sessions := &fakeChatSessions{}
-	app := &App{chat: NewChatHandler(api, sessions, time.Hour, 1, nil), chatTimeout: time.Second, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	fakeSessions := &fakeChatSessions{}
+	sessions := map[string]ChatSessionManager{"default": fakeSessions}
+	resolver := func(req ChatRequest) string { return "default" }
+	app := &App{chat: NewChatHandler(api, sessions, resolver, time.Hour, 1, nil), chatTimeout: time.Second, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	app.handleEventsAPI(socketmode.Event{Type: socketmode.EventTypeEventsAPI, Data: slackevents.EventsAPIEvent{
 		TeamID:     "T1",
 		InnerEvent: slackevents.EventsAPIInnerEvent{Type: string(slackevents.AppMention), Data: &slackevents.AppMentionEvent{User: "U1", Channel: "C1", Text: "<@UBOT> hello", TimeStamp: "123.4"}},
 	}})
 
 	deadline := time.After(time.Second)
-	for sessions.prompt == "" {
+	for fakeSessions.prompt == "" {
 		select {
 		case <-deadline:
 			t.Fatal("expected app mention to route to chat")
@@ -70,8 +72,8 @@ func TestAppMentionEventRoutesToACPChat(t *testing.T) {
 			time.Sleep(time.Millisecond)
 		}
 	}
-	if sessions.prompt != "hello" {
-		t.Fatalf("unexpected prompt: %q", sessions.prompt)
+	if fakeSessions.prompt != "hello" {
+		t.Fatalf("unexpected prompt: %q", fakeSessions.prompt)
 	}
 }
 

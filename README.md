@@ -18,12 +18,13 @@ slack:
   bot_token: xoxb-your-bot-token
   admin_user: your-slack-handle
   debug: false
+  default_agent: default
+  channel_agents:
+    C12345: coding
+  dm_agent: default
 
 acp:
   enabled: true
-  command: /path/to/acp-agent
-  args: [--stdio]
-  workdir: /path/to/workspace
   request_timeout: 10m
   session_idle_timeout: 30m
   max_sessions: 100
@@ -48,6 +49,17 @@ workflow-rules:
       - run:
           cmd: /path/to/background-command
           args: [param1, param2]
+
+Create `~/.config/murtaugh/agents.yaml`:
+
+~~~yaml
+agents:
+  default:
+    command: /path/to/default-agent
+    args: [--stdio]
+  coding:
+    command: /path/to/coding-agent
+    args: [--stdio]
 ~~~
 
 The Slack app must have Socket Mode enabled and must subscribe to slash command

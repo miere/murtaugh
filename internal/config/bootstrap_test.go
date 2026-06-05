@@ -28,6 +28,18 @@ func TestBootstrapFreshInstall(t *testing.T) {
 		t.Fatalf("slack.yaml content mismatch: got %q want %q", got, want)
 	}
 
+	wantAgents, err := assets.FS.ReadFile("agents.yaml")
+	if err != nil {
+		t.Fatalf("read embedded agents.yaml: %v", err)
+	}
+	gotAgents, err := os.ReadFile(filepath.Join(baseDir, "agents.yaml"))
+	if err != nil {
+		t.Fatalf("read bootstrapped agents.yaml: %v", err)
+	}
+	if string(gotAgents) != string(wantAgents) {
+		t.Fatalf("agents.yaml content mismatch")
+	}
+
 	// Every embedded skill must be mirrored into the skills/ directory.
 	entries, err := assets.FS.ReadDir("skills")
 	if err != nil {

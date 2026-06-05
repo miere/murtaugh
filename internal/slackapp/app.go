@@ -43,9 +43,42 @@ func New(cfg config.Config, logger *slog.Logger) *App {
 	}
 	var chat *ChatHandler
 	if cfg.ACP.Enabled {
-		client := acp.NewProcessClient(acp.ProcessOptions{Command: cfg.ACP.Command, Args: cfg.ACP.Args, WorkDir: cfg.ACP.WorkDir, Logger: logger})
-		sessions := acp.NewSessionManager(client, cfg.ACP.EffectiveSessionIdleTimeout(), cfg.ACP.EffectiveMaxSessions()).WithLogger(logger)
-		chat = NewChatHandler(api, sessions, cfg.ACP.EffectiveStreamAppendInterval(), cfg.ACP.EffectiveStreamMinChunkChars(), logger)
+		sessions := make(map[string]ChatSessionManager)
+		for name, profile := range cfg.Agents {
+			client := acp.NewProcessClient(acp.ProcessOptions{
+				Command: profile.Command,
+				Args:    profile.Args,
+				WorkDir: profile.WorkDir,
+				Logger:  logger,
+			})
+			sessions[name] = acp.NewSessionManager(
+				client,
+				cfg.ACP.EffectiveSessionIdleTimeout(),
+				cfg.ACP.EffectiveMaxSessions(),
+			).WithLogger(logger)
+		}
+
+		resolver := func(req ChatRequest) string {
+			if req.DM {
+				if cfg.Slack.DMAgent != "" {
+					return cfg.Slack.DMAgent
+				}
+				return cfg.Slack.DefaultAgent
+			}
+			if agent, ok := cfg.Slack.ChannelAgents[req.ChannelID]; ok {
+				return agent
+			}
+			return cfg.Slack.DefaultAgent
+		}
+
+		chat = NewChatHandler(
+			api,
+			sessions,
+			resolver,
+			cfg.ACP.EffectiveStreamAppendInterval(),
+			cfg.ACP.EffectiveStreamMinChunkChars(),
+			logger,
+		)
 	}
 	var unfurlHandler *LinkUnfurlHandler
 	if len(cfg.UnfurlRules) > 0 {

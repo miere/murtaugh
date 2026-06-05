@@ -51,12 +51,24 @@ those packages do not import `slackapp`.
 
 - `BaseDir` (`yaml:"-"`) — directory of the loaded file; used as the template
   search root.
-- `Slack` — `app_token`, `bot_token`, `admin_user`, `debug`.
-- `ACP` — agent command, working dir, and all timeout/streaming knobs. The
-  `Effective*()` methods supply defaults when fields are blank/zero.
+- `Slack` — `app_token`, `bot_token`, `admin_user`, `debug`, and routing fields
+  (`default_agent`, `dm_agent`, `channel_agents`).
+- `ACP` — all timeout and streaming knobs for ACP chat.
+- `Agents` (`yaml:"-"`) — map of agent profiles loaded from `agents.yaml`.
 - `Commands` — registered slash commands (names must start with `/`).
 - `WorkflowRules` — `map[string]WorkflowRuleConfig` keyed by rule name.
 - `UnfurlRules` — `map[string]UnfurlRuleConfig` keyed by rule name.
+
+### Multi-agent routing
+
+Agent profiles are defined in `agents.yaml`. Murtaugh routes chat requests to
+agents based on the `slack` config in `slack.yaml`:
+
+1.  **Direct Messages**: Use `slack.dm_agent` if set, otherwise `slack.default_agent`.
+2.  **Channels**: Use `slack.channel_agents[channel_id]` if set, otherwise
+    `slack.default_agent`.
+
+`slack.default_agent` is required when `acp.enabled: true`.
 
 `Load` → `Parse` → `Validate()`. **`Parse` fails fast if `Validate()` fails**, so
 invalid config never reaches the running app. Validation covers required Slack

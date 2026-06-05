@@ -21,7 +21,8 @@ type ChatSessionWarmer interface {
 
 type ChatHandler struct {
 	api      StreamAPI
-	sessions ChatSessionManager
+	sessions map[string]ChatSessionManager
+	resolver func(ChatRequest) string
 	interval time.Duration
 	minChars int
 	logger   *slog.Logger
@@ -38,26 +39,38 @@ type ChatRequest struct {
 	Source    string
 }
 
-func NewChatHandler(api StreamAPI, sessions ChatSessionManager, interval time.Duration, minChars int, logger *slog.Logger) *ChatHandler {
+func NewChatHandler(api StreamAPI, sessions map[string]ChatSessionManager, resolver func(ChatRequest) string, interval time.Duration, minChars int, logger *slog.Logger) *ChatHandler {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &ChatHandler{api: api, sessions: sessions, interval: interval, minChars: minChars, logger: logger}
+	return &ChatHandler{api: api, sessions: sessions, resolver: resolver, interval: interval, minChars: minChars, logger: logger}
 }
 
 func (h *ChatHandler) Warm(ctx context.Context) error {
-	warmer, ok := h.sessions.(ChatSessionWarmer)
-	if !ok {
-		return nil
+	for name, manager := range h.sessions {
+		warmer, ok := manager.(ChatSessionWarmer)
+		if !ok {
+			continue
+		}
+		if err := warmer.Warm(ctx); err != nil {
+			h.logger.Warn("failed to warm agent", "agent", name, "error", err)
+		}
 	}
-	return warmer.Warm(ctx)
+	return nil
 }
 
 func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest) error {
 	startedAt := time.Now()
-	if h == nil || h.sessions == nil {
+	if h == nil || len(h.sessions) == 0 {
 		return fmt.Errorf("ACP chat is not enabled")
 	}
+
+	agentName := h.resolver(req)
+	sessions, ok := h.sessions[agentName]
+	if !ok {
+		return fmt.Errorf("no agent configured for %q (resolved from request)", agentName)
+	}
+
 	prompt := strings.TrimSpace(req.Text)
 	if prompt == "" {
 		return fmt.Errorf("chat prompt is empty")
@@ -80,7 +93,7 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest) error {
 	}); err != nil {
 		h.logger.Warn("failed to set assistant status", "error", err)
 	}
-	events, err := h.sessions.Prompt(ctx, key, metadata, acp.PromptRequest{Text: prompt})
+	events, err := sessions.Prompt(ctx, key, metadata, acp.PromptRequest{Text: prompt})
 	if err != nil {
 		return writer.Fail(ctx, err)
 	}

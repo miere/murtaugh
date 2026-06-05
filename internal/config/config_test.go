@@ -10,6 +10,9 @@ func TestParseValidConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate returned error: %v", err)
+	}
 	if cfg.Slack.AppToken != "xapp-test" || cfg.Slack.BotToken != "xoxb-test" || cfg.Slack.AdminUser != "@admin" {
 		t.Fatalf("unexpected Slack tokens parsed")
 	}
@@ -23,10 +26,9 @@ func TestParseACPConfig(t *testing.T) {
 slack:
   app_token: xapp-test
   bot_token: xoxb-test
+  default_agent: default
 acp:
   enabled: true
-  command: /path/to/acp-agent
-  args: [--stdio]
   request_timeout: 2m
   stream_append_interval: 100ms
   stream_min_chunk_chars: 12
@@ -34,27 +36,44 @@ acp:
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
-	if !cfg.ACP.Enabled || cfg.ACP.Command != "/path/to/acp-agent" || cfg.ACP.EffectiveStreamMinChunkChars() != 12 {
+	// Manually add agent for validation success
+	cfg.Agents = map[string]AgentProfile{"default": {Command: "ls"}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate returned error: %v", err)
+	}
+	if !cfg.ACP.Enabled || cfg.ACP.EffectiveStreamMinChunkChars() != 12 {
 		t.Fatalf("unexpected ACP config: %#v", cfg.ACP)
 	}
 }
 
-func TestParseACPRequiresCommandWhenEnabled(t *testing.T) {
-	_, err := Parse([]byte("slack:\n  app_token: xapp-test\n  bot_token: xoxb-test\nacp:\n  enabled: true\n"))
-	if err == nil || !strings.Contains(err.Error(), "acp.command") {
-		t.Fatalf("expected ACP command validation error, got: %v", err)
+func TestParseACPRequiresAgentsWhenEnabled(t *testing.T) {
+	cfg, err := Parse([]byte("slack:\n  app_token: xapp-test\n  bot_token: xoxb-test\nacp:\n  enabled: true\n"))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	err = cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "no agents are defined") {
+		t.Fatalf("expected ACP agents validation error, got: %v", err)
 	}
 }
 
 func TestParseACPValidatesDurations(t *testing.T) {
-	_, err := Parse([]byte("slack:\n  app_token: xapp-test\n  bot_token: xoxb-test\nacp:\n  request_timeout: nope\n"))
+	cfg, err := Parse([]byte("slack:\n  app_token: xapp-test\n  bot_token: xoxb-test\nacp:\n  request_timeout: nope\n"))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	err = cfg.Validate()
 	if err == nil || !strings.Contains(err.Error(), "acp.request_timeout") {
 		t.Fatalf("expected ACP duration validation error, got: %v", err)
 	}
 }
 
 func TestParseRequiresSlackTokens(t *testing.T) {
-	_, err := Parse([]byte("slack: {}\n"))
+	cfg, err := Parse([]byte("slack: {}\n"))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	err = cfg.Validate()
 	if err == nil {
 		t.Fatal("expected validation error")
 	}
@@ -65,7 +84,11 @@ func TestParseRequiresSlackTokens(t *testing.T) {
 }
 
 func TestParseValidatesSlashCommandNames(t *testing.T) {
-	_, err := Parse([]byte("slack:\n  app_token: xapp-test\n  bot_token: xoxb-test\ncommands:\n  - name: murtaugh\n"))
+	cfg, err := Parse([]byte("slack:\n  app_token: xapp-test\n  bot_token: xoxb-test\ncommands:\n  - name: murtaugh\n"))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	err = cfg.Validate()
 	if err == nil || !strings.Contains(err.Error(), "must start with /") {
 		t.Fatalf("expected slash command validation error, got: %v", err)
 	}
@@ -94,6 +117,9 @@ workflow-rules:
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate returned error: %v", err)
+	}
 	rule := cfg.WorkflowRules["code-review-approval"]
 	if rule.RequestEvent != "interactive" || len(rule.Triggers) != 2 {
 		t.Fatalf("unexpected workflow rule parsed: %#v", rule)
@@ -107,7 +133,7 @@ workflow-rules:
 }
 
 func TestParseWorkflowRuleValidatesReplyToSlackRenderer(t *testing.T) {
-	_, err := Parse([]byte(`
+	cfg, err := Parse([]byte(`
 slack:
   app_token: xapp-test
   bot_token: xoxb-test
@@ -122,13 +148,17 @@ workflow-rules:
           run:
             cmd: /path/to/cmd
 `))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	err = cfg.Validate()
 	if err == nil || !strings.Contains(err.Error(), "exactly one of template or run") {
 		t.Fatalf("expected reply-to-slack validation error, got: %v", err)
 	}
 }
 
 func TestParseWorkflowRuleValidatesRequestEvent(t *testing.T) {
-	_, err := Parse([]byte(`
+	cfg, err := Parse([]byte(`
 slack:
   app_token: xapp-test
   bot_token: xoxb-test
@@ -141,6 +171,10 @@ workflow-rules:
       - run:
           cmd: /path/to/cmd
 `))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	err = cfg.Validate()
 	if err == nil || !strings.Contains(err.Error(), "request_event must be interactive") {
 		t.Fatalf("expected request event validation error, got: %v", err)
 	}
@@ -163,6 +197,9 @@ unfurl-rules:
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate returned error: %v", err)
+	}
 	rule, ok := cfg.UnfurlRules["github-pr"]
 	if !ok {
 		t.Fatal("expected github-pr unfurl rule")
@@ -176,7 +213,7 @@ unfurl-rules:
 }
 
 func TestParseUnfurlRequiresMatchCondition(t *testing.T) {
-	_, err := Parse([]byte(`
+	cfg, err := Parse([]byte(`
 slack:
   app_token: xapp-test
   bot_token: xoxb-test
@@ -187,13 +224,17 @@ unfurl-rules:
     unfurl:
       template: t.json
 `))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	err = cfg.Validate()
 	if err == nil || !strings.Contains(err.Error(), "at least one of domain") {
 		t.Fatalf("expected match condition error, got: %v", err)
 	}
 }
 
 func TestParseUnfurlRejectsTemplateAndRun(t *testing.T) {
-	_, err := Parse([]byte(`
+	cfg, err := Parse([]byte(`
 slack:
   app_token: xapp-test
   bot_token: xoxb-test
@@ -206,13 +247,17 @@ unfurl-rules:
       run:
         cmd: echo
 `))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	err = cfg.Validate()
 	if err == nil || !strings.Contains(err.Error(), "exactly one of template or run") {
 		t.Fatalf("expected exclusivity error, got: %v", err)
 	}
 }
 
 func TestParseUnfurlRejectsBadRegex(t *testing.T) {
-	_, err := Parse([]byte(`
+	cfg, err := Parse([]byte(`
 slack:
   app_token: xapp-test
   bot_token: xoxb-test
@@ -224,6 +269,10 @@ unfurl-rules:
     unfurl:
       template: t.json
 `))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	err = cfg.Validate()
 	if err == nil || !strings.Contains(err.Error(), "url_pattern") {
 		t.Fatalf("expected url_pattern validation error, got: %v", err)
 	}

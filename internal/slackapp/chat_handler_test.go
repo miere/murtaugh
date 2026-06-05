@@ -25,14 +25,16 @@ func (f *fakeChatSessions) Prompt(_ context.Context, key acp.ConversationKey, _ 
 
 func TestChatHandlerStreamsACPEventsToSlack(t *testing.T) {
 	api := &fakeStreamAPI{}
-	sessions := &fakeChatSessions{}
-	handler := NewChatHandler(api, sessions, time.Hour, 5, nil)
+	fakeSessions := &fakeChatSessions{}
+	sessions := map[string]ChatSessionManager{"default": fakeSessions}
+	resolver := func(req ChatRequest) string { return "default" }
+	handler := NewChatHandler(api, sessions, resolver, time.Hour, 5, nil)
 	err := handler.Handle(context.Background(), ChatRequest{TeamID: "T1", ChannelID: "C1", UserID: "U1", MessageTS: "123.4", Text: "hi", Source: "test"})
 	if err != nil {
 		t.Fatalf("Handle returned error: %v", err)
 	}
-	if sessions.prompt != "hi" || sessions.key.ThreadTS != "123.4" {
-		t.Fatalf("unexpected session routing: prompt=%q key=%#v", sessions.prompt, sessions.key)
+	if fakeSessions.prompt != "hi" || fakeSessions.key.ThreadTS != "123.4" {
+		t.Fatalf("unexpected session routing: prompt=%q key=%#v", fakeSessions.prompt, fakeSessions.key)
 	}
 	if api.statusCalls != 1 {
 		t.Fatalf("expected one status call, got %d", api.statusCalls)
@@ -63,7 +65,9 @@ func TestStreamThreadTSUsesMessageTimestampForDM(t *testing.T) {
 }
 
 func TestChatHandlerRequiresSourceMessageTimestampForStreaming(t *testing.T) {
-	handler := NewChatHandler(&fakeStreamAPI{}, &fakeChatSessions{}, time.Hour, 5, nil)
+	sessions := map[string]ChatSessionManager{"default": &fakeChatSessions{}}
+	resolver := func(req ChatRequest) string { return "default" }
+	handler := NewChatHandler(&fakeStreamAPI{}, sessions, resolver, time.Hour, 5, nil)
 	err := handler.Handle(context.Background(), ChatRequest{TeamID: "T1", ChannelID: "C1", UserID: "U1", Text: "hi", Source: "test"})
 	if err == nil || err.Error() != "Slack streaming requires a source message timestamp" {
 		t.Fatalf("expected source timestamp error, got: %v", err)
