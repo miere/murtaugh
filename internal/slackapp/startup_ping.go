@@ -82,7 +82,7 @@ func (n *SlackStartupNotifier) resolveAdminUserID(ctx context.Context) (string, 
 			return user.ID, nil
 		}
 	}
-	return "", fmt.Errorf("slack.admin_user %q was not found", n.adminUser)
+	return "", fmt.Errorf("configuration.admin_user %q was not found", n.adminUser)
 }
 
 func loadStartupPingBlocks() ([]slack.Block, error) {

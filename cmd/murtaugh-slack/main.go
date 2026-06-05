@@ -74,7 +74,7 @@ func main() {
 }
 
 func runSlack(cfg config.Config, configPath string) {
-	logger := newLogger(cfg.Slack.Debug)
+	logger := newLogger(cfg.Configuration.Debug)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

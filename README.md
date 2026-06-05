@@ -13,23 +13,19 @@ Go service for connecting Murtaugh to Slack via Socket Mode.
 Create `~/.config/murtaugh/slack.yaml`:
 
 ~~~yaml
-slack:
+oauth:
   app_token: xapp-your-socket-mode-app-token
   bot_token: xoxb-your-bot-token
+
+configuration:
   admin_user: your-slack-handle
   debug: false
+
+chat:
   default_agent: default
   channel_agents:
     C12345: coding
   dm_agent: default
-
-acp:
-  enabled: true
-  request_timeout: 10m
-  session_idle_timeout: 30m
-  max_sessions: 100
-  stream_append_interval: 750ms
-  stream_min_chunk_chars: 96
 
 commands:
   - name: /murtaugh
@@ -53,6 +49,14 @@ workflow-rules:
 Create `~/.config/murtaugh/agents.yaml`:
 
 ~~~yaml
+acp:
+  enabled: true
+  request_timeout: 10m
+  session_idle_timeout: 30m
+  max_sessions: 100
+  stream_append_interval: 750ms
+  stream_min_chunk_chars: 96
+
 agents:
   default:
     command: /path/to/default-agent
@@ -69,14 +73,15 @@ for slash commands, app mentions, IM history, and chat writes. For custom link
 unfurling, subscribe to the `link_shared` bot event and grant the `links:read`
 and `chat:write` scopes.
 
-`slack.admin_user` may be a Slack handle with or without `@` or a Slack user ID.
-When Socket Mode reports that it is connected, Murtaugh opens a DM with that user
-and sends the startup ping message from `assets/ping/01-ping.json`.
+`oauth.app_token` and `oauth.bot_token` hold the Slack Socket Mode and bot
+tokens. `configuration.admin_user` may be a Slack handle with or without `@` or
+a Slack user ID. When Socket Mode reports that it is connected, Murtaugh opens a
+DM with that user and sends the startup ping message from `assets/ping/01-ping.json`.
 
 ## ACP chat
 
-When `acp.enabled` is true, Murtaugh can chat through a local ACP-compatible
-agent process. It supports three entrypoints:
+When `acp.enabled` is true in `agents.yaml`, Murtaugh can chat through a local
+ACP-compatible agent process. It supports three entrypoints:
 
 - DM the bot.
 - Mention the bot in a channel.
@@ -96,8 +101,9 @@ loops:
 - `chat.stopStream` finalizes the response.
 
 Murtaugh flushes the first ACP text chunk immediately, then uses
-`stream_append_interval` and `stream_min_chunk_chars` to coalesce later small
-chunks so it does not call `chat.appendStream` for every tiny token.
+`acp.stream_append_interval` and `acp.stream_min_chunk_chars` from `agents.yaml`
+to coalesce later small chunks so it does not call `chat.appendStream` for every
+tiny token.
 
 ## Workflow rules
 

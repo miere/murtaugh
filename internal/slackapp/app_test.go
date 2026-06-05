@@ -45,9 +45,9 @@ func TestAppNotifiesStartupOnceWhenSocketConnects(t *testing.T) {
 }
 
 func TestNewWithoutAdminUserDoesNotInstallTypedNilStartupNotifier(t *testing.T) {
-	app := New(config.Config{Slack: config.SlackConfig{AppToken: "xapp-test", BotToken: "xoxb-test"}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	app := New(config.Config{OAuth: config.OAuthConfig{AppToken: "xapp-test", BotToken: "xoxb-test"}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if app.startupNotifier != nil {
-		t.Fatalf("expected no startup notifier without slack.admin_user, got %#v", app.startupNotifier)
+		t.Fatalf("expected no startup notifier without configuration.admin_user, got %#v", app.startupNotifier)
 	}
 	app.notifyStartup(context.Background())
 }

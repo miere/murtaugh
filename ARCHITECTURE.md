@@ -40,7 +40,7 @@ those packages do not import `slackapp`.
 1. Resolves the config path (`config.DefaultPath()` → `~/.config/murtaugh/slack.yaml`,
    overridable with `--config`).
 2. `config.Load(path)` reads, parses, validates, and records `BaseDir`.
-3. Builds an `slog.Logger` (text handler; debug level when `slack.debug: true`).
+3. Builds an `slog.Logger` (text handler; debug level when `configuration.debug: true`).
 4. Creates a `signal.NotifyContext` for `SIGINT`/`SIGTERM`.
 5. `slackapp.New(cfg, logger)` then `app.Run(ctx)` blocks until the context is
    cancelled or Socket Mode returns a fatal error.
@@ -51,9 +51,13 @@ those packages do not import `slackapp`.
 
 - `BaseDir` (`yaml:"-"`) — directory of the loaded file; used as the template
   search root.
-- `Slack` — `app_token`, `bot_token`, `admin_user`, `debug`, and routing fields
-  (`default_agent`, `dm_agent`, `channel_agents`).
-- `ACP` — all timeout and streaming knobs for ACP chat.
+- `OAuth` — Slack Socket Mode and bot tokens (`oauth.app_token`,
+  `oauth.bot_token`) loaded from `slack.yaml`.
+- `Configuration` — runtime Slack settings (`configuration.admin_user`,
+  `configuration.debug`) loaded from `slack.yaml`.
+- `Chat` — routing fields (`chat.default_agent`, `chat.dm_agent`,
+  `chat.channel_agents`) loaded from `slack.yaml`.
+- `ACP` (`yaml:"-"`) — timeout and streaming knobs loaded from `agents.yaml`.
 - `Agents` (`yaml:"-"`) — map of agent profiles loaded from `agents.yaml`.
 - `Commands` — registered slash commands (names must start with `/`).
 - `WorkflowRules` — `map[string]WorkflowRuleConfig` keyed by rule name.
@@ -61,18 +65,18 @@ those packages do not import `slackapp`.
 
 ### Multi-agent routing
 
-Agent profiles are defined in `agents.yaml`. Murtaugh routes chat requests to
-agents based on the `slack` config in `slack.yaml`:
+ACP settings and agent profiles are defined in `agents.yaml`. Murtaugh routes
+chat requests to agents based on the `chat` config in `slack.yaml`:
 
-1.  **Direct Messages**: Use `slack.dm_agent` if set, otherwise `slack.default_agent`.
-2.  **Channels**: Use `slack.channel_agents[channel_id]` if set, otherwise
-    `slack.default_agent`.
+1.  **Direct Messages**: Use `chat.dm_agent` if set, otherwise `chat.default_agent`.
+2.  **Channels**: Use `chat.channel_agents[channel_id]` if set, otherwise
+    `chat.default_agent`.
 
-`slack.default_agent` is required when `acp.enabled: true`.
+`chat.default_agent` is required when `acp.enabled: true`.
 
-`Load` → `Parse` → `Validate()`. **`Parse` fails fast if `Validate()` fails**, so
-invalid config never reaches the running app. Validation covers required Slack
-tokens, slash-command name prefixes, ACP durations, and per-rule checks.
+`Load` → `Parse` → load `agents.yaml` / `jobs.yaml` → `Validate()`. Validation
+covers required Slack tokens, slash-command name prefixes, ACP durations, agent
+routing references, and per-rule checks.
 
 ### Triggers and actions
 
@@ -106,7 +110,7 @@ selects over `socket.Events`, dispatching each to `handleEvent`:
 
 | Socket event            | Handler                | Behaviour                                            |
 |-------------------------|------------------------|------------------------------------------------------|
-| `Connected`             | `notifyStartup`        | Opens a DM with `admin_user`, sends the startup ping (once). |
+| `Connected`             | `notifyStartup`        | Opens a DM with `configuration.admin_user`, sends the startup ping (once). |
 | `SlashCommand`          | `handleSlashCommand`   | `/...  chat` → ACP chat; otherwise the default handler acks. |
 | `Interactive`           | `handleInteractive`    | Acks, then runs `workflow.Execute` in a goroutine (5 min).   |
 | `EventsAPI`             | `handleEventsAPI`      | Routes inner events (below).                          |
@@ -192,8 +196,8 @@ list (max 5) or no `link_shared` event is delivered.
 ## Assets and embedding (`internal/../assets`)
 
 `assets/assets.go` embeds reference files via
-`//go:embed slack.yaml ping/*.json unfurl/*.json skills/*.md`. The embedded FS is
-the **fallback** template source: the workflow engine and unfurl renderer both
+`//go:embed slack.yaml agents.yaml jobs.yaml ping/*.json unfurl/*.json skills/*.md`.
+The embedded FS is the **fallback** template source: the workflow engine and unfurl renderer both
 look in the config directory first, then `assets.FS`. **If you add a new asset
 directory or extension, you must extend the `go:embed` directive** or the files
 will not ship in the binary.
@@ -214,8 +218,8 @@ will not ship in the binary.
 1. **Work in a dedicated git worktree** under `ignore/worktrees/`, branched off
    the up-to-date local `HEAD`. Never push without explicit permission.
 2. **Keep config changes complete.** A new config field means: struct field +
-   `yaml` tag, `Validate()` coverage, an example in `assets/slack.yaml`, a README
-   note, and tests in `config_test.go`.
+   `yaml` tag, `Validate()` coverage, an example in the relevant `assets/*.yaml`,
+   a README note, and tests in `config_test.go`.
 3. **Trace downstream effects.** New Slack events need a `handleEvent` /
    `handleEventsAPI` case; new ACP event types need handling in `ChatHandler`.
 4. **Respect the JSON contracts.** Templates and `run` handlers must emit valid

@@ -1,56 +1,87 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
+const baseSlackYAML = `oauth:
+  app_token: xapp-test
+  bot_token: xoxb-test
+`
+
+func testConfig(extra string) []byte {
+	return []byte(baseSlackYAML + extra)
+}
+
 func TestParseValidConfig(t *testing.T) {
-	cfg, err := Parse([]byte("slack:\n  app_token: xapp-test\n  bot_token: xoxb-test\n  admin_user: '@admin'\ncommands:\n  - name: /murtaugh\n"))
+	cfg, err := Parse(testConfig(`configuration:
+  admin_user: '@admin'
+chat:
+  default_agent: default
+  channel_agents:
+    C12345: coding
+  dm_agent: default
+commands:
+  - name: /murtaugh
+`))
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate returned error: %v", err)
 	}
-	if cfg.Slack.AppToken != "xapp-test" || cfg.Slack.BotToken != "xoxb-test" || cfg.Slack.AdminUser != "@admin" {
-		t.Fatalf("unexpected Slack tokens parsed")
+	if cfg.OAuth.AppToken != "xapp-test" || cfg.OAuth.BotToken != "xoxb-test" || cfg.Configuration.AdminUser != "@admin" {
+		t.Fatalf("unexpected Slack config parsed")
+	}
+	if cfg.Chat.DefaultAgent != "default" || cfg.Chat.DMAgent != "default" || cfg.Chat.ChannelAgents["C12345"] != "coding" {
+		t.Fatalf("unexpected chat routing parsed: %#v", cfg.Chat)
 	}
 	if len(cfg.Commands) != 1 || cfg.Commands[0].Name != "/murtaugh" {
 		t.Fatalf("unexpected commands parsed: %#v", cfg.Commands)
 	}
 }
 
-func TestParseACPConfig(t *testing.T) {
-	cfg, err := Parse([]byte(`
-slack:
-  app_token: xapp-test
-  bot_token: xoxb-test
+func TestLoadACPConfigFromAgentsFile(t *testing.T) {
+	baseDir := t.TempDir()
+	configPath := filepath.Join(baseDir, "slack.yaml")
+	if err := os.WriteFile(configPath, testConfig(`chat:
   default_agent: default
-acp:
+`), 0o644); err != nil {
+		t.Fatalf("write slack config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(baseDir, "agents.yaml"), []byte(`acp:
   enabled: true
   request_timeout: 2m
   stream_append_interval: 100ms
   stream_min_chunk_chars: 12
-`))
-	if err != nil {
-		t.Fatalf("Parse returned error: %v", err)
+agents:
+  default:
+    command: ls
+`), 0o644); err != nil {
+		t.Fatalf("write agents config: %v", err)
 	}
-	// Manually add agent for validation success
-	cfg.Agents = map[string]AgentProfile{"default": {Command: "ls"}}
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Validate returned error: %v", err)
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
 	}
 	if !cfg.ACP.Enabled || cfg.ACP.EffectiveStreamMinChunkChars() != 12 {
 		t.Fatalf("unexpected ACP config: %#v", cfg.ACP)
 	}
+	if _, ok := cfg.Agents["default"]; !ok {
+		t.Fatalf("expected default agent to be loaded: %#v", cfg.Agents)
+	}
 }
 
 func TestParseACPRequiresAgentsWhenEnabled(t *testing.T) {
-	cfg, err := Parse([]byte("slack:\n  app_token: xapp-test\n  bot_token: xoxb-test\nacp:\n  enabled: true\n"))
+	cfg, err := Parse(testConfig(""))
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
+	cfg.ACP.Enabled = true
 	err = cfg.Validate()
 	if err == nil || !strings.Contains(err.Error(), "no agents are defined") {
 		t.Fatalf("expected ACP agents validation error, got: %v", err)
@@ -58,10 +89,11 @@ func TestParseACPRequiresAgentsWhenEnabled(t *testing.T) {
 }
 
 func TestParseACPValidatesDurations(t *testing.T) {
-	cfg, err := Parse([]byte("slack:\n  app_token: xapp-test\n  bot_token: xoxb-test\nacp:\n  request_timeout: nope\n"))
+	cfg, err := Parse(testConfig(""))
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
+	cfg.ACP.RequestTimeout = "nope"
 	err = cfg.Validate()
 	if err == nil || !strings.Contains(err.Error(), "acp.request_timeout") {
 		t.Fatalf("expected ACP duration validation error, got: %v", err)
@@ -69,7 +101,7 @@ func TestParseACPValidatesDurations(t *testing.T) {
 }
 
 func TestParseRequiresSlackTokens(t *testing.T) {
-	cfg, err := Parse([]byte("slack: {}\n"))
+	cfg, err := Parse([]byte("oauth: {}\n"))
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
@@ -78,13 +110,13 @@ func TestParseRequiresSlackTokens(t *testing.T) {
 		t.Fatal("expected validation error")
 	}
 	message := err.Error()
-	if !strings.Contains(message, "slack.app_token") || !strings.Contains(message, "slack.bot_token") {
+	if !strings.Contains(message, "oauth.app_token") || !strings.Contains(message, "oauth.bot_token") {
 		t.Fatalf("unexpected validation error: %v", err)
 	}
 }
 
 func TestParseValidatesSlashCommandNames(t *testing.T) {
-	cfg, err := Parse([]byte("slack:\n  app_token: xapp-test\n  bot_token: xoxb-test\ncommands:\n  - name: murtaugh\n"))
+	cfg, err := Parse(testConfig("commands:\n  - name: murtaugh\n"))
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
@@ -95,11 +127,7 @@ func TestParseValidatesSlashCommandNames(t *testing.T) {
 }
 
 func TestParseWorkflowRules(t *testing.T) {
-	cfg, err := Parse([]byte(`
-slack:
-  app_token: xapp-test
-  bot_token: xoxb-test
-workflow-rules:
+	cfg, err := Parse(testConfig(`workflow-rules:
   code-review-approval:
     request_event: interactive
     match:
@@ -133,11 +161,7 @@ workflow-rules:
 }
 
 func TestParseWorkflowRuleValidatesReplyToSlackRenderer(t *testing.T) {
-	cfg, err := Parse([]byte(`
-slack:
-  app_token: xapp-test
-  bot_token: xoxb-test
-workflow-rules:
+	cfg, err := Parse(testConfig(`workflow-rules:
   invalid:
     request_event: interactive
     match:
@@ -158,11 +182,7 @@ workflow-rules:
 }
 
 func TestParseWorkflowRuleValidatesRequestEvent(t *testing.T) {
-	cfg, err := Parse([]byte(`
-slack:
-  app_token: xapp-test
-  bot_token: xoxb-test
-workflow-rules:
+	cfg, err := Parse(testConfig(`workflow-rules:
   invalid:
     request_event: slash_command
     match:
@@ -181,11 +201,7 @@ workflow-rules:
 }
 
 func TestParseValidUnfurlRule(t *testing.T) {
-	cfg, err := Parse([]byte(`
-slack:
-  app_token: xapp-test
-  bot_token: xoxb-test
-unfurl-rules:
+	cfg, err := Parse(testConfig(`unfurl-rules:
   github-pr:
     match:
       channels: [C0ENG]
@@ -213,11 +229,7 @@ unfurl-rules:
 }
 
 func TestParseUnfurlRequiresMatchCondition(t *testing.T) {
-	cfg, err := Parse([]byte(`
-slack:
-  app_token: xapp-test
-  bot_token: xoxb-test
-unfurl-rules:
+	cfg, err := Parse(testConfig(`unfurl-rules:
   bad:
     match:
       channels: [C1]
@@ -234,11 +246,7 @@ unfurl-rules:
 }
 
 func TestParseUnfurlRejectsTemplateAndRun(t *testing.T) {
-	cfg, err := Parse([]byte(`
-slack:
-  app_token: xapp-test
-  bot_token: xoxb-test
-unfurl-rules:
+	cfg, err := Parse(testConfig(`unfurl-rules:
   bad:
     match:
       domain: github.com
@@ -257,11 +265,7 @@ unfurl-rules:
 }
 
 func TestParseJobsConfig(t *testing.T) {
-	cfg, err := Parse([]byte(`
-slack:
-  app_token: xapp-test
-  bot_token: xoxb-test
-`))
+	cfg, err := Parse(testConfig(""))
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
@@ -287,7 +291,7 @@ slack:
 }
 
 func TestJobValidationRequiresCommand(t *testing.T) {
-	cfg, err := Parse([]byte("slack:\n  app_token: xapp-test\n  bot_token: xoxb-test\n"))
+	cfg, err := Parse(testConfig(""))
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
@@ -301,7 +305,7 @@ func TestJobValidationRequiresCommand(t *testing.T) {
 }
 
 func TestJobValidationRejectsBadTimeout(t *testing.T) {
-	cfg, err := Parse([]byte("slack:\n  app_token: xapp-test\n  bot_token: xoxb-test\n"))
+	cfg, err := Parse(testConfig(""))
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
@@ -315,7 +319,7 @@ func TestJobValidationRejectsBadTimeout(t *testing.T) {
 }
 
 func TestJobValidationAcceptsOptionalFields(t *testing.T) {
-	cfg, err := Parse([]byte("slack:\n  app_token: xapp-test\n  bot_token: xoxb-test\n"))
+	cfg, err := Parse(testConfig(""))
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
@@ -328,11 +332,7 @@ func TestJobValidationAcceptsOptionalFields(t *testing.T) {
 }
 
 func TestParseUnfurlRejectsBadRegex(t *testing.T) {
-	cfg, err := Parse([]byte(`
-slack:
-  app_token: xapp-test
-  bot_token: xoxb-test
-unfurl-rules:
+	cfg, err := Parse(testConfig(`unfurl-rules:
   bad:
     match:
       domain: github.com

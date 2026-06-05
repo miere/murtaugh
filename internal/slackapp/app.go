@@ -35,9 +35,9 @@ func New(cfg config.Config, logger *slog.Logger) *App {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	api := slack.New(cfg.Slack.BotToken, slack.OptionAppLevelToken(cfg.Slack.AppToken))
-	socket := socketmode.New(api, socketmode.OptionDebug(cfg.Slack.Debug))
-	startupNotifier, err := NewSlackStartupNotifier(api, cfg.Slack.AdminUser, logger)
+	api := slack.New(cfg.OAuth.BotToken, slack.OptionAppLevelToken(cfg.OAuth.AppToken))
+	socket := socketmode.New(api, socketmode.OptionDebug(cfg.Configuration.Debug))
+	startupNotifier, err := NewSlackStartupNotifier(api, cfg.Configuration.AdminUser, logger)
 	if err != nil {
 		logger.Error("startup Slack ping disabled", "error", err)
 	}
@@ -60,15 +60,15 @@ func New(cfg config.Config, logger *slog.Logger) *App {
 
 		resolver := func(req ChatRequest) string {
 			if req.DM {
-				if cfg.Slack.DMAgent != "" {
-					return cfg.Slack.DMAgent
+				if cfg.Chat.DMAgent != "" {
+					return cfg.Chat.DMAgent
 				}
-				return cfg.Slack.DefaultAgent
+				return cfg.Chat.DefaultAgent
 			}
-			if agent, ok := cfg.Slack.ChannelAgents[req.ChannelID]; ok {
+			if agent, ok := cfg.Chat.ChannelAgents[req.ChannelID]; ok {
 				return agent
 			}
-			return cfg.Slack.DefaultAgent
+			return cfg.Chat.DefaultAgent
 		}
 
 		chat = NewChatHandler(

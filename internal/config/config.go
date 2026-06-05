@@ -18,8 +18,10 @@ const defaultJobsRelativePath = ".config/murtaugh/jobs.yaml"
 
 type Config struct {
 	BaseDir       string                        `yaml:"-"`
-	Slack         SlackConfig                   `yaml:"slack"`
-	ACP           ACPConfig                     `yaml:"acp"`
+	OAuth         OAuthConfig                   `yaml:"oauth"`
+	Configuration ConfigurationConfig           `yaml:"configuration"`
+	Chat          ChatConfig                    `yaml:"chat"`
+	ACP           ACPConfig                     `yaml:"-"`
 	Agents        map[string]AgentProfile       `yaml:"-"`
 	Jobs          map[string]JobProfile         `yaml:"-"`
 	Commands      []CommandConfig               `yaml:"commands"`
@@ -27,11 +29,17 @@ type Config struct {
 	UnfurlRules   map[string]UnfurlRuleConfig   `yaml:"unfurl-rules"`
 }
 
-type SlackConfig struct {
-	AppToken      string            `yaml:"app_token"`
-	BotToken      string            `yaml:"bot_token"`
-	AdminUser     string            `yaml:"admin_user"`
-	Debug         bool              `yaml:"debug"`
+type OAuthConfig struct {
+	AppToken string `yaml:"app_token"`
+	BotToken string `yaml:"bot_token"`
+}
+
+type ConfigurationConfig struct {
+	AdminUser string `yaml:"admin_user"`
+	Debug     bool   `yaml:"debug"`
+}
+
+type ChatConfig struct {
 	ChannelAgents map[string]string `yaml:"channel_agents"`
 	DMAgent       string            `yaml:"dm_agent"`
 	DefaultAgent  string            `yaml:"default_agent"`
@@ -173,11 +181,13 @@ func Load(path string) (Config, error) {
 	agentsData, err := os.ReadFile(agentsPath)
 	if err == nil {
 		var agents struct {
+			ACP    ACPConfig               `yaml:"acp"`
 			Agents map[string]AgentProfile `yaml:"agents"`
 		}
 		if err := yaml.Unmarshal(agentsData, &agents); err != nil {
 			return Config{}, fmt.Errorf("parse agents config %q: %w", agentsPath, err)
 		}
+		cfg.ACP = agents.ACP
 		cfg.Agents = agents.Agents
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return Config{}, fmt.Errorf("read agents config %q: %w", agentsPath, err)
@@ -213,11 +223,11 @@ func Parse(data []byte) (Config, error) {
 
 func (c Config) Validate() error {
 	var errs []error
-	if strings.TrimSpace(c.Slack.AppToken) == "" {
-		errs = append(errs, errors.New("slack.app_token is required"))
+	if strings.TrimSpace(c.OAuth.AppToken) == "" {
+		errs = append(errs, errors.New("oauth.app_token is required"))
 	}
-	if strings.TrimSpace(c.Slack.BotToken) == "" {
-		errs = append(errs, errors.New("slack.bot_token is required"))
+	if strings.TrimSpace(c.OAuth.BotToken) == "" {
+		errs = append(errs, errors.New("oauth.bot_token is required"))
 	}
 	for i, command := range c.Commands {
 		if !strings.HasPrefix(strings.TrimSpace(command.Name), "/") {
@@ -232,19 +242,19 @@ func (c Config) Validate() error {
 		if len(c.Agents) == 0 {
 			errs = append(errs, errors.New("acp is enabled but no agents are defined in agents.yaml"))
 		}
-		if strings.TrimSpace(c.Slack.DefaultAgent) == "" {
-			errs = append(errs, errors.New("slack.default_agent is required when acp is enabled"))
-		} else if _, ok := c.Agents[c.Slack.DefaultAgent]; !ok {
-			errs = append(errs, fmt.Errorf("slack.default_agent %q not found in agents.yaml", c.Slack.DefaultAgent))
+		if strings.TrimSpace(c.Chat.DefaultAgent) == "" {
+			errs = append(errs, errors.New("chat.default_agent is required when acp is enabled"))
+		} else if _, ok := c.Agents[c.Chat.DefaultAgent]; !ok {
+			errs = append(errs, fmt.Errorf("chat.default_agent %q not found in agents.yaml", c.Chat.DefaultAgent))
 		}
-		if c.Slack.DMAgent != "" {
-			if _, ok := c.Agents[c.Slack.DMAgent]; !ok {
-				errs = append(errs, fmt.Errorf("slack.dm_agent %q not found in agents.yaml", c.Slack.DMAgent))
+		if c.Chat.DMAgent != "" {
+			if _, ok := c.Agents[c.Chat.DMAgent]; !ok {
+				errs = append(errs, fmt.Errorf("chat.dm_agent %q not found in agents.yaml", c.Chat.DMAgent))
 			}
 		}
-		for channel, agent := range c.Slack.ChannelAgents {
+		for channel, agent := range c.Chat.ChannelAgents {
 			if _, ok := c.Agents[agent]; !ok {
-				errs = append(errs, fmt.Errorf("slack.channel_agents[%s] references unknown agent %q", channel, agent))
+				errs = append(errs, fmt.Errorf("chat.channel_agents[%s] references unknown agent %q", channel, agent))
 			}
 		}
 	}

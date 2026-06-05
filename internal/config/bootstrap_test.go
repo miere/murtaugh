@@ -75,7 +75,7 @@ func TestBootstrapDoesNotOverwriteExistingFiles(t *testing.T) {
 		t.Fatalf("seed dirs: %v", err)
 	}
 
-	const customConfig = "slack:\n  app_token: keep-me\n"
+	const customConfig = "oauth:\n  app_token: keep-me\n"
 	if err := os.WriteFile(configPath, []byte(customConfig), 0o644); err != nil {
 		t.Fatalf("seed slack.yaml: %v", err)
 	}
