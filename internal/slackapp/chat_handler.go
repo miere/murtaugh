@@ -76,7 +76,7 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest) error {
 	if err := h.api.SetAssistantThreadsStatusContext(ctx, slack.AssistantThreadsSetStatusParameters{
 		ChannelID: req.ChannelID,
 		ThreadTS:  streamThreadTS,
-		Status:    "Murtaugh is thinking...",
+		Status:    "is thinking...",
 	}); err != nil {
 		h.logger.Warn("failed to set assistant status", "error", err)
 	}

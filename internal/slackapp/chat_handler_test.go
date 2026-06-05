@@ -37,7 +37,7 @@ func TestChatHandlerStreamsACPEventsToSlack(t *testing.T) {
 	if api.statusCalls != 1 {
 		t.Fatalf("expected one status call, got %d", api.statusCalls)
 	}
-	if sp := api.statusParams[0]; sp.ChannelID != "C1" || sp.ThreadTS != "123.4" || sp.Status != "Murtaugh is thinking..." {
+	if sp := api.statusParams[0]; sp.ChannelID != "C1" || sp.ThreadTS != "123.4" || sp.Status != "is thinking..." {
 		t.Fatalf("unexpected status params: %#v", sp)
 	}
 	if api.startedChannel != "C1" {
