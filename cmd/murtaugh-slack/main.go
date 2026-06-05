@@ -22,6 +22,10 @@ func main() {
 	configPath := flag.String("config", defaultConfigPath, "path to Slack configuration YAML")
 	flag.Parse()
 
+	if err := config.Bootstrap(*configPath); err != nil {
+		fatal(err)
+	}
+
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		fatal(err)
