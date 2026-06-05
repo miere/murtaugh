@@ -34,6 +34,15 @@ func TestChatHandlerStreamsACPEventsToSlack(t *testing.T) {
 	if sessions.prompt != "hi" || sessions.key.ThreadTS != "123.4" {
 		t.Fatalf("unexpected session routing: prompt=%q key=%#v", sessions.prompt, sessions.key)
 	}
+	if api.statusCalls != 1 {
+		t.Fatalf("expected one status call, got %d", api.statusCalls)
+	}
+	if sp := api.statusParams[0]; sp.ChannelID != "C1" || sp.ThreadTS != "123.4" || sp.Status != "Murtaugh is thinking..." {
+		t.Fatalf("unexpected status params: %#v", sp)
+	}
+	if api.startedChannel != "C1" {
+		t.Fatalf("expected stream started on C1, got %q", api.startedChannel)
+	}
 	if api.appends != 1 || api.stops != 1 {
 		t.Fatalf("expected one append and stop, got appends=%d stops=%d", api.appends, api.stops)
 	}

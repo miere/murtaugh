@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/miere/murtaugh-dev-toolkit/internal/acp"
+	"github.com/slack-go/slack"
 )
 
 type ChatSessionManager interface {
@@ -72,8 +73,12 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest) error {
 		teamID, userID = "", ""
 	}
 	writer := NewStreamWriter(h.api, req.ChannelID, StreamWriterOptions{ThreadTS: streamThreadTS, TeamID: teamID, UserID: userID, Interval: h.interval, MinChars: h.minChars, Logger: h.logger})
-	if err := writer.Start(ctx); err != nil {
-		return err
+	if err := h.api.SetAssistantThreadsStatusContext(ctx, slack.AssistantThreadsSetStatusParameters{
+		ChannelID: req.ChannelID,
+		ThreadTS:  streamThreadTS,
+		Status:    "Murtaugh is thinking...",
+	}); err != nil {
+		h.logger.Warn("failed to set assistant status", "error", err)
 	}
 	events, err := h.sessions.Prompt(ctx, key, metadata, acp.PromptRequest{Text: prompt})
 	if err != nil {
@@ -82,6 +87,7 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest) error {
 	chunks := 0
 	bytes := 0
 	firstChunkLogged := false
+	streamStarted := false
 	for event := range events {
 		switch event.Type {
 		case acp.EventText, acp.EventStatus:
@@ -93,18 +99,38 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest) error {
 					h.logger.Info("received first ACP text chunk", "source", req.Source, "channel", req.ChannelID, "duration", time.Since(startedAt), "bytes", len(event.Text))
 				}
 			}
-			if err := writer.Append(ctx, event.Text); err != nil {
-				return err
+			if !streamStarted && event.Text != "" {
+				if err := writer.Start(ctx); err != nil {
+					return err
+				}
+				streamStarted = true
+			}
+			if streamStarted {
+				if err := writer.Append(ctx, event.Text); err != nil {
+					return err
+				}
 			}
 		case acp.EventError:
 			return writer.Fail(ctx, event.Error)
 		case acp.EventComplete:
+			if !streamStarted {
+				if err := writer.Start(ctx); err != nil {
+					return err
+				}
+				streamStarted = true
+			}
 			if err := writer.Stop(ctx); err != nil {
 				return err
 			}
 			h.logger.Info("completed ACP chat response", "source", req.Source, "channel", req.ChannelID, "duration", time.Since(startedAt), "chunks", chunks, "bytes", bytes)
 			return nil
 		}
+	}
+	if !streamStarted {
+		if err := writer.Start(ctx); err != nil {
+			return err
+		}
+		streamStarted = true
 	}
 	if err := writer.Stop(ctx); err != nil {
 		return err

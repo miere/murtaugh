@@ -12,6 +12,8 @@ type fakeStreamAPI struct {
 	startedChannel string
 	appends        int
 	stops          int
+	statusCalls    int
+	statusParams   []slack.AssistantThreadsSetStatusParameters
 }
 
 func (f *fakeStreamAPI) StartStreamContext(_ context.Context, channelID string, _ ...slack.MsgOption) (string, string, error) {
@@ -27,6 +29,12 @@ func (f *fakeStreamAPI) AppendStreamContext(_ context.Context, _ string, _ strin
 func (f *fakeStreamAPI) StopStreamContext(_ context.Context, _ string, _ string, _ ...slack.MsgOption) (string, string, error) {
 	f.stops++
 	return "C1", "stream-ts", nil
+}
+
+func (f *fakeStreamAPI) SetAssistantThreadsStatusContext(_ context.Context, params slack.AssistantThreadsSetStatusParameters) error {
+	f.statusCalls++
+	f.statusParams = append(f.statusParams, params)
+	return nil
 }
 
 func TestStreamWriterUsesNativeStreamingMethods(t *testing.T) {
