@@ -53,7 +53,9 @@ workflow-rules:
 The Slack app must have Socket Mode enabled and must subscribe to slash command
 payloads for every command listed in the configuration. For ACP chat, subscribe
 to the Events API event types `app_mention` and `message.im`, and grant scopes
-for slash commands, app mentions, IM history, and chat writes.
+for slash commands, app mentions, IM history, and chat writes. For custom link
+unfurling, subscribe to the `link_shared` bot event and grant the `links:read`
+and `chat:write` scopes.
 
 `slack.admin_user` may be a Slack handle with or without `@` or a Slack user ID.
 When Socket Mode reports that it is connected, Murtaugh opens a DM with that user
@@ -110,11 +112,53 @@ the rendered pong response through Slack's `response_url`, using the original
 startup message timestamp as `thread_ts` so the response appears in the message
 thread.
 
+## Custom link unfurling
+
+Unfurl rules teach Murtaugh to replace bare URLs with Block Kit previews. When a
+message containing a matching URL is posted in a channel the bot can see, the
+`link_shared` event arrives and Murtaugh posts a preview via `chat.unfurl`.
+
+~~~yaml
+unfurl-rules:
+  github-pr:
+    match:
+      domain: github.com
+      url_pattern: '^https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/pull/(?P<number>\d+)'
+    unfurl:
+      template: unfurl/github-pr.json
+  github-pr-eng-only:
+    match:
+      channels: [C0ENG1, C0ENG2]
+      domain: github.com
+      url_pattern: '/pull/(?P<number>\d+)'
+    unfurl:
+      run:
+        cmd: /path/to/unfurl-script
+        args: ["--number", "{{ .Captures.number }}"]
+        timeout: 8s
+~~~
+
+- `match` requires at least one of `domain`, `url_prefix`, or `url_pattern`.
+  `domain` matches the URL host exactly or as a subdomain suffix; `url_prefix`
+  is a plain prefix; `url_pattern` is an RE2 regex whose named groups become
+  `.Captures`.
+- `match.channels` is an optional allowlist of Slack channel IDs (`C…`/`D…`/
+  `G…`); when set the rule only fires in those channels.
+- `unfurl` requires exactly one of `template` or `run`. `template` renders a
+  Block Kit attachment JSON (resolved relative to the config directory, then the
+  embedded assets); `run` executes a command that prints attachment JSON on
+  stdout, receiving the link context as JSON on stdin.
+- Rules are evaluated in sorted-key order; the first match per URL wins.
+- Each `match.domain` must be registered in the Slack app's **App Unfurl
+  Domains** list (max 5) or no `link_shared` event is delivered. Composer-mode
+  link previews (before a message is sent) are not supported.
+
 ## Reference assets
 
 The `assets/` directory contains a fake `slack.yaml` plus the default ping and
-pong JSON payloads. They are safe reference files; copy or adapt them to your
-runtime config/template location if you want to override the built-in defaults.
+pong JSON payloads and an example `unfurl/github-pr.json` template. They are safe
+reference files; copy or adapt them to your runtime config/template location if
+you want to override the built-in defaults.
 
 ## Run
 

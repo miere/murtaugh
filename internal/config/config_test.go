@@ -145,3 +145,86 @@ workflow-rules:
 		t.Fatalf("expected request event validation error, got: %v", err)
 	}
 }
+
+func TestParseValidUnfurlRule(t *testing.T) {
+	cfg, err := Parse([]byte(`
+slack:
+  app_token: xapp-test
+  bot_token: xoxb-test
+unfurl-rules:
+  github-pr:
+    match:
+      channels: [C0ENG]
+      domain: github.com
+      url_pattern: '/pull/(?P<number>\d+)'
+    unfurl:
+      template: unfurl/github-pr.json
+`))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	rule, ok := cfg.UnfurlRules["github-pr"]
+	if !ok {
+		t.Fatal("expected github-pr unfurl rule")
+	}
+	if rule.Match.Domain != "github.com" || rule.Unfurl.Template != "unfurl/github-pr.json" {
+		t.Fatalf("unexpected unfurl rule parsed: %#v", rule)
+	}
+	if len(rule.Match.Channels) != 1 || rule.Match.Channels[0] != "C0ENG" {
+		t.Fatalf("unexpected channels parsed: %#v", rule.Match.Channels)
+	}
+}
+
+func TestParseUnfurlRequiresMatchCondition(t *testing.T) {
+	_, err := Parse([]byte(`
+slack:
+  app_token: xapp-test
+  bot_token: xoxb-test
+unfurl-rules:
+  bad:
+    match:
+      channels: [C1]
+    unfurl:
+      template: t.json
+`))
+	if err == nil || !strings.Contains(err.Error(), "at least one of domain") {
+		t.Fatalf("expected match condition error, got: %v", err)
+	}
+}
+
+func TestParseUnfurlRejectsTemplateAndRun(t *testing.T) {
+	_, err := Parse([]byte(`
+slack:
+  app_token: xapp-test
+  bot_token: xoxb-test
+unfurl-rules:
+  bad:
+    match:
+      domain: github.com
+    unfurl:
+      template: t.json
+      run:
+        cmd: echo
+`))
+	if err == nil || !strings.Contains(err.Error(), "exactly one of template or run") {
+		t.Fatalf("expected exclusivity error, got: %v", err)
+	}
+}
+
+func TestParseUnfurlRejectsBadRegex(t *testing.T) {
+	_, err := Parse([]byte(`
+slack:
+  app_token: xapp-test
+  bot_token: xoxb-test
+unfurl-rules:
+  bad:
+    match:
+      domain: github.com
+      url_pattern: '([a-z'
+    unfurl:
+      template: t.json
+`))
+	if err == nil || !strings.Contains(err.Error(), "url_pattern") {
+		t.Fatalf("expected url_pattern validation error, got: %v", err)
+	}
+}

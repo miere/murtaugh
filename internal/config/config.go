@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -19,6 +20,7 @@ type Config struct {
 	ACP           ACPConfig                     `yaml:"acp"`
 	Commands      []CommandConfig               `yaml:"commands"`
 	WorkflowRules map[string]WorkflowRuleConfig `yaml:"workflow-rules"`
+	UnfurlRules   map[string]UnfurlRuleConfig   `yaml:"unfurl-rules"`
 }
 
 type SlackConfig struct {
@@ -69,6 +71,23 @@ type RunTriggerConfig struct {
 	Args    []string `yaml:"args"`
 	Timeout string   `yaml:"timeout"`
 	WorkDir string   `yaml:"workdir"`
+}
+
+type UnfurlRuleConfig struct {
+	Match  UnfurlMatchConfig  `yaml:"match"`
+	Unfurl UnfurlActionConfig `yaml:"unfurl"`
+}
+
+type UnfurlMatchConfig struct {
+	Channels   []string `yaml:"channels"`
+	Domain     string   `yaml:"domain"`
+	URLPrefix  string   `yaml:"url_prefix"`
+	URLPattern string   `yaml:"url_pattern"`
+}
+
+type UnfurlActionConfig struct {
+	Template string            `yaml:"template"`
+	Run      *RunTriggerConfig `yaml:"run"`
 }
 
 func (t *TriggerConfig) UnmarshalYAML(value *yaml.Node) error {
@@ -160,6 +179,11 @@ func (c Config) Validate() error {
 			if err := validateTrigger(trigger); err != nil {
 				errs = append(errs, fmt.Errorf("workflow-rules[%s].trigger[%d]: %w", name, i, err))
 			}
+		}
+	}
+	for name, rule := range c.UnfurlRules {
+		if err := validateUnfurlRule(rule); err != nil {
+			errs = append(errs, fmt.Errorf("unfurl-rules[%s]: %w", name, err))
 		}
 	}
 	return errors.Join(errs...)
@@ -263,4 +287,35 @@ func validateRun(run RunTriggerConfig) error {
 		return errors.New("cmd is required")
 	}
 	return nil
+}
+
+func validateUnfurlRule(rule UnfurlRuleConfig) error {
+	var errs []error
+	match := rule.Match
+	if strings.TrimSpace(match.Domain) == "" &&
+		strings.TrimSpace(match.URLPrefix) == "" &&
+		strings.TrimSpace(match.URLPattern) == "" {
+		errs = append(errs, errors.New("match requires at least one of domain, url_prefix, url_pattern"))
+	}
+	if pattern := strings.TrimSpace(match.URLPattern); pattern != "" {
+		if _, err := regexp.Compile(pattern); err != nil {
+			errs = append(errs, fmt.Errorf("match.url_pattern is not a valid regexp: %w", err))
+		}
+	}
+	for i, channel := range match.Channels {
+		if strings.TrimSpace(channel) == "" {
+			errs = append(errs, fmt.Errorf("match.channels[%d] must not be blank", i))
+		}
+	}
+	hasTemplate := strings.TrimSpace(rule.Unfurl.Template) != ""
+	hasRun := rule.Unfurl.Run != nil
+	if hasTemplate == hasRun {
+		errs = append(errs, errors.New("unfurl requires exactly one of template or run"))
+	}
+	if hasRun {
+		if err := validateRun(*rule.Unfurl.Run); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }

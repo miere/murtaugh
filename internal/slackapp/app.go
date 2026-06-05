@@ -9,6 +9,7 @@ import (
 
 	"github.com/miere/murtaugh-dev-toolkit/internal/acp"
 	"github.com/miere/murtaugh-dev-toolkit/internal/config"
+	"github.com/miere/murtaugh-dev-toolkit/internal/unfurl"
 	"github.com/miere/murtaugh-dev-toolkit/internal/workflow"
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
@@ -23,6 +24,8 @@ type App struct {
 	chat            *ChatHandler
 	chatTimeout     time.Duration
 	chatWarmTimeout time.Duration
+	unfurl          *LinkUnfurlHandler
+	unfurlTimeout   time.Duration
 	startupNotifier StartupNotifier
 	startupPingSent bool
 	logger          *slog.Logger
@@ -44,6 +47,16 @@ func New(cfg config.Config, logger *slog.Logger) *App {
 		sessions := acp.NewSessionManager(client, cfg.ACP.EffectiveSessionIdleTimeout(), cfg.ACP.EffectiveMaxSessions()).WithLogger(logger)
 		chat = NewChatHandler(api, sessions, cfg.ACP.EffectiveStreamAppendInterval(), cfg.ACP.EffectiveStreamMinChunkChars(), logger)
 	}
+	var unfurlHandler *LinkUnfurlHandler
+	if len(cfg.UnfurlRules) > 0 {
+		matcher, err := unfurl.NewMatcher(cfg.UnfurlRules)
+		if err != nil {
+			logger.Error("custom link unfurling disabled", "error", err)
+		} else {
+			renderer := unfurl.NewRenderer(cfg.BaseDir, nil)
+			unfurlHandler = NewLinkUnfurlHandler(matcher, renderer, nil, api, logger)
+		}
+	}
 	return &App{
 		api:             api,
 		socket:          socket,
@@ -52,6 +65,8 @@ func New(cfg config.Config, logger *slog.Logger) *App {
 		chat:            chat,
 		chatTimeout:     cfg.ACP.EffectiveRequestTimeout(),
 		chatWarmTimeout: cfg.ACP.EffectiveStartupTimeout(),
+		unfurl:          unfurlHandler,
+		unfurlTimeout:   2 * time.Minute,
 		startupNotifier: startupNotifier,
 		logger:          logger,
 	}
@@ -186,18 +201,24 @@ func (a *App) handleEventsAPI(event socketmode.Event) {
 		return
 	}
 	a.ack(event)
-	if a.chat == nil {
-		a.logger.Debug("ignored Events API chat event because ACP chat is disabled", "inner_type", eventsAPI.InnerEvent.Type)
-		return
-	}
 	switch inner := eventsAPI.InnerEvent.Data.(type) {
+	case *slackevents.LinkSharedEvent:
+		a.handleLinkShared(eventsAPI.TeamID, inner)
 	case *slackevents.AppMentionEvent:
+		if a.chat == nil {
+			a.logger.Debug("ignored app_mention because ACP chat is disabled")
+			return
+		}
 		if inner.BotID != "" {
 			return
 		}
 		text := stripSlackMentions(inner.Text)
 		a.startChat(context.Background(), ChatRequest{TeamID: eventsAPI.TeamID, ChannelID: inner.Channel, UserID: inner.User, ThreadTS: inner.ThreadTimeStamp, MessageTS: inner.TimeStamp, Text: text, Source: "app_mention"})
 	case *slackevents.MessageEvent:
+		if a.chat == nil {
+			a.logger.Debug("ignored message because ACP chat is disabled")
+			return
+		}
 		if inner.BotID != "" || inner.SubType != "" || inner.ChannelType != "im" {
 			return
 		}
@@ -205,6 +226,28 @@ func (a *App) handleEventsAPI(event socketmode.Event) {
 	default:
 		a.logger.Debug("ignored Events API event", "inner_type", eventsAPI.InnerEvent.Type)
 	}
+}
+
+func (a *App) handleLinkShared(teamID string, inner *slackevents.LinkSharedEvent) {
+	if a.unfurl == nil {
+		a.logger.Debug("ignored link_shared because no unfurl-rules are configured")
+		return
+	}
+	req := LinkSharedRequest{
+		TeamID:    teamID,
+		ChannelID: inner.Channel,
+		UserID:    inner.User,
+		MessageTS: inner.MessageTimeStamp,
+		ThreadTS:  inner.ThreadTimeStamp,
+		Links:     inner.Links,
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), a.unfurlTimeout)
+		defer cancel()
+		if err := a.unfurl.Handle(ctx, req); err != nil {
+			a.logger.Error("link unfurl failed", "channel", inner.Channel, "error", err)
+		}
+	}()
 }
 
 func (a *App) startChat(parent context.Context, req ChatRequest) {
