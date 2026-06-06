@@ -30,6 +30,7 @@ type Event struct {
 	Type  EventType
 	Text  string
 	Error error
+	Task  *TaskEvent
 }
 
 type EventType string
@@ -39,7 +40,26 @@ const (
 	EventStatus   EventType = "status"
 	EventComplete EventType = "complete"
 	EventError    EventType = "error"
+	EventTask     EventType = "task"
 )
+
+type TaskStatus string
+
+const (
+	TaskStatusPending    TaskStatus = "pending"
+	TaskStatusInProgress TaskStatus = "in_progress"
+	TaskStatusComplete   TaskStatus = "complete"
+	TaskStatusFailed     TaskStatus = "failed"
+	TaskStatusCancelled  TaskStatus = "cancelled"
+)
+
+type TaskEvent struct {
+	ID          string
+	Title       string
+	Status      TaskStatus
+	Description string
+	Output      string
+}
 
 type ConversationKey struct {
 	TeamID    string

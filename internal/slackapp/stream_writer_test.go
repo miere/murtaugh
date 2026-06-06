@@ -2,6 +2,9 @@ package slackapp
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,17 +15,23 @@ type fakeStreamAPI struct {
 	startedChannel string
 	appends        int
 	stops          int
-	statusCalls    int
-	statusParams   []slack.AssistantThreadsSetStatusParameters
+	startOptions   [][]slack.MsgOption
+	appendOptions  [][]slack.MsgOption
+
+	statusMu     sync.Mutex
+	statusCalls  int
+	statusParams []slack.AssistantThreadsSetStatusParameters
 }
 
-func (f *fakeStreamAPI) StartStreamContext(_ context.Context, channelID string, _ ...slack.MsgOption) (string, string, error) {
+func (f *fakeStreamAPI) StartStreamContext(_ context.Context, channelID string, options ...slack.MsgOption) (string, string, error) {
 	f.startedChannel = channelID
+	f.startOptions = append(f.startOptions, options)
 	return channelID, "stream-ts", nil
 }
 
-func (f *fakeStreamAPI) AppendStreamContext(_ context.Context, _ string, _ string, _ ...slack.MsgOption) (string, string, error) {
+func (f *fakeStreamAPI) AppendStreamContext(_ context.Context, _ string, _ string, options ...slack.MsgOption) (string, string, error) {
 	f.appends++
+	f.appendOptions = append(f.appendOptions, options)
 	return "C1", "stream-ts", nil
 }
 
@@ -32,9 +41,78 @@ func (f *fakeStreamAPI) StopStreamContext(_ context.Context, _ string, _ string,
 }
 
 func (f *fakeStreamAPI) SetAssistantThreadsStatusContext(_ context.Context, params slack.AssistantThreadsSetStatusParameters) error {
+	f.statusMu.Lock()
+	defer f.statusMu.Unlock()
 	f.statusCalls++
 	f.statusParams = append(f.statusParams, params)
 	return nil
+}
+
+func (f *fakeStreamAPI) statusSnapshot() (int, []slack.AssistantThreadsSetStatusParameters) {
+	f.statusMu.Lock()
+	defer f.statusMu.Unlock()
+	calls := f.statusCalls
+	params := make([]slack.AssistantThreadsSetStatusParameters, len(f.statusParams))
+	copy(params, f.statusParams)
+	return calls, params
+}
+
+func extractChunksFromOptions(options ...slack.MsgOption) ([]slack.StreamChunk, error) {
+	_, values, err := slack.UnsafeApplyMsgOptions("xoxb-test", "C1", "https://slack.com/api", options...)
+	if err != nil {
+		return nil, err
+	}
+	chunksJSON := values.Get("chunks")
+	if chunksJSON == "" {
+		return nil, nil
+	}
+	var rawChunks []json.RawMessage
+	if err := json.Unmarshal([]byte(chunksJSON), &rawChunks); err != nil {
+		return nil, err
+	}
+	var chunks []slack.StreamChunk
+	for _, raw := range rawChunks {
+		var typeCheck struct {
+			Type slack.StreamChunkType `json:"type"`
+		}
+		if err := json.Unmarshal(raw, &typeCheck); err != nil {
+			return nil, err
+		}
+		switch typeCheck.Type {
+		case slack.StreamChunkTaskUpdate:
+			var chunk slack.TaskUpdateChunk
+			if err := json.Unmarshal(raw, &chunk); err != nil {
+				return nil, err
+			}
+			chunks = append(chunks, chunk)
+		case slack.StreamChunkMarkdownText:
+			var chunk slack.MarkdownTextChunk
+			if err := json.Unmarshal(raw, &chunk); err != nil {
+				return nil, err
+			}
+			chunks = append(chunks, chunk)
+		default:
+			return nil, fmt.Errorf("unexpected chunk type %q", typeCheck.Type)
+		}
+	}
+	return chunks, nil
+}
+
+func extractMarkdownTextFromOptions(options ...slack.MsgOption) (string, error) {
+	chunks, err := extractChunksFromOptions(options...)
+	if err != nil {
+		return "", err
+	}
+	for _, chunk := range chunks {
+		if md, ok := chunk.(slack.MarkdownTextChunk); ok {
+			return md.Text, nil
+		}
+	}
+	_, values, err := slack.UnsafeApplyMsgOptions("xoxb-test", "C1", "https://slack.com/api", options...)
+	if err != nil {
+		return "", err
+	}
+	return values.Get("markdown_text"), nil
 }
 
 func TestStreamWriterUsesNativeStreamingMethods(t *testing.T) {

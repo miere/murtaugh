@@ -2,6 +2,7 @@ package slackapp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -10,6 +11,13 @@ import (
 	"github.com/miere/murtaugh-dev-toolkit/internal/acp"
 	"github.com/slack-go/slack"
 )
+
+// defaultStatusRefreshInterval controls how often Handle re-asserts the
+// "is thinking..." assistant status. Slack auto-clears the status as soon as
+// the first stream chunk lands, so without periodic refresh the indicator
+// disappears the moment streaming starts while the response is still being
+// assembled. Two seconds is a compromise between responsiveness and API churn.
+const defaultStatusRefreshInterval = 2 * time.Second
 
 type ChatSessionManager interface {
 	Prompt(context.Context, acp.ConversationKey, acp.SessionMetadata, acp.PromptRequest) (<-chan acp.Event, error)
@@ -20,12 +28,13 @@ type ChatSessionWarmer interface {
 }
 
 type ChatHandler struct {
-	api      StreamAPI
-	sessions map[string]ChatSessionManager
-	resolver func(ChatRequest) string
-	interval time.Duration
-	minChars int
-	logger   *slog.Logger
+	api                   StreamAPI
+	sessions              map[string]ChatSessionManager
+	resolver              func(ChatRequest) string
+	interval              time.Duration
+	minChars              int
+	logger                *slog.Logger
+	statusRefreshInterval time.Duration
 }
 
 type ChatRequest struct {
@@ -43,7 +52,7 @@ func NewChatHandler(api StreamAPI, sessions map[string]ChatSessionManager, resol
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &ChatHandler{api: api, sessions: sessions, resolver: resolver, interval: interval, minChars: minChars, logger: logger}
+	return &ChatHandler{api: api, sessions: sessions, resolver: resolver, interval: interval, minChars: minChars, logger: logger, statusRefreshInterval: defaultStatusRefreshInterval}
 }
 
 func (h *ChatHandler) Warm(ctx context.Context) error {
@@ -86,6 +95,7 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest) error {
 		teamID, userID = "", ""
 	}
 	writer := NewStreamWriter(h.api, req.ChannelID, StreamWriterOptions{ThreadTS: streamThreadTS, TeamID: teamID, UserID: userID, Interval: h.interval, MinChars: h.minChars, Logger: h.logger})
+	taskWriter := NewTaskCardWriter(h.api, writer, 0, h.logger)
 	if err := h.api.SetAssistantThreadsStatusContext(ctx, slack.AssistantThreadsSetStatusParameters{
 		ChannelID: req.ChannelID,
 		ThreadTS:  streamThreadTS,
@@ -93,6 +103,26 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest) error {
 	}); err != nil {
 		h.logger.Warn("failed to set assistant status", "error", err)
 	}
+	// Slack auto-clears the assistant status as soon as the first stream chunk
+	// is sent (start/append/stop). Re-assert it periodically so the indicator
+	// stays visible while the back-pressured stream is still being assembled.
+	statusCtx, stopStatus := context.WithCancel(ctx)
+	statusDone := make(chan struct{})
+	go h.refreshAssistantStatus(statusCtx, req.ChannelID, streamThreadTS, "is thinking...", statusDone)
+	defer func() {
+		stopStatus()
+		<-statusDone
+		// Best-effort explicit clear so the indicator does not linger (e.g. when
+		// the handler errors out before any chunk is sent, Slack would otherwise
+		// keep "is thinking..." displayed for up to two minutes).
+		if err := h.api.SetAssistantThreadsStatusContext(ctx, slack.AssistantThreadsSetStatusParameters{
+			ChannelID: req.ChannelID,
+			ThreadTS:  streamThreadTS,
+			Status:    "",
+		}); err != nil && !errors.Is(err, context.Canceled) {
+			h.logger.Debug("failed to clear assistant status", "error", err)
+		}
+	}()
 	events, err := sessions.Prompt(ctx, key, metadata, acp.PromptRequest{Text: prompt})
 	if err != nil {
 		return writer.Fail(ctx, err)
@@ -101,6 +131,7 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest) error {
 	bytes := 0
 	firstChunkLogged := false
 	streamStarted := false
+	runningTasks := make(map[string]acp.TaskStatus)
 	for event := range events {
 		switch event.Type {
 		case acp.EventText, acp.EventStatus:
@@ -123,7 +154,24 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest) error {
 					return err
 				}
 			}
+		case acp.EventTask:
+			if event.Task == nil {
+				continue
+			}
+			if err := taskWriter.UpdateFromEvent(ctx, event.Task); err != nil {
+				h.logger.Warn("failed to send task update", "error", err, "task_id", event.Task.ID)
+			}
+			if event.Task.Status == acp.TaskStatusInProgress || event.Task.Status == acp.TaskStatusPending {
+				runningTasks[event.Task.ID] = event.Task.Status
+			} else {
+				delete(runningTasks, event.Task.ID)
+			}
 		case acp.EventError:
+			for id := range runningTasks {
+				if err := taskWriter.Fail(ctx, id, ""); err != nil {
+					h.logger.Warn("failed to mark task as failed", "error", err, "task_id", id)
+				}
+			}
 			return writer.Fail(ctx, event.Error)
 		case acp.EventComplete:
 			if !streamStarted {
@@ -139,6 +187,11 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest) error {
 			return nil
 		}
 	}
+	for id := range runningTasks {
+		if err := taskWriter.Fail(ctx, id, ""); err != nil {
+			h.logger.Warn("failed to mark task as failed on loop exit", "error", err, "task_id", id)
+		}
+	}
 	if !streamStarted {
 		if err := writer.Start(ctx); err != nil {
 			return err
@@ -150,6 +203,30 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest) error {
 	}
 	h.logger.Info("completed ACP chat response", "source", req.Source, "channel", req.ChannelID, "duration", time.Since(startedAt), "chunks", chunks, "bytes", bytes)
 	return nil
+}
+
+func (h *ChatHandler) refreshAssistantStatus(ctx context.Context, channelID, threadTS, status string, done chan<- struct{}) {
+	defer close(done)
+	interval := h.statusRefreshInterval
+	if interval <= 0 {
+		interval = defaultStatusRefreshInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := h.api.SetAssistantThreadsStatusContext(ctx, slack.AssistantThreadsSetStatusParameters{
+				ChannelID: channelID,
+				ThreadTS:  threadTS,
+				Status:    status,
+			}); err != nil && !errors.Is(err, context.Canceled) {
+				h.logger.Debug("failed to refresh assistant status", "error", err)
+			}
+		}
+	}
 }
 
 func conversationKey(req ChatRequest) acp.ConversationKey {

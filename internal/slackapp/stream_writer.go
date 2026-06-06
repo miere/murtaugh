@@ -54,10 +54,15 @@ type StreamWriterOptions struct {
 }
 
 func (w *StreamWriter) Start(ctx context.Context) error {
+	return w.StartWithOptions(ctx)
+}
+
+func (w *StreamWriter) StartWithOptions(ctx context.Context, extraOptions ...slack.MsgOption) error {
 	if w.started {
 		return nil
 	}
 	options := []slack.MsgOption{slack.MsgOptionTaskDisplayMode(slack.TaskDisplayModeTimeline)}
+	options = append(options, extraOptions...)
 	if w.threadTS != "" {
 		options = append(options, slack.MsgOptionTS(w.threadTS))
 	}
@@ -77,6 +82,11 @@ func (w *StreamWriter) Start(ctx context.Context) error {
 	w.started = true
 	return nil
 }
+
+func (w *StreamWriter) StreamChannel() string { return w.streamChannel }
+func (w *StreamWriter) StreamTS() string      { return w.streamTS }
+func (w *StreamWriter) Started() bool         { return w.started }
+func (w *StreamWriter) Stopped() bool         { return w.stopped }
 
 func (w *StreamWriter) Append(ctx context.Context, text string) error {
 	if text == "" || w.stopped {
@@ -102,7 +112,7 @@ func (w *StreamWriter) Flush(ctx context.Context) error {
 	text := w.buffer.String()
 	w.buffer.Reset()
 	startedAt := time.Now()
-	_, _, err := w.api.AppendStreamContext(ctx, w.streamChannel, w.streamTS, slack.MsgOptionMarkdownText(text))
+	_, _, err := w.api.AppendStreamContext(ctx, w.streamChannel, w.streamTS, slack.MsgOptionChunks(slack.NewMarkdownTextChunk(text)))
 	if err != nil {
 		return fmt.Errorf("append Slack stream: %w", err)
 	}

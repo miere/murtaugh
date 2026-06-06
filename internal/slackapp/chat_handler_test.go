@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/slack-go/slack"
+
 	"github.com/miere/murtaugh-dev-toolkit/internal/acp"
 )
 
@@ -23,6 +25,40 @@ func (f *fakeChatSessions) Prompt(_ context.Context, key acp.ConversationKey, _ 
 	return ch, nil
 }
 
+type fakeChatSessionsWithTasks struct {
+	key    acp.ConversationKey
+	prompt string
+}
+
+func (f *fakeChatSessionsWithTasks) Prompt(_ context.Context, key acp.ConversationKey, _ acp.SessionMetadata, req acp.PromptRequest) (<-chan acp.Event, error) {
+	f.key = key
+	f.prompt = req.Text
+	ch := make(chan acp.Event, 4)
+	ch <- acp.Event{Type: acp.EventTask, Task: &acp.TaskEvent{ID: "task-1", Title: "Searching", Status: acp.TaskStatusInProgress}}
+	ch <- acp.Event{Type: acp.EventText, Text: "found it"}
+	ch <- acp.Event{Type: acp.EventTask, Task: &acp.TaskEvent{ID: "task-1", Title: "Searching", Status: acp.TaskStatusComplete}}
+	ch <- acp.Event{Type: acp.EventComplete}
+	close(ch)
+	return ch, nil
+}
+
+type fakeChatSessionsWithCompletedTaskThenText struct {
+	key    acp.ConversationKey
+	prompt string
+}
+
+func (f *fakeChatSessionsWithCompletedTaskThenText) Prompt(_ context.Context, key acp.ConversationKey, _ acp.SessionMetadata, req acp.PromptRequest) (<-chan acp.Event, error) {
+	f.key = key
+	f.prompt = req.Text
+	ch := make(chan acp.Event, 4)
+	ch <- acp.Event{Type: acp.EventTask, Task: &acp.TaskEvent{ID: "task-1", Title: "Searching", Status: acp.TaskStatusInProgress}}
+	ch <- acp.Event{Type: acp.EventTask, Task: &acp.TaskEvent{ID: "task-1", Title: "Searching", Status: acp.TaskStatusComplete}}
+	ch <- acp.Event{Type: acp.EventText, Text: "final answer"}
+	ch <- acp.Event{Type: acp.EventComplete}
+	close(ch)
+	return ch, nil
+}
+
 func TestChatHandlerStreamsACPEventsToSlack(t *testing.T) {
 	api := &fakeStreamAPI{}
 	fakeSessions := &fakeChatSessions{}
@@ -36,17 +72,117 @@ func TestChatHandlerStreamsACPEventsToSlack(t *testing.T) {
 	if fakeSessions.prompt != "hi" || fakeSessions.key.ThreadTS != "123.4" {
 		t.Fatalf("unexpected session routing: prompt=%q key=%#v", fakeSessions.prompt, fakeSessions.key)
 	}
-	if api.statusCalls != 1 {
-		t.Fatalf("expected one status call, got %d", api.statusCalls)
+	// Two status calls: the initial "is thinking..." and the explicit clear on
+	// completion. The events complete fast enough that the periodic refresher
+	// (defaultStatusRefreshInterval) never fires.
+	if api.statusCalls != 2 {
+		t.Fatalf("expected two status calls (initial + clear), got %d", api.statusCalls)
 	}
 	if sp := api.statusParams[0]; sp.ChannelID != "C1" || sp.ThreadTS != "123.4" || sp.Status != "is thinking..." {
-		t.Fatalf("unexpected status params: %#v", sp)
+		t.Fatalf("unexpected initial status params: %#v", sp)
+	}
+	if sp := api.statusParams[len(api.statusParams)-1]; sp.ChannelID != "C1" || sp.ThreadTS != "123.4" || sp.Status != "" {
+		t.Fatalf("unexpected final status params (expected explicit clear): %#v", sp)
 	}
 	if api.startedChannel != "C1" {
 		t.Fatalf("expected stream started on C1, got %q", api.startedChannel)
 	}
 	if api.appends != 1 || api.stops != 1 {
 		t.Fatalf("expected one append and stop, got appends=%d stops=%d", api.appends, api.stops)
+	}
+}
+
+func TestChatHandlerRoutesTaskEventsToTaskCardWriter(t *testing.T) {
+	api := &fakeStreamAPI{}
+	fakeSessions := &fakeChatSessionsWithTasks{}
+	sessions := map[string]ChatSessionManager{"default": fakeSessions}
+	resolver := func(req ChatRequest) string { return "default" }
+	handler := NewChatHandler(api, sessions, resolver, time.Hour, 5, nil)
+	err := handler.Handle(context.Background(), ChatRequest{TeamID: "T1", ChannelID: "C1", UserID: "U1", MessageTS: "123.4", Text: "hi", Source: "test"})
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if fakeSessions.prompt != "hi" || fakeSessions.key.ThreadTS != "123.4" {
+		t.Fatalf("unexpected session routing: prompt=%q key=%#v", fakeSessions.prompt, fakeSessions.key)
+	}
+	if api.startedChannel != "C1" {
+		t.Fatalf("expected stream started on C1, got %q", api.startedChannel)
+	}
+	// Expect 2 appends: text + task complete. The first task update starts the stream.
+	if api.appends != 2 || len(api.startOptions) != 1 {
+		t.Fatalf("expected task start on stream start plus 2 appends, got starts=%d appends=%d", len(api.startOptions), api.appends)
+	}
+	// Verify the stream was started with a task update chunk.
+	chunks, err := extractChunksFromOptions(api.startOptions[0]...)
+	if err != nil {
+		t.Fatalf("extract chunks from first append: %v", err)
+	}
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 chunk in first append, got %d", len(chunks))
+	}
+	chunk, ok := chunks[0].(slack.TaskUpdateChunk)
+	if !ok {
+		t.Fatalf("expected TaskUpdateChunk, got %T", chunks[0])
+	}
+	if chunk.ID != "task-1" || chunk.Title != "Searching" || chunk.Status != slack.TaskCardStatusInProgress {
+		t.Fatalf("unexpected first chunk: %+v", chunk)
+	}
+	// Verify the last append is a task completion.
+	lastChunks, err := extractChunksFromOptions(api.appendOptions[len(api.appendOptions)-1]...)
+	if err != nil {
+		t.Fatalf("extract chunks from last append: %v", err)
+	}
+	if len(lastChunks) != 1 {
+		t.Fatalf("expected 1 chunk in last append, got %d", len(lastChunks))
+	}
+	lastChunk, ok := lastChunks[0].(slack.TaskUpdateChunk)
+	if !ok {
+		t.Fatalf("expected TaskUpdateChunk in last append, got %T", lastChunks[0])
+	}
+	if lastChunk.Status != slack.TaskCardStatusComplete {
+		t.Fatalf("expected last chunk status complete, got %q", lastChunk.Status)
+	}
+}
+
+func TestChatHandlerAppendsFinalTextAfterTaskCompletes(t *testing.T) {
+	api := &fakeStreamAPI{}
+	fakeSessions := &fakeChatSessionsWithCompletedTaskThenText{}
+	sessions := map[string]ChatSessionManager{"default": fakeSessions}
+	resolver := func(req ChatRequest) string { return "default" }
+	handler := NewChatHandler(api, sessions, resolver, time.Hour, 5, nil)
+	err := handler.Handle(context.Background(), ChatRequest{TeamID: "T1", ChannelID: "C1", UserID: "U1", MessageTS: "123.4", Text: "hi", Source: "test"})
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if api.appends != 2 || len(api.startOptions) != 1 || api.stops != 1 {
+		t.Fatalf("expected task start plus task completion and final text appends, got starts=%d appends=%d stops=%d", len(api.startOptions), api.appends, api.stops)
+	}
+	chunks, err := extractChunksFromOptions(api.appendOptions[0]...)
+	if err != nil {
+		t.Fatalf("extract chunks from task completion append: %v", err)
+	}
+	if len(chunks) != 1 || chunks[0].(slack.TaskUpdateChunk).Status != slack.TaskCardStatusComplete {
+		t.Fatalf("expected first append to complete the task, got %+v", chunks)
+	}
+	text, err := extractMarkdownTextFromOptions(api.appendOptions[1]...)
+	if err != nil {
+		t.Fatalf("extract markdown text from final append: %v", err)
+	}
+	if text != "final answer" {
+		t.Fatalf("expected final text append, got %q", text)
+	}
+	// Slack's chat.appendStream rejects a chunks-only stream that subsequently
+	// switches to the markdown_text form parameter; once we have sent task
+	// chunks the rest of the stream must keep going through the chunks API.
+	textChunks, err := extractChunksFromOptions(api.appendOptions[1]...)
+	if err != nil {
+		t.Fatalf("extract chunks from final append: %v", err)
+	}
+	if len(textChunks) != 1 {
+		t.Fatalf("expected final text to be sent as a single chunk, got %d chunks", len(textChunks))
+	}
+	if md, ok := textChunks[0].(slack.MarkdownTextChunk); !ok || md.Text != "final answer" {
+		t.Fatalf("expected final text to be a markdown_text chunk, got %+v", textChunks[0])
 	}
 }
 
@@ -61,6 +197,66 @@ func TestStreamThreadTSUsesMessageTimestampForDM(t *testing.T) {
 	got := streamThreadTS(ChatRequest{ThreadTS: "", MessageTS: "123.4", DM: true})
 	if got != "123.4" {
 		t.Fatalf("unexpected stream thread timestamp: %q", got)
+	}
+}
+
+type blockingChatSessions struct {
+	release chan struct{}
+}
+
+func (f *blockingChatSessions) Prompt(_ context.Context, _ acp.ConversationKey, _ acp.SessionMetadata, _ acp.PromptRequest) (<-chan acp.Event, error) {
+	ch := make(chan acp.Event, 2)
+	go func() {
+		<-f.release
+		ch <- acp.Event{Type: acp.EventText, Text: "hi"}
+		ch <- acp.Event{Type: acp.EventComplete}
+		close(ch)
+	}()
+	return ch, nil
+}
+
+func TestChatHandlerRefreshesAssistantStatusWhileEventsPending(t *testing.T) {
+	api := &fakeStreamAPI{}
+	release := make(chan struct{})
+	fakeSessions := &blockingChatSessions{release: release}
+	sessions := map[string]ChatSessionManager{"default": fakeSessions}
+	resolver := func(req ChatRequest) string { return "default" }
+	handler := NewChatHandler(api, sessions, resolver, time.Hour, 5, nil)
+	handler.statusRefreshInterval = 5 * time.Millisecond
+	done := make(chan error, 1)
+	go func() {
+		done <- handler.Handle(context.Background(), ChatRequest{TeamID: "T1", ChannelID: "C1", UserID: "U1", MessageTS: "123.4", Text: "hi", Source: "test"})
+	}()
+	// Give the periodic refresher time to fire several times before any events flow.
+	deadline := time.Now().Add(time.Second)
+	for {
+		calls, _ := api.statusSnapshot()
+		if calls >= 4 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("status refresher never fired enough times, got %d", calls)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	calls, params := api.statusSnapshot()
+	if calls < 4 {
+		t.Fatalf("expected at least 4 status calls (initial + refreshes + clear), got %d", calls)
+	}
+	if params[0].Status != "is thinking..." {
+		t.Fatalf("expected initial status to be \"is thinking...\", got %q", params[0].Status)
+	}
+	if last := params[len(params)-1]; last.Status != "" {
+		t.Fatalf("expected last status call to clear the status, got %q", last.Status)
+	}
+	for i := 1; i < len(params)-1; i++ {
+		if params[i].Status != "is thinking..." {
+			t.Fatalf("expected intermediate refresh %d to re-assert status, got %q", i, params[i].Status)
+		}
 	}
 }
 

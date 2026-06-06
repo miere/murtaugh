@@ -330,19 +330,24 @@ func (c *ProcessClient) deliverNotification(notification rpcNotification) {
 	if sessionID == "" {
 		return
 	}
-	event := Event{Type: EventText, Text: extractText(notification.Params)}
-	if event.Text == "" {
-		return
-	}
 	c.mu.Lock()
 	ch := c.subscribers[sessionID]
 	c.mu.Unlock()
-	if ch != nil {
-		select {
-		case ch <- event:
-		default:
-		}
+	if ch == nil {
+		return
 	}
+	if task := extractTask(notification.Params); task != nil {
+		// Block on the send: dropping task or text notifications truncates the
+		// agent response in the consumer (chat handler). The readLoop is back-
+		// pressured by the consumer, which is the intended behaviour.
+		ch <- Event{Type: EventTask, Task: task}
+		return
+	}
+	event := Event{Type: EventText, Text: extractNotificationText(notification.Params)}
+	if event.Text == "" {
+		return
+	}
+	ch <- event
 }
 
 func (c *ProcessClient) failAll(err error) {
@@ -371,6 +376,103 @@ func extractText(raw json.RawMessage) string {
 		return ""
 	}
 	return strings.Join(extractStrings(value), "")
+}
+
+func extractNotificationText(raw json.RawMessage) string {
+	var value any
+	if len(raw) == 0 || json.Unmarshal(raw, &value) != nil {
+		return ""
+	}
+	m, ok := value.(map[string]any)
+	if !ok {
+		return ""
+	}
+	updateMap, ok := m["update"].(map[string]any)
+	if !ok {
+		return strings.Join(extractStrings(value), "")
+	}
+	if sessionUpdate, _ := updateMap["sessionUpdate"].(string); sessionUpdate != "agent_message_chunk" && sessionUpdate != "agent_message" {
+		return ""
+	}
+	if content, ok := updateMap["content"]; ok {
+		return strings.Join(extractStrings(content), "")
+	}
+	return strings.Join(extractStrings(updateMap), "")
+}
+
+func extractTask(raw json.RawMessage) *TaskEvent {
+	var value any
+	if len(raw) == 0 || json.Unmarshal(raw, &value) != nil {
+		return nil
+	}
+	m, ok := value.(map[string]any)
+	if !ok {
+		return nil
+	}
+	if taskMap, ok := m["task"].(map[string]any); ok {
+		return taskFromMap(taskMap)
+	}
+	updateMap, ok := m["update"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	sessionUpdate, _ := updateMap["sessionUpdate"].(string)
+	if sessionUpdate != "tool_call" && sessionUpdate != "tool_call_update" {
+		return nil
+	}
+	return taskFromMap(updateMap)
+}
+
+func taskFromMap(taskMap map[string]any) *TaskEvent {
+	id, _ := taskMap["id"].(string)
+	if id == "" {
+		id, _ = taskMap["taskId"].(string)
+	}
+	if id == "" {
+		id, _ = taskMap["toolCallId"].(string)
+	}
+	if id == "" {
+		id, _ = taskMap["tool_call_id"].(string)
+	}
+	if id == "" {
+		return nil
+	}
+	task := &TaskEvent{ID: id}
+	if title, ok := taskMap["title"].(string); ok {
+		task.Title = title
+	}
+	if desc, ok := taskMap["description"].(string); ok {
+		task.Description = desc
+	}
+	if task.Description == "" {
+		if kind, ok := taskMap["kind"].(string); ok {
+			task.Description = kind
+		}
+	}
+	if status, ok := taskMap["status"].(string); ok {
+		task.Status = normalizeTaskStatus(status)
+	}
+	if content, ok := taskMap["content"]; ok {
+		task.Output = strings.Join(extractStrings(content), "")
+	}
+	return task
+}
+
+func normalizeTaskStatus(status string) TaskStatus {
+	switch TaskStatus(status) {
+	case TaskStatusComplete, "completed":
+		return TaskStatusComplete
+	case TaskStatusFailed:
+		return TaskStatusFailed
+	case TaskStatusCancelled:
+		return TaskStatusCancelled
+	case TaskStatusPending:
+		return TaskStatusPending
+	case TaskStatusInProgress:
+		return TaskStatusInProgress
+	default:
+		return TaskStatus(status)
+	}
 }
 
 func extractStrings(value any) []string {
