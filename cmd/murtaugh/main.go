@@ -35,6 +35,8 @@ Flags:
                         (default: ~/.config/murtaugh/slack.yaml).
 `
 
+var version = "dev"
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "murtaugh:", err)
@@ -46,6 +48,10 @@ func main() {
 // to the application layer. It is separated from main() so it can be
 // exercised by tests.
 func run(rawArgs []string) error {
+	if len(rawArgs) > 0 && rawArgs[0] == "version" {
+		fmt.Println(version)
+		return nil
+	}
 	defaultPath, err := config.DefaultPath()
 	if err != nil {
 		return err

@@ -7,15 +7,29 @@ REPO_NAME="murtaugh-dev-toolkit"
 RELEASE_API_URL="${MURTAUGH_RELEASE_API_URL:-https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest}"
 
 ASSUME_YES=0
+SKIP_CONFIG=0
+RECONFIGURE=0
+FORCE_INSTALL=0
+DRY_RUN=0
+TARGET_VERSION=""
 CUSTOM_AGENT_ARGS=()
 
 usage() {
   cat <<'EOF'
-Usage: install.sh [--yes]
+Usage: install.sh [--yes] [--version VERSION] [--force] [--skip-config] [--reconfigure] [--dry-run]
 
-Installs the latest Murtaugh macOS release, writes Slack and chat-agent config,
-optionally creates a LaunchAgent, and can configure Murtaugh as an MCP server in
-supported clients.
+Installs or updates the Murtaugh macOS release. When Murtaugh is already
+installed, re-running this installer updates the binary and preserves existing
+config files by default. Use --reconfigure to force a full config rewrite.
+
+Options:
+  --yes                 Skip interactive prompts (use env vars for all values).
+  --version VERSION     Install a specific version instead of the latest.
+  --force               Reinstall even if the current version matches latest.
+  --skip-config         Update binary only; do not write or modify any config.
+  --reconfigure         Always rewrite config files, backing up existing ones.
+  --dry-run             Show what would happen without making changes.
+  --help, -h            Show this message.
 
 Environment overrides:
   MURTAUGH_INSTALL_DIR
@@ -30,11 +44,16 @@ Environment overrides:
   MURTAUGH_MCP_CLIENT             skip|opencode|auggie|goose
   MURTAUGH_RELEASE_JSON_PATH      local file used instead of GitHub API
   MURTAUGH_INSTALL_ARCH           override uname arch for testing
+  MURTAUGH_DRY_RUN                yes|no (same as --dry-run flag)
+  MURTAUGH_FORCE_INSTALL          yes|no (same as --force flag)
+  MURTAUGH_RECONFIGURE            yes|no (same as --reconfigure flag)
+  MURTAUGH_SKIP_CONFIG            yes|no (same as --skip-config flag)
+  MURTAUGH_TARGET_VERSION         install specific version (same as --version)
 EOF
 }
 
 log() {
-  printf '[murtaugh-installer] %s\n' "$*"
+  printf '[murtaugh-installer] %s\n' "$*" >&2
 }
 
 die() {
@@ -120,11 +139,75 @@ require_darwin() {
   [[ "$(uname -s)" == "Darwin" ]] || die "this installer currently supports macOS only"
 }
 
+is_env_yes() {
+  local val=${1:-}
+  [[ "${val}" == "yes" || "${val}" == "true" || "${val}" == "1" ]]
+}
+
+installed_murtaugh_bin() {
+  command -v murtaugh 2>/dev/null || true
+}
+
+detect_installed_version() {
+  local bin=${1:-}
+  if [[ -z "$bin" || ! -x "$bin" ]]; then
+    printf '%s' ""
+    return 0
+  fi
+  "$bin" version 2>/dev/null || true
+}
+
+# strip_leading_v normalizes a version tag for comparison.
+strip_leading_v() {
+  local v="$1"
+  v="${v#v}"
+  v="${v#V}"
+  printf '%s' "$v"
+}
+
+# version_compare returns 0 if a == b, 1 if a > b, 2 if a < b.
+# Uses simple dot-separated integer comparison.
+version_compare() {
+  local a="$(strip_leading_v "$1")"
+  local b="$(strip_leading_v "$2")"
+  local IFS=.
+  read -r -a a_parts <<< "$a"
+  read -r -a b_parts <<< "$b"
+  local max=$(( ${#a_parts[@]} > ${#b_parts[@]} ? ${#a_parts[@]} : ${#b_parts[@]} ))
+  for (( i = 0; i < max; i++ )); do
+    local av=${a_parts[i]:-0}
+    local bv=${b_parts[i]:-0}
+    if (( av > bv )); then return 1; fi
+    if (( av < bv )); then return 2; fi
+  done
+  return 0
+}
+
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --yes)
         ASSUME_YES=1
+        ;;
+      --version)
+        if [[ -n "${2:-}" && "${2:-}" != -* ]]; then
+          TARGET_VERSION="$2"
+          shift
+        else
+          die "--version requires a value"
+        fi
+        ;;
+      --force)
+        FORCE_INSTALL=1
+        ;;
+      --skip-config)
+        SKIP_CONFIG=1
+        ;;
+      --reconfigure)
+        RECONFIGURE=1
+        ;;
+      --dry-run)
+        DRY_RUN=1
         ;;
       --help|-h)
         usage
@@ -136,6 +219,15 @@ parse_args() {
     esac
     shift
   done
+
+  # Allow environment overrides for boolean flags
+  is_env_yes "${MURTAUGH_DRY_RUN:-}" && DRY_RUN=1
+  is_env_yes "${MURTAUGH_FORCE_INSTALL:-}" && FORCE_INSTALL=1
+  is_env_yes "${MURTAUGH_RECONFIGURE:-}" && RECONFIGURE=1
+  is_env_yes "${MURTAUGH_SKIP_CONFIG:-}" && SKIP_CONFIG=1
+  if [[ -n "${MURTAUGH_TARGET_VERSION:-}" ]]; then
+    TARGET_VERSION="$MURTAUGH_TARGET_VERSION"
+  fi
 }
 
 prompt_required() {
@@ -220,8 +312,11 @@ choose_install_dir() {
 }
 
 release_json() {
+  local target_version="${1:-}"
   if [[ -n "${MURTAUGH_RELEASE_JSON_PATH:-}" ]]; then
     cat "$MURTAUGH_RELEASE_JSON_PATH"
+  elif [[ -n "$target_version" ]]; then
+    curl -fsSL "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/tags/${target_version}"
   else
     curl -fsSL "$RELEASE_API_URL"
   fi
@@ -256,27 +351,58 @@ raise SystemExit(f"release asset not found: {want_name}")
 PY
 }
 
-install_latest_binary() {
+install_or_update_binary() {
   local install_dir=$1
   local suffix=$2
-  local json tag asset_url tmpdir tmpbin dest
+  local target_version=${3:-}
+  local json tag asset_url tmpdir tmpbin dest installed_bin current_version
+
+  json=$(release_json "$target_version")
   local parsed=()
-  json=$(release_json)
   while IFS= read -r line; do
     parsed+=("$line")
   done < <(read_release_field "$json" "$suffix")
   tag=${parsed[0]}
   asset_url=${parsed[1]}
+
+  installed_bin=$(installed_murtaugh_bin)
+  current_version=$(detect_installed_version "$installed_bin")
+
+  if [[ -n "$current_version" && -n "$tag" && "$FORCE_INSTALL" -eq 0 ]]; then
+    version_compare "$current_version" "$tag"
+    local cmp=$?
+    if [[ "$cmp" -eq 0 ]]; then
+      log "Already running ${tag} — no update needed. Use --force to reinstall."
+      printf '%s' "$(realpath_py "$installed_bin")"
+      return 0
+    elif [[ "$cmp" -eq 1 ]]; then
+      log "Already running a newer version (${current_version}) than ${tag} — skipping update."
+      printf '%s' "$(realpath_py "$installed_bin")"
+      return 0
+    fi
+  fi
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log "[DRY-RUN] Would download ${tag} to ${install_dir}/murtaugh"
+    printf '%s' "${install_dir}/murtaugh"
+    return 0
+  fi
+
   tmpdir=$(mktemp -d)
   tmpbin="$tmpdir/murtaugh"
   curl -fsSL "$asset_url" -o "$tmpbin"
   chmod +x "$tmpbin"
-  "$tmpbin" --help >/dev/null 2>&1 || die "downloaded release asset for ${tag} failed a --help smoke check"
+  "$tmpbin" version >/dev/null 2>&1 || die "downloaded release asset for ${tag} failed a version check"
   dest="$install_dir/murtaugh"
   backup_file_if_exists "$dest"
   cp "$tmpbin" "$dest"
   chmod 755 "$dest"
   rm -rf "$tmpdir"
+  if [[ "$current_version" == "" ]]; then
+    log "Installed Murtaugh ${tag} to ${dest}"
+  else
+    log "Updated Murtaugh from ${current_version} to ${tag}"
+  fi
   printf '%s' "$(realpath_py "$dest")"
 }
 
@@ -451,6 +577,28 @@ EOF
   fi
 }
 
+restart_launch_agent_if_needed() {
+  local installed_bin=$1
+  local plist="$HOME/Library/LaunchAgents/dev.murtaugh.plist"
+  if [[ ! -f "$plist" ]]; then
+    return 0
+  fi
+  command -v launchctl >/dev/null 2>&1 || return 0
+  local uid
+  uid=$(id -u)
+  if ! launchctl print "gui/${uid}/dev.murtaugh" >/dev/null 2>&1; then
+    return 0
+  fi
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log "[DRY-RUN] Would restart LaunchAgent dev.murtaugh"
+    return 0
+  fi
+  log "Restarting LaunchAgent dev.murtaugh"
+  launchctl bootout "gui/${uid}" "$plist" >/dev/null 2>&1 || true
+  launchctl bootstrap "gui/${uid}" "$plist"
+  log "Restarted LaunchAgent dev.murtaugh"
+}
+
 configure_mcp_client() {
   local installed_bin=$1
   local mcp_client target
@@ -488,52 +636,87 @@ main() {
   local install_dir arch_suffix installed_bin
   install_dir=$(choose_install_dir)
   arch_suffix=$(detect_arch_suffix)
-  installed_bin=$(install_latest_binary "$install_dir" "$arch_suffix")
-  log "Installed Murtaugh to ${installed_bin}"
+  installed_bin=$(install_or_update_binary "$install_dir" "$arch_suffix" "$TARGET_VERSION")
 
-  local app_token bot_token admin_user chat_choice chat_command=""
-  local -a chat_args=()
-  app_token=$(prompt_required MURTAUGH_SLACK_APP_TOKEN "Slack app token (xapp-...)" yes)
-  bot_token=$(prompt_required MURTAUGH_SLACK_BOT_TOKEN "Slack bot token (xoxb-...)" yes)
-  admin_user=$(prompt_required MURTAUGH_ADMIN_USER "Slack admin handle or user ID")
-  [[ "$app_token" == xapp-* ]] || die "Slack app token must start with xapp-"
-  [[ "$bot_token" == xoxb-* ]] || die "Slack bot token must start with xoxb-"
-
-  chat_choice=$(prompt_choice MURTAUGH_CHAT_AGENT "Slack Chat agent" skip skip opencode goose auggie custom)
-  if [[ "$chat_choice" != "skip" ]]; then
-    chat_command=$(resolve_agent_command "$chat_choice")
+  if [[ "$SKIP_CONFIG" -eq 1 ]]; then
+    log "Done. Binary updated; config untouched."
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      log "[DRY-RUN] No changes were made."
+    fi
+    log "Murtaugh MCP command: ${installed_bin} mcp"
+    return 0
   fi
-  case "$chat_choice" in
-    opencode) chat_args=(acp) ;;
-    goose) chat_args=(acp) ;;
-    auggie) chat_args=(--acp --allow-indexing) ;;
-    custom)
-      collect_custom_args
-      chat_args=("${CUSTOM_AGENT_ARGS[@]}")
-      ;;
-  esac
 
-  local config_dir slack_yaml agents_yaml
+  local config_dir slack_yaml agents_yaml has_config
   config_dir="$HOME/.config/murtaugh"
   slack_yaml="$config_dir/slack.yaml"
   agents_yaml="$config_dir/agents.yaml"
-  mkdir -p "$config_dir"
-  chmod 700 "$config_dir" 2>/dev/null || true
+  has_config=0
+  [[ -f "$slack_yaml" || -f "$agents_yaml" ]] && has_config=1
 
-  write_slack_yaml "$slack_yaml" "$app_token" "$bot_token" "$admin_user" "$chat_choice"
-  if [[ "$chat_choice" == "skip" ]]; then
-    write_agents_yaml "$agents_yaml" "$chat_choice"
+  local app_token bot_token admin_user chat_choice chat_command=""
+  local -a chat_args=()
+
+  if [[ "$has_config" -eq 1 && "$RECONFIGURE" -eq 0 && "$DRY_RUN" -eq 0 ]]; then
+    log "Existing config detected. Preserving Slack and agent configs by default."
+    log "Use --reconfigure to rewrite them."
   else
-    write_agents_yaml "$agents_yaml" "$chat_choice" "$chat_command" "${chat_args[@]}"
-  fi
-  log "Wrote Slack config to ${slack_yaml}"
-  log "Wrote agent config to ${agents_yaml}"
+    if [[ "$DRY_RUN" -eq 1 && "$has_config" -eq 1 && "$RECONFIGURE" -eq 0 ]]; then
+      log "[DRY-RUN] Would preserve existing config files."
+    elif [[ "$DRY_RUN" -eq 1 && "$RECONFIGURE" -eq 1 ]]; then
+      log "[DRY-RUN] Would rewrite config files with backups."
+    elif [[ "$DRY_RUN" -eq 1 && "$has_config" -eq 0 ]]; then
+      log "[DRY-RUN] Would write new config files."
+    fi
 
-  write_launch_agent "$installed_bin"
-  configure_mcp_client "$installed_bin"
+    app_token=$(prompt_required MURTAUGH_SLACK_APP_TOKEN "Slack app token (xapp-...)" yes)
+    bot_token=$(prompt_required MURTAUGH_SLACK_BOT_TOKEN "Slack bot token (xoxb-...)" yes)
+    admin_user=$(prompt_required MURTAUGH_ADMIN_USER "Slack admin handle or user ID")
+    [[ "$app_token" == xapp-* ]] || die "Slack app token must start with xapp-"
+    [[ "$bot_token" == xoxb-* ]] || die "Slack bot token must start with xoxb-"
+
+    chat_choice=$(prompt_choice MURTAUGH_CHAT_AGENT "Slack Chat agent" skip skip opencode goose auggie custom)
+    if [[ "$chat_choice" != "skip" ]]; then
+      chat_command=$(resolve_agent_command "$chat_choice")
+    fi
+    case "$chat_choice" in
+      opencode) chat_args=(acp) ;;
+      goose) chat_args=(acp) ;;
+      auggie) chat_args=(--acp --allow-indexing) ;;
+      custom)
+        collect_custom_args
+        chat_args=("${CUSTOM_AGENT_ARGS[@]}")
+        ;;
+    esac
+
+    mkdir -p "$config_dir"
+    chmod 700 "$config_dir" 2>/dev/null || true
+
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      log "[DRY-RUN] Would write ${slack_yaml} and ${agents_yaml}"
+    else
+      write_slack_yaml "$slack_yaml" "$app_token" "$bot_token" "$admin_user" "$chat_choice"
+      if [[ "$chat_choice" == "skip" ]]; then
+        write_agents_yaml "$agents_yaml" "$chat_choice"
+      else
+        write_agents_yaml "$agents_yaml" "$chat_choice" "$chat_command" "${chat_args[@]}"
+      fi
+      log "Wrote Slack config to ${slack_yaml}"
+      log "Wrote agent config to ${agents_yaml}"
+    fi
+  fi
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log "[DRY-RUN] Would configure LaunchAgent and MCP clients if applicable."
+  else
+    write_launch_agent "$installed_bin"
+    configure_mcp_client "$installed_bin"
+  fi
+
+  restart_launch_agent_if_needed "$installed_bin"
 
   log "Murtaugh MCP command: ${installed_bin} mcp"
-  log "Done. Re-run this installer any time to regenerate config with fresh backups."
+  log "Done. Re-run this installer any time to update or regenerate config."
 }
 
 main "$@"

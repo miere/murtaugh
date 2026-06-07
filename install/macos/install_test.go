@@ -23,7 +23,7 @@ func writeExecutable(t *testing.T, path, body string) {
 func writeReleaseFixture(t *testing.T, dir string) string {
 	t.Helper()
 	asset := filepath.Join(dir, "murtaugh-v9.9.9-darwin-arm64")
-	writeExecutable(t, asset, "#!/bin/sh\nif [ \"$1\" = \"--help\" ]; then exit 0; fi\nexit 0\n")
+	writeExecutable(t, asset, "#!/bin/sh\nif [ \"$1\" = \"--help\" ] || [ \"$1\" = \"version\" ]; then echo 'v9.9.9'; exit 0; fi\nexit 0\n")
 	release := map[string]any{
 		"tag_name": "v9.9.9",
 		"assets": []map[string]any{{
@@ -176,5 +176,190 @@ func TestInstallerFailsBeforeWritingConfigWhenAgentMissing(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(home, ".config", "murtaugh", "agents.yaml")); !os.IsNotExist(err) {
 		t.Fatalf("agents.yaml should not have been written, stat err=%v", err)
+	}
+}
+
+func TestInstallerSkipsUpdateWhenAlreadyCurrent(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("installer is macOS-only")
+	}
+	home := t.TempDir()
+	binDir := filepath.Join(home, ".local", "bin")
+	releaseJSON := writeReleaseFixture(t, t.TempDir())
+
+	// Install a fake murtaugh that reports v9.9.9
+	writeExecutable(t, filepath.Join(binDir, "murtaugh"), "#!/bin/sh\nif [ \"$1\" = \"version\" ]; then echo 'v9.9.9'; exit 0; fi\nexit 0\n")
+
+	out, err := runInstaller(t, []string{
+		"HOME=" + home,
+		"PATH=" + binDir + ":/usr/bin:/bin:/usr/sbin:/sbin",
+		"MURTAUGH_RELEASE_JSON_PATH=" + releaseJSON,
+		"MURTAUGH_INSTALL_ARCH=arm64",
+		"MURTAUGH_SLACK_APP_TOKEN=xapp-test-token",
+		"MURTAUGH_SLACK_BOT_TOKEN=xoxb-test-token",
+		"MURTAUGH_ADMIN_USER=@admin",
+		"MURTAUGH_CHAT_AGENT=skip",
+		"MURTAUGH_ENABLE_LAUNCH_AGENT=no",
+		"MURTAUGH_MCP_CLIENT=skip",
+	})
+	if err != nil {
+		t.Fatalf("installer failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Already running v9.9.9") {
+		t.Fatalf("expected skip update message, got:\n%s", out)
+	}
+	if strings.Contains(out, "Updated Murtaugh") {
+		t.Fatalf("should not have updated binary, got:\n%s", out)
+	}
+}
+
+func TestInstallerForcesUpdateWhenCurrent(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("installer is macOS-only")
+	}
+	home := t.TempDir()
+	binDir := filepath.Join(home, ".local", "bin")
+	releaseJSON := writeReleaseFixture(t, t.TempDir())
+
+	// Install a fake murtaugh that reports v9.9.9
+	writeExecutable(t, filepath.Join(binDir, "murtaugh"), "#!/bin/sh\nif [ \"$1\" = \"version\" ]; then echo 'v9.9.9'; exit 0; fi\nexit 0\n")
+
+	out, err := runInstaller(t, []string{
+		"HOME=" + home,
+		"PATH=" + binDir + ":/usr/bin:/bin:/usr/sbin:/sbin",
+		"MURTAUGH_RELEASE_JSON_PATH=" + releaseJSON,
+		"MURTAUGH_INSTALL_ARCH=arm64",
+		"MURTAUGH_SLACK_APP_TOKEN=xapp-test-token",
+		"MURTAUGH_SLACK_BOT_TOKEN=xoxb-test-token",
+		"MURTAUGH_ADMIN_USER=@admin",
+		"MURTAUGH_CHAT_AGENT=skip",
+		"MURTAUGH_ENABLE_LAUNCH_AGENT=no",
+		"MURTAUGH_MCP_CLIENT=skip",
+		"MURTAUGH_FORCE_INSTALL=yes",
+	})
+	if err != nil {
+		t.Fatalf("installer failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Updated Murtaugh from v9.9.9 to v9.9.9") {
+		t.Fatalf("expected forced update message, got:\n%s", out)
+	}
+}
+
+func TestInstallerSkipConfigUpdatesBinaryOnly(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("installer is macOS-only")
+	}
+	home := t.TempDir()
+	binDir := filepath.Join(home, ".local", "bin")
+	releaseJSON := writeReleaseFixture(t, t.TempDir())
+
+	out, err := runInstaller(t, []string{
+		"HOME=" + home,
+		"PATH=" + binDir + ":/usr/bin:/bin:/usr/sbin:/sbin",
+		"MURTAUGH_RELEASE_JSON_PATH=" + releaseJSON,
+		"MURTAUGH_INSTALL_ARCH=arm64",
+		"MURTAUGH_SKIP_CONFIG=yes",
+	})
+	if err != nil {
+		t.Fatalf("installer failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Binary updated; config untouched") {
+		t.Fatalf("expected skip config message, got:\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".config", "murtaugh", "slack.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("slack.yaml should not have been written, stat err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".config", "murtaugh", "agents.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("agents.yaml should not have been written, stat err=%v", err)
+	}
+}
+
+func TestInstallerPreservesConfigByDefault(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("installer is macOS-only")
+	}
+	home := t.TempDir()
+	binDir := filepath.Join(home, ".local", "bin")
+	releaseJSON := writeReleaseFixture(t, t.TempDir())
+
+	// Pre-seed existing config
+	configDir := filepath.Join(home, ".config", "murtaugh")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "slack.yaml"), []byte("existing: true\n"), 0o644); err != nil {
+		t.Fatalf("write existing slack.yaml: %v", err)
+	}
+
+	out, err := runInstaller(t, []string{
+		"HOME=" + home,
+		"PATH=" + binDir + ":/usr/bin:/bin:/usr/sbin:/sbin",
+		"MURTAUGH_RELEASE_JSON_PATH=" + releaseJSON,
+		"MURTAUGH_INSTALL_ARCH=arm64",
+		"MURTAUGH_CHAT_AGENT=skip",
+		"MURTAUGH_ENABLE_LAUNCH_AGENT=no",
+		"MURTAUGH_MCP_CLIENT=skip",
+	})
+	if err != nil {
+		t.Fatalf("installer failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Preserving Slack and agent configs by default") {
+		t.Fatalf("expected preserve config message, got:\n%s", out)
+	}
+	content, err := os.ReadFile(filepath.Join(configDir, "slack.yaml"))
+	if err != nil {
+		t.Fatalf("read slack.yaml: %v", err)
+	}
+	if string(content) != "existing: true\n" {
+		t.Fatalf("slack.yaml was overwritten unexpectedly: %s", content)
+	}
+}
+
+func TestInstallerReconfiguresWhenRequested(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("installer is macOS-only")
+	}
+	home := t.TempDir()
+	binDir := filepath.Join(home, ".local", "bin")
+	releaseJSON := writeReleaseFixture(t, t.TempDir())
+	writeExecutable(t, filepath.Join(binDir, "auggie"), "#!/bin/sh\nexit 0\n")
+
+	// Pre-seed existing config
+	configDir := filepath.Join(home, ".config", "murtaugh")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "slack.yaml"), []byte("existing: true\n"), 0o644); err != nil {
+		t.Fatalf("write existing slack.yaml: %v", err)
+	}
+
+	out, err := runInstaller(t, []string{
+		"HOME=" + home,
+		"PATH=" + binDir + ":/usr/bin:/bin:/usr/sbin:/sbin",
+		"MURTAUGH_RELEASE_JSON_PATH=" + releaseJSON,
+		"MURTAUGH_INSTALL_ARCH=arm64",
+		"MURTAUGH_SLACK_APP_TOKEN=xapp-test-token",
+		"MURTAUGH_SLACK_BOT_TOKEN=xoxb-test-token",
+		"MURTAUGH_ADMIN_USER=@admin",
+		"MURTAUGH_CHAT_AGENT=auggie",
+		"MURTAUGH_ENABLE_LAUNCH_AGENT=no",
+		"MURTAUGH_MCP_CLIENT=skip",
+		"MURTAUGH_RECONFIGURE=yes",
+	})
+	if err != nil {
+		t.Fatalf("installer failed: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "Preserving Slack and agent configs by default") {
+		t.Fatalf("should not have preserved config when --reconfigure, got:\n%s", out)
+	}
+	content, err := os.ReadFile(filepath.Join(configDir, "slack.yaml"))
+	if err != nil {
+		t.Fatalf("read slack.yaml: %v", err)
+	}
+	if strings.Contains(string(content), "existing: true") {
+		t.Fatalf("slack.yaml was not reconfigured as expected: %s", content)
+	}
+	if !strings.Contains(string(content), "app_token") {
+		t.Fatalf("slack.yaml was not rewritten with new config: %s", content)
 	}
 }

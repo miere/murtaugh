@@ -201,11 +201,14 @@ This repository includes a macOS installer at `install/macos/install.sh`.
 
 It will:
 
-- download the latest GitHub release for the current macOS architecture,
+- download the latest GitHub release for the current macOS architecture (or a
+  specific version with `--version`),
 - install `murtaugh` into a user-writable bin directory,
-- write `~/.config/murtaugh/slack.yaml` and `agents.yaml`,
+- write `~/.config/murtaugh/slack.yaml` and `agents.yaml` on first install,
+- **preserve existing config files by default** when re-run,
 - optionally create `~/Library/LaunchAgents/dev.murtaugh.plist`,
-- optionally configure Murtaugh as an MCP server in supported clients.
+- optionally configure Murtaugh as an MCP server in supported clients,
+- restart the LaunchAgent automatically when a running binary is updated.
 
 Supported Slack Chat agent choices are:
 
@@ -223,10 +226,33 @@ For MCP setup, the installer can update supported client config files and will
 create a backup before modifying any existing file, printing the backup path as
 part of the install output. Goose MCP setup remains manual-only in v1.
 
+### Update behavior
+
+Re-running the installer is safe:
+
+- If the installed version matches the latest release, the installer exits
+  cleanly with no changes.
+- If an older version is installed, it updates the binary and restarts the
+  LaunchAgent if present.
+- Config files are **preserved** by default. Use `--reconfigure` to force a
+  full rewrite.
+- Use `--skip-config` to update the binary only.
+
 Run it with:
 
 ~~~sh
 bash install/macos/install.sh
+~~~
+
+Common flags:
+
+~~~sh
+bash install/macos/install.sh --yes                  # non-interactive
+bash install/macos/install.sh --version v1.2.3       # install a specific version
+bash install/macos/install.sh --force                # reinstall even if current
+bash install/macos/install.sh --skip-config          # update binary only
+bash install/macos/install.sh --reconfigure          # rewrite all config
+bash install/macos/install.sh --dry-run              # preview changes
 ~~~
 
 ### Slack Socket Mode daemon (default)
