@@ -1,14 +1,5 @@
 # Murtaugh Dev Toolkit
 
-Go toolkit that exposes the same capabilities through three frontends:
-
-- **Slack** — Socket Mode daemon (`murtaugh slack`, the default).
-- **CLI** — direct human-facing commands (`murtaugh <tool> [...]`).
-- **MCP** — JSON-RPC stdio server for AI clients (`murtaugh mcp`).
-
-Every Murtaugh tool is registered exactly once and is automatically available
-through both the CLI and MCP frontends.
-
 ## Goals
 
 - Make it easy to build refined Slack experiences with BlockKit.
@@ -55,8 +46,9 @@ workflow-rules:
           cmd: /path/to/background-command
           args: [param1, param2]
 
-Create `~/.config/murtaugh/agents.yaml`:
+~~~
 
+Create `~/.config/murtaugh/agents.yaml`:
 ~~~yaml
 acp:
   enabled: true
