@@ -195,6 +195,40 @@ Build the single binary:
 go build -o murtaugh ./cmd/murtaugh
 ~~~
 
+## macOS installer
+
+This repository includes a macOS installer at `install/macos/install.sh`.
+
+It will:
+
+- download the latest GitHub release for the current macOS architecture,
+- install `murtaugh` into a user-writable bin directory,
+- write `~/.config/murtaugh/slack.yaml` and `agents.yaml`,
+- optionally create `~/Library/LaunchAgents/dev.murtaugh.plist`,
+- optionally configure Murtaugh as an MCP server in supported clients.
+
+Supported Slack Chat agent choices are:
+
+- skip chat-agent setup,
+- `opencode acp`,
+- `goose acp`,
+- `auggie --acp --allow-indexing`,
+- custom ACP-compatible command.
+
+The installer is configure-only for third-party agents: it checks whether the
+selected agent binary already exists and does not install OpenCode, Goose, or
+Auggie for you.
+
+For MCP setup, the installer can update supported client config files and will
+create a backup before modifying any existing file, printing the backup path as
+part of the install output. Goose MCP setup remains manual-only in v1.
+
+Run it with:
+
+~~~sh
+bash install/macos/install.sh
+~~~
+
 ### Slack Socket Mode daemon (default)
 
 ~~~sh
