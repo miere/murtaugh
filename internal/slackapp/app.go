@@ -52,6 +52,20 @@ type App struct {
 	// in tests that do not need to exercise the restart path; the slash
 	// handler reports "not available" when nil.
 	restart RestartTrigger
+	// resumeStore persists the restart marker between processes. nil
+	// disables the "restarting…" / "back online" Slack confirmation flow
+	// — the restart still happens, just silently.
+	resumeStore ResumeMarkerStore
+	// messaging is the Slack surface used by the resume helpers. Set to
+	// the same *slack.Client as api in New; kept as a separate field so
+	// tests can substitute a narrow fake without re-implementing the
+	// full Slack client.
+	messaging slackMessagingAPI
+	// resumeConsumed flips to true the first time consumeResumeMarker
+	// runs after a successful socket connect. Slack may emit multiple
+	// EventTypeConnected events across the daemon's life (re-connects,
+	// flaky links); we only want to act on the marker once per process.
+	resumeConsumed bool
 }
 
 func New(cfg config.Config, logger *slog.Logger) *App {
@@ -129,7 +143,17 @@ func New(cfg config.Config, logger *slog.Logger) *App {
 		startupNotifier: startupNotifier,
 		logger:          logger,
 		cfg:             cfg.Configuration,
+		messaging:       api,
 	}
+}
+
+// WithResumeMarkerStore attaches the persistent store used to bridge
+// restart notices across process restarts. When nil (the default) the
+// restart flow runs silently — the "restarting…" / "back online"
+// confirmation messages are skipped.
+func (a *App) WithResumeMarkerStore(store ResumeMarkerStore) *App {
+	a.resumeStore = store
+	return a
 }
 
 // WithRestartTrigger attaches the graceful-restart trigger and returns the
@@ -189,6 +213,7 @@ func (a *App) handleEvent(ctx context.Context, event socketmode.Event) {
 	case socketmode.EventTypeConnected:
 		a.logger.Debug("socket mode lifecycle event", "type", event.Type)
 		a.notifyStartup(ctx)
+		a.notifyResume(ctx)
 	case socketmode.EventTypeConnecting, socketmode.EventTypeHello:
 		a.logger.Debug("socket mode lifecycle event", "type", event.Type)
 	case socketmode.EventTypeSlashCommand:
@@ -248,6 +273,22 @@ func (a *App) notifyStartup(ctx context.Context) {
 	}()
 }
 
+// notifyResume runs the once-per-process consumption of the on-disk
+// resume marker. Slack may emit several Connected events for one daemon
+// (re-connects, network blips); the resumeConsumed flag guards against
+// re-editing the same notice on every reconnect.
+func (a *App) notifyResume(ctx context.Context) {
+	if a.resumeConsumed {
+		return
+	}
+	a.resumeConsumed = true
+	go func() {
+		resumeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		a.consumeResumeMarker(resumeCtx)
+	}()
+}
+
 func (a *App) handleInteractive(event socketmode.Event) {
 	interaction, ok := event.Data.(slack.InteractionCallback)
 	if !ok {
@@ -286,7 +327,7 @@ func (a *App) handleSlashCommand(ctx context.Context, event socketmode.Event) {
 
 	response, err := a.handler.HandleSlashCommand(ctx, command)
 	if isRestartSlashCommand(command.Text) {
-		a.handleRestartSlashCommand(event, command)
+		a.handleRestartSlashCommand(ctx, event, command)
 		return
 	}
 	if isChatSlashCommand(command.Text) {
@@ -306,7 +347,12 @@ func (a *App) handleSlashCommand(ctx context.Context, event socketmode.Event) {
 // additionally requires IsAdminUser. Non-admin allowed users receive an
 // ephemeral deny so the failure mode is discoverable (unlike DMs or
 // mentions, where silent ignore is the policy).
-func (a *App) handleRestartSlashCommand(event socketmode.Event, command slack.SlashCommand) {
+//
+// On accept, the "restarting…" notice is posted to the originating
+// channel and a resume marker is written to disk before the coordinator
+// is signalled. The notice + marker are best-effort: any failure is
+// logged but never blocks the restart itself (see resume.go).
+func (a *App) handleRestartSlashCommand(ctx context.Context, event socketmode.Event, command slack.SlashCommand) {
 	if !a.cfg.IsAdminUser(command.UserID) {
 		a.logger.Info("denied restart slash command from non-admin user", "command", command.Command, "user", command.UserID, "channel", command.ChannelID)
 		a.ack(event, ephemeralText("Sorry, only the configured admin can restart Murtaugh."))
@@ -318,6 +364,13 @@ func (a *App) handleRestartSlashCommand(event socketmode.Event, command slack.Sl
 		return
 	}
 	reason := fmt.Sprintf("user requested via %s restart", command.Command)
+	// Post + persist must happen before the coordinator fires so the
+	// marker is durable when the grace timer expires and the process
+	// exits. Use a fresh bounded context so a slow Slack API call does
+	// not stall the slash ack.
+	noticeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	a.postRestartNoticeAndSaveMarker(noticeCtx, command.ChannelID, "", command.UserID, restartSourceSlash, reason)
+	cancel()
 	if !a.restart(string(restartSourceSlash), command.UserID, command.ChannelID, reason) {
 		a.ack(event, ephemeralText("A restart is already in progress (or the cool-down has not elapsed). Try again shortly."))
 		return

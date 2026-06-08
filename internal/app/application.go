@@ -48,6 +48,10 @@ type Application struct {
 	// restart is the optional graceful-restart coordinator. Only the Slack
 	// daemon path attaches one; CLI and MCP modes leave it nil.
 	restart *RestartCoordinator
+	// resumeMarkerPath is the on-disk location of the cross-restart
+	// marker. Empty disables the resume confirmation flow; the restart
+	// still happens but no "back online" notice is posted.
+	resumeMarkerPath string
 }
 
 // New constructs an Application for the given mode. cfg/configPath/logger
@@ -87,6 +91,10 @@ func (a *Application) Run(ctx context.Context) error {
 					Reason:  reason,
 				})
 			})
+		}
+		if path := strings.TrimSpace(a.resumeMarkerPath); path != "" {
+			sl = sl.WithResumeMarkerStore(slackapp.NewFileResumeMarkerStore(path))
+			a.logger.Debug("resume marker store wired", "path", path)
 		}
 		a.logger.Info("starting Slack Socket Mode service", "config", a.configPath)
 		err := sl.Run(ctx)
@@ -151,6 +159,14 @@ func (a *Application) WithRestartCoordinator(rc *RestartCoordinator) *Applicatio
 // Kit interactions) can locate the trigger without re-importing the
 // composition root.
 func (a *Application) RestartCoordinator() *RestartCoordinator { return a.restart }
+
+// WithResumeMarkerPath configures the on-disk path where the Slack
+// daemon persists its cross-restart marker. Empty disables the resume
+// notice flow entirely. Returns the receiver for fluent wiring.
+func (a *Application) WithResumeMarkerPath(path string) *Application {
+	a.resumeMarkerPath = path
+	return a
+}
 
 // buildRegistry wires every tool Murtaugh ships with. New tools must be
 // registered here so they appear in both the CLI and MCP frontends.

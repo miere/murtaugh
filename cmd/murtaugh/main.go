@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -85,6 +86,11 @@ func run(rawArgs []string) error {
 		application = application.WithRestartCoordinator(
 			app.NewRestartCoordinator(stop, logger, 0, 0),
 		)
+		if path, err := defaultResumeMarkerPath(); err != nil {
+			logger.Warn("resume marker disabled: could not resolve state directory", "error", err)
+		} else {
+			application = application.WithResumeMarkerPath(path)
+		}
 	}
 	if mode == app.ModeCLI && len(rest) == 0 {
 		return errors.New(application.UsageLine())
@@ -155,6 +161,21 @@ func selectMode(args []string) (app.Mode, []string) {
 	default:
 		return app.ModeCLI, args
 	}
+}
+
+// defaultResumeMarkerPath resolves the on-disk location for the
+// cross-restart resume marker. Follows the XDG state convention
+// (XDG_STATE_HOME overrides; falls back to ~/.local/state/murtaugh)
+// because the marker is runtime state, not config.
+func defaultResumeMarkerPath() (string, error) {
+	if v := strings.TrimSpace(os.Getenv("XDG_STATE_HOME")); v != "" {
+		return filepath.Join(v, "murtaugh", "restart.json"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".local", "state", "murtaugh", "restart.json"), nil
 }
 
 // newLogger builds the slog logger Murtaugh uses for daemon-style modes.
