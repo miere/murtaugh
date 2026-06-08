@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -23,6 +25,7 @@ import (
 	"github.com/miere/murtaugh-dev-toolkit/internal/tools/ping"
 	setupagents "github.com/miere/murtaugh-dev-toolkit/internal/tools/setup/agents"
 	setupbootstrap "github.com/miere/murtaugh-dev-toolkit/internal/tools/setup/bootstrap"
+	setuplaunchd "github.com/miere/murtaugh-dev-toolkit/internal/tools/setup/launchd"
 	setupmcpregister "github.com/miere/murtaugh-dev-toolkit/internal/tools/setup/mcpregister"
 	setupslack "github.com/miere/murtaugh-dev-toolkit/internal/tools/setup/slack"
 )
@@ -235,8 +238,24 @@ func buildRegistry(cfg config.Config, configPath string) *tools.Registry {
 	}
 	reg.Register(setupagents.New(agentsPath))
 	reg.Register(setupmcpregister.New(os.UserHomeDir))
+	reg.Register(setuplaunchd.New(setuplaunchd.Deps{
+		Home:      os.UserHomeDir,
+		GOOS:      runtime.GOOS,
+		Plutil:    execRunner,
+		Launchctl: execRunner,
+	}))
 
 	return reg
+}
+
+// execRunner runs name with args, surfacing combined stdout/stderr only when
+// the command fails so successful invocations stay quiet on the CLI.
+func execRunner(ctx context.Context, name string, args ...string) error {
+	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s: %w: %s", name, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // baseDirFor resolves the config directory the same way jobsPath/bootstrapPath
