@@ -77,7 +77,7 @@ func run(rawArgs []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	application := app.New(mode, rest, cfg, configPath, logger)
+	application := app.New(mode, rest, cfg, configPath, version, logger)
 	// The Slack daemon is the only long-running mode that needs a
 	// user-triggered restart path. stop is reused as the cancel hook so
 	// the coordinator's shutdown looks identical to a SIGTERM from the

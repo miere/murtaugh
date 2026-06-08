@@ -28,6 +28,7 @@ import (
 	setuplaunchd "github.com/miere/murtaugh-dev-toolkit/internal/tools/setup/launchd"
 	setupmcpregister "github.com/miere/murtaugh-dev-toolkit/internal/tools/setup/mcpregister"
 	setupslack "github.com/miere/murtaugh-dev-toolkit/internal/tools/setup/slack"
+	setupupdate "github.com/miere/murtaugh-dev-toolkit/internal/tools/setup/update"
 )
 
 // Mode selects which frontend Run starts.
@@ -50,6 +51,7 @@ type Application struct {
 	args       []string
 	cfg        config.Config
 	configPath string
+	version    string
 	logger     *slog.Logger
 	registry   *tools.Registry
 	// restart is the optional graceful-restart coordinator. Only the Slack
@@ -68,14 +70,16 @@ type Application struct {
 // New constructs an Application for the given mode. cfg/configPath/logger
 // come from the entry point so the same loaded state is shared across
 // frontends. args is the list of positional arguments handed to the CLI
-// frontend (Slack/MCP ignore it).
-func New(mode Mode, args []string, cfg config.Config, configPath string, logger *slog.Logger) *Application {
-	reg := buildRegistry(cfg, configPath)
+// frontend (Slack/MCP ignore it). version is the binary's compile-time
+// version string (e.g. "v0.4.1" or "dev") and is consumed by setup.update.
+func New(mode Mode, args []string, cfg config.Config, configPath, version string, logger *slog.Logger) *Application {
+	reg := buildRegistry(cfg, configPath, version)
 	return &Application{
 		mode:       mode,
 		args:       args,
 		cfg:        cfg,
 		configPath: configPath,
+		version:    version,
 		logger:     logger,
 		registry:   reg,
 	}
@@ -194,7 +198,7 @@ func (a *Application) WithConfigWatchPaths(paths []string) *Application {
 
 // buildRegistry wires every tool Murtaugh ships with. New tools must be
 // registered here so they appear in both the CLI and MCP frontends.
-func buildRegistry(cfg config.Config, configPath string) *tools.Registry {
+func buildRegistry(cfg config.Config, configPath, version string) *tools.Registry {
 	reg := tools.NewRegistry()
 	reg.Register(ping.New())
 
@@ -244,8 +248,32 @@ func buildRegistry(cfg config.Config, configPath string) *tools.Registry {
 		Plutil:    execRunner,
 		Launchctl: execRunner,
 	}))
+	reg.Register(setupupdate.New(setupupdate.Deps{
+		CurrentVersion: func() string { return version },
+		CurrentBinary:  os.Executable,
+		GOOS:           runtime.GOOS,
+		GOARCH:         runtime.GOARCH,
+		HTTPGet:        setupupdate.HTTPGetter(),
+		VerifyBinary:   verifyBinary,
+		Owner:          "miere",
+		Repo:           "murtaugh-dev-toolkit",
+	}))
 
 	return reg
+}
+
+// verifyBinary runs `<path> version` to confirm the staged binary is
+// executable on this host. A non-zero exit or unparseable output means we
+// refuse to swap it into place.
+func verifyBinary(path string) error {
+	out, err := exec.Command(path, "version").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s version: %w: %s", path, err, strings.TrimSpace(string(out)))
+	}
+	if strings.TrimSpace(string(out)) == "" {
+		return fmt.Errorf("%s version produced no output", path)
+	}
+	return nil
 }
 
 // execRunner runs name with args, surfacing combined stdout/stderr only when
