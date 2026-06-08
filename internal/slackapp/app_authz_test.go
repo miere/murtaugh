@@ -138,6 +138,65 @@ func TestAppMentionEventIgnoresUnauthorizedUser(t *testing.T) {
 	}
 }
 
+type recordingWorkflow struct {
+	calls    int
+	lastUser string
+}
+
+func (r *recordingWorkflow) Execute(_ context.Context, interaction slack.InteractionCallback) error {
+	r.calls++
+	r.lastUser = interaction.User.ID
+	return nil
+}
+
+func TestHandleInteractiveIgnoresUnauthorizedUser(t *testing.T) {
+	wf := &recordingWorkflow{}
+	app := &App{
+		workflow: wf,
+		socket:   nil, // a.ack is a no-op when socket is nil (see app.go)
+		logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		cfg:      config.ConfigurationConfig{AllowedUsers: []string{"UALICE00"}},
+	}
+	app.handleInteractive(socketmode.Event{
+		Type: socketmode.EventTypeInteractive,
+		Data: slack.InteractionCallback{
+			User:    slack.User{ID: "UEVIL000"},
+			Channel: slack.Channel{GroupConversation: slack.GroupConversation{Conversation: slack.Conversation{ID: "C1"}}},
+		},
+	})
+	time.Sleep(50 * time.Millisecond)
+	if wf.calls != 0 {
+		t.Fatalf("expected unauthorized interactive callback to bypass workflow, got %d calls", wf.calls)
+	}
+}
+
+func TestHandleInteractiveAllowsAllowlistedUser(t *testing.T) {
+	wf := &recordingWorkflow{}
+	app := &App{
+		workflow: wf,
+		socket:   nil,
+		logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		cfg:      config.ConfigurationConfig{AllowedUsers: []string{"UALICE00"}},
+	}
+	app.handleInteractive(socketmode.Event{
+		Type: socketmode.EventTypeInteractive,
+		Data: slack.InteractionCallback{
+			User:    slack.User{ID: "UALICE00"},
+			Channel: slack.Channel{GroupConversation: slack.GroupConversation{Conversation: slack.Conversation{ID: "C1"}}},
+		},
+	})
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if wf.calls > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if wf.calls != 1 || wf.lastUser != "UALICE00" {
+		t.Fatalf("expected allowlisted interactive callback to reach workflow, got calls=%d user=%q", wf.calls, wf.lastUser)
+	}
+}
+
 func TestDMEventIgnoresUnauthorizedUser(t *testing.T) {
 	sessions := &fakeChatSessions{}
 	app := &App{

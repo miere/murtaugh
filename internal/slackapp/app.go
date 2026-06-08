@@ -16,11 +16,17 @@ import (
 	"github.com/slack-go/slack/socketmode"
 )
 
+// workflowDispatcher is the minimal surface needed to dispatch an interactive
+// callback to a workflow engine. *workflow.Engine satisfies it.
+type workflowDispatcher interface {
+	Execute(ctx context.Context, interaction slack.InteractionCallback) error
+}
+
 type App struct {
 	api             userDirectoryAPI
 	socket          *socketmode.Client
 	handler         SlashCommandHandler
-	workflow        *workflow.Engine
+	workflow        workflowDispatcher
 	chat            *ChatHandler
 	chatTimeout     time.Duration
 	chatWarmTimeout time.Duration
@@ -231,6 +237,10 @@ func (a *App) handleInteractive(event socketmode.Event) {
 	}
 
 	a.ack(event)
+	if !a.cfg.IsAllowedUser(interaction.User.ID) {
+		a.logger.Info("denied interactive callback from unauthorized user", "user", interaction.User.ID, "channel", interaction.Channel.ID, "callback_id", interaction.CallbackID)
+		return
+	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
