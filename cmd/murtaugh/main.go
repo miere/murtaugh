@@ -77,6 +77,15 @@ func run(rawArgs []string) error {
 	defer stop()
 
 	application := app.New(mode, rest, cfg, configPath, logger)
+	// The Slack daemon is the only long-running mode that needs a
+	// user-triggered restart path. stop is reused as the cancel hook so
+	// the coordinator's shutdown looks identical to a SIGTERM from the
+	// outside (launchd, systemd) — process exits 0, supervisor respawns.
+	if mode == app.ModeSlack {
+		application = application.WithRestartCoordinator(
+			app.NewRestartCoordinator(stop, logger, 0, 0),
+		)
+	}
 	if mode == app.ModeCLI && len(rest) == 0 {
 		return errors.New(application.UsageLine())
 	}

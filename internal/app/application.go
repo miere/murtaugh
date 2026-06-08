@@ -45,6 +45,9 @@ type Application struct {
 	configPath string
 	logger     *slog.Logger
 	registry   *tools.Registry
+	// restart is the optional graceful-restart coordinator. Only the Slack
+	// daemon path attaches one; CLI and MCP modes leave it nil.
+	restart *RestartCoordinator
 }
 
 // New constructs an Application for the given mode. cfg/configPath/logger
@@ -120,6 +123,21 @@ func (a *Application) UsageLine() string {
 // Registry exposes the underlying registry. Intended for tests so the
 // composition wiring can be inspected without standing up a frontend.
 func (a *Application) Registry() *tools.Registry { return a.registry }
+
+// WithRestartCoordinator attaches a restart coordinator to the application
+// and returns the receiver to support a fluent wiring style at the entry
+// point. Only the Slack daemon path currently consumes the coordinator;
+// other modes may safely skip this call.
+func (a *Application) WithRestartCoordinator(rc *RestartCoordinator) *Application {
+	a.restart = rc
+	return a
+}
+
+// RestartCoordinator returns the attached coordinator, or nil if none was
+// configured. Exposed so downstream frontends (Slack slash handler, Block
+// Kit interactions) can locate the trigger without re-importing the
+// composition root.
+func (a *Application) RestartCoordinator() *RestartCoordinator { return a.restart }
 
 // buildRegistry wires every tool Murtaugh ships with. New tools must be
 // registered here so they appear in both the CLI and MCP frontends.
