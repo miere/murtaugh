@@ -68,11 +68,29 @@ log() { printf '[murtaugh-installer] %s\n' "$*" >&2; }
 die() { printf '[murtaugh-installer] ERROR: %s\n' "$*" >&2; exit 1; }
 timestamp() { date +%Y%m%d%H%M%S; }
 
-realpath_py() {
-  python3 - "$1" <<'PY'
-import os, sys
-print(os.path.realpath(sys.argv[1]))
-PY
+# resolve_path canonicalizes $1 without invoking python or GNU coreutils.
+# Symlinks are resolved one hop (sufficient for our install dirs); for files
+# the parent is resolved and the basename re-attached.
+resolve_path() {
+  local target=$1
+  [[ -n "$target" ]] || { printf ''; return 0; }
+  if [[ -L "$target" ]]; then
+    local link
+    link=$(readlink "$target")
+    [[ "$link" = /* ]] || link="$(dirname "$target")/$link"
+    target=$link
+  fi
+  if [[ -d "$target" ]]; then
+    (cd "$target" >/dev/null 2>&1 && pwd -P) || printf '%s' "$target"
+  else
+    local d f
+    d=$(dirname "$target"); f=$(basename "$target")
+    if (cd "$d" >/dev/null 2>&1); then
+      printf '%s/%s' "$(cd "$d" && pwd -P)" "$f"
+    else
+      printf '%s' "$target"
+    fi
+  fi
 }
 
 backup_file_if_exists() {
@@ -181,35 +199,50 @@ prompt_choice() {
 choose_install_dir() {
   if [[ -n "${MURTAUGH_INSTALL_DIR:-}" ]]; then
     mkdir -p "$MURTAUGH_INSTALL_DIR"
-    printf '%s' "$(realpath_py "$MURTAUGH_INSTALL_DIR")"
+    printf '%s' "$(resolve_path "$MURTAUGH_INSTALL_DIR")"
     return 0
   fi
   local candidates=() current dir
   current=$(command -v murtaugh 2>/dev/null || true)
-  [[ -n "$current" ]] && candidates+=("$(dirname "$(realpath_py "$current")")")
+  [[ -n "$current" ]] && candidates+=("$(dirname "$(resolve_path "$current")")")
   candidates+=("$HOME/.local/bin")
   [[ -d /opt/homebrew/bin ]] && candidates+=("/opt/homebrew/bin")
   [[ -d /usr/local/bin ]] && candidates+=("/usr/local/bin")
   for dir in "${candidates[@]}"; do
     [[ -n "$dir" ]] || continue
     if [[ "$dir" == "$HOME"/* ]]; then
-      mkdir -p "$dir"; printf '%s' "$(realpath_py "$dir")"; return 0
+      mkdir -p "$dir"; printf '%s' "$(resolve_path "$dir")"; return 0
     fi
-    [[ -w "$dir" ]] && { printf '%s' "$(realpath_py "$dir")"; return 0; }
+    [[ -w "$dir" ]] && { printf '%s' "$(resolve_path "$dir")"; return 0; }
   done
   mkdir -p "$HOME/.local/bin"
-  printf '%s' "$(realpath_py "$HOME/.local/bin")"
+  printf '%s' "$(resolve_path "$HOME/.local/bin")"
 }
 
+# release_json fetches the GitHub release metadata, or reads a local file
+# when MURTAUGH_RELEASE_JSON_PATH is set (used by the integration tests).
+#
+# GitHub's /releases/latest endpoint deliberately excludes pre-releases, so
+# when a project has only pre-release tags published it returns 404. We fall
+# back to /releases?per_page=1 in that case, which returns the most recent
+# release of any kind. The bash JSON extractors operate on regex matches and
+# do not care whether the body is a single object or a one-element array.
 release_json() {
-  local target_version="${1:-}"
+  local target_version="${1:-}" body
   if [[ -n "${MURTAUGH_RELEASE_JSON_PATH:-}" ]]; then
     cat "$MURTAUGH_RELEASE_JSON_PATH"
-  elif [[ -n "$target_version" ]]; then
-    curl -fsSL "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/tags/${target_version}"
-  else
-    curl -fsSL "$RELEASE_API_URL"
+    return $?
   fi
+  if [[ -n "$target_version" ]]; then
+    curl -fsSL "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/tags/${target_version}"
+    return $?
+  fi
+  if body=$(curl -fsSL "$RELEASE_API_URL" 2>/dev/null); then
+    printf '%s' "$body"
+    return 0
+  fi
+  log "No stable release found; checking for pre-releases."
+  curl -fsSL "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases?per_page=1"
 }
 
 detect_arch_suffix() {
@@ -221,31 +254,42 @@ detect_arch_suffix() {
   esac
 }
 
-read_release_field() {
-  local json=$1 suffix=$2
-  python3 - "$suffix" "$json" <<'PY'
-import json, sys
-suffix = sys.argv[1]
-data = json.loads(sys.argv[2])
-tag = data["tag_name"]
-want = f"murtaugh-{tag}-{suffix}"
-for asset in data.get("assets", []):
-    if asset.get("name") == want:
-        print(tag)
-        print(asset["browser_download_url"])
-        sys.exit(0)
-raise SystemExit(f"release asset not found: {want}")
-PY
+# extract_tag_name pulls "tag_name": "<v>" from GitHub release JSON.
+# Pure bash + grep/sed so the installer has no Python dependency.
+extract_tag_name() {
+  printf '%s' "$1" \
+    | tr -d '\n' \
+    | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' \
+    | head -n1 \
+    | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/'
+}
+
+# extract_asset_url finds the browser_download_url whose path ends with the
+# expected asset filename. Works because release URLs are predictable:
+# https://github.com/<owner>/<repo>/releases/download/<tag>/<asset>.
+extract_asset_url() {
+  local json=$1 want=$2
+  printf '%s' "$json" \
+    | tr -d '\n' \
+    | grep -oE "\"browser_download_url\"[[:space:]]*:[[:space:]]*\"[a-z]+://[^\"]*/${want}\"" \
+    | head -n1 \
+    | sed -E 's/.*"([a-z]+:\/\/[^"]+)".*/\1/'
 }
 
 install_or_update_binary() {
   local install_dir=$1 suffix=$2 target_version=${3:-}
-  local json tag asset_url tmpdir tmpbin dest installed_bin current_version
+  local json tag asset_url tmpdir tmpbin dest installed_bin current_version want
 
-  json=$(release_json "$target_version")
-  local parsed=()
-  while IFS= read -r line; do parsed+=("$line"); done < <(read_release_field "$json" "$suffix")
-  tag=${parsed[0]}; asset_url=${parsed[1]}
+  if ! json=$(release_json "$target_version" 2>/dev/null); then
+    die "could not fetch release metadata from GitHub. The repository may have no published releases yet, or you are offline. Set MURTAUGH_RELEASE_JSON_PATH to a local release.json to install from a fixture, or pass --version <tag> to target a specific release."
+  fi
+  [[ -n "$json" ]] || die "release metadata was empty"
+
+  tag=$(extract_tag_name "$json")
+  [[ -n "$tag" ]] || die "release metadata did not contain a tag_name; the response may not be a GitHub release payload"
+  want="murtaugh-${tag}-${suffix}"
+  asset_url=$(extract_asset_url "$json" "$want")
+  [[ -n "$asset_url" ]] || die "release ${tag} has no asset named ${want}"
 
   installed_bin=$(installed_murtaugh_bin)
   current_version=$(detect_installed_version "$installed_bin")
@@ -255,10 +299,10 @@ install_or_update_binary() {
     local cmp=$?
     if [[ "$cmp" -eq 0 ]]; then
       log "Already running ${tag} — no update needed. Use --force to reinstall."
-      printf '%s' "$(realpath_py "$installed_bin")"; return 0
+      printf '%s' "$(resolve_path "$installed_bin")"; return 0
     elif [[ "$cmp" -eq 1 ]]; then
       log "Already running a newer version (${current_version}) than ${tag} — skipping update."
-      printf '%s' "$(realpath_py "$installed_bin")"; return 0
+      printf '%s' "$(resolve_path "$installed_bin")"; return 0
     fi
   fi
 
@@ -270,7 +314,15 @@ install_or_update_binary() {
   tmpdir=$(mktemp -d); tmpbin="$tmpdir/murtaugh"
   curl -fsSL "$asset_url" -o "$tmpbin"
   chmod +x "$tmpbin"
-  "$tmpbin" version >/dev/null 2>&1 || die "downloaded release asset for ${tag} failed a version check"
+  # Sanity-check the download executes at all. We accept any non-127/126
+  # exit because not every released binary version has the same subcommand
+  # set; earlier builds shipped without `version` and would otherwise be
+  # rejected here even though they run fine.
+  "$tmpbin" version >/dev/null 2>&1
+  local check_rc=$?
+  if [[ $check_rc -eq 127 || $check_rc -eq 126 ]]; then
+    die "downloaded release asset for ${tag} could not be executed (exit ${check_rc}); the archive may be corrupted or for the wrong architecture"
+  fi
   dest="$install_dir/murtaugh"
   backup_file_if_exists "$dest"
   cp "$tmpbin" "$dest"
@@ -281,7 +333,7 @@ install_or_update_binary() {
   else
     log "Updated Murtaugh from ${current_version} to ${tag}"
   fi
-  printf '%s' "$(realpath_py "$dest")"
+  printf '%s' "$(resolve_path "$dest")"
 }
 
 resolve_agent_command() {
@@ -290,7 +342,7 @@ resolve_agent_command() {
     skip) return 0 ;;
     opencode|goose|auggie)
       command -v "$choice" >/dev/null 2>&1 || die "${choice} is not installed or not on PATH"
-      realpath_py "$(command -v "$choice")"
+      resolve_path "$(command -v "$choice")"
       ;;
     custom)
       local custom_cmd=${MURTAUGH_CUSTOM_AGENT_COMMAND:-}
@@ -299,23 +351,24 @@ resolve_agent_command() {
         read -r -p "Custom ACP command path: " custom_cmd
       fi
       [[ -x "$custom_cmd" ]] || die "custom command is not executable: ${custom_cmd}"
-      realpath_py "$custom_cmd"
+      resolve_path "$custom_cmd"
       ;;
     *) die "unsupported chat agent choice: ${choice}" ;;
   esac
 }
 
+# collect_custom_args splits MURTAUGH_CUSTOM_AGENT_ARGS using shell quoting
+# rules. xargs -n1 honors quotes/escapes the same way a shell would when
+# tokenizing a command line, so e.g. `--flag "two words" --other` becomes
+# three array entries with the quoted span preserved.
 collect_custom_args() {
   local arg_string=${MURTAUGH_CUSTOM_AGENT_ARGS:-}
   CUSTOM_AGENT_ARGS=()
   [[ -z "$arg_string" && $ASSUME_YES -eq 0 ]] && read -r -p "Custom ACP command args (optional): " arg_string
   [[ -z "$arg_string" ]] && return 0
-  while IFS= read -r arg; do CUSTOM_AGENT_ARGS+=("$arg"); done < <(python3 - "$arg_string" <<'PY'
-import shlex, sys
-for item in shlex.split(sys.argv[1]):
-    print(item)
-PY
-)
+  while IFS= read -r arg; do
+    [[ -n "$arg" ]] && CUSTOM_AGENT_ARGS+=("$arg")
+  done < <(printf '%s' "$arg_string" | xargs -n1 printf '%s\n' 2>/dev/null)
 }
 
 restart_launch_agent_if_needed() {

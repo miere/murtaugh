@@ -423,3 +423,57 @@ func TestInstallerReconfiguresWhenRequested(t *testing.T) {
 		t.Fatalf("slack.yaml was not rewritten with new config: %s", content)
 	}
 }
+
+// TestInstallerHasNoPythonDependency guards against reintroducing inline
+// python heredocs into install.sh. The orchestrator rewrite explicitly
+// promised to be python-free; a stray python3 invocation has burned us
+// before on user machines that interpret JSON differently or where
+// system python is missing.
+func TestInstallerHasNoPythonDependency(t *testing.T) {
+	data, err := os.ReadFile("install.sh")
+	if err != nil {
+		t.Fatalf("read install.sh: %v", err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.Contains(line, "python3 ") || strings.Contains(line, "python ") {
+			t.Fatalf("install.sh must not invoke python; found: %q", line)
+		}
+	}
+}
+
+// TestInstallerFailsCleanlyWhenReleaseMissing covers the failure mode the
+// user hit when running the installer against a repo without a published
+// release: release_json returned a 404, the prior implementation crashed
+// with `parsed[0]: unbound variable`, and the user saw a python stacktrace.
+// The new code must produce a single, human-readable error instead.
+func TestInstallerFailsCleanlyWhenReleaseMissing(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("installer is macOS-only")
+	}
+	home := t.TempDir()
+	// Point at a nonexistent file so release_json fails the same way curl
+	// would fail with a 404, without actually hitting the network.
+	out, err := runInstaller(t, []string{
+		"HOME=" + home,
+		"PATH=/usr/bin:/bin:/usr/sbin:/sbin",
+		"MURTAUGH_RELEASE_JSON_PATH=/nonexistent/release.json",
+		"MURTAUGH_INSTALL_ARCH=arm64",
+		"MURTAUGH_SKIP_CONFIG=yes",
+	})
+	if err == nil {
+		t.Fatalf("installer should have failed when release metadata is missing, got:\n%s", out)
+	}
+	if strings.Contains(out, "Traceback") || strings.Contains(out, "python") {
+		t.Fatalf("installer should not surface python errors, got:\n%s", out)
+	}
+	if strings.Contains(out, "unbound variable") {
+		t.Fatalf("installer should handle missing release without bash unbound errors, got:\n%s", out)
+	}
+	if !strings.Contains(out, "could not fetch release metadata") && !strings.Contains(out, "release metadata") {
+		t.Fatalf("installer should print a clear error about the missing release, got:\n%s", out)
+	}
+}
