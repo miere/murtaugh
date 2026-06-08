@@ -2,13 +2,47 @@ package macos
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 )
+
+// builtBinaryOnce caches the murtaugh binary built for the release fixture.
+// The bash installer now delegates config writes to `murtaugh setup ...`, so
+// the asset must be the real binary rather than an exit-0 shell stub.
+var (
+	builtBinaryOnce sync.Once
+	builtBinaryPath string
+	builtBinaryErr  error
+)
+
+func buildMurtaughBinary(t *testing.T) string {
+	t.Helper()
+	builtBinaryOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "murtaugh-build-")
+		if err != nil {
+			builtBinaryErr = err
+			return
+		}
+		bin := filepath.Join(dir, "murtaugh")
+		cmd := exec.Command("go", "build", "-ldflags=-X main.version=v9.9.9", "-o", bin, "../../cmd/murtaugh")
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			builtBinaryErr = err
+			return
+		}
+		builtBinaryPath = bin
+	})
+	if builtBinaryErr != nil {
+		t.Fatalf("build murtaugh: %v", builtBinaryErr)
+	}
+	return builtBinaryPath
+}
 
 func writeExecutable(t *testing.T, path, body string) {
 	t.Helper()
@@ -20,10 +54,33 @@ func writeExecutable(t *testing.T, path, body string) {
 	}
 }
 
+func copyFile(t *testing.T, src, dst string, perm os.FileMode) {
+	t.Helper()
+	in, err := os.Open(src)
+	if err != nil {
+		t.Fatalf("open %s: %v", src, err)
+	}
+	defer in.Close()
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dst, err)
+	}
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
+		t.Fatalf("create %s: %v", dst, err)
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		t.Fatalf("copy %s -> %s: %v", src, dst, err)
+	}
+	if err := out.Close(); err != nil {
+		t.Fatalf("close %s: %v", dst, err)
+	}
+}
+
 func writeReleaseFixture(t *testing.T, dir string) string {
 	t.Helper()
 	asset := filepath.Join(dir, "murtaugh-v9.9.9-darwin-arm64")
-	writeExecutable(t, asset, "#!/bin/sh\nif [ \"$1\" = \"--help\" ] || [ \"$1\" = \"version\" ]; then echo 'v9.9.9'; exit 0; fi\nexit 0\n")
+	copyFile(t, buildMurtaughBinary(t), asset, 0o755)
 	release := map[string]any{
 		"tag_name": "v9.9.9",
 		"assets": []map[string]any{{
@@ -137,7 +194,10 @@ func TestInstallerConfiguresAuggieAndBacksUpMCPSettings(t *testing.T) {
 	if got := murtaugh["command"]; got != realInstalledBin {
 		t.Fatalf("command = %v, want %s", got, realInstalledBin)
 	}
-	if !strings.Contains(out, "Backed up "+settingsPath) {
+	// setup.mcp-register reports the backup path as part of its Result
+	// string ("(backup: <path>)"). The old bash logger prefix went away
+	// with the install.sh rewrite; we now assert on the tool's notice.
+	if !strings.Contains(out, "backup: "+settingsPath+".bak.") {
 		t.Fatalf("expected backup notice in output, got:\n%s", out)
 	}
 	matches, err := filepath.Glob(settingsPath + ".bak.*")
