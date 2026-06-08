@@ -35,8 +35,9 @@ type OAuthConfig struct {
 }
 
 type ConfigurationConfig struct {
-	AdminUser string `yaml:"admin_user"`
-	Debug     bool   `yaml:"debug"`
+	AdminUser    string   `yaml:"admin_user"`
+	AllowedUsers []string `yaml:"allowed_users"`
+	Debug        bool     `yaml:"debug"`
 }
 
 type ChatConfig struct {
@@ -234,6 +235,11 @@ func (c Config) Validate() error {
 			errs = append(errs, fmt.Errorf("commands[%d].name must start with /", i))
 		}
 	}
+	for i, allowed := range c.Configuration.AllowedUsers {
+		if strings.TrimSpace(allowed) == "" {
+			errs = append(errs, fmt.Errorf("configuration.allowed_users[%d] must not be blank", i))
+		}
+	}
 	if err := c.ACP.Validate(); err != nil {
 		errs = append(errs, err)
 	}
@@ -292,6 +298,50 @@ func (c Config) Validate() error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// IsAllowedUser reports whether the given Slack user ID is permitted to
+// interact directly with the bot via slash commands, mentions, or DMs.
+//
+// The check is ID-only: a user is allowed when their ID matches
+// configuration.admin_user (only when admin_user is configured as a Slack
+// user ID, not a handle) or any entry in configuration.allowed_users. The
+// slackapp startup layer is responsible for resolving any handle entries in
+// allowed_users to IDs before this helper is consulted, and for separately
+// checking against the resolved admin user ID when admin_user is a handle.
+//
+// With a tight default, an empty allowed_users list means only the admin user
+// may interact with the bot.
+func (c ConfigurationConfig) IsAllowedUser(userID string) bool {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return false
+	}
+	admin := strings.TrimPrefix(strings.TrimSpace(c.AdminUser), "@")
+	if looksLikeSlackUserID(admin) && admin == userID {
+		return true
+	}
+	for _, allowed := range c.AllowedUsers {
+		if strings.TrimSpace(allowed) == userID {
+			return true
+		}
+	}
+	return false
+}
+
+func looksLikeSlackUserID(value string) bool {
+	if len(value) < 4 {
+		return false
+	}
+	if !(strings.HasPrefix(value, "U") || strings.HasPrefix(value, "W")) {
+		return false
+	}
+	for _, r := range value[1:] {
+		if !((r >= '0' && r <= '9') || (r >= 'A' && r <= 'Z')) {
+			return false
+		}
+	}
+	return true
 }
 
 func (c ACPConfig) Validate() error {

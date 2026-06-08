@@ -331,6 +331,131 @@ func TestJobValidationAcceptsOptionalFields(t *testing.T) {
 	}
 }
 
+func TestParseAllowedUsers(t *testing.T) {
+	cfg, err := Parse(testConfig(`configuration:
+  admin_user: U0ADMIN00
+  allowed_users:
+    - U0ALICE00
+    - U0BOB0000
+`))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate returned error: %v", err)
+	}
+	if got, want := cfg.Configuration.AllowedUsers, []string{"U0ALICE00", "U0BOB0000"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("unexpected allowed_users parsed: %#v", got)
+	}
+}
+
+func TestValidateAllowedUsersRejectsBlankEntries(t *testing.T) {
+	cfg, err := Parse(testConfig(`configuration:
+  allowed_users:
+    - ""
+    - "   "
+`))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	err = cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "configuration.allowed_users[0] must not be blank") {
+		t.Fatalf("expected blank entry validation error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "configuration.allowed_users[1] must not be blank") {
+		t.Fatalf("expected blank entry error for index 1, got: %v", err)
+	}
+}
+
+func TestValidateAllowedUsersAcceptsHandlesAndIDs(t *testing.T) {
+	// Validation must accept both Slack user IDs and handles; resolution from
+	// handles to IDs happens at startup in the slackapp layer.
+	cfg, err := Parse(testConfig(`configuration:
+  allowed_users:
+    - "@alice"
+    - "bob"
+    - "U0CHARLIE"
+`))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected handles and IDs to pass validation, got: %v", err)
+	}
+}
+
+func TestIsAllowedUserMatchesAdminWhenConfiguredAsUserID(t *testing.T) {
+	cfg, err := Parse(testConfig(`configuration:
+  admin_user: U0ADMIN00
+`))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	if !cfg.Configuration.IsAllowedUser("U0ADMIN00") {
+		t.Fatal("expected admin user ID to be allowed")
+	}
+	if cfg.Configuration.IsAllowedUser("U0OTHER00") {
+		t.Fatal("expected non-admin user to be denied with empty allowed_users")
+	}
+}
+
+func TestIsAllowedUserHandlesAdminPrefixedHandle(t *testing.T) {
+	cfg, err := Parse(testConfig(`configuration:
+  admin_user: "@U0ADMIN00"
+`))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	if !cfg.Configuration.IsAllowedUser("U0ADMIN00") {
+		t.Fatal("expected admin user ID to be allowed when admin_user is prefixed with @")
+	}
+}
+
+func TestIsAllowedUserSkipsAdminConfiguredAsHandle(t *testing.T) {
+	cfg, err := Parse(testConfig(`configuration:
+  admin_user: murtaugh-admin
+`))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	// admin_user is a handle, not a user ID — helper cannot match by ID alone.
+	if cfg.Configuration.IsAllowedUser("U0ADMIN00") {
+		t.Fatal("expected helper to skip handle-based admin_user matching")
+	}
+}
+
+func TestIsAllowedUserMatchesAllowedList(t *testing.T) {
+	cfg, err := Parse(testConfig(`configuration:
+  admin_user: U0ADMIN00
+  allowed_users:
+    - U0ALICE00
+    - U0BOB0000
+`))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	for _, id := range []string{"U0ADMIN00", "U0ALICE00", "U0BOB0000"} {
+		if !cfg.Configuration.IsAllowedUser(id) {
+			t.Errorf("expected %q to be allowed", id)
+		}
+	}
+	if cfg.Configuration.IsAllowedUser("U0EVE0000") {
+		t.Fatal("expected non-listed user to be denied")
+	}
+}
+
+func TestIsAllowedUserRejectsBlankInput(t *testing.T) {
+	cfg, err := Parse(testConfig(`configuration:
+  admin_user: U0ADMIN00
+`))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	if cfg.Configuration.IsAllowedUser("") || cfg.Configuration.IsAllowedUser("   ") {
+		t.Fatal("expected blank user ID to be denied")
+	}
+}
+
 func TestParseUnfurlRejectsBadRegex(t *testing.T) {
 	cfg, err := Parse(testConfig(`unfurl-rules:
   bad:

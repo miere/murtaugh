@@ -4,6 +4,12 @@ oauth:
 
 configuration:
   admin_user: murtaugh-admin
+  # Users allowed to interact with the bot (slash commands, mentions, DMs).
+  # The admin_user is implicitly allowed; leave the list empty to keep the bot
+  # admin-only. Each entry may be a Slack user ID (e.g. U0123ABC) or a handle
+  # (e.g. alice, @alice); handles are resolved to IDs at startup and the bot
+  # refuses to start if any entry cannot be resolved.
+  allowed_users: []
   debug: false
 
 chat:
