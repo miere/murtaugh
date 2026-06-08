@@ -27,6 +27,7 @@ func TestRegistry_ContainsAllExpectedTools(t *testing.T) {
 		{"ping", nil},
 		{"jobs.run", []string{"name"}},
 		{"jobs.define", []string{"name", "command"}},
+		{"setup.bootstrap", nil},
 	}
 
 	for _, c := range cases {
@@ -66,6 +67,7 @@ func TestUsageLine_ListsFlatToolsNamespacesAndModes(t *testing.T) {
 	for _, want := range []string{
 		"ping",
 		"jobs <define|run>",
+		"setup <bootstrap>",
 		"slack",
 		"mcp",
 	} {

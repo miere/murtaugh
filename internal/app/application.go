@@ -21,6 +21,7 @@ import (
 	"github.com/miere/murtaugh-dev-toolkit/internal/tools/jobs/define"
 	"github.com/miere/murtaugh-dev-toolkit/internal/tools/jobs/run"
 	"github.com/miere/murtaugh-dev-toolkit/internal/tools/ping"
+	setupbootstrap "github.com/miere/murtaugh-dev-toolkit/internal/tools/setup/bootstrap"
 )
 
 // Mode selects which frontend Run starts.
@@ -210,6 +211,17 @@ func buildRegistry(cfg config.Config, configPath string) *tools.Registry {
 		return filepath.Join(baseDir, "jobs.yaml")
 	}
 	reg.Register(define.New(jobsPath))
+
+	bootstrapPath := func() string {
+		if strings.TrimSpace(configPath) != "" {
+			return configPath
+		}
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, ".config", "murtaugh", "slack.yaml")
+		}
+		return ""
+	}
+	reg.Register(setupbootstrap.New(bootstrapPath))
 
 	return reg
 }
