@@ -23,6 +23,7 @@ import (
 	"github.com/miere/murtaugh-dev-toolkit/internal/tools/ping"
 	setupagents "github.com/miere/murtaugh-dev-toolkit/internal/tools/setup/agents"
 	setupbootstrap "github.com/miere/murtaugh-dev-toolkit/internal/tools/setup/bootstrap"
+	setupmcpregister "github.com/miere/murtaugh-dev-toolkit/internal/tools/setup/mcpregister"
 	setupslack "github.com/miere/murtaugh-dev-toolkit/internal/tools/setup/slack"
 )
 
@@ -233,6 +234,7 @@ func buildRegistry(cfg config.Config, configPath string) *tools.Registry {
 		return ""
 	}
 	reg.Register(setupagents.New(agentsPath))
+	reg.Register(setupmcpregister.New(os.UserHomeDir))
 
 	return reg
 }

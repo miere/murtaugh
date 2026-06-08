@@ -30,6 +30,7 @@ func TestRegistry_ContainsAllExpectedTools(t *testing.T) {
 		{"setup.bootstrap", nil},
 		{"setup.slack", []string{"app_token", "bot_token", "admin_user"}},
 		{"setup.agents", []string{}},
+		{"setup.mcp-register", []string{"client", "binary_path"}},
 	}
 
 	for _, c := range cases {
@@ -69,7 +70,7 @@ func TestUsageLine_ListsFlatToolsNamespacesAndModes(t *testing.T) {
 	for _, want := range []string{
 		"ping",
 		"jobs <define|run>",
-		"setup <agents|bootstrap|slack>",
+		"setup <agents|bootstrap|mcp-register|slack>",
 		"slack",
 		"mcp",
 	} {
