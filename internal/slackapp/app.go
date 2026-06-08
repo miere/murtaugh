@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -66,6 +67,12 @@ type App struct {
 	// EventTypeConnected events across the daemon's life (re-connects,
 	// flaky links); we only want to act on the marker once per process.
 	resumeConsumed bool
+	// configWatchPaths lists files whose mtime, when it advances,
+	// triggers a restart suggestion to the admin. Empty (the default)
+	// disables the watcher entirely. The composition root populates
+	// this from the loaded config's sibling files (slack.yaml,
+	// agents.yaml, jobs.yaml).
+	configWatchPaths []string
 }
 
 func New(cfg config.Config, logger *slog.Logger) *App {
@@ -164,6 +171,22 @@ func (a *App) WithRestartTrigger(trigger RestartTrigger) *App {
 	return a
 }
 
+// WithConfigWatchPaths attaches the list of on-disk files whose mtime
+// changes should produce a restart suggestion to the admin. Blank
+// entries are filtered out; an empty list disables the watcher
+// entirely (which is the default, so CLI/MCP modes and tests never
+// pay for the polling goroutine).
+func (a *App) WithConfigWatchPaths(paths []string) *App {
+	cleaned := make([]string, 0, len(paths))
+	for _, p := range paths {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			cleaned = append(cleaned, trimmed)
+		}
+	}
+	a.configWatchPaths = cleaned
+	return a
+}
+
 func (a *App) Run(ctx context.Context) error {
 	resolveCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	err := a.resolveAllowSet(resolveCtx)
@@ -177,6 +200,7 @@ func (a *App) Run(ctx context.Context) error {
 		errCh <- a.socket.RunContext(ctx)
 	}()
 	a.warmChat(ctx)
+	a.startConfigWatcher(ctx)
 
 	for {
 		select {
@@ -206,6 +230,37 @@ func (a *App) warmChat(ctx context.Context) {
 		}
 		a.logger.Info("ACP warmup completed")
 	}()
+}
+
+// startConfigWatcher launches the on-disk config file watcher in a
+// goroutine that lives for the lifetime of the Run context. No-op
+// when no paths are configured so the cost (one ticker, one
+// goroutine) is paid only by the Slack daemon path. The watcher's
+// callback posts a restart suggestion to the admin DM via
+// SuggestRestart, which is itself a best-effort no-op when no
+// messaging surface or admin user is available.
+func (a *App) startConfigWatcher(ctx context.Context) {
+	if len(a.configWatchPaths) == 0 {
+		return
+	}
+	watcher := newConfigWatcher(a.configWatchPaths, defaultConfigWatchInterval, a.onConfigFileChanged, a.logger)
+	a.logger.Info("config watcher started", "paths", a.configWatchPaths, "interval", defaultConfigWatchInterval.String())
+	go watcher.Run(ctx)
+}
+
+// onConfigFileChanged is the watcher's callback. It builds an
+// operator-facing reason that names the changed file and its new
+// mtime, then asks the bot to surface the restart suggestion via
+// the standard Block Kit path. Errors from SuggestRestart are
+// logged and never propagated since the watcher's contract is
+// best-effort: a missed suggestion is preferable to a noisy stall.
+func (a *App) onConfigFileChanged(ctx context.Context, path string, mtime time.Time) {
+	reason := fmt.Sprintf("`%s` changed on disk at %s; restart Murtaugh to pick up the new config.",
+		filepath.Base(path), mtime.UTC().Format(time.RFC3339))
+	a.logger.Info("config file change detected", "path", path, "mtime", mtime)
+	if _, _, err := a.SuggestRestart(ctx, "", reason); err != nil {
+		a.logger.Error("config watcher: restart suggestion failed", "path", path, "error", err)
+	}
 }
 
 func (a *App) handleEvent(ctx context.Context, event socketmode.Event) {

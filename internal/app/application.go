@@ -52,6 +52,10 @@ type Application struct {
 	// marker. Empty disables the resume confirmation flow; the restart
 	// still happens but no "back online" notice is posted.
 	resumeMarkerPath string
+	// configWatchPaths is the list of files whose mtime, when it
+	// advances, makes the Slack daemon suggest a restart to the
+	// admin via Block Kit. Empty disables the watcher entirely.
+	configWatchPaths []string
 }
 
 // New constructs an Application for the given mode. cfg/configPath/logger
@@ -95,6 +99,10 @@ func (a *Application) Run(ctx context.Context) error {
 		if path := strings.TrimSpace(a.resumeMarkerPath); path != "" {
 			sl = sl.WithResumeMarkerStore(slackapp.NewFileResumeMarkerStore(path))
 			a.logger.Debug("resume marker store wired", "path", path)
+		}
+		if len(a.configWatchPaths) > 0 {
+			sl = sl.WithConfigWatchPaths(a.configWatchPaths)
+			a.logger.Debug("config watcher wired", "paths", a.configWatchPaths)
 		}
 		a.logger.Info("starting Slack Socket Mode service", "config", a.configPath)
 		err := sl.Run(ctx)
@@ -165,6 +173,15 @@ func (a *Application) RestartCoordinator() *RestartCoordinator { return a.restar
 // notice flow entirely. Returns the receiver for fluent wiring.
 func (a *Application) WithResumeMarkerPath(path string) *Application {
 	a.resumeMarkerPath = path
+	return a
+}
+
+// WithConfigWatchPaths configures the list of files whose mtime, when
+// it advances, makes the Slack daemon ask the admin to confirm a
+// restart via Block Kit. Empty disables the watcher entirely.
+// Returns the receiver for fluent wiring.
+func (a *Application) WithConfigWatchPaths(paths []string) *Application {
+	a.configWatchPaths = paths
 	return a
 }
 
