@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -104,7 +105,7 @@ func TestInvoke_WritesPlistAndLogsDir(t *testing.T) {
 	}
 }
 
-func TestInvoke_LoadInvokesLaunchctlBootoutThenBootstrap(t *testing.T) {
+func TestInvoke_LoadInvokesBootoutBootstrapThenKickstart(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("not relevant on windows")
 	}
@@ -117,11 +118,17 @@ func TestInvoke_LoadInvokesLaunchctlBootoutThenBootstrap(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
-	if len(launchctl.calls) != 2 {
-		t.Fatalf("launchctl calls = %v, want bootout+bootstrap", launchctl.calls)
+	if len(launchctl.calls) != 3 {
+		t.Fatalf("launchctl calls = %v, want bootout+bootstrap+kickstart", launchctl.calls)
 	}
-	if launchctl.calls[0][1] != "bootout" || launchctl.calls[1][1] != "bootstrap" {
+	if launchctl.calls[0][1] != "bootout" || launchctl.calls[1][1] != "bootstrap" || launchctl.calls[2][1] != "kickstart" {
 		t.Fatalf("calls order wrong: %v", launchctl.calls)
+	}
+	// kickstart must target the labeled service, not the bare domain, or
+	// launchctl errors and the agent never spawns.
+	last := launchctl.calls[2]
+	if last[len(last)-1] != "gui/"+strconv.Itoa(os.Getuid())+"/dev.murtaugh" {
+		t.Fatalf("kickstart target = %v, want gui/<uid>/dev.murtaugh", last)
 	}
 }
 

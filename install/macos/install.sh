@@ -448,6 +448,10 @@ restart_launch_agent_if_needed() {
   log "Restarting LaunchAgent dev.murtaugh"
   launchctl bootout "gui/${uid}" "$plist" >/dev/null 2>&1 || true
   launchctl bootstrap "gui/${uid}" "$plist"
+  # bootstrap registers the agent but does not reliably honor RunAtLoad, so
+  # force the (re)start explicitly — otherwise the daemon sits loaded but
+  # never spawns and Slack stays unreachable.
+  launchctl kickstart -k "gui/${uid}/dev.murtaugh"
   log "Restarted LaunchAgent dev.murtaugh"
 }
 
@@ -479,7 +483,7 @@ write_launch_agent() {
   local bin=$1 enable_choice load_choice setup_args
   enable_choice=$(prompt_choice MURTAUGH_ENABLE_LAUNCH_AGENT "Create a launchd LaunchAgent?" yes yes no)
   [[ "$enable_choice" == "yes" ]] || return 0
-  load_choice=$(prompt_choice MURTAUGH_LOAD_LAUNCH_AGENT "Load the LaunchAgent now?" no yes no)
+  load_choice=$(prompt_choice MURTAUGH_LOAD_LAUNCH_AGENT "Load the LaunchAgent now?" yes yes no)
   setup_args=(setup launchd --binary-path "$bin")
   [[ "$load_choice" == "yes" ]] && setup_args+=(--load true)
   "$bin" "${setup_args[@]}" >&2

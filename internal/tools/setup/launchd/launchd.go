@@ -138,6 +138,14 @@ func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 		if err := t.deps.Launchctl(ctx, "launchctl", "bootstrap", gui, plistPath); err != nil {
 			return nil, fmt.Errorf("launchctl bootstrap failed: %w", err)
 		}
+		// bootstrap registers the agent but does not reliably honor
+		// RunAtLoad: the job sits loaded-but-never-spawned (runs=0,
+		// state=not running) and produces no output, so Slack is
+		// unreachable. kickstart forces the first run; -k also restarts a
+		// stale instance, keeping re-runs of the installer idempotent.
+		if err := t.deps.Launchctl(ctx, "launchctl", "kickstart", "-k", gui+"/dev.murtaugh"); err != nil {
+			return nil, fmt.Errorf("launchctl kickstart failed: %w", err)
+		}
 		loaded = true
 	}
 	return Result{Path: plistPath, BackupPath: backupPath, Created: !wasThere, Loaded: loaded}, nil
