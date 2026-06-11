@@ -225,7 +225,10 @@ murtaugh slack gateway
 ~~~
 
 `murtaugh slack` on its own lists the slack subcommands; `murtaugh` on its own
-prints usage.
+prints usage. For the full command reference run **`murtaugh help`**, or
+**`murtaugh help <command>`** / **`murtaugh <command> --help`** for a single
+command (e.g. `murtaugh help slack send-msg`) — every flag, default, and
+example is documented there.
 
 ### Slack tools (CLI)
 
@@ -338,7 +341,9 @@ murtaugh jobs define \
 ~~~
 
 Schema-typed arguments are coerced automatically: `--count 5` → integer,
-`--verbose true` → boolean, repeated `--args` flags → array.
+`--verbose true` → boolean, repeated `--args` flags → array. Note every flag
+takes a value — booleans included (`--load true`, not a bare `--load`). Run
+`murtaugh help <command>` for the full per-command flag reference.
 
 ### MCP server
 

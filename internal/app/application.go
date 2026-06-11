@@ -176,7 +176,8 @@ func (a *Application) UsageLine() string {
 		parts = append(parts, fmt.Sprintf("%s <%s>", ns, strings.Join(subs, "|")))
 	}
 	parts = append(parts, "mcp")
-	return "usage: murtaugh <command>; commands: " + strings.Join(parts, ", ")
+	return "usage: murtaugh <command>; commands: " + strings.Join(parts, ", ") +
+		"\nrun `murtaugh help` for full command docs, or `murtaugh help <command>` for one."
 }
 
 // SlackUsageLine renders the help shown for a bare `murtaugh slack`
@@ -192,7 +193,8 @@ func (a *Application) SlackUsageLine() string {
 	}
 	sort.Strings(subs)
 	return "usage: murtaugh slack <subcommand>; subcommands: " + strings.Join(subs, ", ") +
-		"\n  gateway starts the Slack Socket Mode daemon; the rest are one-shot tools."
+		"\n  gateway starts the Slack Socket Mode daemon; the rest are one-shot tools." +
+		"\n  run `murtaugh help slack <subcommand>` for flags and examples."
 }
 
 // Registry exposes the underlying registry. Intended for tests so the
