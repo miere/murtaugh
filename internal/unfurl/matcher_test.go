@@ -14,7 +14,7 @@ func TestMatcherDomainSuffixAndCaptures(t *testing.T) {
 	m, err := NewMatcher(map[string]config.UnfurlRuleConfig{
 		"github-pr": {
 			Match:  config.UnfurlMatchConfig{Domain: "github.com", URLPattern: `/pull/(?P<number>\d+)`},
-			Unfurl: templateAction("unfurl/github-pr.json"),
+			Unfurl: templateAction("templates/unfurl/github-pr.json"),
 		},
 	})
 	if err != nil {

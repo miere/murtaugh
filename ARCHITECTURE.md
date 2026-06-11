@@ -291,11 +291,21 @@ list (max 5) or no `link_shared` event is delivered.
 ## Assets and embedding (`internal/../assets`)
 
 `assets/assets.go` embeds reference files via
-`//go:embed slack.yaml agents.yaml jobs.yaml ping/*.json unfurl/*.json skills/*.md`.
+`//go:embed slack.yaml agents.yaml jobs.yaml templates skills`.
+Block Kit templates live under `templates/` (`ping/`, `unfurl/`); bundled agent
+skills live under `skills/`, each a `SKILL.md` + `reference/` + `examples/` tree.
+The `templates` and `skills` directories are embedded recursively.
+
 The embedded FS is the **fallback** template source: the workflow engine and unfurl renderer both
-look in the config directory first, then `assets.FS`. **If you add a new asset
-directory or extension, you must extend the `go:embed` directive** or the files
-will not ship in the binary.
+look in the config directory first, then `assets.FS` — so a config template path
+like `templates/unfurl/github-pr.json` resolves to `<workspace>/templates/unfurl/github-pr.json`
+on disk, falling back to the same path inside `assets.FS`. **If you add a new asset
+directory, the recursive `templates`/`skills` embeds cover nested files, but a new
+top-level asset must be added to the `go:embed` directive** or it will not ship in the binary.
+
+On a fresh install `config.Bootstrap` mirrors `templates/` into `<workspace>/templates/`
+and `skills/` into `<workspace>/.agents/skills/`, then symlinks `<workspace>/.claude/skills`
+to `.agents/skills` so both ACP and Claude-based agents discover the bundled skills.
 
 ## Testing conventions
 

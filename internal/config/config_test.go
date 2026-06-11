@@ -208,7 +208,7 @@ func TestParseValidUnfurlRule(t *testing.T) {
       domain: github.com
       url_pattern: '/pull/(?P<number>\d+)'
     unfurl:
-      template: unfurl/github-pr.json
+      template: templates/unfurl/github-pr.json
 `))
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
@@ -220,7 +220,7 @@ func TestParseValidUnfurlRule(t *testing.T) {
 	if !ok {
 		t.Fatal("expected github-pr unfurl rule")
 	}
-	if rule.Match.Domain != "github.com" || rule.Unfurl.Template != "unfurl/github-pr.json" {
+	if rule.Match.Domain != "github.com" || rule.Unfurl.Template != "templates/unfurl/github-pr.json" {
 		t.Fatalf("unexpected unfurl rule parsed: %#v", rule)
 	}
 	if len(rule.Match.Channels) != 1 || rule.Match.Channels[0] != "C0ENG" {

@@ -1,0 +1,11 @@
+{
+  "blocks": [
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*<{{ .URL }}|Pull Request #{{ .Captures.number }}>*\n`{{ .Captures.owner }}/{{ .Captures.repo }}`"
+      }
+    }
+  ]
+}

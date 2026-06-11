@@ -2,6 +2,6 @@
 bin/
 dist/
 coverage.out
-murtaugh
-murtaugh-slack
+/murtaugh
+/murtaugh-slack
 ignore/

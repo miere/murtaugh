@@ -95,7 +95,7 @@ func defaultWorkflowRules() map[string]config.WorkflowRuleConfig {
 			},
 			Triggers: []config.TriggerConfig{{
 				Type:         "reply-to-slack",
-				ReplyToSlack: &config.ReplyToSlackTriggerConfig{Template: "ping/02-pong.json"},
+				ReplyToSlack: &config.ReplyToSlackTriggerConfig{Template: "templates/ping/02-pong.json"},
 			}},
 		},
 	}

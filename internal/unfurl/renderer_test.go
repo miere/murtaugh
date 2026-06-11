@@ -52,7 +52,7 @@ func TestRendererRejectsInvalidJSON(t *testing.T) {
 
 func TestRendererFallsBackToEmbeddedAssets(t *testing.T) {
 	r := NewRenderer(t.TempDir(), nil)
-	att, err := r.Render("unfurl/github-pr.json", Data{
+	att, err := r.Render("templates/unfurl/github-pr.json", Data{
 		URL:      "https://github.com/acme/widgets/pull/42",
 		Captures: map[string]string{"owner": "acme", "repo": "widgets", "number": "42"},
 	})

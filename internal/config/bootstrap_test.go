@@ -1,12 +1,41 @@
 package config
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/miere/murtaugh-dev-toolkit/assets"
 )
+
+// assertEmbeddedTreeCopied walks the embedded srcRoot subtree and fails the
+// test unless every file was mirrored, byte-for-byte, under dstRoot.
+func assertEmbeddedTreeCopied(t *testing.T, srcRoot, dstRoot string) {
+	t.Helper()
+	err := fs.WalkDir(assets.FS, srcRoot, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		want, err := assets.FS.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		rel := strings.TrimPrefix(p, srcRoot+"/")
+		got, err := os.ReadFile(filepath.Join(dstRoot, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatalf("read bootstrapped %q: %v", rel, err)
+		}
+		if string(got) != string(want) {
+			t.Fatalf("content mismatch for %q", rel)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk embedded %q: %v", srcRoot, err)
+	}
+}
 
 func TestBootstrapFreshInstall(t *testing.T) {
 	baseDir := filepath.Join(t.TempDir(), "murtaugh")
@@ -40,23 +69,24 @@ func TestBootstrapFreshInstall(t *testing.T) {
 		t.Fatalf("agents.yaml content mismatch")
 	}
 
-	// Every embedded skill must be mirrored into the skills/ directory.
-	entries, err := assets.FS.ReadDir("skills")
+	// Every embedded template and skill file must be mirrored into the
+	// workspace: templates under templates/, skills under .agents/skills/.
+	assertEmbeddedTreeCopied(t, "templates", filepath.Join(baseDir, "templates"))
+	assertEmbeddedTreeCopied(t, "skills", filepath.Join(baseDir, ".agents", "skills"))
+
+	// .claude/skills is a relative symlink to .agents/skills so Claude-based
+	// agents discover the same bundled skills.
+	link := filepath.Join(baseDir, ".claude", "skills")
+	target, err := os.Readlink(link)
 	if err != nil {
-		t.Fatalf("read embedded skills: %v", err)
+		t.Fatalf("expected .claude/skills to be a symlink: %v", err)
 	}
-	for _, entry := range entries {
-		wantSkill, err := assets.FS.ReadFile("skills/" + entry.Name())
-		if err != nil {
-			t.Fatalf("read embedded skill %q: %v", entry.Name(), err)
-		}
-		gotSkill, err := os.ReadFile(filepath.Join(baseDir, "skills", entry.Name()))
-		if err != nil {
-			t.Fatalf("read bootstrapped skill %q: %v", entry.Name(), err)
-		}
-		if string(gotSkill) != string(wantSkill) {
-			t.Fatalf("skill %q content mismatch", entry.Name())
-		}
+	if want := filepath.Join("..", ".agents", "skills"); target != want {
+		t.Fatalf("symlink target = %q, want %q", target, want)
+	}
+	// The symlink must resolve to the real skill tree.
+	if _, err := os.Stat(filepath.Join(link, "murtaugh-slack", "SKILL.md")); err != nil {
+		t.Fatalf("skill not reachable through .claude/skills symlink: %v", err)
 	}
 
 	// Optional docs are not embedded, so they must be skipped silently.
@@ -70,8 +100,8 @@ func TestBootstrapFreshInstall(t *testing.T) {
 func TestBootstrapDoesNotOverwriteExistingFiles(t *testing.T) {
 	baseDir := filepath.Join(t.TempDir(), "murtaugh")
 	configPath := filepath.Join(baseDir, "slack.yaml")
-	skillsDir := filepath.Join(baseDir, "skills")
-	if err := os.MkdirAll(skillsDir, 0o755); err != nil {
+	skillDir := filepath.Join(baseDir, ".agents", "skills", "murtaugh-slack")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
 		t.Fatalf("seed dirs: %v", err)
 	}
 
@@ -80,11 +110,7 @@ func TestBootstrapDoesNotOverwriteExistingFiles(t *testing.T) {
 		t.Fatalf("seed slack.yaml: %v", err)
 	}
 
-	entries, err := assets.FS.ReadDir("skills")
-	if err != nil || len(entries) == 0 {
-		t.Fatalf("expected embedded skills, err=%v entries=%d", err, len(entries))
-	}
-	existingSkill := filepath.Join(skillsDir, entries[0].Name())
+	existingSkill := filepath.Join(skillDir, "SKILL.md")
 	const customSkill = "user authored skill"
 	if err := os.WriteFile(existingSkill, []byte(customSkill), 0o644); err != nil {
 		t.Fatalf("seed skill: %v", err)
