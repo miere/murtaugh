@@ -369,7 +369,7 @@ func TestValidateAllowedUsersRejectsBlankEntries(t *testing.T) {
 
 func TestValidateAllowedUsersAcceptsHandlesAndIDs(t *testing.T) {
 	// Validation must accept both Slack user IDs and handles; resolution from
-	// handles to IDs happens at startup in the slackapp layer.
+	// handles to IDs happens at startup in the gateway layer.
 	cfg, err := Parse(testConfig(`configuration:
   allowed_users:
     - "@alice"

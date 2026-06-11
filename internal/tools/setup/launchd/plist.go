@@ -19,6 +19,7 @@ const plistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
     <array>
       <string>{{.Binary}}</string>
       <string>slack</string>
+      <string>gateway</string>
     </array>
     <key>RunAtLoad</key>
     <true/>

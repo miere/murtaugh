@@ -9,12 +9,13 @@ between them, and the conventions you must respect so changes stay consistent.
 A Go toolkit that ships a single binary with **three frontends** backed by a
 shared Tool registry:
 
-- **Slack** — Socket Mode daemon (`murtaugh slack`, the default) that responds
-  to slash commands, runs YAML-defined **workflow rules** against interactive
-  payloads (Block Kit buttons, etc.), bridges Slack conversations to an **ACP**
-  (Agent Communication Protocol) agent with live response streaming, and
-  renders **custom link unfurls** for shared URLs.
-- **CLI** — human-facing direct invocation (`murtaugh <tool> [...]`).
+- **Slack gateway** — Socket Mode daemon (`murtaugh slack gateway`) that
+  responds to slash commands, runs YAML-defined **workflow rules** against
+  interactive payloads (Block Kit buttons, etc.), bridges Slack conversations
+  to an **ACP** (Agent Communication Protocol) agent with live response
+  streaming, and renders **custom link unfurls** for shared URLs.
+- **CLI** — human-facing direct invocation (`murtaugh <tool> [...]`), including
+  the Slack tools under the `slack` namespace (`murtaugh slack send-msg`, …).
 - **MCP** — JSON-RPC stdio server (`murtaugh mcp`) that exposes every
   registered tool to AI clients.
 
@@ -33,9 +34,9 @@ Module path: `github.com/miere/murtaugh-dev-toolkit`.
                   builds Registry + selects Mode
         ┌────────────────────────┼────────────────────────┐
         │                        │                        │
-┌───────▼────────┐      ┌────────▼────────┐      ┌────────▼────────┐
-│ frontends/cli  │      │ frontends/mcp   │      │ slackapp (daemon)│
-└───────┬────────┘      └────────┬────────┘      └─────────────────┘
+┌───────▼────────┐      ┌────────▼────────┐      ┌──────────▼─────────┐
+│ frontends/cli  │      │ frontends/mcp   │      │ slack/gateway      │
+└───────┬────────┘      └────────┬────────┘      └────────────────────┘
         │                        │
         └──────► Tool ◄──────────┘
                   (internal/tools/*)
@@ -44,8 +45,9 @@ Module path: `github.com/miere/murtaugh-dev-toolkit`.
 - `internal/app` is the only place tools are wired into the registry.
 - CLI and MCP frontends know nothing about each other and reach tools only
   through `tools.Tool`.
-- The Slack daemon does not use the Tool registry today; it runs side-by-side
-  as a third frontend selected by mode.
+- The Slack gateway does not use the Tool registry today; it runs side-by-side
+  as a third frontend selected by mode (`ModeGateway`). The `slack.*` tools,
+  by contrast, are ordinary registry tools shared by the CLI and MCP frontends.
 
 ## Repository layout
 
@@ -60,8 +62,11 @@ internal/tools/       Shared Tool interface + one package per tool.
   ping/               Health-check tool (the canonical example).
   jobs/run/           Tool `jobs.run`: execute a job defined in jobs.yaml.
   jobs/define/        Tool `jobs.define`: register a job in jobs.yaml.
+  slack/              Slack tools: send-msg, fetch-msgs, fetch-reactions, update-msg.
 internal/config/      Config schema, loading, and validation.
-internal/slackapp/    Socket Mode app, event loop, all Slack event handlers.
+internal/slack/       Slack subsystem:
+  gateway/            Socket Mode gateway, event loop, all Slack event handlers.
+  client/             Slack Web API client wrapper used by the slack.* tools.
 internal/acp/         ACP process client, session manager, protocol types.
 internal/workflow/    Workflow engine, command runner, template rendering.
 internal/unfurl/      Link matcher and Block Kit attachment renderer.
@@ -69,8 +74,9 @@ assets/               Embedded reference config, JSON templates, agent skills.
 ```
 
 `internal/*` is private to this module. Cross-package dependencies flow in one
-direction: `slackapp` orchestrates `config`, `acp`, `workflow`, and `unfurl`;
-those packages do not import `slackapp`. Tool packages depend on `config`
+direction: `slack/gateway` orchestrates `config`, `acp`, `workflow`, and
+`unfurl`; those packages do not import `slack/gateway`. Tool packages depend
+on `config`
 where they need shared types (e.g. `JobProfile`), never the other way around.
 
 ## The Tool contract
@@ -122,7 +128,9 @@ type Tool interface {
    `--config PATH` and `--config=PATH`).
 2. Resolves the config path (`config.DefaultPath()` →
    `~/.config/murtaugh/slack.yaml`, overridable with `--config`).
-3. Selects the mode: `slack` (default), `mcp`, or `<tool>` → `ModeCLI`.
+3. Selects the mode: `slack gateway` → `ModeGateway`, `mcp` → `ModeMCP`, or
+   any other tokens (including `slack <tool>`) → `ModeCLI`. No subcommand, or
+   a bare `slack`, prints usage rather than launching anything.
 4. `config.Bootstrap(path)` seeds the config directory on first run, then
    `config.Load(path)` reads, parses, validates, and records `BaseDir`.
 5. Builds an `slog.Logger` (text handler; debug level when
@@ -179,9 +187,9 @@ exactly one key — either `reply-to-slack` (→ `ReplyToSlackTriggerConfig`) or
 content condition, a compilable `url_pattern`, non-blank channel entries, and
 exactly one action.
 
-## Slack app (`internal/slackapp`)
+## Slack gateway (`internal/slack/gateway`)
 
-`App` owns the `*slack.Client`, the `*socketmode.Client`, and the four
+`Gateway` owns the `*slack.Client`, the `*socketmode.Client`, and the four
 subsystems (`handler`, `workflow`, `chat`, `unfurl`). `New()` wires them:
 
 - `chat` is built **only if** `acp.enabled` is true.
@@ -212,7 +220,7 @@ Inner Events API events:
 Handlers **ack first, then work asynchronously** in a goroutine with a bounded
 context. Long work must never block the event loop.
 
-## ACP chat (`internal/acp` + `slackapp/chat_handler.go`)
+## ACP chat (`internal/acp` + `slack/gateway/chat_handler.go`)
 
 `acp.Client` is the interface (`Initialize`, `NewSession`, `Prompt`, `Cancel`,
 `Close`). `ProcessClient` implements it by speaking **JSON-RPC over the agent's
@@ -228,7 +236,7 @@ thread maps to one persistent agent conversation.
 `ChatHandler.Handle` builds the key + `SessionMetadata`, sets the assistant
 status to `is thinking...`, then ranges over the prompt's event channel.
 
-## Streaming (`slackapp/stream_api.go` + stream writer)
+## Streaming (`slack/gateway/stream_api.go` + stream writer)
 
 `StreamAPI` abstracts the Slack streaming surface so the chat handler is
 testable: `StartStreamContext`, `AppendStreamContext`, `StopStreamContext`, and
@@ -261,7 +269,7 @@ external-process contract. `OSCommandRunner` enforces a timeout (default 30s),
 pipes stdin in, and captures stdout. **Convention: handlers read a JSON object on
 stdin and print a single JSON object on stdout.**
 
-## Custom link unfurling (`internal/unfurl` + `slackapp/link_unfurl_handler.go`)
+## Custom link unfurling (`internal/unfurl` + `slack/gateway/link_unfurl_handler.go`)
 
 - `Matcher` compiles rules once (sorted-key order). `Match(url, domain, channel)`
   returns the first rule whose optional channel allowlist, domain (exact or

@@ -85,7 +85,7 @@ func TestInvoke_WritesPlistAndLogsDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("plist missing: %v", err)
 	}
-	for _, want := range []string{"dev.murtaugh", "/usr/local/bin/murtaugh", "<string>slack</string>"} {
+	for _, want := range []string{"dev.murtaugh", "/usr/local/bin/murtaugh", "<string>slack</string>", "<string>gateway</string>"} {
 		if !strings.Contains(string(body), want) {
 			t.Fatalf("plist missing %q in:\n%s", want, body)
 		}

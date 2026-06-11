@@ -73,7 +73,7 @@ func TestUsageLine_ListsFlatToolsNamespacesAndModes(t *testing.T) {
 		"ping",
 		"jobs <define|run>",
 		"setup <agents|bootstrap|launchd|mcp-register|slack|update>",
-		"slack",
+		"slack <fetch-msgs|fetch-reactions|gateway|send-msg|update-msg>",
 		"mcp",
 	} {
 		if !strings.Contains(line, want) {

@@ -1,10 +1,11 @@
 // Command murtaugh is the single entry point for the Murtaugh dev toolkit.
-// It can run as the Slack Socket Mode daemon (`murtaugh slack`, default),
-// the MCP stdio server (`murtaugh mcp`), or invoke any of the registered
-// CLI tools directly (e.g. `murtaugh ping`, `murtaugh jobs run --name X`).
+// It can run as the Slack gateway — the Socket Mode daemon started by
+// `murtaugh slack gateway` — the MCP stdio server (`murtaugh mcp`), or
+// invoke any of the registered CLI tools directly (e.g. `murtaugh ping`,
+// `murtaugh jobs run --name X`, `murtaugh slack send-msg --to ...`).
 //
-// All three modes share the same loaded config and the same Tool registry,
-// so adding a new tool exposes it to both the CLI and MCP frontends in a
+// All modes share the same loaded config and the same Tool registry, so
+// adding a new tool exposes it to both the CLI and MCP frontends in a
 // single change.
 package main
 
@@ -25,8 +26,9 @@ import (
 
 const usage = `Usage: murtaugh [--config PATH] <command> [args...]
 
-Modes:
-  slack                 Start the Slack Socket Mode daemon (default).
+Commands:
+  slack gateway         Start the Slack gateway (Socket Mode daemon).
+  slack <tool> [args]   Invoke a Slack tool, e.g. ` + "`" + `murtaugh slack send-msg --to ...` + "`" + `.
   mcp                   Start the MCP stdio server.
   <tool> [args...]      Invoke a registered CLI tool. Namespaced tools take
                         two tokens, e.g. ` + "`" + `murtaugh jobs run --name <n>` + "`" + `.
@@ -87,11 +89,11 @@ func run(rawArgs []string) error {
 	defer stop()
 
 	application := app.New(mode, rest, cfg, configPath, version, logger)
-	// The Slack daemon is the only long-running mode that needs a
+	// The Slack gateway is the only long-running mode that needs a
 	// user-triggered restart path. stop is reused as the cancel hook so
 	// the coordinator's shutdown looks identical to a SIGTERM from the
 	// outside (launchd, systemd) — process exits 0, supervisor respawns.
-	if mode == app.ModeSlack {
+	if mode == app.ModeGateway {
 		application = application.WithRestartCoordinator(
 			app.NewRestartCoordinator(stop, logger, 0, 0),
 		)
@@ -104,6 +106,11 @@ func run(rawArgs []string) error {
 	}
 	if mode == app.ModeCLI && len(rest) == 0 {
 		return errors.New(application.UsageLine())
+	}
+	// A bare `murtaugh slack` (no subcommand) lists the slack subcommands
+	// instead of trying to resolve a tool literally named "slack".
+	if mode == app.ModeCLI && len(rest) == 1 && rest[0] == "slack" {
+		return errors.New(application.SlackUsageLine())
 	}
 	return application.Run(ctx)
 }
@@ -166,16 +173,24 @@ func isSetupInvocation(mode app.Mode, rest []string) bool {
 	return rest[0] == "setup"
 }
 
-// selectMode resolves the top-level subcommand. `slack` is the default when
-// nothing is supplied so the long-running daemon stays the no-argument
-// behaviour the README documents.
+// selectMode resolves the top-level subcommand. `slack gateway` starts the
+// long-running Socket Mode daemon; `slack <tool>` and every other token are
+// CLI tools resolved by the registry. No subcommand prints usage (ModeCLI
+// with an empty arg list), so the gateway is always launched explicitly.
 func selectMode(args []string) (app.Mode, []string) {
 	if len(args) == 0 {
-		return app.ModeSlack, nil
+		return app.ModeCLI, nil
 	}
 	switch args[0] {
 	case "slack":
-		return app.ModeSlack, args[1:]
+		// `slack gateway` is the daemon; `slack <tool>` falls through to
+		// the CLI, where resolve() forms the dotted name "slack.<tool>".
+		// A bare `slack` also falls through; run() then prints the slack
+		// subcommand list.
+		if len(args) >= 2 && args[1] == "gateway" {
+			return app.ModeGateway, args[2:]
+		}
+		return app.ModeCLI, args
 	case "mcp":
 		return app.ModeMCP, args[1:]
 	default:
@@ -184,7 +199,7 @@ func selectMode(args []string) (app.Mode, []string) {
 }
 
 // defaultConfigWatchPaths returns the on-disk files whose mtime
-// changes should make the Slack daemon suggest a restart. The
+// changes should make the gateway suggest a restart. The
 // canonical Murtaugh layout keeps slack.yaml, agents.yaml, and
 // jobs.yaml as siblings under ~/.config/murtaugh, so we derive the
 // list from the main config path's parent dir rather than hard-

@@ -216,17 +216,36 @@ through any additional Slack app configuration needed for the new rule.
 
 ## Running Murtaugh
 
-### Slack daemon (default)
+### Slack gateway
+
+The gateway is the long-running Socket Mode daemon. Start it explicitly:
 
 ~~~sh
-murtaugh          # implicit — no subcommand starts the daemon
-murtaugh slack    # explicit
+murtaugh slack gateway
 ~~~
+
+`murtaugh slack` on its own lists the slack subcommands; `murtaugh` on its own
+prints usage.
+
+### Slack tools (CLI)
+
+The same Slack capabilities the MCP server exposes are available as one-shot
+CLI tools under the `slack` namespace:
+
+~~~sh
+murtaugh slack send-msg --to '#general' --body 'hello'
+murtaugh slack fetch-msgs --channel general
+murtaugh slack fetch-reactions --channel general --from @ada --emoji thumbsup
+murtaugh slack update-msg --channel C123 --ts 1234.5678 --body 'edited'
+~~~
+
+These reuse the gateway's `oauth.bot_token`, so no extra configuration is
+needed.
 
 ### As a LaunchAgent (macOS)
 
 The macOS installer can create `~/Library/LaunchAgents/dev.murtaugh.plist` so
-the daemon starts automatically on login and restarts on crash.
+the gateway starts automatically on login and restarts on crash.
 
 ---
 

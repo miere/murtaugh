@@ -18,7 +18,7 @@ import (
 	"github.com/miere/murtaugh-dev-toolkit/internal/config"
 	"github.com/miere/murtaugh-dev-toolkit/internal/frontends/cli"
 	"github.com/miere/murtaugh-dev-toolkit/internal/frontends/mcp"
-	"github.com/miere/murtaugh-dev-toolkit/internal/slackapp"
+	gateway "github.com/miere/murtaugh-dev-toolkit/internal/slack/gateway"
 	"github.com/miere/murtaugh-dev-toolkit/internal/tools"
 	"github.com/miere/murtaugh-dev-toolkit/internal/tools/jobs/define"
 	"github.com/miere/murtaugh-dev-toolkit/internal/tools/jobs/run"
@@ -29,6 +29,10 @@ import (
 	setupmcpregister "github.com/miere/murtaugh-dev-toolkit/internal/tools/setup/mcpregister"
 	setupslack "github.com/miere/murtaugh-dev-toolkit/internal/tools/setup/slack"
 	setupupdate "github.com/miere/murtaugh-dev-toolkit/internal/tools/setup/update"
+	slackfetchmsgs "github.com/miere/murtaugh-dev-toolkit/internal/tools/slack/fetchmsgs"
+	slackfetchreactions "github.com/miere/murtaugh-dev-toolkit/internal/tools/slack/fetchreactions"
+	slacksendmsg "github.com/miere/murtaugh-dev-toolkit/internal/tools/slack/sendmsg"
+	slackupdatemsg "github.com/miere/murtaugh-dev-toolkit/internal/tools/slack/updatemsg"
 )
 
 // Mode selects which frontend Run starts.
@@ -39,8 +43,9 @@ const (
 	ModeCLI Mode = iota
 	// ModeMCP runs the MCP stdio server frontend.
 	ModeMCP
-	// ModeSlack runs the Slack Socket Mode daemon.
-	ModeSlack
+	// ModeGateway runs the Slack gateway: the Socket Mode daemon started
+	// by `murtaugh slack gateway`.
+	ModeGateway
 )
 
 // Application is the composition root for a single murtaugh invocation. It
@@ -54,15 +59,15 @@ type Application struct {
 	version    string
 	logger     *slog.Logger
 	registry   *tools.Registry
-	// restart is the optional graceful-restart coordinator. Only the Slack
-	// daemon path attaches one; CLI and MCP modes leave it nil.
+	// restart is the optional graceful-restart coordinator. Only the
+	// gateway path attaches one; CLI and MCP modes leave it nil.
 	restart *RestartCoordinator
 	// resumeMarkerPath is the on-disk location of the cross-restart
 	// marker. Empty disables the resume confirmation flow; the restart
 	// still happens but no "back online" notice is posted.
 	resumeMarkerPath string
 	// configWatchPaths is the list of files whose mtime, when it
-	// advances, makes the Slack daemon suggest a restart to the
+	// advances, makes the gateway suggest a restart to the
 	// admin via Block Kit. Empty disables the watcher entirely.
 	configWatchPaths []string
 }
@@ -86,19 +91,19 @@ func New(mode Mode, args []string, cfg config.Config, configPath, version string
 }
 
 // Run starts the selected frontend and blocks until it returns. CLI and MCP
-// share the same Registry; Slack ignores the registry and starts the Socket
-// Mode daemon directly.
+// share the same Registry; the gateway ignores the registry and starts the
+// Socket Mode daemon directly.
 func (a *Application) Run(ctx context.Context) error {
 	switch a.mode {
 	case ModeMCP:
 		return mcp.New(a.registry).Serve(ctx)
-	case ModeSlack:
-		sl := slackapp.New(a.cfg, a.logger)
+	case ModeGateway:
+		gw := gateway.New(a.cfg, a.logger)
 		if rc := a.restart; rc != nil {
-			// Adapt the coordinator's Request method into slackapp's
-			// stringly-typed trigger so the slackapp package stays free
+			// Adapt the coordinator's Request method into the gateway's
+			// stringly-typed trigger so the gateway package stays free
 			// of any internal/app import (which would cycle).
-			sl = sl.WithRestartTrigger(func(source, userID, channel, reason string) bool {
+			gw = gw.WithRestartTrigger(func(source, userID, channel, reason string) bool {
 				return rc.Request(RestartRequest{
 					Source:  RestartSource(source),
 					UserID:  userID,
@@ -108,19 +113,19 @@ func (a *Application) Run(ctx context.Context) error {
 			})
 		}
 		if path := strings.TrimSpace(a.resumeMarkerPath); path != "" {
-			sl = sl.WithResumeMarkerStore(slackapp.NewFileResumeMarkerStore(path))
+			gw = gw.WithResumeMarkerStore(gateway.NewFileResumeMarkerStore(path))
 			a.logger.Debug("resume marker store wired", "path", path)
 		}
 		if len(a.configWatchPaths) > 0 {
-			sl = sl.WithConfigWatchPaths(a.configWatchPaths)
+			gw = gw.WithConfigWatchPaths(a.configWatchPaths)
 			a.logger.Debug("config watcher wired", "paths", a.configWatchPaths)
 		}
-		a.logger.Info("starting Slack Socket Mode service", "config", a.configPath)
-		err := sl.Run(ctx)
+		a.logger.Info("starting Slack gateway (Socket Mode)", "config", a.configPath)
+		err := gw.Run(ctx)
 		if err != nil && ctx.Err() != nil {
 			err = nil
 		}
-		a.logger.Info("Slack Socket Mode service stopped")
+		a.logger.Info("Slack gateway stopped")
 		return err
 	default:
 		return cli.New(a.registry).Run(ctx, a.args)
@@ -130,8 +135,10 @@ func (a *Application) Run(ctx context.Context) error {
 // UsageLine renders a human-readable usage string built from the registered
 // tools. Flat tool names (e.g. `ping`) are listed first; namespaced tools
 // (e.g. `jobs.run`) are grouped by their namespace and rendered as
-// `<ns> <sub>`. The built-in `slack` and `mcp` modes (handled by main.go)
-// are appended so callers see every entry point in one line.
+// `<ns> <sub>`. The `gateway` subcommand is injected into the `slack`
+// namespace (it starts the daemon and is not a registry tool), and the
+// built-in `mcp` mode (handled by main.go) is appended, so callers see
+// every entry point in one line.
 func (a *Application) UsageLine() string {
 	var flat []string
 	groups := map[string][]string{}
@@ -150,14 +157,37 @@ func (a *Application) UsageLine() string {
 		flat = append(flat, name)
 	}
 
+	// `slack gateway` starts the Socket Mode daemon. It is not a registry
+	// tool, so surface it as a slack subcommand alongside the slack.* tools.
+	if _, seen := groups["slack"]; !seen {
+		groupOrder = append(groupOrder, "slack")
+	}
+	groups["slack"] = append(groups["slack"], "gateway")
+
 	parts := append([]string{}, flat...)
 	for _, ns := range groupOrder {
 		subs := groups[ns]
 		sort.Strings(subs)
 		parts = append(parts, fmt.Sprintf("%s <%s>", ns, strings.Join(subs, "|")))
 	}
-	parts = append(parts, "slack", "mcp")
+	parts = append(parts, "mcp")
 	return "usage: murtaugh <command>; commands: " + strings.Join(parts, ", ")
+}
+
+// SlackUsageLine renders the help shown for a bare `murtaugh slack`
+// invocation: the `slack.*` tools (without their namespace prefix) plus the
+// `gateway` daemon subcommand, sorted. It exists so the slack namespace lists
+// its own subcommands instead of falling through to the generic CLI error.
+func (a *Application) SlackUsageLine() string {
+	subs := []string{"gateway"}
+	for _, t := range a.registry.All() {
+		if name := t.Name(); strings.HasPrefix(name, "slack.") {
+			subs = append(subs, strings.TrimPrefix(name, "slack."))
+		}
+	}
+	sort.Strings(subs)
+	return "usage: murtaugh slack <subcommand>; subcommands: " + strings.Join(subs, ", ") +
+		"\n  gateway starts the Slack Socket Mode daemon; the rest are one-shot tools."
 }
 
 // Registry exposes the underlying registry. Intended for tests so the
@@ -166,7 +196,7 @@ func (a *Application) Registry() *tools.Registry { return a.registry }
 
 // WithRestartCoordinator attaches a restart coordinator to the application
 // and returns the receiver to support a fluent wiring style at the entry
-// point. Only the Slack daemon path currently consumes the coordinator;
+// point. Only the gateway path currently consumes the coordinator;
 // other modes may safely skip this call.
 func (a *Application) WithRestartCoordinator(rc *RestartCoordinator) *Application {
 	a.restart = rc
@@ -188,7 +218,7 @@ func (a *Application) WithResumeMarkerPath(path string) *Application {
 }
 
 // WithConfigWatchPaths configures the list of files whose mtime, when
-// it advances, makes the Slack daemon ask the admin to confirm a
+// it advances, makes the gateway ask the admin to confirm a
 // restart via Block Kit. Empty disables the watcher entirely.
 // Returns the receiver for fluent wiring.
 func (a *Application) WithConfigWatchPaths(paths []string) *Application {
@@ -258,6 +288,15 @@ func buildRegistry(cfg config.Config, configPath, version string) *tools.Registr
 		Owner:          "miere",
 		Repo:           "murtaugh-dev-toolkit",
 	}))
+
+	// Slack tools share the daemon's bot token (oauth.bot_token in
+	// slack.yaml). The client is built lazily on first Invoke, so an
+	// unconfigured token only surfaces when a tool is actually called.
+	botToken := cfg.OAuth.BotToken
+	reg.Register(slacksendmsg.New(botToken))
+	reg.Register(slackfetchmsgs.New(botToken))
+	reg.Register(slackfetchreactions.New(botToken))
+	reg.Register(slackupdatemsg.New(botToken))
 
 	return reg
 }
