@@ -30,9 +30,14 @@ recent messages/reactions.
 ## Invocation
 
 - **CLI:** `murtaugh slack send-msg --to "#dev" --body "hi"`. Flags are the
-  schema property names in kebab-case (`attachment_type` → `--attachment-type`).
+  schema property names in kebab-case (`attachment_type` → `--attachment-type`)
+  and every flag carries a value (there are no bare switches).
 - **MCP:** the same tools appear as `slack.send-msg`, `slack.fetch-msgs`, etc.;
   pass the schema properties as the tool arguments.
+- **Full flag reference:** `murtaugh help slack <tool>` (e.g.
+  `murtaugh help slack send-msg`) or `murtaugh slack <tool> --help` — required
+  vs optional flags, the `#channel`/`@user`/ID `--to` forms, `--blocks`
+  (inline JSON or file path), mutual exclusions, and examples.
 
 ## Global guidelines (defaults — follow unless the user says otherwise)
 

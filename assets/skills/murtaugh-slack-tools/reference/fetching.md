@@ -9,6 +9,10 @@ semantics. Each result message carries `ts`, `user`, `text`, optional
 > most **100 messages** (no pagination) — narrow with `since`/`thread` rather
 > than expecting deep history.
 
+> CLI flags carry values: `--channel`, `--thread`, `--since` (and `--from` /
+> `--emoji` for reactions). Run `murtaugh help slack fetch-msgs` /
+> `murtaugh help slack fetch-reactions` for the canonical reference.
+
 ## `slack.fetch-msgs` — read a channel or thread
 
 *Fetch messages from a Slack channel or thread, oldest first.*

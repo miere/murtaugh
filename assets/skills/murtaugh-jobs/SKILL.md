@@ -44,3 +44,7 @@ daemon** is running — it owns the in-process scheduler.
 - **Scheduled runs are best-effort.** A run that would fire while the gateway is
   down is **skipped, not caught up** (see `reference/scheduling.md`). Don't rely
   on a scheduled job for must-not-miss accounting without external safeguards.
+- **Ask the binary for exact flags.** `murtaugh help jobs run` /
+  `murtaugh help jobs define` (or `murtaugh jobs <run|define> --help`) print the
+  full flag reference — which are required, the repeatable `--args` form, and
+  the `--timeout`/`--schedule`/`--every` value formats.

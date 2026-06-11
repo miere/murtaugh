@@ -10,8 +10,12 @@
 | `to` | yes | Destination: `#channel`, `@user`, or a `C`/`G`/`D` Slack ID. |
 | `blocks` | no | Block Kit: a JSON string (starts with `[` or `{`) **or** a path to a JSON file. Mutually exclusive with `attachment`. |
 | `attachment` | no | Path to a file to upload. Mutually exclusive with `blocks`. |
-| `attachment_type` | no | Snippet type for the attachment (`markdown`). |
+| `attachment_type` | no | Snippet type for the uploaded attachment. Closed enum — the only accepted value is `markdown`. |
 | `thread` | no | Parent message `ts` to reply in-thread. |
+
+> On the CLI these are kebab flags carrying a value: `--body`, `--to`,
+> `--blocks`, `--attachment`, `--attachment-type`, `--thread`. Run
+> `murtaugh help slack send-msg` for the canonical reference.
 
 Returns `{ ok, channel, ts, to }` — **store `ts`** to update or thread later.
 
@@ -43,7 +47,8 @@ murtaugh slack send-msg --to "#dev" --body "Deploy started" \
 | `blocks` | no | Block Kit JSON string or file path (same as `send-msg`). |
 
 Returns `{ ok, channel, ts }`. Updates the original message in place — there is
-**no thread arg** (you can't move a message into a thread).
+**no thread arg** (you can't move a message into a thread) and **no attachment
+arg** (update takes `--body` and/or `--blocks` only).
 
 Behavior:
 - A `channel` starting with `#` is resolved via `conversations.list`; anything

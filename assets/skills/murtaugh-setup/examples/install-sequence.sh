@@ -15,6 +15,7 @@ murtaugh setup slack \
   --admin-user "@you"
 
 # 3. ACP agent (omit --command to leave ACP chat disabled).
+#    --args is repeatable: pass it once per argument to the agent binary.
 murtaugh setup agents --command /usr/local/bin/acp-agent --args --stdio
 
 # 4. (macOS) install + start the gateway daemon as a LaunchAgent.
@@ -24,5 +25,6 @@ murtaugh setup launchd --binary-path "$BIN" --load true
 murtaugh setup mcp-register --client opencode --binary-path "$BIN"
 
 # Later: self-update the binary, then reload the daemon.
-# murtaugh setup update
+# A bare `setup update` refuses to overwrite a dev build — add --force true.
+# murtaugh setup update --force true
 # murtaugh setup launchd --binary-path "$BIN" --load true
