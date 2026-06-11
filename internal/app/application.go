@@ -120,6 +120,11 @@ func (a *Application) Run(ctx context.Context) error {
 			gw = gw.WithConfigWatchPaths(a.configWatchPaths)
 			a.logger.Debug("config watcher wired", "paths", a.configWatchPaths)
 		}
+		// Scheduled jobs reuse the jobs.run execution path so a cron/every
+		// run behaves identically to a manual one (same timeout, workdir, and
+		// exit-code handling). Output streams to the daemon's stdout/stderr,
+		// which launchd captures into the Murtaugh log files.
+		gw = gw.WithScheduledRunner(newScheduledRunner(a.cfg))
 		a.logger.Info("starting Slack gateway (Socket Mode)", "config", a.configPath)
 		err := gw.Run(ctx)
 		if err != nil && ctx.Err() != nil {
@@ -299,6 +304,29 @@ func buildRegistry(cfg config.Config, configPath, version string) *tools.Registr
 	reg.Register(slackupdatemsg.New(botToken))
 
 	return reg
+}
+
+// newScheduledRunner builds the executor the gateway scheduler uses to fire
+// cron/every-scheduled jobs. It wraps the same jobs.run tool the CLI and MCP
+// frontends use (streaming child output to the process stdout/stderr, which
+// launchd captures), and maps a non-zero exit code onto an error so the
+// gateway logs the run as failed.
+func newScheduledRunner(cfg config.Config) gateway.ScheduledRunner {
+	lookup := func(name string) (config.JobProfile, bool) {
+		j, ok := cfg.Jobs[name]
+		return j, ok
+	}
+	runTool := run.New(lookup)
+	return func(ctx context.Context, name string) error {
+		result, err := runTool.Invoke(ctx, map[string]any{"name": name})
+		if err != nil {
+			return err
+		}
+		if r, ok := result.(run.Result); ok && r.ExitCode != 0 {
+			return fmt.Errorf("exited with code %d", r.ExitCode)
+		}
+		return nil
+	}
 }
 
 // verifyBinary runs `<path> version` to confirm the staged binary is

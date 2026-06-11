@@ -87,6 +87,15 @@ type Gateway struct {
 	// this from the loaded config's sibling files (slack.yaml,
 	// agents.yaml, jobs.yaml).
 	configWatchPaths []string
+	// scheduledJobs is the job set captured from the loaded config at
+	// construction. The scheduler registers the entries whose ScheduleKind
+	// is cron/every; manual jobs are ignored. Empty disables scheduling.
+	scheduledJobs map[string]config.JobProfile
+	// runJob executes a job by name to completion. Injected by the
+	// composition root (WithScheduledRunner) as a closure over the jobs.run
+	// tool. nil disables the scheduler, so CLI/MCP and tests never pay for
+	// it.
+	runJob ScheduledRunner
 }
 
 func New(cfg config.Config, logger *slog.Logger) *Gateway {
@@ -170,6 +179,7 @@ func New(cfg config.Config, logger *slog.Logger) *Gateway {
 		logger:          logger,
 		cfg:             cfg.Configuration,
 		messaging:       api,
+		scheduledJobs:   cfg.Jobs,
 	}
 }
 
@@ -206,6 +216,14 @@ func (a *Gateway) WithConfigWatchPaths(paths []string) *Gateway {
 	return a
 }
 
+// WithScheduledRunner attaches the executor used to run cron/every-scheduled
+// jobs and returns the receiver for fluent wiring. When nil (the default) the
+// scheduler is disabled entirely, so CLI/MCP modes and tests never start it.
+func (a *Gateway) WithScheduledRunner(runner ScheduledRunner) *Gateway {
+	a.runJob = runner
+	return a
+}
+
 func (a *Gateway) Run(ctx context.Context) error {
 	resolveCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	err := a.resolveAllowSet(resolveCtx)
@@ -220,6 +238,8 @@ func (a *Gateway) Run(ctx context.Context) error {
 	}()
 	a.warmChat(ctx)
 	a.startConfigWatcher(ctx)
+	stopScheduler := a.startScheduler(ctx)
+	defer stopScheduler()
 
 	for {
 		select {

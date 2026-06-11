@@ -78,6 +78,42 @@ type JobProfile struct {
 	Args    []string `yaml:"args"`
 	WorkDir string   `yaml:"workdir"`
 	Timeout string   `yaml:"timeout"`
+	// Schedule, when set, runs the job automatically on a cron schedule
+	// using standard 5-field cron syntax (e.g. "0 2 * * *" for 02:00 daily).
+	// Mutually exclusive with Every.
+	Schedule string `yaml:"schedule"`
+	// Every, when set, runs the job automatically at a fixed interval
+	// expressed as a Go duration (e.g. "1h", "30m"). Mutually exclusive with
+	// Schedule. When both Schedule and Every are empty the job is
+	// manual-only: it runs solely when invoked via jobs.run or a workflow.
+	Every string `yaml:"every"`
+}
+
+// ScheduleKind classifies how a job is triggered.
+type ScheduleKind int
+
+const (
+	// ScheduleManual is a job with neither schedule nor every set: it runs
+	// only on explicit invocation (jobs.run, MCP, or a workflow trigger).
+	ScheduleManual ScheduleKind = iota
+	// ScheduleCron is a job driven by a cron expression (Schedule).
+	ScheduleCron
+	// ScheduleEvery is a job driven by a fixed interval duration (Every).
+	ScheduleEvery
+)
+
+// ScheduleKind reports how the job is triggered. Schedule takes precedence
+// over Every if both are set, but Validate rejects that combination so the
+// ambiguity never reaches a running scheduler.
+func (p JobProfile) ScheduleKind() ScheduleKind {
+	switch {
+	case strings.TrimSpace(p.Schedule) != "":
+		return ScheduleCron
+	case strings.TrimSpace(p.Every) != "":
+		return ScheduleEvery
+	default:
+		return ScheduleManual
+	}
 }
 
 type WorkflowRuleConfig struct {
@@ -277,6 +313,16 @@ func (c Config) Validate() error {
 		if job.Timeout != "" {
 			if _, err := time.ParseDuration(job.Timeout); err != nil {
 				errs = append(errs, fmt.Errorf("jobs[%s].timeout must be a valid duration: %w", name, err))
+			}
+		}
+		if strings.TrimSpace(job.Schedule) != "" && strings.TrimSpace(job.Every) != "" {
+			errs = append(errs, fmt.Errorf("jobs[%s] sets both schedule and every; use exactly one", name))
+		}
+		if every := strings.TrimSpace(job.Every); every != "" {
+			if d, err := time.ParseDuration(every); err != nil {
+				errs = append(errs, fmt.Errorf("jobs[%s].every must be a valid duration: %w", name, err))
+			} else if d <= 0 {
+				errs = append(errs, fmt.Errorf("jobs[%s].every must be greater than zero", name))
 			}
 		}
 	}

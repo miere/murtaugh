@@ -5,6 +5,16 @@
 #   murtaugh jobs run --name <n>
 # Both commands are also exposed as MCP tools (jobs.define, jobs.run) when
 # Murtaugh runs as `murtaugh mcp`.
+#
+# A job has three trigger modes:
+#   * manual   — neither `schedule` nor `every` set: runs only via jobs.run
+#                or a workflow trigger (the default).
+#   * schedule — a standard 5-field cron expression, run automatically by the
+#                `slack gateway` daemon (e.g. "0 2 * * *" = 02:00 every day).
+#   * every    — a Go duration, run automatically at a fixed interval
+#                (e.g. "1h", "30m").
+# `schedule` and `every` are mutually exclusive. Scheduled runs only fire
+# while the gateway daemon is running; edits here apply on the next restart.
 
 jobs:
   example-job:
@@ -12,3 +22,13 @@ jobs:
     args: ["hello from murtaugh"]
     # workdir: /path/to/working/directory
     # timeout: 5m
+
+  # Cron-scheduled: run every day at 02:00.
+  # nightly-backup:
+  #   command: /usr/local/bin/backup.sh
+  #   schedule: "0 2 * * *"
+
+  # Interval-scheduled: run once an hour.
+  # hourly-sync:
+  #   command: /usr/local/bin/sync.sh
+  #   every: 1h
