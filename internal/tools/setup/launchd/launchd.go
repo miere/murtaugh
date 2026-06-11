@@ -1,7 +1,7 @@
 // Package launchd implements the `setup.launchd` tool: write the
 // dev.murtaugh LaunchAgent plist, optionally invoking launchctl to
 // (re)bootstrap it. Mirrors the plist install.sh emitted, including the
-// PATH environment block and the slack-mode ProgramArguments.
+// PATH environment block and the `slack gateway` ProgramArguments.
 //
 // The tool is registered on every platform but only operational on darwin;
 // other GOOS values return a clean "unsupported on $GOOS" error so callers

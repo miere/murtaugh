@@ -311,7 +311,7 @@ func (c Config) Validate() error {
 // The check is ID-only: a user is allowed when their ID matches
 // configuration.admin_user (only when admin_user is configured as a Slack
 // user ID, not a handle) or any entry in configuration.allowed_users. The
-// slackapp startup layer is responsible for resolving any handle entries in
+// gateway startup layer is responsible for resolving any handle entries in
 // allowed_users to IDs before this helper is consulted, and for separately
 // checking against the resolved admin user ID when admin_user is a handle.
 //
@@ -337,7 +337,7 @@ func (c ConfigurationConfig) IsAllowedUser(userID string) bool {
 // IsAdminUser reports whether the given Slack user ID matches the
 // resolved configuration.admin_user. Like IsAllowedUser this is ID-only,
 // so admin_user must already have been resolved from a handle to a Slack
-// user ID (slackapp.resolveAllowSet does this at daemon start). A blank
+// user ID (gateway.resolveAllowSet does this at daemon start). A blank
 // or handle-shaped admin_user will never match.
 func (c ConfigurationConfig) IsAdminUser(userID string) bool {
 	userID = strings.TrimSpace(userID)
