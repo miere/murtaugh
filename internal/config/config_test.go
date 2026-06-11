@@ -331,6 +331,75 @@ func TestJobValidationAcceptsOptionalFields(t *testing.T) {
 	}
 }
 
+func TestJobScheduleKind(t *testing.T) {
+	cases := []struct {
+		name string
+		job  JobProfile
+		want ScheduleKind
+	}{
+		{"manual", JobProfile{Command: "/bin/echo"}, ScheduleManual},
+		{"cron", JobProfile{Command: "/bin/echo", Schedule: "0 2 * * *"}, ScheduleCron},
+		{"every", JobProfile{Command: "/bin/echo", Every: "1h"}, ScheduleEvery},
+		{"blank-schedule-is-manual", JobProfile{Command: "/bin/echo", Schedule: "  "}, ScheduleManual},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.job.ScheduleKind(); got != tc.want {
+				t.Fatalf("ScheduleKind() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestJobValidationAcceptsScheduleAndEverySeparately(t *testing.T) {
+	cfg, err := Parse(testConfig(""))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	cfg.Jobs = map[string]JobProfile{
+		"cron":  {Command: "/bin/echo", Schedule: "0 2 * * *"},
+		"every": {Command: "/bin/echo", Every: "30m"},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate returned error: %v", err)
+	}
+}
+
+func TestJobValidationRejectsScheduleAndEveryTogether(t *testing.T) {
+	cfg, err := Parse(testConfig(""))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	cfg.Jobs = map[string]JobProfile{
+		"both": {Command: "/bin/echo", Schedule: "0 2 * * *", Every: "1h"},
+	}
+	err = cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "jobs[both] sets both schedule and every") {
+		t.Fatalf("expected mutual-exclusion error, got: %v", err)
+	}
+}
+
+func TestJobValidationRejectsBadEvery(t *testing.T) {
+	cfg, err := Parse(testConfig(""))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	cfg.Jobs = map[string]JobProfile{
+		"bad":  {Command: "/bin/echo", Every: "nope"},
+		"zero": {Command: "/bin/echo", Every: "0s"},
+	}
+	err = cfg.Validate()
+	if err == nil {
+		t.Fatal("expected every validation error, got nil")
+	}
+	if !strings.Contains(err.Error(), "jobs[bad].every must be a valid duration") {
+		t.Fatalf("expected invalid-duration error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "jobs[zero].every must be greater than zero") {
+		t.Fatalf("expected non-positive-duration error, got: %v", err)
+	}
+}
+
 func TestParseAllowedUsers(t *testing.T) {
 	cfg, err := Parse(testConfig(`configuration:
   admin_user: U0ADMIN00

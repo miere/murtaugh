@@ -40,7 +40,7 @@ func (t *Tool) Name() string { return "jobs.define" }
 
 // Description returns the human-facing summary used by MCP clients.
 func (t *Tool) Description() string {
-	return "Register a job (command, args, workdir, timeout) in jobs.yaml."
+	return "Register a job (command, args, workdir, timeout, schedule/every) in jobs.yaml."
 }
 
 // InputSchema returns the JSON Schema for the tool's arguments. `args` is a
@@ -51,11 +51,13 @@ func (t *Tool) InputSchema() *jsonschema.Schema {
 	return &jsonschema.Schema{
 		Type: "object",
 		Properties: map[string]*jsonschema.Schema{
-			"name":    {Type: "string", Description: "Job key. Must be non-empty."},
-			"command": {Type: "string", Description: "Absolute path or PATH-resolved binary to execute."},
-			"args":    {Type: "array", Items: &jsonschema.Schema{Type: "string"}, Description: "Positional arguments passed to command."},
-			"workdir": {Type: "string", Description: "Optional working directory."},
-			"timeout": {Type: "string", Description: "Optional Go duration (e.g. '5m'). Defaults to 10m at run-time when empty."},
+			"name":     {Type: "string", Description: "Job key. Must be non-empty."},
+			"command":  {Type: "string", Description: "Absolute path or PATH-resolved binary to execute."},
+			"args":     {Type: "array", Items: &jsonschema.Schema{Type: "string"}, Description: "Positional arguments passed to command."},
+			"workdir":  {Type: "string", Description: "Optional working directory."},
+			"timeout":  {Type: "string", Description: "Optional Go duration (e.g. '5m'). Defaults to 10m at run-time when empty."},
+			"schedule": {Type: "string", Description: "Optional 5-field cron expression (e.g. '0 2 * * *') to run the job automatically. Mutually exclusive with every."},
+			"every":    {Type: "string", Description: "Optional Go duration (e.g. '1h') to run the job at a fixed interval. Mutually exclusive with schedule."},
 		},
 		Required: []string{"name", "command"},
 	}
@@ -86,6 +88,8 @@ func (t *Tool) Invoke(_ context.Context, args map[string]any) (any, error) {
 	command, _ := args["command"].(string)
 	workdir, _ := args["workdir"].(string)
 	timeout, _ := args["timeout"].(string)
+	schedule, _ := args["schedule"].(string)
+	every, _ := args["every"].(string)
 
 	if strings.TrimSpace(name) == "" {
 		return nil, errors.New("name is required")
@@ -96,6 +100,16 @@ func (t *Tool) Invoke(_ context.Context, args map[string]any) (any, error) {
 	if timeout != "" {
 		if _, err := time.ParseDuration(timeout); err != nil {
 			return nil, fmt.Errorf("timeout %q is not a valid duration: %w", timeout, err)
+		}
+	}
+	if strings.TrimSpace(schedule) != "" && strings.TrimSpace(every) != "" {
+		return nil, errors.New("schedule and every are mutually exclusive; set at most one")
+	}
+	if e := strings.TrimSpace(every); e != "" {
+		if d, err := time.ParseDuration(e); err != nil {
+			return nil, fmt.Errorf("every %q is not a valid duration: %w", every, err)
+		} else if d <= 0 {
+			return nil, fmt.Errorf("every %q must be greater than zero", every)
 		}
 	}
 
@@ -119,10 +133,12 @@ func (t *Tool) Invoke(_ context.Context, args map[string]any) (any, error) {
 
 	_, exists := existing[name]
 	existing[name] = config.JobProfile{
-		Command: command,
-		Args:    jobArgs,
-		WorkDir: workdir,
-		Timeout: timeout,
+		Command:  command,
+		Args:     jobArgs,
+		WorkDir:  workdir,
+		Timeout:  timeout,
+		Schedule: schedule,
+		Every:    every,
 	}
 
 	if err := writeJobs(path, existing); err != nil {
