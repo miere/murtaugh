@@ -4,11 +4,17 @@ Jobs are invoked the same way whether or not they're scheduled. The two tools
 are exposed identically on the CLI and over MCP (when Murtaugh runs as
 `murtaugh mcp`).
 
+For the full per-command reference (every flag, required/optional, defaults),
+run `murtaugh help jobs run` / `murtaugh help jobs define`, or
+`murtaugh jobs <run|define> --help`.
+
 ## `jobs.run` — execute a job
 
 ```bash
 murtaugh jobs run --name cleanup-logs
 ```
+
+`--name` is the only flag and is **required**.
 
 - Resolves the job by name from `jobs.yaml`.
 - Applies the job's `timeout` (default 10m) as a hard deadline.
@@ -29,9 +35,18 @@ murtaugh jobs define --name hourly-sync \
 
 - Reads `jobs.yaml`, adds or replaces the named entry, writes it back. Other
   jobs are preserved verbatim.
-- Accepts `--schedule` / `--every` (mutually exclusive), plus `--workdir` and
-  `--timeout`. Same validation as `configuring.md`.
+- **Required:** `--name` and `--command`.
+- **Optional:** `--args` (repeatable — once per argument, e.g.
+  `--args --full --args /data`), `--workdir`, `--timeout` (Go duration like
+  `5m`), and `--schedule` (5-field cron) / `--every` (Go duration), which are
+  **mutually exclusive**. Same validation as `configuring.md`.
 - Does **not** run the job — only defines it.
+
+```bash
+murtaugh jobs define --name nightly-backup \
+  --command /usr/local/bin/backup --args --full --args /data \
+  --workdir /srv --timeout 30m --schedule "0 2 * * *"
+```
 
 ## Who runs a job
 

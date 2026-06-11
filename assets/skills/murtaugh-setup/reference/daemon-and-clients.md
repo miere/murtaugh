@@ -1,5 +1,13 @@
 # Daemon, MCP clients & updates: launchd, mcp-register, update
 
+> **CLI flags carry values — booleans included.** `load` and `force` below are
+> booleans, but the CLI parser has no bare switches: write `--load true` and
+> `--force true` (a bare `--load` fails with `flag --load requires a value`).
+> snake_case `Arg` names map to kebab flags (`binary_path` → `--binary-path`,
+> `release_json_url` → `--release-json-url`). Over MCP, pass a real JSON
+> boolean. Run `murtaugh help setup <tool>` or `murtaugh setup <tool> --help`
+> for the full reference.
+
 ## `setup.launchd` — install the daemon (macOS)
 
 *Write the dev.murtaugh LaunchAgent plist (macOS) and optionally load it.*
@@ -7,7 +15,7 @@
 | Arg | Required | Meaning |
 |---|---|---|
 | `binary_path` | yes | Absolute path to the murtaugh binary. |
-| `load` | no | When `true`, (re)load the agent via `launchctl` after writing. |
+| `load` | no | Boolean. `--load true` (re)loads the agent via `launchctl` after writing. |
 
 **macOS only** (errors on other platforms). It writes
 `~/Library/LaunchAgents/dev.murtaugh.plist` with:
@@ -54,11 +62,17 @@ murtaugh setup mcp-register --client opencode --binary-path "$(which murtaugh)"
 | Arg | Required | Meaning |
 |---|---|---|
 | `version` | no | Release tag (e.g. `v0.0.2`). Default: latest. |
-| `force` | no | Required to replace a `dev` build or re-install the current version. |
+| `force` | no | Boolean. `--force true` is required to replace a `dev` build or re-install the current version. |
 | `release_json_url` | no | Override the GitHub API URL (testing). |
 
 Fetches the matching `murtaugh-<tag>-<os>-<arch>` asset from
 `github.com/miere/murtaugh-dev-toolkit`, sanity-checks it (`<asset> version`),
 backs up the current binary, and swaps it in. **Skips** if already on the target
-version; refuses to replace a `dev` build unless `force: true`. After updating a
+version; refuses to replace a `dev` build unless `--force true`. After updating a
 daemon, reload it (`setup.launchd --load true`, or your supervisor).
+
+```bash
+murtaugh setup update                 # latest release; refuses on a dev build
+murtaugh setup update --force true    # required when replacing a dev build
+murtaugh setup update --version v0.5.0 --force true
+```

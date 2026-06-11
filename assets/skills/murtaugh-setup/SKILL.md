@@ -5,8 +5,12 @@ This is **operator-facing**: getting the binary in place, writing the config
 files, and (on macOS) installing the daemon. For *running and debugging* the
 daemon afterward, see the `murtaugh-operations` skill.
 
-Every `setup.*` tool is idempotent and backs up any file it would overwrite
-(`<file>.bak.<timestamp>`), so re-running is safe.
+Every `setup.*` tool is idempotent, so re-running is safe. The config writers
+(`setup.slack`, `setup.agents`, `setup.launchd`, `setup.mcp-register`) back up
+any file they replace (`<file>.bak.<timestamp>`). `setup.bootstrap` is the one
+exception that **refreshes in place**: it keeps the bundled agent skills in sync
+with the shipped binary on every run (config files and templates stay
+preserved) — see `reference/config-tools.md`.
 
 ## Install order (the workflow)
 
@@ -40,3 +44,9 @@ Later: **`setup.update`** self-updates the binary from a GitHub release.
   your own supervisor (`murtaugh slack gateway`).
 - Tools run as `murtaugh setup <tool> …` on the CLI and as `setup.<tool>` over
   MCP. Setup tools work **before** a valid config exists (they create it).
+- **CLI flags always carry a value — booleans included.** Write `--load true`
+  and `--force true`; a bare `--load` is rejected. snake_case arg names map to
+  kebab flags (`binary_path` → `--binary-path`, `app_token` → `--app-token`).
+- **When in doubt, ask the binary.** `murtaugh help` lists every command;
+  `murtaugh help setup <tool>` (or `murtaugh setup <tool> --help`) prints that
+  tool's full flag reference — required/optional, types, defaults, examples.

@@ -37,3 +37,7 @@ job runs, and errors are all there.
   preserves a "restarting… / back online" notice across the restart.
 - The daemon also runs the **job scheduler** (see the `murtaugh-jobs` skill) and
   the **chat** and **unfurl** handlers (see `murtaugh-agents`, `murtaugh-unfurl`).
+- **The daemon takes no tool flags** — only the global `--config PATH`
+  (`murtaugh --config /path/slack.yaml slack gateway`). Run
+  `murtaugh help slack gateway` for the full reference, or `murtaugh help` to
+  list every command.
