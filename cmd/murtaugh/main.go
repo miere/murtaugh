@@ -22,21 +22,8 @@ import (
 
 	"github.com/miere/murtaugh-dev-toolkit/internal/app"
 	"github.com/miere/murtaugh-dev-toolkit/internal/config"
+	"github.com/miere/murtaugh-dev-toolkit/internal/help"
 )
-
-const usage = `Usage: murtaugh [--config PATH] <command> [args...]
-
-Commands:
-  slack gateway         Start the Slack gateway (Socket Mode daemon).
-  slack <tool> [args]   Invoke a Slack tool, e.g. ` + "`" + `murtaugh slack send-msg --to ...` + "`" + `.
-  mcp                   Start the MCP stdio server.
-  <tool> [args...]      Invoke a registered CLI tool. Namespaced tools take
-                        two tokens, e.g. ` + "`" + `murtaugh jobs run --name <n>` + "`" + `.
-
-Flags:
-  --config PATH         Slack configuration YAML
-                        (default: ~/.config/murtaugh/slack.yaml).
-`
 
 var version = "dev"
 
@@ -63,6 +50,13 @@ func run(rawArgs []string) error {
 	configPath, args, err := extractConfigFlag(rawArgs, defaultPath)
 	if err != nil {
 		return err
+	}
+	// Help is resolved before config bootstrap/load so `murtaugh help` (and
+	// `murtaugh <command> --help`) work on a machine that has never been
+	// configured. The single embedded reference is the source of truth.
+	if tokens, ok := helpRequest(args); ok {
+		fmt.Fprint(os.Stdout, help.Render(tokens))
+		return nil
 	}
 	mode, rest := selectMode(args)
 
@@ -123,10 +117,6 @@ func extractConfigFlag(args []string, fallback string) (string, []string, error)
 	configPath := fallback
 	for i := 0; i < len(args); i++ {
 		a := args[i]
-		if a == "--help" || a == "-h" {
-			fmt.Fprint(os.Stderr, usage)
-			os.Exit(0)
-		}
 		name, value, hasValue := parseConfigToken(a)
 		if name != "config" {
 			out = append(out, a)
@@ -161,6 +151,31 @@ func parseConfigToken(a string) (string, string, bool) {
 		hasValue = true
 	}
 	return name, value, hasValue
+}
+
+// helpRequest reports whether args asks for help and, if so, returns the
+// command tokens that scope it (empty means the full document). A leading
+// `help` subcommand consumes the rest of the tokens as the command to look up
+// (`murtaugh help slack send-msg`); otherwise a `--help`/`-h` flag anywhere
+// triggers help scoped to the surrounding command (`murtaugh slack send-msg
+// --help`). The `--config` flag has already been stripped by the caller.
+func helpRequest(args []string) ([]string, bool) {
+	if len(args) > 0 && args[0] == "help" {
+		return args[1:], true
+	}
+	tokens := make([]string, 0, len(args))
+	found := false
+	for _, a := range args {
+		if a == "--help" || a == "-h" {
+			found = true
+			continue
+		}
+		tokens = append(tokens, a)
+	}
+	if found {
+		return tokens, true
+	}
+	return nil, false
 }
 
 // isSetupInvocation reports whether the CLI was asked to run a setup.* tool.

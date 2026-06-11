@@ -118,7 +118,42 @@ type Tool interface {
    implement the `Tool` interface.
 2. Register the new tool in `internal/app/application.go::buildRegistry`.
 3. Add a `_test.go` covering happy-path invocation and schema declarations.
-4. Document the new command in `README.md`.
+4. **Document the command in `assets/cli-help.md`** (see "CLI/MCP command
+   reference" below) and add it to the command list in
+   `internal/help/help_test.go::TestEveryCommandDocumented`.
+5. Note the command in `README.md`.
+
+The same rule applies when you **change or remove** a tool: every flag rename,
+new flag, changed default, new enum value, or deleted command must be reflected
+in `assets/cli-help.md` in the same change. `go test ./internal/help/...` fails
+if a registered command has no help section, but it cannot catch a stale flag
+description — keep the prose honest by hand.
+
+### CLI/MCP command reference (`assets/cli-help.md`)
+
+`assets/cli-help.md` is the **single source of truth** for what every command
+does and which flags it takes. It is embedded into the binary (via the
+`assets` `go:embed` directive) and surfaced by the `internal/help` package:
+
+- `murtaugh help` prints the whole document; `murtaugh help <command>` (e.g.
+  `murtaugh help slack send-msg`) and `murtaugh <command> --help` print a single
+  command's section.
+- CLI usage errors and the bare-invocation usage line point users at
+  `murtaugh help`.
+
+The document is plain Markdown with one parser contract: each command's section
+begins with a level-2 header of the exact form `## murtaugh <invocation>`
+(e.g. `## murtaugh jobs run`). `help.Section` returns everything from that header
+up to the next `## ` or `# ` line, and accepts both the spaced CLI form
+(`jobs run`) and the dotted registry form (`jobs.run`). Top-of-file overview
+material uses level-1 (`# `) headers so it is never mistaken for a command
+section. When you add a command, follow that header convention or `help.Section`
+will not find it.
+
+Because tool flag descriptions also live in each tool's `InputSchema`, keep the
+two in agreement: the schema `Description` is the one-line MCP hint; the
+`cli-help.md` section is the full human/agent-facing manual (required/optional,
+defaults, mutual exclusions, the boolean-needs-a-value CLI quirk, examples).
 
 ## Lifecycle (entrypoint → shutdown)
 
@@ -291,10 +326,12 @@ list (max 5) or no `link_shared` event is delivered.
 ## Assets and embedding (`internal/../assets`)
 
 `assets/assets.go` embeds reference files via
-`//go:embed slack.yaml agents.yaml jobs.yaml templates skills`.
+`//go:embed slack.yaml agents.yaml jobs.yaml cli-help.md templates skills`.
 Block Kit templates live under `templates/` (`ping/`, `unfurl/`); bundled agent
 skills live under `skills/`, each a `SKILL.md` + `reference/` + `examples/` tree.
-The `templates` and `skills` directories are embedded recursively.
+`cli-help.md` is the canonical command reference (see "CLI/MCP command
+reference" above). The `templates` and `skills` directories are embedded
+recursively.
 
 The embedded FS is the **fallback** template source: the workflow engine and unfurl renderer both
 look in the config directory first, then `assets.FS` — so a config template path
@@ -325,6 +362,9 @@ to `.agents/skills` so both ACP and Claude-based agents discover the bundled ski
 2. **Keep config changes complete.** A new config field means: struct field +
    `yaml` tag, `Validate()` coverage, an example in the relevant `assets/*.yaml`,
    a README note, and tests in `config_test.go`.
+2b. **Keep command docs complete.** A new/changed/removed tool or flag means
+   updating its section in `assets/cli-help.md` (and the command list in
+   `internal/help/help_test.go`). See "Adding a new tool".
 3. **Trace downstream effects.** New Slack events need a `handleEvent` /
    `handleEventsAPI` case; new ACP event types need handling in `ChatHandler`.
 4. **Respect the JSON contracts.** Templates and `run` handlers must emit valid

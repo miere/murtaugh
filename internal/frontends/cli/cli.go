@@ -83,5 +83,5 @@ func (f *Frontend) resolve(args []string) (string, []string, error) {
 			return dotted, args[2:], nil
 		}
 	}
-	return "", nil, fmt.Errorf("unknown command: %s", args[0])
+	return "", nil, fmt.Errorf("unknown command: %s (run `murtaugh help` to list commands)", args[0])
 }
