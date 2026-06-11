@@ -1,0 +1,24 @@
+# Example jobs.yaml showing all three trigger modes.
+# Copy entries into your real ~/.config/murtaugh/jobs.yaml and edit.
+
+jobs:
+  # 1. MANUAL — neither schedule nor every. Runs only when invoked:
+  #    murtaugh jobs run --name greet
+  greet:
+    command: /bin/echo
+    args: ["hello from murtaugh"]
+
+  # 2. CRON — runs automatically on a 5-field cron expression.
+  #    Here: 02:00 every day. Requires the slack gateway to be running.
+  nightly-backup:
+    command: /usr/local/bin/backup.sh
+    workdir: /var/data
+    timeout: 30m
+    schedule: "0 2 * * *"
+
+  # 3. INTERVAL — runs automatically every fixed duration.
+  #    Here: once an hour. Mutually exclusive with schedule.
+  hourly-sync:
+    command: /usr/bin/python3
+    args: ["/Users/you/.config/murtaugh/automations/sync.py"]
+    every: 1h
