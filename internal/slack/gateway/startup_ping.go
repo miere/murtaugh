@@ -78,7 +78,7 @@ func (n *SlackStartupNotifier) resolveAdminUserID(ctx context.Context) (string, 
 }
 
 func loadStartupPingBlocks() ([]slack.Block, error) {
-	data, err := assets.FS.ReadFile("ping/01-ping.json")
+	data, err := assets.FS.ReadFile("templates/ping/01-ping.json")
 	if err != nil {
 		return nil, fmt.Errorf("read startup ping asset: %w", err)
 	}

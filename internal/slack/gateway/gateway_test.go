@@ -281,7 +281,7 @@ func newTemplateUnfurlHandler(t *testing.T, api Unfurler) *LinkUnfurlHandler {
 	matcher, err := unfurl.NewMatcher(map[string]config.UnfurlRuleConfig{
 		"github-pr": {
 			Match:  config.UnfurlMatchConfig{Domain: "github.com", URLPattern: `^https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/pull/(?P<number>\d+)`},
-			Unfurl: config.UnfurlActionConfig{Template: "unfurl/github-pr.json"},
+			Unfurl: config.UnfurlActionConfig{Template: "templates/unfurl/github-pr.json"},
 		},
 	})
 	if err != nil {

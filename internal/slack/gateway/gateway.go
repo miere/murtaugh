@@ -116,10 +116,18 @@ func New(cfg config.Config, logger *slog.Logger) *Gateway {
 	if cfg.ACP.Enabled {
 		sessions = make(map[string]ChatSessionManager)
 		for name, profile := range cfg.Agents {
+			// Default an agent's working directory to the workspace (the
+			// config dir, e.g. ~/.config/murtaugh) when it leaves workdir
+			// unset, so agents start where the bundled skills and templates
+			// live and can auto-discover them.
+			workDir := profile.WorkDir
+			if strings.TrimSpace(workDir) == "" {
+				workDir = cfg.BaseDir
+			}
 			client := acp.NewProcessClient(acp.ProcessOptions{
 				Command: profile.Command,
 				Args:    profile.Args,
-				WorkDir: profile.WorkDir,
+				WorkDir: workDir,
 				Logger:  logger,
 			})
 			sessions[name] = acp.NewSessionManager(

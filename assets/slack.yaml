@@ -34,11 +34,11 @@ workflow-rules:
         - action_id: ping
     trigger:
       - reply-to-slack:
-          template: ping/02-pong.json
+          template: templates/ping/02-pong.json
 
 # If workflow-rules is omitted entirely, Murtaugh still installs a built-in
-# ping button workflow that renders ping/02-pong.json in the original message
-# thread.
+# ping button workflow that renders templates/ping/02-pong.json in the original
+# message thread.
 
 # Custom link unfurling. Requires the link_shared bot event plus the links:read
 # and chat:write scopes, and each match.domain must be registered in the Slack
@@ -49,4 +49,4 @@ unfurl-rules:
       domain: github.com
       url_pattern: '^https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/pull/(?P<number>\d+)'
     unfurl:
-      template: unfurl/github-pr.json
+      template: templates/unfurl/github-pr.json
