@@ -60,9 +60,9 @@ func TestAppMentionEventRoutesToACPChat(t *testing.T) {
 	sessions := map[string]ChatSessionManager{"default": fakeSessions}
 	resolver := func(req ChatRequest) string { return "default" }
 	app := &Gateway{
-		chat:        NewChatHandler(api, sessions, resolver, time.Hour, 1, nil),
-		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
-		cfg:         config.ConfigurationConfig{AllowedUsers: []string{"U1"}},
+		chat:   NewChatHandler(api, sessions, resolver, time.Hour, 1, nil),
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		cfg:    config.ConfigurationConfig{AllowedUsers: []string{"U1"}},
 	}
 	app.handleEventsAPI(socketmode.Event{Type: socketmode.EventTypeEventsAPI, Data: slackevents.EventsAPIEvent{
 		TeamID:     "T1",
