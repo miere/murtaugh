@@ -14,9 +14,10 @@ import (
 
 const defaultTaskUpdateInterval = 1 * time.Second
 
-// defaultPlanTitle labels the Plan block that groups an agent's task cards
-// when no more specific title (e.g. the user's request) has been supplied.
-const defaultPlanTitle = "Tasks"
+// defaultPlanTitle labels the Plan block that groups an agent's task cards.
+// It is a fixed, user-facing label rather than the user's prompt: a prompt can
+// be long, multi-line, and is meaningless as a heading once truncated.
+const defaultPlanTitle = "Task list"
 
 // defaultTaskTitle is the fallback card title when neither the event nor a
 // previously-seen update carried one.
@@ -35,6 +36,7 @@ type TaskCardWriter struct {
 	mu        sync.Mutex
 	lastFlush map[string]time.Time
 	titles    map[string]string
+	statuses  map[string]slack.TaskCardStatus
 	planTitle string
 	planOpen  bool
 }
@@ -55,6 +57,7 @@ func NewTaskCardWriter(api StreamAPI, streamer *StreamWriter, interval time.Dura
 		interval:  interval,
 		lastFlush: make(map[string]time.Time),
 		titles:    make(map[string]string),
+		statuses:  make(map[string]slack.TaskCardStatus),
 		planTitle: defaultPlanTitle,
 	}
 }
@@ -78,6 +81,7 @@ func (w *TaskCardWriter) SetPlanTitle(title string) {
 // unless the status is a terminal state (complete or error) in which case the
 // update is always sent.
 func (w *TaskCardWriter) Update(ctx context.Context, taskID, title string, status slack.TaskCardStatus) error {
+	w.recordStatus(taskID, status)
 	if !w.shouldFlush(taskID, status) {
 		return nil
 	}
@@ -141,7 +145,7 @@ func (w *TaskCardWriter) UpdateFromEvent(ctx context.Context, event *acp.TaskEve
 	if event == nil {
 		return nil
 	}
-	status := mapTaskStatus(event.Status)
+	status := w.resolveStatus(event.ID, event.Status)
 	title := w.titleFor(event.ID, event.Title)
 	if title == "" {
 		title = defaultTaskTitle
@@ -150,6 +154,31 @@ func (w *TaskCardWriter) UpdateFromEvent(ctx context.Context, event *acp.TaskEve
 		return err
 	}
 	return nil
+}
+
+// resolveStatus maps an ACP task status to its Slack equivalent, but only when
+// the agent actually reported a recognised status. ACP agents (e.g. goose)
+// emit tool_call_update notifications that refine only the title or content and
+// carry no status; mapping those through mapTaskStatus would default them to
+// in_progress and silently flip a card that had already completed back to a
+// spinner. Instead we reuse the last status seen for the task, falling back to
+// in_progress only for the very first update.
+func (w *TaskCardWriter) resolveStatus(taskID string, status acp.TaskStatus) slack.TaskCardStatus {
+	if mapped, ok := knownTaskStatus(status); ok {
+		return mapped
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if last, ok := w.statuses[taskID]; ok {
+		return last
+	}
+	return slack.TaskCardStatusInProgress
+}
+
+func (w *TaskCardWriter) recordStatus(taskID string, status slack.TaskCardStatus) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.statuses[taskID] = status
 }
 
 func (w *TaskCardWriter) titleFor(taskID, title string) string {
@@ -182,18 +211,29 @@ func (w *TaskCardWriter) recordFlush(taskID string, t time.Time) {
 }
 
 func mapTaskStatus(status acp.TaskStatus) slack.TaskCardStatus {
+	if mapped, ok := knownTaskStatus(status); ok {
+		return mapped
+	}
+	return slack.TaskCardStatusInProgress
+}
+
+// knownTaskStatus maps the ACP task statuses we recognise to their Slack
+// equivalents. The boolean distinguishes "the agent reported this status" from
+// "fell through to a default" — an empty or unrecognised status returns false
+// so callers can preserve a card's previous state instead of overwriting it.
+func knownTaskStatus(status acp.TaskStatus) (slack.TaskCardStatus, bool) {
 	switch status {
 	case acp.TaskStatusPending:
-		return slack.TaskCardStatusPending
+		return slack.TaskCardStatusPending, true
 	case acp.TaskStatusInProgress:
-		return slack.TaskCardStatusInProgress
+		return slack.TaskCardStatusInProgress, true
 	case acp.TaskStatusComplete:
-		return slack.TaskCardStatusComplete
+		return slack.TaskCardStatusComplete, true
 	case acp.TaskStatusFailed:
-		return slack.TaskCardStatusError
+		return slack.TaskCardStatusError, true
 	case acp.TaskStatusCancelled:
-		return slack.TaskCardStatusError
+		return slack.TaskCardStatusError, true
 	default:
-		return slack.TaskCardStatusInProgress
+		return "", false
 	}
 }

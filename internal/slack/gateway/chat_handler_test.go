@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"context"
-	"strings"
 	"testing"
 	"time"
 
@@ -71,6 +70,59 @@ func (f *fakeChatSessionsWithCompletedTaskThenText) Prompt(_ context.Context, ke
 	ch <- acp.Event{Type: acp.EventComplete}
 	close(ch)
 	return ch, nil
+}
+
+// fakeChatSessionsRenamedTask reproduces goose's tool-call lifecycle: the tool
+// starts running with a raw title, the agent then refines the title in a
+// follow-up notification that carries no status, and the run finishes without
+// an explicit terminal update for the tool. The renamed task must still be
+// finalised as complete, not stranded mid-spinner (which Slack renders as a
+// warning once the plan closes).
+type fakeChatSessionsRenamedTask struct{}
+
+func (f *fakeChatSessionsRenamedTask) Prompt(_ context.Context, _ acp.ConversationKey, _ acp.SessionMetadata, _ acp.PromptRequest) (<-chan acp.Event, error) {
+	ch := make(chan acp.Event, 4)
+	ch <- acp.Event{Type: acp.EventTask, Task: &acp.TaskEvent{ID: "task-1", Title: "edit - /tmp/x.py", Status: acp.TaskStatusInProgress}}
+	ch <- acp.Event{Type: acp.EventTask, Task: &acp.TaskEvent{ID: "task-1", Title: "editing python command"}}
+	ch <- acp.Event{Type: acp.EventComplete}
+	close(ch)
+	return ch, nil
+}
+
+func (f *fakeChatSessionsRenamedTask) Lookup(acp.ConversationKey) (string, bool) { return "", false }
+func (f *fakeChatSessionsRenamedTask) Cancel(context.Context, string) error      { return nil }
+
+func TestChatHandlerFinalisesRenamedTaskOnSuccess(t *testing.T) {
+	api := &fakeStreamAPI{}
+	sessions := map[string]ChatSessionManager{"default": &fakeChatSessionsRenamedTask{}}
+	resolver := func(req ChatRequest) string { return "default" }
+	handler := NewChatHandler(api, sessions, resolver, time.Hour, 5, nil)
+	if err := handler.Handle(context.Background(), ChatRequest{TeamID: "T1", ChannelID: "C1", UserID: "U1", MessageTS: "123.4", Text: "hi", Source: "test"}); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	var statuses []slack.TaskCardStatus
+	for _, opts := range append(api.startOptions, api.appendOptions...) {
+		chunks, err := extractChunksFromOptions(opts...)
+		if err != nil {
+			t.Fatalf("extract chunks: %v", err)
+		}
+		for _, task := range taskChunks(chunks) {
+			if task.ID == "task-1" {
+				statuses = append(statuses, task.Status)
+			}
+		}
+	}
+	if len(statuses) == 0 {
+		t.Fatalf("expected task-1 updates, got none")
+	}
+	if last := statuses[len(statuses)-1]; last != slack.TaskCardStatusComplete {
+		t.Fatalf("expected renamed task-1 to end complete, got %q (all: %v)", last, statuses)
+	}
+	for _, s := range statuses {
+		if s == slack.TaskCardStatusError {
+			t.Fatalf("renamed task-1 was painted error despite a successful run: %v", statuses)
+		}
+	}
 }
 
 func TestChatHandlerStreamsACPEventsToSlack(t *testing.T) {
@@ -356,16 +408,6 @@ func TestChatHandlerClearsStatusOnFreshContextAfterCancel(t *testing.T) {
 	_, params := api.statusSnapshot()
 	if len(params) == 0 || params[len(params)-1].Status != "" {
 		t.Fatalf("expected the final status call to clear the indicator on a fresh context, got %#v", params)
-	}
-}
-
-func TestPlanTitleCollapsesAndTruncates(t *testing.T) {
-	if got := planTitle("  hello   world\nfoo  "); got != "hello world foo" {
-		t.Fatalf("expected whitespace-collapsed title, got %q", got)
-	}
-	long := planTitle(strings.Repeat("a", 200))
-	if !strings.HasSuffix(long, "…") || len([]rune(long)) > 81 {
-		t.Fatalf("expected truncated title with ellipsis, got %q (len %d)", long, len([]rune(long)))
 	}
 }
 
