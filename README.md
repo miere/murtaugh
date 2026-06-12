@@ -52,7 +52,7 @@ architecture, writing starter config files, setting up a LaunchAgent, and
 optionally wiring Murtaugh into your MCP client.
 
 ~~~sh
-curl -fsSL https://github.com/miere/murtaugh-dev-toolkit/releases/download/v0.0.2/install_macos.sh | bash
+curl -fsSL https://github.com/miere/murtaugh-dev-toolkit/releases/latest/download/install_macos.sh | bash
 ~~~
 
 Common flags:
