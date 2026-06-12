@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -138,14 +139,27 @@ func TestAppMentionEventIgnoresUnauthorizedUser(t *testing.T) {
 }
 
 type recordingWorkflow struct {
+	// mu guards the recorded fields: Gateway.handleInteractive dispatches Execute
+	// from a goroutine, so a test waiting on it reads these concurrently.
+	mu       sync.Mutex
 	calls    int
 	lastUser string
 }
 
 func (r *recordingWorkflow) Execute(_ context.Context, interaction slack.InteractionCallback) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.calls++
 	r.lastUser = interaction.User.ID
 	return nil
+}
+
+// stats returns the recorded call count and last user, safe to read while a
+// handler goroutine may still be invoking Execute.
+func (r *recordingWorkflow) stats() (int, string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls, r.lastUser
 }
 
 func TestHandleInteractiveIgnoresUnauthorizedUser(t *testing.T) {
@@ -186,17 +200,21 @@ func TestHandleInteractiveAllowsAllowlistedUser(t *testing.T) {
 	})
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		if wf.calls > 0 {
+		if calls, _ := wf.stats(); calls > 0 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if wf.calls != 1 || wf.lastUser != "UALICE00" {
-		t.Fatalf("expected allowlisted interactive callback to reach workflow, got calls=%d user=%q", wf.calls, wf.lastUser)
+	if calls, lastUser := wf.stats(); calls != 1 || lastUser != "UALICE00" {
+		t.Fatalf("expected allowlisted interactive callback to reach workflow, got calls=%d user=%q", calls, lastUser)
 	}
 }
 
 type recordingRestart struct {
+	// mu guards the recorded fields: the restart-suggestion interactive path
+	// fires trigger from a goroutine (Gateway.handleInteractive), so a test that
+	// waits on it reads these fields concurrently with the write.
+	mu          sync.Mutex
 	calls       int
 	lastSource  string
 	lastUser    string
@@ -206,12 +224,22 @@ type recordingRestart struct {
 }
 
 func (r *recordingRestart) trigger(source, userID, channel, reason string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.calls++
 	r.lastSource = source
 	r.lastUser = userID
 	r.lastChannel = channel
 	r.lastReason = reason
 	return r.accept
+}
+
+// callCount returns how many times trigger has fired, safe to call while a
+// handler goroutine may still be invoking trigger.
+func (r *recordingRestart) callCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls
 }
 
 func TestHandleSlashCommandRestartDeniesNonAdmin(t *testing.T) {
