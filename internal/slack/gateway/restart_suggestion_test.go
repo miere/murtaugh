@@ -317,15 +317,15 @@ func TestHandleInteractiveRoutesSuggestionAwayFromWorkflow(t *testing.T) {
 	})
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		if restart.calls > 0 {
+		if restart.callCount() > 0 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if wf.calls != 0 {
-		t.Fatalf("expected workflow engine to be bypassed for restart-suggestion clicks, got %d calls", wf.calls)
+	if calls, _ := wf.stats(); calls != 0 {
+		t.Fatalf("expected workflow engine to be bypassed for restart-suggestion clicks, got %d calls", calls)
 	}
-	if restart.calls != 1 {
-		t.Fatalf("expected restart coordinator to fire once for routed confirm, got %d", restart.calls)
+	if got := restart.callCount(); got != 1 {
+		t.Fatalf("expected restart coordinator to fire once for routed confirm, got %d", got)
 	}
 }

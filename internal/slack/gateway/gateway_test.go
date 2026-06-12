@@ -70,7 +70,7 @@ func TestAppMentionEventRoutesToACPChat(t *testing.T) {
 	}})
 
 	deadline := time.After(time.Second)
-	for fakeSessions.prompt == "" {
+	for fakeSessions.promptText() == "" {
 		select {
 		case <-deadline:
 			t.Fatal("expected app mention to route to chat")
@@ -78,8 +78,8 @@ func TestAppMentionEventRoutesToACPChat(t *testing.T) {
 			time.Sleep(time.Millisecond)
 		}
 	}
-	if fakeSessions.prompt != "hello" {
-		t.Fatalf("unexpected prompt: %q", fakeSessions.prompt)
+	if got := fakeSessions.promptText(); got != "hello" {
+		t.Fatalf("unexpected prompt: %q", got)
 	}
 }
 

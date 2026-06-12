@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,18 +13,33 @@ import (
 )
 
 type fakeChatSessions struct {
+	// mu guards key/prompt: gateway-level tests drive Prompt from the startChat
+	// goroutine and poll these fields, so the write and read race without it.
+	// Tests that call ChatHandler.Handle synchronously may read the fields
+	// directly — the happens-before is established by the sequential call.
+	mu     sync.Mutex
 	key    acp.ConversationKey
 	prompt string
 }
 
 func (f *fakeChatSessions) Prompt(_ context.Context, key acp.ConversationKey, _ acp.SessionMetadata, req acp.PromptRequest) (<-chan acp.Event, error) {
+	f.mu.Lock()
 	f.key = key
 	f.prompt = req.Text
+	f.mu.Unlock()
 	ch := make(chan acp.Event, 2)
 	ch <- acp.Event{Type: acp.EventText, Text: "hello from agent"}
 	ch <- acp.Event{Type: acp.EventComplete}
 	close(ch)
 	return ch, nil
+}
+
+// promptText returns the last prompt text, safe to read while the startChat
+// goroutine may still be invoking Prompt.
+func (f *fakeChatSessions) promptText() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.prompt
 }
 
 func (f *fakeChatSessions) Lookup(acp.ConversationKey) (string, bool) { return "", false }
