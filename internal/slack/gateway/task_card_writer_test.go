@@ -164,6 +164,57 @@ func TestTaskCardWriterFailAndComplete(t *testing.T) {
 	}
 }
 
+func TestTaskCardWriterPreservesStatusOnTitleOnlyUpdate(t *testing.T) {
+	api := &fakeStreamAPI{}
+	streamer := NewStreamWriter(api, "C1", StreamWriterOptions{Interval: time.Hour, MinChars: 5})
+	writer := NewTaskCardWriter(api, streamer, time.Millisecond, nil)
+	ctx := context.Background()
+
+	// A tool starts running...
+	if err := writer.UpdateFromEvent(ctx, &acp.TaskEvent{ID: "call-1", Title: "edit - /tmp/x.py", Status: acp.TaskStatusInProgress}); err != nil {
+		t.Fatalf("UpdateFromEvent returned error: %v", err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	// ...then the agent refines only the title, sending no status (goose does
+	// this for tool_call_update notifications). The card must keep its
+	// in_progress status rather than being defaulted back to a fresh spinner.
+	if err := writer.UpdateFromEvent(ctx, &acp.TaskEvent{ID: "call-1", Title: "editing python command"}); err != nil {
+		t.Fatalf("UpdateFromEvent returned error: %v", err)
+	}
+	chunks, err := extractChunksFromOptions(api.appendOptions[0]...)
+	if err != nil {
+		t.Fatalf("extract chunks: %v", err)
+	}
+	chunk := chunks[0].(slack.TaskUpdateChunk)
+	if chunk.Title != "editing python command" || chunk.Status != slack.TaskCardStatusInProgress {
+		t.Fatalf("expected refined title with preserved in_progress status, got %+v", chunk)
+	}
+}
+
+func TestTaskCardWriterTitleUpdateDoesNotRegressCompletedCard(t *testing.T) {
+	api := &fakeStreamAPI{}
+	streamer := NewStreamWriter(api, "C1", StreamWriterOptions{Interval: time.Hour, MinChars: 5})
+	writer := NewTaskCardWriter(api, streamer, time.Millisecond, nil)
+	ctx := context.Background()
+
+	if err := writer.UpdateFromEvent(ctx, &acp.TaskEvent{ID: "call-1", Title: "Read file", Status: acp.TaskStatusComplete}); err != nil {
+		t.Fatalf("UpdateFromEvent returned error: %v", err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	// A late status-less update must not knock a completed card back to a spinner.
+	if err := writer.UpdateFromEvent(ctx, &acp.TaskEvent{ID: "call-1", Title: "read /tmp/x.py"}); err != nil {
+		t.Fatalf("UpdateFromEvent returned error: %v", err)
+	}
+	chunks, err := extractChunksFromOptions(api.appendOptions[0]...)
+	if err != nil {
+		t.Fatalf("extract chunks: %v", err)
+	}
+	chunk := chunks[0].(slack.TaskUpdateChunk)
+	if chunk.Status != slack.TaskCardStatusComplete {
+		t.Fatalf("expected status to stay complete, got %+v", chunk)
+	}
+}
+
 func TestTaskCardWriterReusesTitleForCompletionUpdate(t *testing.T) {
 	api := &fakeStreamAPI{}
 	streamer := NewStreamWriter(api, "C1", StreamWriterOptions{Interval: time.Hour, MinChars: 5})

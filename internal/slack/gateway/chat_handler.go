@@ -122,7 +122,6 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest) (retErr error
 		retErr = nil
 	}()
 	taskWriter := NewTaskCardWriter(h.api, writer, 0, h.logger)
-	taskWriter.SetPlanTitle(planTitle(prompt))
 	if err := h.api.SetAssistantThreadsStatusContext(ctx, slack.AssistantThreadsSetStatusParameters{
 		ChannelID: req.ChannelID,
 		ThreadTS:  streamThreadTS,
@@ -194,10 +193,17 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest) (retErr error
 			if err := taskWriter.UpdateFromEvent(ctx, event.Task); err != nil {
 				h.logger.Warn("failed to send task update", "error", err, "task_id", event.Task.ID)
 			}
-			if event.Task.Status == acp.TaskStatusInProgress || event.Task.Status == acp.TaskStatusPending {
-				runningTasks[event.Task.ID] = event.Task.Status
-			} else {
+			// Only an explicit terminal status retires a task from the running
+			// set. An update that merely refines the title or content carries no
+			// status (empty/unknown); treating that as "done" used to drop the
+			// task from runningTasks, so finalizeTasks never resolved it and the
+			// card was stranded mid-spinner — which Slack paints with a warning
+			// once the plan closes. Keep tracking it until a real terminal
+			// status arrives or the agent completes.
+			if isTerminalTaskStatus(event.Task.Status) {
 				delete(runningTasks, event.Task.ID)
+			} else {
+				runningTasks[event.Task.ID] = event.Task.Status
 			}
 		case acp.EventError:
 			// A caller interrupt (new message / /stop) surfaces here as a
@@ -346,20 +352,17 @@ func conversationKey(req ChatRequest) acp.ConversationKey {
 	return acp.ConversationKey{TeamID: req.TeamID, ChannelID: req.ChannelID, ThreadTS: threadTS}
 }
 
-// planTitle derives a short, single-line title for the Plan block that groups
-// the agent's task cards, from the user's prompt. Long or multi-line prompts
-// are collapsed and truncated so the plan header stays compact.
-func planTitle(prompt string) string {
-	title := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(prompt, "\r", " "), "\n", " "))
-	for strings.Contains(title, "  ") {
-		title = strings.ReplaceAll(title, "  ", " ")
+// isTerminalTaskStatus reports whether an ACP task status is a final outcome.
+// A task in any other state — pending, in_progress, or an update that omitted
+// its status — is still running and must stay tracked so it is finalised
+// rather than abandoned mid-flight.
+func isTerminalTaskStatus(status acp.TaskStatus) bool {
+	switch status {
+	case acp.TaskStatusComplete, acp.TaskStatusFailed, acp.TaskStatusCancelled:
+		return true
+	default:
+		return false
 	}
-	// Truncate on rune boundaries so a multibyte character is never split.
-	const maxRunes = 80
-	if runes := []rune(title); len(runes) > maxRunes {
-		title = strings.TrimSpace(string(runes[:maxRunes])) + "…"
-	}
-	return title
 }
 
 func streamThreadTS(req ChatRequest) string {
