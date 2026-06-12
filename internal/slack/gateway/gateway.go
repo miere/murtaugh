@@ -39,7 +39,6 @@ type Gateway struct {
 	workflow        workflowDispatcher
 	chat            *ChatHandler
 	chatSessions    map[string]ChatSessionManager
-	chatTimeout     time.Duration
 	chatWarmTimeout time.Duration
 	// cancelGrace is how long the interrupt path waits after asking the
 	// ACP agent to cancel its in-flight prompt before hard-cancelling the
@@ -157,7 +156,7 @@ func New(cfg config.Config, logger *slog.Logger) *Gateway {
 			cfg.ACP.EffectiveStreamAppendInterval(),
 			cfg.ACP.EffectiveStreamMinChunkChars(),
 			logger,
-		)
+		).WithIdleTimeout(cfg.ACP.EffectiveRequestTimeout())
 	}
 	var unfurlHandler *LinkUnfurlHandler
 	if len(cfg.UnfurlRules) > 0 {
@@ -176,7 +175,6 @@ func New(cfg config.Config, logger *slog.Logger) *Gateway {
 		workflow:        workflow.NewEngine(cfg, workflow.Options{Logger: logger}),
 		chat:            chat,
 		chatSessions:    sessions,
-		chatTimeout:     cfg.ACP.EffectiveRequestTimeout(),
 		chatWarmTimeout: cfg.ACP.EffectiveStartupTimeout(),
 		cancelGrace:     cfg.ACP.EffectiveCancelGracePeriod(),
 		inFlight:        NewInFlightRegistry(),
@@ -681,7 +679,11 @@ func (a *Gateway) startChat(parent context.Context, req ChatRequest) {
 		a.notifyFollowUpDeferred(parent, req)
 		return
 	}
-	ctx, cancelCtx := context.WithTimeout(parent, a.chatTimeout)
+	// No total wall-clock deadline here: a turn is bounded by inactivity inside
+	// ChatHandler (WithIdleTimeout), so a long-but-progressing response is never
+	// killed mid-flight. This context stays cancellable purely for the interrupt
+	// and /stop paths.
+	ctx, cancelCtx := context.WithCancel(parent)
 	cancelFunc := a.buildInterruptCancel(key, agent, cancelCtx)
 	_, previous := a.inFlight.Register(key, cancelFunc, agent)
 	if previous != nil {

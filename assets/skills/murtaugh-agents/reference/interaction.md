@@ -17,8 +17,12 @@ message doesn't spawn a second reply.
 The reply streams into the thread: Murtaugh edits the message as chunks arrive,
 batched by `stream_append_interval` and `stream_min_chunk_chars` (see
 `reference/agents-yaml.md`) so the edit cadence stays readable rather than
-flickering token-by-token. Each response is bounded by `request_timeout`
-(default 10m).
+flickering token-by-token. Each turn is bounded by `request_timeout`
+(default 10m) as an *idle* timeout — the budget resets on every chunk or task
+update, so a long turn that keeps making progress is never cut off; only an
+agent that goes silent for the whole window is treated as stalled. When that
+happens Murtaugh asks the agent to stop and posts a notice rather than leaving a
+silent, dead message behind.
 
 ## Interrupting & stopping
 
