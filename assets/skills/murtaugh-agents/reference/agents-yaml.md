@@ -31,7 +31,7 @@ applies when the field is omitted (the bootstrapped file ships tuned values).
 |---|---|---|
 | `enabled` | `false` | Master switch for DM/mention chat. Off → DMs and mentions are ignored. |
 | `startup_timeout` | `10s` | Budget for the agent warmup probe at daemon start. |
-| `request_timeout` | `10m` | Hard deadline for each chat response. |
+| `request_timeout` | `10m` | Idle timeout per chat turn: max time with **no agent activity** before the turn is treated as stalled. Resets on every chunk/task update, so a long but progressing response is never cut off. |
 | `session_idle_timeout` | `30m` | How long an idle ACP session is kept before teardown. |
 | `max_sessions` | `100` | Concurrent session cap per agent. |
 | `stream_append_interval` | `250ms` | How often buffered chunks are flushed to Slack. |

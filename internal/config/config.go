@@ -52,8 +52,12 @@ type CommandConfig struct {
 }
 
 type ACPConfig struct {
-	Enabled              bool   `yaml:"enabled"`
-	StartupTimeout       string `yaml:"startup_timeout"`
+	Enabled        bool   `yaml:"enabled"`
+	StartupTimeout string `yaml:"startup_timeout"`
+	// RequestTimeout bounds a chat turn by INACTIVITY, not total wall-clock: the
+	// timer resets on every chunk or task update the agent emits, so a long turn
+	// that keeps making progress is never killed mid-flight. Only an agent that
+	// goes silent for this long is treated as stalled.
 	RequestTimeout       string `yaml:"request_timeout"`
 	SessionIdleTimeout   string `yaml:"session_idle_timeout"`
 	MaxSessions          int    `yaml:"max_sessions"`
@@ -445,6 +449,9 @@ func (c ACPConfig) EffectiveStartupTimeout() time.Duration {
 	return durationOrDefault(c.StartupTimeout, 10*time.Second)
 }
 
+// EffectiveRequestTimeout is the per-turn idle timeout: the longest a chat turn
+// may go with no agent activity before it is treated as stalled. It is reset by
+// every event, so it bounds inactivity rather than total turn duration.
 func (c ACPConfig) EffectiveRequestTimeout() time.Duration {
 	return durationOrDefault(c.RequestTimeout, 10*time.Minute)
 }

@@ -124,7 +124,6 @@ func TestAppMentionEventIgnoresUnauthorizedUser(t *testing.T) {
 	sessions := &fakeChatSessions{}
 	app := &Gateway{
 		chat:        NewChatHandler(&fakeStreamAPI{}, map[string]ChatSessionManager{"default": sessions}, func(ChatRequest) string { return "default" }, time.Hour, 1, nil),
-		chatTimeout: time.Second,
 		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 		cfg:         config.ConfigurationConfig{AllowedUsers: []string{"UALICE00"}},
 	}
@@ -296,7 +295,6 @@ func TestDMEventIgnoresUnauthorizedUser(t *testing.T) {
 	sessions := &fakeChatSessions{}
 	app := &Gateway{
 		chat:        NewChatHandler(&fakeStreamAPI{}, map[string]ChatSessionManager{"default": sessions}, func(ChatRequest) string { return "default" }, time.Hour, 1, nil),
-		chatTimeout: time.Second,
 		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 		cfg:         config.ConfigurationConfig{AllowedUsers: []string{"UALICE00"}},
 	}

@@ -61,7 +61,6 @@ func TestAppMentionEventRoutesToACPChat(t *testing.T) {
 	resolver := func(req ChatRequest) string { return "default" }
 	app := &Gateway{
 		chat:        NewChatHandler(api, sessions, resolver, time.Hour, 1, nil),
-		chatTimeout: time.Second,
 		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 		cfg:         config.ConfigurationConfig{AllowedUsers: []string{"U1"}},
 	}
@@ -118,7 +117,6 @@ func TestDuplicateAppMentionStartsChatOnce(t *testing.T) {
 	resolver := func(req ChatRequest) string { return "default" }
 	app := &Gateway{
 		chat:         NewChatHandler(api, sessions, resolver, time.Hour, 1, nil),
-		chatTimeout:  time.Second,
 		inFlight:     NewInFlightRegistry(),
 		recentEvents: newEventDedup(time.Minute),
 		logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -190,7 +188,6 @@ func TestNonInterruptibleAgentDropsFollowUpWhileInFlight(t *testing.T) {
 	app := &Gateway{
 		chat:         NewChatHandler(api, sessions, resolver, time.Hour, 1, discardLogger()),
 		chatSessions: sessions,
-		chatTimeout:  2 * time.Second,
 		inFlight:     NewInFlightRegistry(),
 		recentEvents: newEventDedup(time.Minute),
 		messaging:    msg,

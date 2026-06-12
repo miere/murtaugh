@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -560,5 +561,133 @@ func TestChatHandlerRequiresSourceMessageTimestampForStreaming(t *testing.T) {
 	err := handler.Handle(context.Background(), ChatRequest{TeamID: "T1", ChannelID: "C1", UserID: "U1", Text: "hi", Source: "test"})
 	if err == nil || err.Error() != "Slack streaming requires a source message timestamp" {
 		t.Fatalf("expected source timestamp error, got: %v", err)
+	}
+}
+
+// stallingChatSessions emits a task and a text chunk, then goes silent until
+// its prompt context is cancelled — a stalled agent that never completes. It
+// records session/cancel calls and hands out a session id so the idle-timeout
+// path can look one up.
+type stallingChatSessions struct {
+	sessionID string
+	cancelled []string
+}
+
+func (f *stallingChatSessions) Prompt(ctx context.Context, _ acp.ConversationKey, _ acp.SessionMetadata, _ acp.PromptRequest) (<-chan acp.Event, error) {
+	ch := make(chan acp.Event)
+	go func() {
+		defer close(ch)
+		select {
+		case ch <- acp.Event{Type: acp.EventTask, Task: &acp.TaskEvent{ID: "task-1", Title: "Working", Status: acp.TaskStatusInProgress}}:
+		case <-ctx.Done():
+			return
+		}
+		select {
+		case ch <- acp.Event{Type: acp.EventText, Text: "partial reply"}:
+		case <-ctx.Done():
+			return
+		}
+		<-ctx.Done() // stall until the handler gives up and cancels the prompt
+	}()
+	return ch, nil
+}
+
+func (f *stallingChatSessions) Lookup(acp.ConversationKey) (string, bool) { return f.sessionID, true }
+func (f *stallingChatSessions) Cancel(_ context.Context, sessionID string) error {
+	f.cancelled = append(f.cancelled, sessionID)
+	return nil
+}
+
+func TestChatHandlerIdleTimeoutStopsAgentAndPostsNotice(t *testing.T) {
+	api := &fakeStreamAPI{}
+	fake := &stallingChatSessions{sessionID: "sess-1"}
+	sessions := map[string]ChatSessionManager{"default": fake}
+	resolver := func(req ChatRequest) string { return "default" }
+	handler := NewChatHandler(api, sessions, resolver, time.Hour, 1, nil).WithIdleTimeout(50 * time.Millisecond)
+
+	err := handler.Handle(context.Background(), ChatRequest{TeamID: "T1", ChannelID: "C1", UserID: "U1", MessageTS: "123.4", Text: "hi", Source: "test"})
+	if err != nil {
+		t.Fatalf("expected Handle to return nil on idle timeout, got: %v", err)
+	}
+	// The agent was asked to stop so it stops burning undeliverable work.
+	if len(fake.cancelled) != 1 || fake.cancelled[0] != "sess-1" {
+		t.Fatalf("expected one session/cancel for sess-1, got %v", fake.cancelled)
+	}
+	// A real, honest notice was posted rather than a silent dead UI.
+	var posted strings.Builder
+	for _, opts := range append(api.startOptions, api.appendOptions...) {
+		if text, err := extractMarkdownTextFromOptions(opts...); err == nil {
+			posted.WriteString(text)
+		}
+	}
+	if !strings.Contains(posted.String(), "asked it to stop") {
+		t.Fatalf("expected an idle-timeout notice, got markdown: %q", posted.String())
+	}
+	// The stalled task card is never repainted red: the agent did not fail.
+	for _, opts := range append(api.startOptions, api.appendOptions...) {
+		chunks, cerr := extractChunksFromOptions(opts...)
+		if cerr != nil {
+			t.Fatalf("extract chunks: %v", cerr)
+		}
+		for _, task := range taskChunks(chunks) {
+			if task.Status == slack.TaskCardStatusError {
+				t.Fatalf("idle timeout falsely painted task %q as error", task.ID)
+			}
+		}
+	}
+	if api.stops == 0 {
+		t.Fatalf("expected the stream to be stopped on idle timeout")
+	}
+}
+
+// steadyChatSessions emits several events spaced under the idle window, then
+// completes — a long but continuously-progressing turn that must never time out.
+type steadyChatSessions struct {
+	gap       time.Duration
+	events    int
+	cancelled int
+}
+
+func (f *steadyChatSessions) Prompt(_ context.Context, _ acp.ConversationKey, _ acp.SessionMetadata, _ acp.PromptRequest) (<-chan acp.Event, error) {
+	ch := make(chan acp.Event)
+	go func() {
+		defer close(ch)
+		for i := 0; i < f.events; i++ {
+			time.Sleep(f.gap)
+			ch <- acp.Event{Type: acp.EventTask, Task: &acp.TaskEvent{ID: "task-1", Title: "Working", Status: acp.TaskStatusInProgress}}
+		}
+		ch <- acp.Event{Type: acp.EventText, Text: "done"}
+		ch <- acp.Event{Type: acp.EventComplete}
+	}()
+	return ch, nil
+}
+
+func (f *steadyChatSessions) Lookup(acp.ConversationKey) (string, bool) { return "sess-1", true }
+func (f *steadyChatSessions) Cancel(context.Context, string) error      { f.cancelled++; return nil }
+
+func TestChatHandlerIdleTimerResetsOnActivity(t *testing.T) {
+	api := &fakeStreamAPI{}
+	// 10 events, 10ms apart (~100ms of steady activity) under a 60ms idle window:
+	// no single gap approaches the window, so the turn must finish, not time out.
+	fake := &steadyChatSessions{gap: 10 * time.Millisecond, events: 10}
+	sessions := map[string]ChatSessionManager{"default": fake}
+	resolver := func(req ChatRequest) string { return "default" }
+	handler := NewChatHandler(api, sessions, resolver, time.Hour, 1, nil).WithIdleTimeout(60 * time.Millisecond)
+
+	err := handler.Handle(context.Background(), ChatRequest{TeamID: "T1", ChannelID: "C1", UserID: "U1", MessageTS: "123.4", Text: "hi", Source: "test"})
+	if err != nil {
+		t.Fatalf("expected Handle to complete a steadily-progressing turn, got: %v", err)
+	}
+	if fake.cancelled != 0 {
+		t.Fatalf("a progressing turn must not be cancelled as idle, got %d cancels", fake.cancelled)
+	}
+	var posted strings.Builder
+	for _, opts := range append(api.startOptions, api.appendOptions...) {
+		if text, err := extractMarkdownTextFromOptions(opts...); err == nil {
+			posted.WriteString(text)
+		}
+	}
+	if strings.Contains(posted.String(), "asked it to stop") {
+		t.Fatalf("a progressing turn must not post an idle-timeout notice, got: %q", posted.String())
 	}
 }
