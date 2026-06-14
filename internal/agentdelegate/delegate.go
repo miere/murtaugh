@@ -84,6 +84,7 @@ func (r *Runner) defaultClient(profile config.AgentProfile, logger *slog.Logger)
 		Command: profile.Command,
 		Args:    profile.Args,
 		WorkDir: workDir,
+		Env:     profile.EnvOverrides(),
 		Logger:  logger,
 	})
 }

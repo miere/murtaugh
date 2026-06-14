@@ -26,3 +26,10 @@ agents:
     # message does not try to interrupt — and instead waits for the current
     # response to finish. Set true to force-enable and skip the probe.
     # interruptible: false
+    # env: extra environment variables for the agent process. Values are
+    # expanded against Murtaugh's own environment (so "${HOME}" and "$PATH"
+    # work) and layered on top of the inherited environment, so these win on a
+    # duplicate key. Omit to start the agent with Murtaugh's environment as-is.
+    # env:
+    #   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    #   PATH: ${HOME}/bin:${PATH}

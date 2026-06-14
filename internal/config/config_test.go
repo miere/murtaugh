@@ -768,3 +768,43 @@ func TestParseUnfurlRejectsBadRegex(t *testing.T) {
 		t.Fatalf("expected url_pattern validation error, got: %v", err)
 	}
 }
+
+func TestAgentEnvOverridesExpandsAndSorts(t *testing.T) {
+	t.Setenv("MURTAUGH_TEST_HOME", "/home/murtaugh")
+	profile := AgentProfile{Env: map[string]string{
+		"ZZZ":  "last",
+		"DATA": "${MURTAUGH_TEST_HOME}/data",
+		"AAA":  "first",
+		"":     "skip-blank-key",
+	}}
+	got := profile.EnvOverrides()
+	want := []string{"AAA=first", "DATA=/home/murtaugh/data", "ZZZ=last"}
+	if len(got) != len(want) {
+		t.Fatalf("EnvOverrides returned %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("EnvOverrides[%d] = %q, want %q (full: %v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+func TestAgentEnvOverridesNilWhenEmpty(t *testing.T) {
+	if got := (AgentProfile{}).EnvOverrides(); got != nil {
+		t.Fatalf("expected nil for empty env, got %v", got)
+	}
+}
+
+func TestValidateRejectsEnvKeyWithEquals(t *testing.T) {
+	cfg, err := Parse(testConfig(""))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	cfg.Agents = map[string]AgentProfile{
+		"default": {Command: "/bin/agent", Env: map[string]string{"BAD=KEY": "x"}},
+	}
+	err = cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "must not contain '='") {
+		t.Fatalf("expected env key validation error, got: %v", err)
+	}
+}
