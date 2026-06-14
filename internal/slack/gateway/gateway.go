@@ -523,7 +523,14 @@ func (a *Gateway) handleInteractive(event socketmode.Event) {
 		journal.Keys{TeamID: interaction.Team.ID, ChannelID: interaction.Channel.ID, UserID: interaction.User.ID},
 		map[string]any{"interaction_type": string(interaction.Type), "callback_id": interaction.CallbackID})
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		// No total wall-clock deadline here: a delegate-to-agent step (e.g. a
+		// code review) is legitimately long-running and is already bounded by
+		// the delegate Runner's idle watchdog (acpCfg.EffectiveRequestTimeout()).
+		// The other trigger steps are independently bounded too — a run command
+		// by its own commandTimeout, a reply-to-slack by the Slack HTTP client —
+		// so a fixed 5m cap here only ever guillotines a productive long turn.
+		// cancel() still tears everything down once Execute returns.
+		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		ctx = journal.WithCorrID(ctx, corrID)
 		if err := a.workflow.Execute(ctx, interaction); err != nil {
