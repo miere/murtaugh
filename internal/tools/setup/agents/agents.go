@@ -87,6 +87,7 @@ var acpDefaults = acpBlock{
 	StreamAppendInterval: "750ms",
 	StreamMinChunkChars:  96,
 	StreamFinalFeedback:  false,
+	ProgressDisplay:      "simplified",
 }
 
 type document struct {
@@ -103,6 +104,7 @@ type acpBlock struct {
 	StreamAppendInterval string `yaml:"stream_append_interval"`
 	StreamMinChunkChars  int    `yaml:"stream_min_chunk_chars"`
 	StreamFinalFeedback  bool   `yaml:"stream_final_feedback"`
+	ProgressDisplay      string `yaml:"progress_display"`
 }
 
 type profileBlock struct {

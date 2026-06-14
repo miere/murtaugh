@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/miere/murtaugh-dev-toolkit/internal/acp"
+	"github.com/miere/murtaugh-dev-toolkit/internal/config"
 	"github.com/slack-go/slack"
 )
 
@@ -60,6 +61,9 @@ type ChatHandler struct {
 	// (the default) records nothing; the gateway wires it only when that stream
 	// is enabled.
 	sessionLog *sessionLogger
+	// progressDisplay resolves the per-agent progress rendering. nil defaults
+	// every agent to the simplified single-line view.
+	progressDisplay func(agent string) config.ProgressDisplay
 }
 
 type ChatRequest struct {
@@ -102,6 +106,36 @@ func (h *ChatHandler) effectiveIdleTimeout() time.Duration {
 func (h *ChatHandler) WithSessionLogger(sl *sessionLogger) *ChatHandler {
 	h.sessionLog = sl
 	return h
+}
+
+// WithProgressDisplay sets the resolver that picks each agent's progress
+// rendering. nil (the default) renders every agent in simplified mode. Returns
+// the handler for chaining.
+func (h *ChatHandler) WithProgressDisplay(resolve func(agent string) config.ProgressDisplay) *ChatHandler {
+	h.progressDisplay = resolve
+	return h
+}
+
+// resolveProgressDisplay returns the configured mode for the agent, defaulting
+// to simplified when no resolver is wired or it returns an empty value.
+func (h *ChatHandler) resolveProgressDisplay(agent string) config.ProgressDisplay {
+	if h.progressDisplay == nil {
+		return config.ProgressDisplaySimplified
+	}
+	if mode := h.progressDisplay(agent); mode != "" {
+		return mode
+	}
+	return config.ProgressDisplaySimplified
+}
+
+// taskDisplayModeFor maps a progress mode to the Slack stream's task display
+// mode: the full task list groups cards under a Plan, the simplified line lays
+// its single card out on a Timeline so no Plan header appears.
+func taskDisplayModeFor(mode config.ProgressDisplay) slack.TaskDisplayMode {
+	if mode == config.ProgressDisplayTasks {
+		return slack.TaskDisplayModePlan
+	}
+	return slack.TaskDisplayModeTimeline
 }
 
 // resetIdleTimer restarts t for another idle window, draining an already-fired
@@ -192,7 +226,8 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest) (retErr error
 	if req.DM {
 		teamID, userID = "", ""
 	}
-	writer := NewStreamWriter(h.api, req.ChannelID, StreamWriterOptions{ThreadTS: streamThreadTS, TeamID: teamID, UserID: userID, Interval: h.interval, MinChars: h.minChars, Logger: h.logger})
+	progressMode := h.resolveProgressDisplay(agentName)
+	writer := NewStreamWriter(h.api, req.ChannelID, StreamWriterOptions{ThreadTS: streamThreadTS, TeamID: teamID, UserID: userID, Interval: h.interval, MinChars: h.minChars, TaskDisplayMode: taskDisplayModeFor(progressMode), Logger: h.logger})
 	// Safety net: guarantee the Slack stream is finalised on every exit path.
 	// Declared first so it runs last (after the interrupt handler below). The
 	// happy path and interrupt path stop the stream themselves, making this a
@@ -211,7 +246,12 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest) (retErr error
 		h.renderInterrupted(writer)
 		retErr = nil
 	}()
-	taskWriter := NewTaskCardWriter(h.api, writer, 0, h.logger)
+	var taskWriter progressRenderer
+	if progressMode == config.ProgressDisplayTasks {
+		taskWriter = NewTaskCardWriter(h.api, writer, 0, h.logger)
+	} else {
+		taskWriter = NewStatusLineWriter(h.api, writer, 0, h.logger)
+	}
 	if err := h.api.SetAssistantThreadsStatusContext(ctx, slack.AssistantThreadsSetStatusParameters{
 		ChannelID: req.ChannelID,
 		ThreadTS:  streamThreadTS,
@@ -368,7 +408,7 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest) (retErr error
 // finishStream resolves a successful turn: it completes any task cards the agent
 // left open, makes sure a Slack message exists, stops the stream, and logs. It
 // is shared by the explicit EventComplete and the channel-closed-cleanly paths.
-func (h *ChatHandler) finishStream(ctx context.Context, writer *StreamWriter, taskWriter *TaskCardWriter, runningTasks map[string]acp.TaskStatus, streamStarted *bool, req ChatRequest, startedAt time.Time, chunks, bytes int, stopReason string) error {
+func (h *ChatHandler) finishStream(ctx context.Context, writer *StreamWriter, taskWriter progressRenderer, runningTasks map[string]acp.TaskStatus, streamStarted *bool, req ChatRequest, startedAt time.Time, chunks, bytes int, stopReason string) error {
 	h.finalizeTasks(ctx, taskWriter, runningTasks, slack.TaskCardStatusComplete)
 	if !*streamStarted {
 		if err := writer.Start(ctx); err != nil {
@@ -437,7 +477,7 @@ func (h *ChatHandler) handleIdleTimeout(ctx context.Context, sessions ChatSessio
 // tasks the agent left open, so a card is never stranded in a spinner or
 // painted with a status that contradicts what actually happened. Errors are
 // logged, not propagated: finalisation is best-effort cleanup.
-func (h *ChatHandler) finalizeTasks(ctx context.Context, taskWriter *TaskCardWriter, running map[string]acp.TaskStatus, status slack.TaskCardStatus) {
+func (h *ChatHandler) finalizeTasks(ctx context.Context, taskWriter progressRenderer, running map[string]acp.TaskStatus, status slack.TaskCardStatus) {
 	for id := range running {
 		var err error
 		switch status {

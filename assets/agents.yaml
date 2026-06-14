@@ -8,12 +8,18 @@ acp:
   stream_min_chunk_chars: 96
   stream_final_feedback: false
   cancel_grace_period: 2s
+  # progress_display: how tool/step progress renders while a turn streams.
+  # "simplified" (default) collapses it into one last-write-wins status line
+  # that resolves to a check; "tasks" keeps the full multi-card plan. Per-agent
+  # profiles may override it.
+  progress_display: simplified
 
 agents:
   default:
     command: /path/to/acp-agent
     args: [--stdio]
     workdir: /path/to/workspace
+    # progress_display: tasks   # per-agent override of acp.progress_display
     # interruptible: optional override for session/cancel support. Omit to let
     # Murtaugh auto-detect at startup (it probes the agent and logs the result).
     # Set false for agents that do not implement session/cancel so a follow-up

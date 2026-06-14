@@ -178,7 +178,8 @@ func New(cfg config.Config, logger *slog.Logger, recorder journal.Recorder) *Gat
 			cfg.ACP.EffectiveStreamAppendInterval(),
 			cfg.ACP.EffectiveStreamMinChunkChars(),
 			logger,
-		).WithIdleTimeout(cfg.ACP.EffectiveRequestTimeout()).WithSessionLogger(sessionLog)
+		).WithIdleTimeout(cfg.ACP.EffectiveRequestTimeout()).WithSessionLogger(sessionLog).
+			WithProgressDisplay(cfg.EffectiveProgressDisplay)
 	}
 	// One shared runner backs every delegate-to-agent surface (jobs, workflow
 	// triggers, unfurls). Each delegation spins its own isolated agent process,
