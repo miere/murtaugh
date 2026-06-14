@@ -171,6 +171,18 @@ func New(cfg config.Config, logger *slog.Logger, recorder journal.Recorder) *Gat
 		if cfg.Journal.EffectiveEnabled(journal.StreamACPSession) {
 			sessionLog = newSessionLogger(recorder, cfg.Journal.EffectiveBlobDir(), logger)
 		}
+		// Resolve this bot's own Slack user id once so thread backfill can mark
+		// the agent's prior replies as its own. Best-effort: a failed auth.test
+		// only costs the "(you)" tagging, not the backfill itself.
+		var botUserID string
+		authCtx, cancelAuth := context.WithTimeout(context.Background(), 10*time.Second)
+		if resp, err := api.AuthTestContext(authCtx); err != nil {
+			logger.Warn("auth.test failed; thread backfill will not tag the bot's own replies", "error", err)
+		} else {
+			botUserID = resp.UserID
+		}
+		cancelAuth()
+
 		chat = NewChatHandler(
 			api,
 			sessions,
@@ -179,7 +191,8 @@ func New(cfg config.Config, logger *slog.Logger, recorder journal.Recorder) *Gat
 			cfg.ACP.EffectiveStreamMinChunkChars(),
 			logger,
 		).WithIdleTimeout(cfg.ACP.EffectiveRequestTimeout()).WithSessionLogger(sessionLog).
-			WithProgressDisplay(cfg.EffectiveProgressDisplay).WithStatusMessenger(api)
+			WithProgressDisplay(cfg.EffectiveProgressDisplay).WithStatusMessenger(api).
+			WithBackfiller(NewThreadBackfiller(api, botUserID, logger))
 	}
 	// One shared runner backs every delegate-to-agent surface (jobs, workflow
 	// triggers, unfurls). Each delegation spins its own isolated agent process,

@@ -68,6 +68,17 @@ type ChatHandler struct {
 	// context-block message. nil makes the simplified line a no-op (tests that
 	// do not wire Slack); the gateway always supplies it in production.
 	statusMessenger statusMessenger
+	// backfiller renders an existing Slack thread into a transcript when a brand-
+	// new ACP session is opened for it, so the agent starts with the prior
+	// conversation as context. nil disables backfill (the prompt is the single
+	// triggering message only).
+	backfiller threadBackfiller
+}
+
+// threadBackfiller renders a Slack thread into a transcript block for a cold
+// session's first prompt. *ThreadBackfiller satisfies it.
+type threadBackfiller interface {
+	Backfill(ctx context.Context, channelID, threadTS, excludeTS string) (string, error)
 }
 
 type ChatRequest struct {
@@ -128,6 +139,18 @@ func (h *ChatHandler) WithStatusMessenger(m statusMessenger) *ChatHandler {
 	return h
 }
 
+// WithBackfiller wires the thread backfiller that seeds a cold ACP session with
+// the existing Slack thread. Returns the handler for chaining. nil (the default)
+// disables backfill. A nil *ThreadBackfiller is also tolerated so callers can
+// wire it unconditionally and let an unbuilt backfiller stay disabled.
+func (h *ChatHandler) WithBackfiller(b *ThreadBackfiller) *ChatHandler {
+	if b == nil {
+		return h
+	}
+	h.backfiller = b
+	return h
+}
+
 // resolveProgressDisplay returns the configured mode for the agent, defaulting
 // to simplified when no resolver is wired or it returns an empty value.
 func (h *ChatHandler) resolveProgressDisplay(agent string) config.ProgressDisplay {
@@ -175,6 +198,32 @@ func (h *ChatHandler) Warm(ctx context.Context) error {
 	return nil
 }
 
+// backfillHistory renders the existing Slack thread into a transcript to seed a
+// brand-new ACP session, returning "" when no backfill is needed or possible.
+// It backfills only a threaded conversation (ThreadTS set) whose session is not
+// already live: a warm session already holds the history, and a top-level
+// message has no prior thread to read. The triggering message (MessageTS) is
+// excluded so it is not duplicated ahead of the user's own prompt text. A fetch
+// failure is logged and degraded to "" — the agent proceeds without backstory
+// rather than the turn failing.
+func (h *ChatHandler) backfillHistory(ctx context.Context, req ChatRequest, sessions ChatSessionManager, key acp.ConversationKey) string {
+	if h.backfiller == nil || req.ThreadTS == "" {
+		return ""
+	}
+	if _, live := sessions.Lookup(key); live {
+		return ""
+	}
+	history, err := h.backfiller.Backfill(ctx, req.ChannelID, req.ThreadTS, req.MessageTS)
+	if err != nil {
+		h.logger.Warn("thread backfill failed; proceeding without history", "channel", req.ChannelID, "thread", req.ThreadTS, "error", err)
+		return ""
+	}
+	if history != "" {
+		h.logger.Info("seeding new ACP session with thread history", "channel", req.ChannelID, "thread", req.ThreadTS)
+	}
+	return history
+}
+
 func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest) (retErr error) {
 	startedAt := time.Now()
 	if h == nil || len(h.sessions) == 0 {
@@ -193,6 +242,7 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest) (retErr error
 	}
 	key := conversationKey(req)
 	metadata := acp.SessionMetadata{TeamID: req.TeamID, ChannelID: req.ChannelID, ThreadTS: key.ThreadTS, UserID: req.UserID, Source: req.Source}
+	history := h.backfillHistory(ctx, req, sessions, key)
 	streamThreadTS := streamThreadTS(req)
 	if streamThreadTS == "" {
 		return fmt.Errorf("Slack streaming requires a source message timestamp")
@@ -309,7 +359,7 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest) (retErr error
 	// parent rather than tripping the interrupt path.
 	promptCtx, cancelPrompt := context.WithCancel(ctx)
 	defer cancelPrompt()
-	events, err := sessions.Prompt(promptCtx, key, metadata, acp.PromptRequest{Text: prompt})
+	events, err := sessions.Prompt(promptCtx, key, metadata, acp.PromptRequest{Text: prompt, History: history})
 	if err != nil {
 		turnErr = err
 		return writer.Fail(ctx, err)
