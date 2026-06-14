@@ -175,7 +175,7 @@ func (c *ProcessClient) Prompt(ctx context.Context, sessionID string, request Pr
 		}()
 		result, err := c.call(ctx, "session/prompt", map[string]any{
 			"sessionId": sessionID,
-			"prompt":    []map[string]string{{"type": "text", "text": request.Text}},
+			"prompt":    promptBlocks(request),
 		})
 		if err != nil {
 			events <- Event{Type: EventError, Error: err}
@@ -193,6 +193,28 @@ func (c *ProcessClient) Prompt(ctx context.Context, sessionID string, request Pr
 		events <- Event{Type: EventComplete, StopReason: stopReason}
 	}()
 	return events, nil
+}
+
+// promptBlocks renders a PromptRequest into ACP `session/prompt` content
+// blocks. When the request carries a Slack conversation, a delimited context
+// block is prepended ahead of the user's text — ACP exposes no system role, so
+// this leading block is the closest stand-in for a system note. It tells the
+// agent where it is so it can hand the same channel/thread to the `restart`
+// tool. Without conversation context (CLI and other non-chat callers) the
+// single text block is emitted unchanged.
+func promptBlocks(request PromptRequest) []map[string]string {
+	blocks := make([]map[string]string, 0, 2)
+	if request.Channel != "" {
+		ctxText := fmt.Sprintf(
+			"<conversation-context channel=%q thread=%q>You are responding in this Slack conversation. "+
+				"If you call the `restart` tool, pass these exact channel and thread values so the approval "+
+				"card is asked here.</conversation-context>",
+			request.Channel, request.Thread,
+		)
+		blocks = append(blocks, map[string]string{"type": "text", "text": ctxText})
+	}
+	blocks = append(blocks, map[string]string{"type": "text", "text": request.Text})
+	return blocks
 }
 
 // unsubscribe retracts a prompt's event subscription, but only if it is still

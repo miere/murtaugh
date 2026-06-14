@@ -6,62 +6,23 @@ import (
 	"strings"
 	"time"
 
+	"github.com/miere/murtaugh-dev-toolkit/internal/slack/restartcard"
 	"github.com/slack-go/slack"
 )
 
 const (
-	// restartSuggestionBlockID tags the actions block that carries the
-	// confirm/dismiss buttons. The router uses it (and the action_id
-	// prefix below) to identify suggestion callbacks without depending
-	// on free-form text.
-	restartSuggestionBlockID = "murtaugh_restart_suggestion"
-
-	restartSuggestionActionPrefix  = "murtaugh_restart_suggestion_"
-	restartSuggestionActionConfirm = "murtaugh_restart_suggestion_confirm"
-	restartSuggestionActionDismiss = "murtaugh_restart_suggestion_dismiss"
-
 	// restartSourceInteractive mirrors internal/app.RestartSourceInteractive.
 	// Duplicated here so gateway can stay independent of the composition
 	// root (importing internal/app would cycle); the values are kept
 	// identical by convention.
 	restartSourceInteractive = "interactive"
 
-	restartSuggestionHeadline     = ":warning: Murtaugh thinks a restart might help."
 	restartSuggestionConfirmedFmt = ":arrows_counterclockwise: Restart confirmed by <@%s>."
 	restartSuggestionDismissedFmt = ":no_entry_sign: Restart suggestion dismissed by <@%s>."
 	restartSuggestionDenied       = ":lock: Only the configured admin can restart Murtaugh."
 	restartSuggestionUnavailable  = ":lock: Restart is not available in this deployment."
 	restartSuggestionBusy         = ":hourglass_flowing_sand: A restart is already in progress (or the cool-down has not elapsed)."
-
-	restartSuggestionDefaultReason = "Murtaugh detected a condition that may be resolved by a restart."
 )
-
-// BuildRestartSuggestion returns the Block Kit layout used by
-// SuggestRestart. The reason is rendered as a context line so the
-// operator knows why the bot is suggesting the restart; the two
-// buttons carry stable action_ids consumed by the interactive handler.
-func BuildRestartSuggestion(reason string) []slack.Block {
-	reason = strings.TrimSpace(reason)
-	if reason == "" {
-		reason = restartSuggestionDefaultReason
-	}
-	confirm := slack.NewButtonBlockElement(
-		restartSuggestionActionConfirm,
-		reason,
-		slack.NewTextBlockObject(slack.PlainTextType, "Restart now", false, false),
-	)
-	confirm.Style = slack.StylePrimary
-	dismiss := slack.NewButtonBlockElement(
-		restartSuggestionActionDismiss,
-		reason,
-		slack.NewTextBlockObject(slack.PlainTextType, "Dismiss", false, false),
-	)
-	return []slack.Block{
-		slack.NewSectionBlock(slack.NewTextBlockObject(slack.MarkdownType, restartSuggestionHeadline, false, false), nil, nil),
-		slack.NewContextBlock("", slack.NewTextBlockObject(slack.MarkdownType, reason, false, false)),
-		slack.NewActionBlock(restartSuggestionBlockID, confirm, dismiss),
-	}
-}
 
 // SuggestRestart posts a restart-suggestion Block Kit message and
 // returns the (channel, timestamp) of the posted message. When channel
@@ -82,9 +43,9 @@ func (a *Gateway) SuggestRestart(ctx context.Context, channel, reason string) (s
 		a.logger.Debug("restart suggestion skipped: no destination channel or admin DM available")
 		return "", "", nil
 	}
-	blocks := BuildRestartSuggestion(reason)
+	blocks := restartcard.Build(reason)
 	postedChannel, ts, err := a.messaging.PostMessageContext(ctx, destination,
-		slack.MsgOptionText(restartSuggestionHeadline, false),
+		slack.MsgOptionText(restartcard.Headline, false),
 		slack.MsgOptionBlocks(blocks...),
 	)
 	if err != nil {
@@ -128,10 +89,10 @@ func isRestartSuggestionInteraction(interaction slack.InteractionCallback) bool 
 		if action == nil {
 			continue
 		}
-		if strings.HasPrefix(action.ActionID, restartSuggestionActionPrefix) {
+		if strings.HasPrefix(action.ActionID, restartcard.ActionPrefix) {
 			return true
 		}
-		if action.BlockID == restartSuggestionBlockID {
+		if action.BlockID == restartcard.BlockID {
 			return true
 		}
 	}
@@ -147,7 +108,7 @@ func firstRestartSuggestionAction(interaction slack.InteractionCallback) (string
 		if action == nil {
 			continue
 		}
-		if strings.HasPrefix(action.ActionID, restartSuggestionActionPrefix) {
+		if strings.HasPrefix(action.ActionID, restartcard.ActionPrefix) {
 			return action.ActionID, action.Value
 		}
 	}
@@ -175,10 +136,10 @@ func (a *Gateway) handleRestartSuggestionInteraction(ctx context.Context, intera
 		return
 	}
 	switch actionID {
-	case restartSuggestionActionDismiss:
+	case restartcard.ActionDismiss:
 		a.editSuggestion(ctx, channel, messageTS, fmt.Sprintf(restartSuggestionDismissedFmt, interaction.User.ID))
 		a.logger.Info("restart suggestion dismissed", "user", interaction.User.ID, "channel", channel, "ts", messageTS)
-	case restartSuggestionActionConfirm:
+	case restartcard.ActionConfirm:
 		a.handleRestartSuggestionConfirm(ctx, interaction, channel, messageTS, reason)
 	default:
 		a.logger.Warn("restart suggestion interaction with unexpected action",

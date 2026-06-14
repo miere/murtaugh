@@ -29,6 +29,7 @@ import (
 	journalquery "github.com/miere/murtaugh-dev-toolkit/internal/tools/journal/query"
 	journalstats "github.com/miere/murtaugh-dev-toolkit/internal/tools/journal/stats"
 	"github.com/miere/murtaugh-dev-toolkit/internal/tools/ping"
+	"github.com/miere/murtaugh-dev-toolkit/internal/tools/restart"
 	setupagents "github.com/miere/murtaugh-dev-toolkit/internal/tools/setup/agents"
 	setupbootstrap "github.com/miere/murtaugh-dev-toolkit/internal/tools/setup/bootstrap"
 	setuplaunchd "github.com/miere/murtaugh-dev-toolkit/internal/tools/setup/launchd"
@@ -347,6 +348,12 @@ func buildRegistry(cfg config.Config, configPath, version string, recorder journ
 	reg.Register(slackfetchmsgs.New(botToken))
 	reg.Register(slackfetchreactions.New(botToken))
 	reg.Register(slackupdatemsg.New(botToken))
+
+	// `restart` only *requests* a restart: it posts the approval card the
+	// gateway already understands. The real restart fires when the admin
+	// confirms in Slack (or via the admin-only slash command), never from
+	// this tool. With no channel it asks the configured admin in their DM.
+	reg.Register(restart.New(botToken, cfg.Configuration.AdminUser))
 
 	return reg
 }
