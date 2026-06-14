@@ -33,6 +33,16 @@ type PromptRequest struct {
 	// conversation rather than the admin DM. Empty for non-chat callers.
 	Channel string `json:"channel,omitempty"`
 	Thread  string `json:"thread,omitempty"`
+
+	// History carries a pre-rendered transcript of the Slack thread that
+	// preceded this prompt. ACP's session/prompt is a single user turn with no
+	// way to replay prior turns, so when a brand-new session is opened for an
+	// existing thread the gateway flattens the backstory into this opaque text
+	// block (already framed and author-labelled) and the ProcessClient emits it
+	// as its own content block ahead of the user's message. Empty when the
+	// session is warm (the agent already holds the history) or the thread is
+	// new.
+	History string `json:"history,omitempty"`
 }
 
 type Event struct {
