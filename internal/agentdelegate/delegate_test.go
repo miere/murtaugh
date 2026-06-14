@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/miere/murtaugh-dev-toolkit/internal/acp"
 	"github.com/miere/murtaugh-dev-toolkit/internal/config"
@@ -135,6 +136,75 @@ func TestRunIdleTimeout(t *testing.T) {
 	}
 	if !client.closed {
 		t.Fatal("client was not closed after idle timeout")
+	}
+}
+
+// heartbeatClient emits a steady stream of text events spaced by interval and
+// then completes. It models a long but *productive* turn: the total wall-clock
+// far exceeds the idle window, yet no single gap between events ever does.
+type heartbeatClient struct {
+	interval time.Duration
+	beats    int
+	closed   bool
+}
+
+func (c *heartbeatClient) Initialize(context.Context) error { return nil }
+
+func (c *heartbeatClient) NewSession(context.Context, acp.SessionMetadata) (acp.Session, error) {
+	return acp.Session{ID: "session-1"}, nil
+}
+
+func (c *heartbeatClient) Prompt(ctx context.Context, _ string, _ acp.PromptRequest) (<-chan acp.Event, error) {
+	ch := make(chan acp.Event)
+	go func() {
+		defer close(ch)
+		ticker := time.NewTicker(c.interval)
+		defer ticker.Stop()
+		for i := 0; i < c.beats; i++ {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			select {
+			case ch <- textEvent("."):
+			case <-ctx.Done():
+				return
+			}
+		}
+		select {
+		case ch <- acp.Event{Type: acp.EventComplete}:
+		case <-ctx.Done():
+		}
+	}()
+	return ch, nil
+}
+
+func (c *heartbeatClient) Cancel(context.Context, string) error { return nil }
+
+func (c *heartbeatClient) Close() error { c.closed = true; return nil }
+
+// TestRunProductiveTurnOutlivesIdleWindow is the delegate-side guard for the
+// "5-minute guillotine" bug: the turn must be bounded by *inactivity*, not by
+// total wall-clock. The client beats every 20ms for 240ms total — well past the
+// 200ms idle window — so a total-time cap would kill it, but an idle-only bound
+// lets it run to completion. Regressing Run to a total deadline fails here.
+func TestRunProductiveTurnOutlivesIdleWindow(t *testing.T) {
+	const beats = 12
+	client := &heartbeatClient{interval: 20 * time.Millisecond, beats: beats}
+	agents := map[string]config.AgentProfile{"default": {Command: "/bin/true"}}
+	r := NewRunner(agents, config.ACPConfig{RequestTimeout: "200ms"}, "", slog.New(slog.NewTextHandler(nopWriter{}, nil)))
+	r.WithClientFactory(func(config.AgentProfile, *slog.Logger) acp.Client { return client })
+
+	out, err := r.Run(context.Background(), "default", "hi")
+	if err != nil {
+		t.Fatalf("a productive long turn must not be killed, got error: %v", err)
+	}
+	if len(out) != beats {
+		t.Fatalf("expected %d heartbeat chars, got %d (%q)", beats, len(out), out)
+	}
+	if !client.closed {
+		t.Fatal("client was not closed after a completed turn")
 	}
 }
 
