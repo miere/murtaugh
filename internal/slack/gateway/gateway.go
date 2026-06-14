@@ -143,6 +143,7 @@ func New(cfg config.Config, logger *slog.Logger, recorder journal.Recorder) *Gat
 				Command: profile.Command,
 				Args:    profile.Args,
 				WorkDir: workDir,
+				Env:     profile.EnvOverrides(),
 				Logger:  logger,
 			})
 			sessions[name] = acp.NewSessionManager(

@@ -20,7 +20,11 @@ type ProcessOptions struct {
 	Command string
 	Args    []string
 	WorkDir string
-	Logger  *slog.Logger
+	// Env are extra KEY=VALUE entries layered on top of the inherited
+	// environment when the agent process is started. Empty leaves the process
+	// with Murtaugh's own environment unchanged.
+	Env    []string
+	Logger *slog.Logger
 }
 
 type ProcessClient struct {
@@ -276,6 +280,12 @@ func (c *ProcessClient) start(ctx context.Context) error {
 	}
 	cmd := exec.Command(c.opts.Command, c.opts.Args...)
 	cmd.Dir = c.opts.WorkDir
+	if len(c.opts.Env) > 0 {
+		// Inherit Murtaugh's environment, then append the profile's overrides.
+		// exec resolves a duplicate key to the last entry, so appending the
+		// overrides last makes them win over an inherited var of the same name.
+		cmd.Env = append(os.Environ(), c.opts.Env...)
+	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("open ACP stdout: %w", err)

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -97,6 +98,37 @@ type AgentProfile struct {
 	// ProgressDisplay overrides acp.progress_display for this agent. Empty
 	// inherits the global default (which itself defaults to simplified).
 	ProgressDisplay string `yaml:"progress_display"`
+	// Env injects environment variables into the agent process. Each value is
+	// expanded against Murtaugh's own environment first (so "${HOME}/bin" and
+	// "$PATH" resolve), then the resulting KEY=VALUE pairs are layered on top of
+	// the inherited environment — the agent sees Murtaugh's env plus these, with
+	// these winning on a duplicate key. Empty (the default) leaves the inherited
+	// environment untouched.
+	Env map[string]string `yaml:"env"`
+}
+
+// EnvOverrides renders the profile's Env map into the KEY=VALUE slice exec
+// expects, expanding each value against the host environment. It returns nil
+// when no variables are configured so callers can leave cmd.Env unset and keep
+// the plain inherited environment. Blank keys are skipped; keys are emitted in
+// sorted order so the result is deterministic.
+func (p AgentProfile) EnvOverrides() []string {
+	if len(p.Env) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(p.Env))
+	for key := range p.Env {
+		if strings.TrimSpace(key) == "" {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, key+"="+os.ExpandEnv(p.Env[key]))
+	}
+	return out
 }
 
 type JobProfile struct {
@@ -368,6 +400,11 @@ func (c Config) Validate() error {
 	for name, profile := range c.Agents {
 		if err := validateProgressDisplay(fmt.Sprintf("agents[%s].progress_display", name), profile.ProgressDisplay); err != nil {
 			errs = append(errs, err)
+		}
+		for key := range profile.Env {
+			if strings.ContainsRune(key, '=') {
+				errs = append(errs, fmt.Errorf("agents[%s].env key %q must not contain '='", name, key))
+			}
 		}
 	}
 

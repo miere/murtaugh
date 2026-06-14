@@ -263,6 +263,37 @@ func TestProcessClientDoesNotDropEventsForSlowConsumer(t *testing.T) {
 	}
 }
 
+func TestProcessClientPassesEnvToAgent(t *testing.T) {
+	client := NewProcessClient(ProcessOptions{
+		Command: os.Args[0],
+		Args:    []string{"-test.run", "TestACPHelperProcess", "--", "acp-helper"},
+		Env:     []string{"MURTAUGH_TEST_ENV=injected-value"},
+	})
+	t.Cleanup(func() { _ = client.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.Initialize(ctx); err != nil {
+		t.Fatalf("Initialize returned error: %v", err)
+	}
+	session, err := client.NewSession(ctx, SessionMetadata{TeamID: "T1"})
+	if err != nil {
+		t.Fatalf("NewSession returned error: %v", err)
+	}
+	events, err := client.Prompt(ctx, session.ID, PromptRequest{Text: "echoenv:MURTAUGH_TEST_ENV"})
+	if err != nil {
+		t.Fatalf("Prompt returned error: %v", err)
+	}
+	var text strings.Builder
+	for event := range events {
+		if event.Type == EventText {
+			text.WriteString(event.Text)
+		}
+	}
+	if got := text.String(); got != "injected-value" {
+		t.Fatalf("agent did not see injected env var: got %q, want %q", got, "injected-value")
+	}
+}
+
 func TestACPHelperProcess(t *testing.T) {
 	mode := ""
 	if len(os.Args) > 0 {
@@ -306,6 +337,11 @@ func TestACPHelperProcess(t *testing.T) {
 			promptText := ""
 			if len(params.Prompt) > 0 {
 				promptText = params.Prompt[0].Text
+			}
+			if name, ok := strings.CutPrefix(promptText, "echoenv:"); ok {
+				_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{"sessionId": "session-1", "update": map[string]any{"sessionUpdate": "agent_message", "content": []map[string]string{{"type": "text", "text": os.Getenv(name)}}}}})
+				_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{"stopReason": "end_turn"}})
+				continue
 			}
 			if n := parseBurstCount(promptText); n > 0 {
 				for i := 0; i < n; i++ {
