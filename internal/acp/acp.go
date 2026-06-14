@@ -24,6 +24,15 @@ type SessionMetadata struct {
 
 type PromptRequest struct {
 	Text string `json:"text"`
+
+	// Channel and Thread carry the Slack conversation the prompt originates
+	// from. ACP has no system/instructions field, so when these are set the
+	// ProcessClient prepends a delimited context block to the prompt — the
+	// closest equivalent — telling the agent where it is. The agent passes
+	// them on to the `restart` tool so the approval card is asked in this
+	// conversation rather than the admin DM. Empty for non-chat callers.
+	Channel string `json:"channel,omitempty"`
+	Thread  string `json:"thread,omitempty"`
 }
 
 type Event struct {

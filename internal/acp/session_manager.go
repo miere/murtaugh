@@ -129,6 +129,15 @@ func (m *SessionManager) Prompt(ctx context.Context, key ConversationKey, metada
 	if err != nil {
 		return nil, err
 	}
+	// Tell the agent which Slack conversation it is in so it can target the
+	// `restart` tool's approval card here instead of the admin DM. Only fill
+	// what the caller has not already set, so explicit callers win.
+	if request.Channel == "" {
+		request.Channel = metadata.ChannelID
+	}
+	if request.Thread == "" {
+		request.Thread = metadata.ThreadTS
+	}
 	return m.client.Prompt(ctx, session.ID, request)
 }
 
