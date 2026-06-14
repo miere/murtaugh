@@ -10,7 +10,13 @@ import (
 	"github.com/slack-go/slack"
 
 	"github.com/miere/murtaugh-dev-toolkit/internal/acp"
+	"github.com/miere/murtaugh-dev-toolkit/internal/config"
 )
+
+// tasksProgress forces the full task-card rendering, for the tests that assert
+// TaskCardWriter behaviour specifically. The handler default is the simplified
+// single-line view.
+func tasksProgress(string) config.ProgressDisplay { return config.ProgressDisplayTasks }
 
 type fakeChatSessions struct {
 	// mu guards key/prompt: gateway-level tests drive Prompt from the startChat
@@ -113,7 +119,7 @@ func TestChatHandlerFinalisesRenamedTaskOnSuccess(t *testing.T) {
 	api := &fakeStreamAPI{}
 	sessions := map[string]ChatSessionManager{"default": &fakeChatSessionsRenamedTask{}}
 	resolver := func(req ChatRequest) string { return "default" }
-	handler := NewChatHandler(api, sessions, resolver, time.Hour, 5, nil)
+	handler := NewChatHandler(api, sessions, resolver, time.Hour, 5, nil).WithProgressDisplay(tasksProgress)
 	if err := handler.Handle(context.Background(), ChatRequest{TeamID: "T1", ChannelID: "C1", UserID: "U1", MessageTS: "123.4", Text: "hi", Source: "test"}); err != nil {
 		t.Fatalf("Handle returned error: %v", err)
 	}
@@ -180,7 +186,7 @@ func TestChatHandlerRoutesTaskEventsToTaskCardWriter(t *testing.T) {
 	fakeSessions := &fakeChatSessionsWithTasks{}
 	sessions := map[string]ChatSessionManager{"default": fakeSessions}
 	resolver := func(req ChatRequest) string { return "default" }
-	handler := NewChatHandler(api, sessions, resolver, time.Hour, 5, nil)
+	handler := NewChatHandler(api, sessions, resolver, time.Hour, 5, nil).WithProgressDisplay(tasksProgress)
 	err := handler.Handle(context.Background(), ChatRequest{TeamID: "T1", ChannelID: "C1", UserID: "U1", MessageTS: "123.4", Text: "hi", Source: "test"})
 	if err != nil {
 		t.Fatalf("Handle returned error: %v", err)
@@ -230,7 +236,7 @@ func TestChatHandlerAppendsFinalTextAfterTaskCompletes(t *testing.T) {
 	fakeSessions := &fakeChatSessionsWithCompletedTaskThenText{}
 	sessions := map[string]ChatSessionManager{"default": fakeSessions}
 	resolver := func(req ChatRequest) string { return "default" }
-	handler := NewChatHandler(api, sessions, resolver, time.Hour, 5, nil)
+	handler := NewChatHandler(api, sessions, resolver, time.Hour, 5, nil).WithProgressDisplay(tasksProgress)
 	err := handler.Handle(context.Background(), ChatRequest{TeamID: "T1", ChannelID: "C1", UserID: "U1", MessageTS: "123.4", Text: "hi", Source: "test"})
 	if err != nil {
 		t.Fatalf("Handle returned error: %v", err)
@@ -290,7 +296,7 @@ func TestChatHandlerCompletesStillRunningTasksOnSuccess(t *testing.T) {
 	api := &fakeStreamAPI{}
 	sessions := map[string]ChatSessionManager{"default": &fakeChatSessionsRunningTaskThenComplete{}}
 	resolver := func(req ChatRequest) string { return "default" }
-	handler := NewChatHandler(api, sessions, resolver, time.Hour, 5, nil)
+	handler := NewChatHandler(api, sessions, resolver, time.Hour, 5, nil).WithProgressDisplay(tasksProgress)
 	if err := handler.Handle(context.Background(), ChatRequest{TeamID: "T1", ChannelID: "C1", UserID: "U1", MessageTS: "123.4", Text: "hi", Source: "test"}); err != nil {
 		t.Fatalf("Handle returned error: %v", err)
 	}

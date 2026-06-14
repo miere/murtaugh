@@ -13,6 +13,7 @@ acp:
   stream_append_interval: 750ms
   stream_min_chunk_chars: 96
   cancel_grace_period: 2s
+  progress_display: simplified
 
 agents:
   default:
@@ -20,6 +21,7 @@ agents:
     args: [--stdio]
     workdir: /path/to/workspace
     # interruptible: false
+    # progress_display: tasks   # override the global default per agent
 ```
 
 ## `acp` settings
@@ -37,6 +39,7 @@ applies when the field is omitted (the bootstrapped file ships tuned values).
 | `stream_append_interval` | `250ms` | How often buffered chunks are flushed to Slack. |
 | `stream_min_chunk_chars` | `24` | Minimum characters before a chunk is flushed (avoids choppy edits). |
 | `cancel_grace_period` | `2s` | After asking the agent to cancel, how long to let trailing chunks flush before hard-cancelling. |
+| `progress_display` | `simplified` | How tool/step progress renders while a turn streams: `simplified` (a single, last-write-wins status line that resolves to a check) or `tasks` (the full multi-card plan). Per-agent profiles can override it. |
 
 ## `agents` profiles
 
@@ -46,6 +49,7 @@ applies when the field is omitted (the bootstrapped file ships tuned values).
 | `args` | no | CLI args — commonly `[--stdio]`. |
 | `workdir` | no | Working directory. Defaults to the **workspace** (`~/.config/murtaugh`) when unset. |
 | `interruptible` | no | Override for session/cancel support (see below). |
+| `progress_display` | no | Override `acp.progress_display` for this agent: `simplified` or `tasks`. Blank inherits the global default. Use `tasks` for coding agents where watching the plan matters; `simplified` (the default) elsewhere. |
 
 ### `interruptible` — the cancel capability
 

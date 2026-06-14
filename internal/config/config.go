@@ -67,7 +67,24 @@ type ACPConfig struct {
 	StreamMinChunkChars  int    `yaml:"stream_min_chunk_chars"`
 	StreamFinalFeedback  bool   `yaml:"stream_final_feedback"`
 	CancelGracePeriod    string `yaml:"cancel_grace_period"`
+	// ProgressDisplay is the default rendering for tool/step progress across all
+	// agents. Empty means simplified. Per-agent profiles may override it.
+	ProgressDisplay string `yaml:"progress_display"`
 }
+
+// ProgressDisplay selects how an agent's tool/step progress renders in Slack
+// while a turn is streaming.
+type ProgressDisplay string
+
+const (
+	// ProgressDisplaySimplified collapses progress into a single, last-write-wins
+	// status line that resolves to a check when the turn ends. It is the default:
+	// non-intrusive, ideal when only the outcome matters.
+	ProgressDisplaySimplified ProgressDisplay = "simplified"
+	// ProgressDisplayTasks keeps the full multi-card task list grouped under a
+	// Plan block — useful for coding sessions where watching the plan is the point.
+	ProgressDisplayTasks ProgressDisplay = "tasks"
+)
 
 type AgentProfile struct {
 	Command string   `yaml:"command"`
@@ -77,6 +94,9 @@ type AgentProfile struct {
 	// nil (the default) Murtaugh probes the agent at warmup; set it explicitly
 	// to skip the probe or to correct a wrong verdict.
 	Interruptible *bool `yaml:"interruptible"`
+	// ProgressDisplay overrides acp.progress_display for this agent. Empty
+	// inherits the global default (which itself defaults to simplified).
+	ProgressDisplay string `yaml:"progress_display"`
 }
 
 type JobProfile struct {
@@ -345,6 +365,11 @@ func (c Config) Validate() error {
 	if err := c.ACP.Validate(); err != nil {
 		errs = append(errs, err)
 	}
+	for name, profile := range c.Agents {
+		if err := validateProgressDisplay(fmt.Sprintf("agents[%s].progress_display", name), profile.ProgressDisplay); err != nil {
+			errs = append(errs, err)
+		}
+	}
 
 	if c.ACP.Enabled {
 		if len(c.Agents) == 0 {
@@ -512,12 +537,56 @@ func (c ACPConfig) Validate() error {
 	if c.StreamMinChunkChars < 0 {
 		errs = append(errs, errors.New("acp.stream_min_chunk_chars must be greater than or equal to zero"))
 	}
+	if err := validateProgressDisplay("acp.progress_display", c.ProgressDisplay); err != nil {
+		errs = append(errs, err)
+	}
 	return errors.Join(errs...)
 }
 
 func (p AgentProfile) Validate() error {
 	if strings.TrimSpace(p.Command) == "" {
 		return errors.New("agent profile command is required")
+	}
+	return nil
+}
+
+// EffectiveProgressDisplay resolves how the given agent's progress renders:
+// the agent profile's setting wins, then the global acp default, then
+// simplified. Unknown values are rejected at load time (Validate), so this
+// only ever observes valid or empty strings.
+func (c Config) EffectiveProgressDisplay(agent string) ProgressDisplay {
+	if p, ok := c.Agents[agent]; ok {
+		if m := normalizeProgressDisplay(p.ProgressDisplay); m != "" {
+			return m
+		}
+	}
+	if m := normalizeProgressDisplay(c.ACP.ProgressDisplay); m != "" {
+		return m
+	}
+	return ProgressDisplaySimplified
+}
+
+// normalizeProgressDisplay maps a raw config string to a known mode, or "" when
+// it is blank/unrecognised (callers treat "" as "inherit"/"default").
+func normalizeProgressDisplay(s string) ProgressDisplay {
+	switch ProgressDisplay(strings.ToLower(strings.TrimSpace(s))) {
+	case ProgressDisplaySimplified:
+		return ProgressDisplaySimplified
+	case ProgressDisplayTasks:
+		return ProgressDisplayTasks
+	default:
+		return ""
+	}
+}
+
+// validateProgressDisplay rejects a non-empty progress_display value that is
+// not one of the known modes. Empty is always allowed (it means "inherit").
+func validateProgressDisplay(field, value string) error {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	if normalizeProgressDisplay(value) == "" {
+		return fmt.Errorf("%s must be %q or %q", field, ProgressDisplaySimplified, ProgressDisplayTasks)
 	}
 	return nil
 }
