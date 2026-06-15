@@ -158,7 +158,7 @@ func (a *Application) Run(ctx context.Context) error {
 		gw = gw.WithTroubleshootBundler(func(ctx context.Context, note string) (string, []string, error) {
 			res, err := troubleshoot.Build(ctx, troubleshoot.Options{
 				Note:      note,
-				Providers: troubleshoot.KnownProviders(),
+				Providers: effectiveTroubleshootProviders(a.cfg),
 			}, troubleshoot.ResolveSources(
 				a.cfg.Journal.EffectivePath(),
 				a.cfg.Journal.EffectiveBlobDir(),
@@ -344,7 +344,13 @@ func buildRegistry(cfg config.Config, configPath, version string, recorder journ
 		return ""
 	}
 	reg.Register(setupagents.New(agentsPath))
-	reg.Register(setupmcpregister.New(os.UserHomeDir))
+	troubleshootConfigPath := func() string {
+		if base := baseDirFor(cfg, configPath); base != "" {
+			return filepath.Join(base, "troubleshoot.yaml")
+		}
+		return ""
+	}
+	reg.Register(setupmcpregister.New(os.UserHomeDir, troubleshootConfigPath, troubleshoot.KnownProviders()))
 	reg.Register(setuplaunchd.New(setuplaunchd.Deps{
 		Home:      os.UserHomeDir,
 		GOOS:      runtime.GOOS,
@@ -388,9 +394,22 @@ func buildRegistry(cfg config.Config, configPath, version string, recorder journ
 			version,
 		)
 	}
-	reg.Register(troubleshootbundle.New(troubleshootSources))
+	reg.Register(troubleshootbundle.New(troubleshootSources, func() []string { return effectiveTroubleshootProviders(cfg) }))
 
 	return reg
+}
+
+// effectiveTroubleshootProviders resolves which downstream providers a bundle
+// should include by default: the set configured in troubleshoot.yaml (written
+// by setup.mcp-register) when non-empty, otherwise every provider Murtaugh
+// knows how to collect diagnostics for. Missing files are skipped at collection
+// time, so the all-known fallback is safe on a machine that only runs some of
+// them.
+func effectiveTroubleshootProviders(cfg config.Config) []string {
+	if len(cfg.Troubleshoot.Providers) > 0 {
+		return cfg.Troubleshoot.Providers
+	}
+	return troubleshoot.KnownProviders()
 }
 
 // newJobDelegator builds the agent runner that backs agent-delegated jobs

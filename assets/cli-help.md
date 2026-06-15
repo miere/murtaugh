@@ -351,8 +351,15 @@ into the existing file (other keys preserved) and backing it up first.
 Target files: `opencode` → `~/.config/opencode/opencode.json`; `auggie` →
 `~/.augment/settings.json`; `goose` → `~/.config/goose/config.yaml`.
 
+When the client is also a provider Murtaugh can collect diagnostics for (today
+`goose`), it is recorded in `troubleshoot.yaml` so `troubleshoot bundle` and
+`/murtaugh troubleshoot` include that provider's sessions/logs **by default**
+(no `--include` needed). Recording is best-effort — a failure there only adds a
+warning, it does not fail the client registration.
+
 ```
 murtaugh setup mcp-register --client opencode --binary-path /usr/local/bin/murtaugh
+murtaugh setup mcp-register --client goose --binary-path /usr/local/bin/murtaugh
 ```
 
 ## murtaugh setup launchd
@@ -402,7 +409,7 @@ never asks an agent to gather the files.
 | Flag             | Required | Type            | Notes                                                                          |
 |------------------|----------|-----------------|--------------------------------------------------------------------------------|
 | `--note`         | no       | string          | Symptom description; recorded in the manifest.                                 |
-| `--include`      | no       | string (repeat) | Provider whose on-disk diagnostics to add (known: `goose`). Repeat per provider.|
+| `--include`      | no       | string (repeat) | Provider whose on-disk diagnostics to add (known: `goose`). Repeat per provider. Defaults to the providers in `troubleshoot.yaml` (written by `setup mcp-register`), else all known providers.|
 | `--out`          | no       | string          | Output path for the zip. Defaults to a timestamped file in the temp dir.       |
 | `--max-log-bytes`| no       | integer         | Tail cap per log file in bytes. Defaults to 5 MiB.                             |
 | `--redact`       | no       | boolean         | Redact known secrets. Defaults to `true`; only set `false` for local-only use. |

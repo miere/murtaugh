@@ -51,8 +51,15 @@ else, and backs up the file:
 
 The entry runs `murtaugh mcp` (see `reference/mcp-server.md`).
 
+When the client is also a provider Murtaugh can collect diagnostics for (today
+`goose`), it is appended to `troubleshoot.yaml`'s `providers` list, so
+`troubleshoot_bundle` / `/murtaugh troubleshoot` include that provider's
+sessions and logs by default. This is best-effort: if the recording fails, the
+client registration still succeeds and the result carries a warning.
+
 ```bash
 murtaugh setup mcp-register --client opencode --binary-path "$(which murtaugh)"
+murtaugh setup mcp-register --client goose --binary-path "$(which murtaugh)"
 ```
 
 ## `setup_update` — self-update the binary

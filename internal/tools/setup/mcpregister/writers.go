@@ -99,6 +99,65 @@ func writeGoose(home, binary string) (Result, error) {
 	return Result{Client: "goose", Path: target, BackupPath: backupPath, Created: !wasThere}, nil
 }
 
+// recordTroubleshootProvider adds provider to the providers list in Murtaugh's
+// machine-managed troubleshoot.yaml, creating the file if needed and preserving
+// any other content. Returns whether the file changed (false when the provider
+// was already listed). troubleshoot.yaml carries no user comments, so a plain
+// map round-trip is safe here (unlike slack.yaml).
+func recordTroubleshootProvider(path, provider string) (bool, error) {
+	doc, err := readYAML(path)
+	if err != nil {
+		return false, err
+	}
+	ts, _ := doc["troubleshoot"].(map[string]any)
+	if ts == nil {
+		ts = map[string]any{}
+		doc["troubleshoot"] = ts
+	}
+	providers := toStringSlice(ts["providers"])
+	for _, p := range providers {
+		if p == provider {
+			return false, nil // already recorded; nothing to write
+		}
+	}
+	providers = append(providers, provider)
+	ts["providers"] = providers
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return false, fmt.Errorf("ensure config dir: %w", err)
+	}
+	if _, err := backup.IfExists(path); err != nil {
+		return false, err
+	}
+	out, err := yaml.Marshal(doc)
+	if err != nil {
+		return false, fmt.Errorf("marshal troubleshoot.yaml: %w", err)
+	}
+	if err := os.WriteFile(path, out, 0o644); err != nil {
+		return false, fmt.Errorf("write %q: %w", path, err)
+	}
+	return true, nil
+}
+
+// toStringSlice coerces a YAML-decoded value (which may be []any or []string)
+// into []string, dropping non-string and empty entries.
+func toStringSlice(v any) []string {
+	switch t := v.(type) {
+	case []string:
+		return t
+	case []any:
+		out := make([]string, 0, len(t))
+		for _, e := range t {
+			if s, ok := e.(string); ok && s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
 // readJSON returns the parsed object at path. A missing file yields an empty
 // map so callers can populate it without branching.
 func readJSON(path string) (map[string]any, error) {

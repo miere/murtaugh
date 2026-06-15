@@ -11,7 +11,7 @@ import (
 )
 
 func TestTool_Metadata(t *testing.T) {
-	tl := New(stubResolver(t))
+	tl := New(stubResolver(t), nil, nil)
 	if tl.Name() != "setup.mcp-register" {
 		t.Fatalf("Name() = %q, want setup.mcp-register", tl.Name())
 	}
@@ -39,7 +39,7 @@ func TestInvoke_OpencodeMergesIntoExistingJSON(t *testing.T) {
 	if err := os.WriteFile(target, []byte(`{"theme":"dark","mcp":{"other":{"keep":true}}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tl := New(homeResolver(home))
+	tl := New(homeResolver(home), nil, nil)
 
 	res, err := tl.Invoke(context.Background(), map[string]any{
 		"client":      "opencode",
@@ -90,7 +90,7 @@ func TestInvoke_AuggieMergesIntoExistingJSON(t *testing.T) {
 	if err := os.WriteFile(target, []byte(`{"theme":"light"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tl := New(homeResolver(home))
+	tl := New(homeResolver(home), nil, nil)
 
 	_, err := tl.Invoke(context.Background(), map[string]any{
 		"client":      "auggie",
@@ -123,7 +123,7 @@ func TestInvoke_GoosePreservesExistingExtensionsAndWritesYAML(t *testing.T) {
 	if err := os.WriteFile(target, []byte(seed), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tl := New(homeResolver(home))
+	tl := New(homeResolver(home), nil, nil)
 
 	_, err := tl.Invoke(context.Background(), map[string]any{
 		"client":      "goose",
@@ -157,7 +157,7 @@ func TestInvoke_GoosePreservesExistingExtensionsAndWritesYAML(t *testing.T) {
 func TestInvoke_GooseCreatesFreshConfigWhenMissing(t *testing.T) {
 	home := t.TempDir()
 	target := filepath.Join(home, ".config", "goose", "config.yaml")
-	tl := New(homeResolver(home))
+	tl := New(homeResolver(home), nil, nil)
 
 	res, err := tl.Invoke(context.Background(), map[string]any{
 		"client":      "goose",
@@ -176,7 +176,7 @@ func TestInvoke_GooseCreatesFreshConfigWhenMissing(t *testing.T) {
 }
 
 func TestInvoke_RejectsUnknownClient(t *testing.T) {
-	tl := New(homeResolver(t.TempDir()))
+	tl := New(homeResolver(t.TempDir()), nil, nil)
 	_, err := tl.Invoke(context.Background(), map[string]any{
 		"client":      "claude",
 		"binary_path": "/usr/local/bin/murtaugh",
@@ -184,6 +184,79 @@ func TestInvoke_RejectsUnknownClient(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for unknown client")
 	}
+}
+
+func TestInvoke_RecordsKnownProviderForTroubleshoot(t *testing.T) {
+	home := t.TempDir()
+	tsPath := filepath.Join(home, ".config", "murtaugh", "troubleshoot.yaml")
+	tl := New(homeResolver(home), func() string { return tsPath }, []string{"goose"})
+
+	res, err := tl.Invoke(context.Background(), map[string]any{
+		"client":      "goose",
+		"binary_path": "/usr/local/bin/murtaugh",
+	})
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if !res.(Result).ProviderRecorded {
+		t.Fatalf("expected ProviderRecorded=true, got %+v", res)
+	}
+	providers := readTroubleshootProviders(t, tsPath)
+	if len(providers) != 1 || providers[0] != "goose" {
+		t.Fatalf("troubleshoot.yaml providers = %v, want [goose]", providers)
+	}
+
+	// A second registration must not duplicate the entry.
+	res2, err := tl.Invoke(context.Background(), map[string]any{
+		"client":      "goose",
+		"binary_path": "/usr/local/bin/murtaugh",
+	})
+	if err != nil {
+		t.Fatalf("Invoke (second): %v", err)
+	}
+	if res2.(Result).ProviderRecorded {
+		t.Fatal("second registration should not re-record goose")
+	}
+	if got := readTroubleshootProviders(t, tsPath); len(got) != 1 {
+		t.Fatalf("providers duplicated: %v", got)
+	}
+}
+
+func TestInvoke_NonProviderClientNotRecorded(t *testing.T) {
+	home := t.TempDir()
+	tsPath := filepath.Join(home, ".config", "murtaugh", "troubleshoot.yaml")
+	tl := New(homeResolver(home), func() string { return tsPath }, []string{"goose"})
+
+	res, err := tl.Invoke(context.Background(), map[string]any{
+		"client":      "opencode",
+		"binary_path": "/usr/local/bin/murtaugh",
+	})
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if res.(Result).ProviderRecorded {
+		t.Fatal("opencode is not a known diagnostics provider; should not be recorded")
+	}
+	if _, err := os.Stat(tsPath); !os.IsNotExist(err) {
+		t.Fatalf("troubleshoot.yaml should not be created for a non-provider client (err=%v)", err)
+	}
+}
+
+func readTroubleshootProviders(t *testing.T, path string) []string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read troubleshoot.yaml: %v", err)
+	}
+	var doc struct {
+		Troubleshoot struct {
+			Providers []string `yaml:"providers"`
+		} `yaml:"troubleshoot"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parse troubleshoot.yaml: %v", err)
+	}
+	return doc.Troubleshoot.Providers
 }
 
 func homeResolver(home string) HomeResolver {

@@ -27,9 +27,18 @@ type Config struct {
 	Agents        map[string]AgentProfile       `yaml:"-"`
 	Jobs          map[string]JobProfile         `yaml:"-"`
 	Journal       JournalConfig                 `yaml:"-"`
+	Troubleshoot  TroubleshootConfig            `yaml:"-"`
 	Commands      []CommandConfig               `yaml:"commands"`
 	WorkflowRules map[string]WorkflowRuleConfig `yaml:"workflow-rules"`
 	UnfurlRules   map[string]UnfurlRuleConfig   `yaml:"unfurl-rules"`
+}
+
+// TroubleshootConfig is the machine-managed troubleshoot.yaml sibling. It
+// records which downstream providers' on-disk diagnostics the bundler should
+// include by default. setup.mcp-register appends to Providers when it registers
+// Murtaugh into a client that is also a known diagnostics provider (e.g. goose).
+type TroubleshootConfig struct {
+	Providers []string `yaml:"providers"`
 }
 
 type OAuthConfig struct {
@@ -357,6 +366,20 @@ func Load(path string) (Config, error) {
 		cfg.Journal = journal.Journal
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return Config{}, fmt.Errorf("read journal config %q: %w", journalPath, err)
+	}
+
+	troubleshootPath := filepath.Join(cfg.BaseDir, "troubleshoot.yaml")
+	troubleshootData, err := os.ReadFile(troubleshootPath)
+	if err == nil {
+		var ts struct {
+			Troubleshoot TroubleshootConfig `yaml:"troubleshoot"`
+		}
+		if err := yaml.Unmarshal(troubleshootData, &ts); err != nil {
+			return Config{}, fmt.Errorf("parse troubleshoot config %q: %w", troubleshootPath, err)
+		}
+		cfg.Troubleshoot = ts.Troubleshoot
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return Config{}, fmt.Errorf("read troubleshoot config %q: %w", troubleshootPath, err)
 	}
 
 	if err := cfg.Validate(); err != nil {
