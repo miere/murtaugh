@@ -54,7 +54,7 @@ func TestEngineRecordsMatchAndTriggers(t *testing.T) {
 	})
 
 	ctx := journal.WithCorrID(context.Background(), "gw_test")
-	if err := engine.Execute(ctx, approvalInteraction()); err != nil {
+	if err := engine.Execute(ctx, approvalInteraction(), nil); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 
@@ -93,7 +93,7 @@ func TestEngineRecordsNoMatch(t *testing.T) {
 	engine := NewEngine(workflowConfig(), Options{Poster: &recordingPoster{}, Recorder: rec})
 
 	// pingInteraction does not satisfy the code-review-approval rule's match.
-	if err := engine.Execute(context.Background(), pingInteraction()); err != nil {
+	if err := engine.Execute(context.Background(), pingInteraction(), nil); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 	noMatch := rec.byKind("workflow.no_match")
@@ -117,7 +117,7 @@ func TestEngineRecordsTriggerFailure(t *testing.T) {
 	rec := &fakeRecorder{}
 	engine := NewEngine(cfg, Options{Poster: &recordingPoster{}, Runner: erroringRunner{}, Recorder: rec})
 
-	if err := engine.Execute(context.Background(), approvalInteraction()); err == nil {
+	if err := engine.Execute(context.Background(), approvalInteraction(), nil); err == nil {
 		t.Fatalf("expected Execute to fail")
 	}
 	triggers := rec.byKind("workflow.trigger")

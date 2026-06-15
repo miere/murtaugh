@@ -146,7 +146,7 @@ type recordingWorkflow struct {
 	lastUser string
 }
 
-func (r *recordingWorkflow) Execute(_ context.Context, interaction slack.InteractionCallback) error {
+func (r *recordingWorkflow) Execute(_ context.Context, interaction slack.InteractionCallback, _ []byte) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls++

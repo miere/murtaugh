@@ -51,7 +51,7 @@ func TestEnginePostsTemplateResponseAndRunsBackgroundCommand(t *testing.T) {
 	runner := &recordingRunner{}
 	engine := NewEngine(workflowConfig(), Options{Poster: poster, Runner: runner, TemplateDir: templateDir})
 
-	if err := engine.Execute(context.Background(), approvalInteraction()); err != nil {
+	if err := engine.Execute(context.Background(), approvalInteraction(), nil); err != nil {
 		t.Fatalf("Execute returned error: %v", err)
 	}
 
@@ -69,6 +69,71 @@ func TestEnginePostsTemplateResponseAndRunsBackgroundCommand(t *testing.T) {
 	}
 }
 
+func TestEngineRendersRunArgsAndPipesRawStdin(t *testing.T) {
+	cfg := config.Config{WorkflowRules: map[string]config.WorkflowRuleConfig{
+		"pr-approve": {
+			RequestEvent: "interactive",
+			Match:        map[string]any{"actions": []any{map[string]any{"action_id": "approve_only"}}},
+			Triggers: []config.TriggerConfig{
+				{Type: "run", Run: &config.RunTriggerConfig{
+					Cmd:  "bash",
+					Args: []string{"-c", "gh pr review {{ (index .Payload.actions 0).value }}"},
+				}},
+			},
+		},
+	}}
+	runner := &recordingRunner{}
+	engine := NewEngine(cfg, Options{Runner: runner})
+
+	interaction := slack.InteractionCallback{
+		Type: slack.InteractionTypeBlockActions,
+		ActionCallback: slack.ActionCallbacks{BlockActions: []*slack.BlockAction{{
+			ActionID: "approve_only",
+			Value:    "owner/repo#123",
+		}}},
+	}
+	raw := []byte(`{"verbatim":"exactly-what-slack-sent"}`)
+	if err := engine.Execute(context.Background(), interaction, raw); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if len(runner.commands) != 1 {
+		t.Fatalf("expected one run command, got %d", len(runner.commands))
+	}
+	// run args are template-rendered against .Payload
+	if args := runner.commands[0].Args; len(args) != 2 || args[1] != "gh pr review owner/repo#123" {
+		t.Fatalf("run args not rendered against .Payload: %#v", args)
+	}
+	// the run command receives the RAW Slack payload on stdin, verbatim
+	if string(runner.inputs[0]) != string(raw) {
+		t.Fatalf("stdin = %q, want raw payload %q", runner.inputs[0], raw)
+	}
+}
+
+func TestEngineRunArgTemplateErrorFailsRule(t *testing.T) {
+	cfg := config.Config{WorkflowRules: map[string]config.WorkflowRuleConfig{
+		"bad": {
+			RequestEvent: "interactive",
+			Match:        map[string]any{"actions": []any{map[string]any{"action_id": "approve_only"}}},
+			Triggers: []config.TriggerConfig{
+				{Type: "run", Run: &config.RunTriggerConfig{Cmd: "bash", Args: []string{"{{ .Payload.missing.field }}"}}},
+			},
+		},
+	}}
+	runner := &recordingRunner{}
+	engine := NewEngine(cfg, Options{Runner: runner})
+
+	interaction := slack.InteractionCallback{
+		Type:           slack.InteractionTypeBlockActions,
+		ActionCallback: slack.ActionCallbacks{BlockActions: []*slack.BlockAction{{ActionID: "approve_only"}}},
+	}
+	if err := engine.Execute(context.Background(), interaction, nil); err == nil {
+		t.Fatal("expected an unresolved-placeholder template error to fail the rule")
+	}
+	if len(runner.commands) != 0 {
+		t.Fatalf("command should not run when its args fail to render: %#v", runner.commands)
+	}
+}
+
 func TestEnginePostsCommandRenderedResponse(t *testing.T) {
 	poster := &recordingPoster{}
 	runner := &recordingRunner{outputs: [][]byte{[]byte(`{"text":"from command"}`)}}
@@ -81,7 +146,7 @@ func TestEnginePostsCommandRenderedResponse(t *testing.T) {
 	cfg.WorkflowRules["code-review-approval"] = rule
 
 	engine := NewEngine(cfg, Options{Poster: poster, Runner: runner})
-	if err := engine.Execute(context.Background(), approvalInteraction()); err != nil {
+	if err := engine.Execute(context.Background(), approvalInteraction(), nil); err != nil {
 		t.Fatalf("Execute returned error: %v", err)
 	}
 
@@ -133,7 +198,7 @@ func TestEngineDelegateReplyPostsJSON(t *testing.T) {
 	cfg := delegateReplyConfig(`Summarise approval in {{ index .Payload.channel "name" }}`)
 
 	engine := NewEngine(cfg, Options{Poster: poster, Delegator: del})
-	if err := engine.Execute(context.Background(), approvalInteraction()); err != nil {
+	if err := engine.Execute(context.Background(), approvalInteraction(), nil); err != nil {
 		t.Fatalf("Execute returned error: %v", err)
 	}
 
@@ -154,7 +219,7 @@ func TestEngineDelegateReplyNonJSONSkipsPost(t *testing.T) {
 	cfg := delegateReplyConfig("Summarise it")
 
 	engine := NewEngine(cfg, Options{Poster: poster, Delegator: del})
-	if err := engine.Execute(context.Background(), approvalInteraction()); err != nil {
+	if err := engine.Execute(context.Background(), approvalInteraction(), nil); err != nil {
 		t.Fatalf("Execute should not error on non-JSON output, got: %v", err)
 	}
 	if len(poster.bodies) != 0 {
@@ -174,7 +239,7 @@ func TestEngineTopLevelDelegateFireAndForget(t *testing.T) {
 	cfg.WorkflowRules["code-review-approval"] = rule
 
 	engine := NewEngine(cfg, Options{Poster: poster, Delegator: del})
-	if err := engine.Execute(context.Background(), approvalInteraction()); err != nil {
+	if err := engine.Execute(context.Background(), approvalInteraction(), nil); err != nil {
 		t.Fatalf("Execute returned error: %v", err)
 	}
 	if del.forgets != 1 || del.agents[0] != "default" {
@@ -192,7 +257,7 @@ func TestEngineSkipsWhenNoRuleMatches(t *testing.T) {
 	interaction := approvalInteraction()
 	interaction.Channel.Name = "other-channel"
 
-	if err := engine.Execute(context.Background(), interaction); err != nil {
+	if err := engine.Execute(context.Background(), interaction, nil); err != nil {
 		t.Fatalf("Execute returned error: %v", err)
 	}
 	if len(poster.bodies) != 0 || len(runner.commands) != 0 {
@@ -204,7 +269,7 @@ func TestEngineInstallsDefaultPingPongRule(t *testing.T) {
 	poster := &recordingPoster{}
 	engine := NewEngine(config.Config{}, Options{Poster: poster})
 
-	if err := engine.Execute(context.Background(), pingInteraction()); err != nil {
+	if err := engine.Execute(context.Background(), pingInteraction(), nil); err != nil {
 		t.Fatalf("Execute returned error: %v", err)
 	}
 	if len(poster.bodies) != 1 || poster.urls[0] != "https://hooks.slack.test/ping" {
@@ -235,7 +300,7 @@ func TestEngineUsesEmbeddedFallbackTemplateForConfiguredRule(t *testing.T) {
 		},
 	}}, Options{Poster: poster})
 
-	if err := engine.Execute(context.Background(), pingInteraction()); err != nil {
+	if err := engine.Execute(context.Background(), pingInteraction(), nil); err != nil {
 		t.Fatalf("Execute returned error: %v", err)
 	}
 	if len(poster.bodies) != 1 || !strings.Contains(string(poster.bodies[0]), ":recycle: The server communication is functional.") {
@@ -249,7 +314,7 @@ func TestEngineLogsInfoWhenNoRuleMatches(t *testing.T) {
 	engine := NewEngine(workflowConfig(), Options{Logger: logger})
 	interaction := pingInteraction()
 
-	if err := engine.Execute(context.Background(), interaction); err != nil {
+	if err := engine.Execute(context.Background(), interaction, nil); err != nil {
 		t.Fatalf("Execute returned error: %v", err)
 	}
 	output := logs.String()

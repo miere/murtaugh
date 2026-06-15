@@ -25,7 +25,7 @@ import (
 // workflowDispatcher is the minimal surface needed to dispatch an interactive
 // callback to a workflow engine. *workflow.Engine satisfies it.
 type workflowDispatcher interface {
-	Execute(ctx context.Context, interaction slack.InteractionCallback) error
+	Execute(ctx context.Context, interaction slack.InteractionCallback, rawPayload []byte) error
 }
 
 // RestartTrigger is the function the Gateway calls to request a graceful
@@ -561,6 +561,13 @@ func (a *Gateway) handleInteractive(event socketmode.Event) {
 		"interactive callback received",
 		journal.Keys{TeamID: interaction.Team.ID, ChannelID: interaction.Channel.ID, UserID: interaction.User.ID},
 		map[string]any{"interaction_type": string(interaction.Type), "callback_id": interaction.CallbackID})
+	// The raw Slack callback bytes (as delivered) are what a `run` trigger gets
+	// on stdin — full fidelity, exactly what Slack sent. Falls back to a
+	// marshaled form inside the engine when absent.
+	var rawPayload []byte
+	if event.Request != nil {
+		rawPayload = event.Request.Payload
+	}
 	go func() {
 		// No total wall-clock deadline here: a delegate-to-agent step (e.g. a
 		// code review) is legitimately long-running and is already bounded by
@@ -572,7 +579,7 @@ func (a *Gateway) handleInteractive(event socketmode.Event) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		ctx = journal.WithCorrID(ctx, corrID)
-		if err := a.workflow.Execute(ctx, interaction); err != nil {
+		if err := a.workflow.Execute(ctx, interaction, rawPayload); err != nil {
 			a.logger.Error("interactive workflow failed", "error", err)
 		}
 	}()

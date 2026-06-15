@@ -66,10 +66,17 @@ more-specific rules to sort ahead of catch-alls.
   return solely valid Slack message JSON — non-JSON is logged and skipped). Set
   `"replace_original": true` to overwrite the clicked message (see
   `templates/code-review/02-approved.json`).
-- **`run`** spawns a command and writes the full Slack interaction callback to its
-  stdin as JSON. Use it for side effects (calling the GitHub API, etc.). It does
-  **not** post a reply on its own — pair it with `reply-to-slack` if the user needs
-  feedback.
+- **`run`** spawns a command for side effects (calling the GitHub API, etc.). It
+  does **not** post a reply on its own — pair it with `reply-to-slack` if the
+  user needs feedback. Two ways to get the interaction data into the command:
+  - **stdin** — the raw Slack interaction callback (exactly what Slack sent) is
+    written to the command's stdin as JSON. Parse it with e.g.
+    `jq -r '.actions[0].value'`.
+  - **templated `cmd`/`args`** — both are rendered with Go `text/template`, the
+    payload under `.Payload` (same as templates/prompts). So
+    `args: ["-c", "gh pr review {{ (index .Payload.actions 0).value }}"]` works.
+    An unresolved placeholder fails the rule loudly rather than running a
+    half-rendered command. (`timeout` is never templated.)
 - **`delegate-to-agent`** (top-level) hands the interaction to an agent in an
   isolated one-shot session and is **fire-and-forget** — no output is captured;
   the agent acts through its own tools (it may post to Slack itself). The

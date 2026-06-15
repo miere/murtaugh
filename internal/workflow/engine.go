@@ -123,14 +123,23 @@ func defaultWorkflowRules() map[string]config.WorkflowRuleConfig {
 	}
 }
 
-func (e *Engine) Execute(ctx context.Context, interaction slack.InteractionCallback) error {
+// Execute matches interaction against the configured rules and runs the
+// triggers of the first match. rawPayload is the verbatim Slack interaction
+// callback as delivered over the wire; it is what a `run` trigger receives on
+// stdin (full fidelity, matching the docs). Callers that don't have the raw
+// bytes (tests, synthetic events) may pass nil, in which case a marshaled form
+// of interaction is used instead.
+func (e *Engine) Execute(ctx context.Context, interaction slack.InteractionCallback, rawPayload []byte) error {
 	payload, err := payloadMap(interaction)
 	if err != nil {
 		return err
 	}
-	payloadJSON, err := json.Marshal(interaction)
-	if err != nil {
-		return fmt.Errorf("marshal interaction payload: %w", err)
+	runStdin := rawPayload
+	if len(runStdin) == 0 {
+		runStdin, err = json.Marshal(interaction)
+		if err != nil {
+			return fmt.Errorf("marshal interaction payload: %w", err)
+		}
 	}
 
 	keys := journal.Keys{
@@ -148,7 +157,7 @@ func (e *Engine) Execute(ctx context.Context, interaction slack.InteractionCallb
 		ruleKeys.RuleID = rule.Name
 		e.record(ctx, "workflow.matched", journal.LevelInfo, "matched workflow rule "+rule.Name, ruleKeys,
 			map[string]any{"interaction_type": string(interaction.Type)})
-		return e.executeRule(ctx, rule, interaction.ResponseURL, payload, payloadJSON, keys)
+		return e.executeRule(ctx, rule, interaction.ResponseURL, payload, runStdin, keys)
 	}
 
 	e.logger.Info(
@@ -166,12 +175,12 @@ func (e *Engine) Execute(ctx context.Context, interaction slack.InteractionCallb
 	return nil
 }
 
-func (e *Engine) executeRule(ctx context.Context, rule Rule, responseURL string, payload map[string]any, payloadJSON []byte, keys journal.Keys) error {
+func (e *Engine) executeRule(ctx context.Context, rule Rule, responseURL string, payload map[string]any, runStdin []byte, keys journal.Keys) error {
 	keys.RuleID = rule.Name
 	for _, trigger := range rule.Config.Triggers {
 		switch trigger.Type {
 		case "reply-to-slack":
-			body, err := e.renderReply(ctx, *trigger.ReplyToSlack, payload, payloadJSON)
+			body, err := e.renderReply(ctx, *trigger.ReplyToSlack, payload, runStdin)
 			if err != nil {
 				// A delegate-to-agent reply that produced non-JSON is not a hard
 				// failure: the runner already logged a warning with the output.
@@ -193,7 +202,13 @@ func (e *Engine) executeRule(ctx context.Context, rule Rule, responseURL string,
 			e.record(ctx, "workflow.trigger", journal.LevelInfo, "reply-to-slack posted", keys,
 				map[string]any{"trigger": "reply-to-slack"})
 		case "run":
-			if _, err := e.runner.Run(ctx, *trigger.Run, payloadJSON); err != nil {
+			runCfg, err := renderRunConfig(*trigger.Run, payload)
+			if err != nil {
+				e.record(ctx, "workflow.trigger", journal.LevelError, "run command template failed", keys,
+					map[string]any{"trigger": "run", "error": err.Error()})
+				return fmt.Errorf("render run command for rule %s: %w", rule.Name, err)
+			}
+			if _, err := e.runner.Run(ctx, runCfg, runStdin); err != nil {
 				e.record(ctx, "workflow.trigger", journal.LevelError, "run command failed", keys,
 					map[string]any{"trigger": "run", "error": err.Error()})
 				return fmt.Errorf("run command for rule %s: %w", rule.Name, err)
@@ -242,9 +257,13 @@ func (e *Engine) delegate(ctx context.Context, cfg config.DelegateToAgentConfig,
 	return e.delegator.RunAndForget(ctx, cfg.Agent, prompt)
 }
 
-func (e *Engine) renderReply(ctx context.Context, trigger config.ReplyToSlackTriggerConfig, payload map[string]any, payloadJSON []byte) ([]byte, error) {
+func (e *Engine) renderReply(ctx context.Context, trigger config.ReplyToSlackTriggerConfig, payload map[string]any, runStdin []byte) ([]byte, error) {
 	if trigger.Run != nil {
-		stdout, err := e.runner.Run(ctx, *trigger.Run, payloadJSON)
+		runCfg, err := renderRunConfig(*trigger.Run, payload)
+		if err != nil {
+			return nil, err
+		}
+		stdout, err := e.runner.Run(ctx, runCfg, runStdin)
 		if err != nil {
 			return nil, err
 		}
@@ -313,6 +332,36 @@ func blockActionIDs(actions []*slack.BlockAction) []string {
 		ids = append(ids, action.ActionID)
 	}
 	return ids
+}
+
+// renderRunConfig renders a run trigger's cmd, args, and workdir through
+// text/template against the interaction payload (under .Payload), so a rule can
+// parameterise the command — e.g. `{{ (index .Payload.actions 0).value }}`.
+// Timeout is left verbatim (it is a duration, never templated). A malformed or
+// unresolved placeholder fails the rule loudly rather than executing a
+// half-rendered command.
+func renderRunConfig(cfg config.RunTriggerConfig, payload map[string]any) (config.RunTriggerConfig, error) {
+	data := map[string]any{"Payload": payload}
+	cmd, err := renderPrompt(cfg.Cmd, data)
+	if err != nil {
+		return config.RunTriggerConfig{}, fmt.Errorf("run cmd: %w", err)
+	}
+	var args []string
+	if len(cfg.Args) > 0 {
+		args = make([]string, len(cfg.Args))
+		for i, a := range cfg.Args {
+			rendered, err := renderPrompt(a, data)
+			if err != nil {
+				return config.RunTriggerConfig{}, fmt.Errorf("run arg %d: %w", i, err)
+			}
+			args[i] = rendered
+		}
+	}
+	workdir, err := renderPrompt(cfg.WorkDir, data)
+	if err != nil {
+		return config.RunTriggerConfig{}, fmt.Errorf("run workdir: %w", err)
+	}
+	return config.RunTriggerConfig{Cmd: cmd, Args: args, Timeout: cfg.Timeout, WorkDir: workdir}, nil
 }
 
 // renderPrompt renders a delegate-to-agent prompt through text/template with
