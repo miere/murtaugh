@@ -6,7 +6,9 @@ import "embed"
 // the seed config files, the Block Kit templates under templates/, the bundled
 // agent skills under skills/ (each a SKILL.md + reference/ + examples/ tree),
 // and cli-help.md (the canonical CLI/MCP command reference surfaced by
-// `murtaugh help`). Both templates and skills are embedded recursively.
+// `murtaugh help`). Both templates and skills are embedded recursively, as is
+// troubleshoot/ (the diagnostics-bundle instructions surfaced by
+// `troubleshoot.bundle`).
 //
-//go:embed slack.yaml agents.yaml jobs.yaml journal.yaml cli-help.md templates skills
+//go:embed slack.yaml agents.yaml jobs.yaml journal.yaml cli-help.md templates skills troubleshoot
 var FS embed.FS

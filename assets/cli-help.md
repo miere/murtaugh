@@ -390,6 +390,36 @@ murtaugh setup update
 murtaugh setup update --version v0.5.0 --force true
 ```
 
+## murtaugh troubleshoot bundle
+
+Assemble a self-contained **diagnostics bundle** (a zip) for investigating a
+problem: a consistent snapshot of the event journal, the ACP transcripts, the
+daemon logs (tail-truncated), the **redacted** config files, optional
+downstream-provider artifacts (e.g. Goose sessions + logs), a `manifest.json`,
+and an `INSTRUCTIONS.md` telling an AI agent how to read it. Deterministic — it
+never asks an agent to gather the files.
+
+| Flag             | Required | Type            | Notes                                                                          |
+|------------------|----------|-----------------|--------------------------------------------------------------------------------|
+| `--note`         | no       | string          | Symptom description; recorded in the manifest.                                 |
+| `--include`      | no       | string (repeat) | Provider whose on-disk diagnostics to add (known: `goose`). Repeat per provider.|
+| `--out`          | no       | string          | Output path for the zip. Defaults to a timestamped file in the temp dir.       |
+| `--max-log-bytes`| no       | integer         | Tail cap per log file in bytes. Defaults to 5 MiB.                             |
+| `--redact`       | no       | boolean         | Redact known secrets. Defaults to `true`; only set `false` for local-only use. |
+
+- Redaction removes Slack tokens (`xoxb-`/`xapp-`/`xoxp-`) and the values of
+  obviously-secret config keys. It **cannot** scrub secrets inside conversation
+  transcripts or binary `*.db` files — treat the bundle as sensitive.
+- The same capability is exposed over MCP as `troubleshoot_bundle`, and in Slack
+  as `/murtaugh troubleshoot <symptoms>` (which DMs the bundle to the admin).
+- Missing sources (e.g. logs on a non-macOS host, or a provider that isn't
+  installed) are skipped and noted in `manifest.json`, never fatal.
+
+```
+murtaugh troubleshoot bundle --note "bot goes silent on action requests" --include goose
+murtaugh troubleshoot bundle --out /tmp/murtaugh-diag.zip --max-log-bytes 1048576
+```
+
 ## murtaugh version
 
 Print the binary's version string (e.g. `v0.4.1` or `dev`). Takes no flags.

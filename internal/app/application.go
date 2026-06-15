@@ -40,6 +40,8 @@ import (
 	slackfetchreactions "github.com/miere/murtaugh-dev-toolkit/internal/tools/slack/fetchreactions"
 	slacksendmsg "github.com/miere/murtaugh-dev-toolkit/internal/tools/slack/sendmsg"
 	slackupdatemsg "github.com/miere/murtaugh-dev-toolkit/internal/tools/slack/updatemsg"
+	troubleshootbundle "github.com/miere/murtaugh-dev-toolkit/internal/tools/troubleshoot/bundle"
+	"github.com/miere/murtaugh-dev-toolkit/internal/troubleshoot"
 )
 
 // Mode selects which frontend Run starts.
@@ -148,6 +150,26 @@ func (a *Application) Run(ctx context.Context) error {
 		if a.journalSweep != nil {
 			gw = gw.WithJournalSweeper(a.journalSweep, a.journalSweepEvery)
 		}
+		// `/murtaugh troubleshoot <symptoms>` assembles a redacted diagnostics
+		// bundle and DMs it to the admin. The gateway owns Slack delivery; the
+		// deterministic file assembly is this closure over the same bundler the
+		// troubleshoot.bundle tool uses. Always attempts to include known
+		// providers (e.g. Goose) — absent files are simply skipped.
+		gw = gw.WithTroubleshootBundler(func(ctx context.Context, note string) (string, []string, error) {
+			res, err := troubleshoot.Build(ctx, troubleshoot.Options{
+				Note:      note,
+				Providers: troubleshoot.KnownProviders(),
+			}, troubleshoot.ResolveSources(
+				a.cfg.Journal.EffectivePath(),
+				a.cfg.Journal.EffectiveBlobDir(),
+				baseDirFor(a.cfg, a.configPath),
+				a.version,
+			))
+			if err != nil {
+				return "", nil, err
+			}
+			return res.Path, res.Manifest.Errors, nil
+		})
 		a.logger.Info("starting Slack gateway (Socket Mode)", "config", a.configPath)
 		err := gw.Run(ctx)
 		if err != nil && ctx.Err() != nil {
@@ -354,6 +376,19 @@ func buildRegistry(cfg config.Config, configPath, version string, recorder journ
 	// confirms in Slack (or via the admin-only slash command), never from
 	// this tool. With no channel it asks the configured admin in their DM.
 	reg.Register(restart.New(botToken, cfg.Configuration.AdminUser))
+
+	// `troubleshoot.bundle` assembles a redacted diagnostics zip. It resolves
+	// its read paths (journal, blobs, config dir) from the loaded config on
+	// every call, mirroring the journal/jobs path closures above.
+	troubleshootSources := func() troubleshoot.Sources {
+		return troubleshoot.ResolveSources(
+			cfg.Journal.EffectivePath(),
+			cfg.Journal.EffectiveBlobDir(),
+			baseDirFor(cfg, configPath),
+			version,
+		)
+	}
+	reg.Register(troubleshootbundle.New(troubleshootSources))
 
 	return reg
 }

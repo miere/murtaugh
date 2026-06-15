@@ -133,6 +133,7 @@ settings enabled:
    - `commands` — slash commands
    - `app_mentions:read`, `im:history` — chat
    - `chat:write`, `chat:write.public` — sending messages
+   - `files:write` — uploading the `/murtaugh troubleshoot` diagnostics bundle
    - `links:read` — link unfurling (if used)
 4. **Event subscriptions** — subscribe to:
    - `app_mention`, `message.im` — for AI chat
