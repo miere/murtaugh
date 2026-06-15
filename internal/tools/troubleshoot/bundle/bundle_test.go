@@ -10,7 +10,7 @@ import (
 )
 
 func TestTool_Metadata(t *testing.T) {
-	tl := New(func() troubleshoot.Sources { return troubleshoot.Sources{} })
+	tl := New(func() troubleshoot.Sources { return troubleshoot.Sources{} }, nil)
 	if tl.Name() != "troubleshoot.bundle" {
 		t.Fatalf("Name() = %q", tl.Name())
 	}
@@ -24,7 +24,7 @@ func TestTool_Invoke_BuildsBundle(t *testing.T) {
 	out := filepath.Join(dir, "b.zip")
 	tl := New(func() troubleshoot.Sources {
 		return troubleshoot.Sources{Version: "test", GOOS: "testos"}
-	})
+	}, nil)
 
 	got, err := tl.Invoke(context.Background(), map[string]any{
 		"note": "silent replies",
@@ -52,7 +52,7 @@ func TestTool_Invoke_RedactFalse(t *testing.T) {
 	dir := t.TempDir()
 	tl := New(func() troubleshoot.Sources {
 		return troubleshoot.Sources{Version: "test", GOOS: "testos"}
-	})
+	}, nil)
 	got, err := tl.Invoke(context.Background(), map[string]any{
 		"out":    filepath.Join(dir, "b.zip"),
 		"redact": false,

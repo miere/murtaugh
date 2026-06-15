@@ -23,11 +23,17 @@ type SourcesProvider func() troubleshoot.Sources
 // Tool is the `troubleshoot.bundle` capability.
 type Tool struct {
 	sources SourcesProvider
+	// defaultProviders supplies the provider list used when the caller passes no
+	// `include` argument (the configured set from troubleshoot.yaml, else all
+	// known providers). nil yields no default.
+	defaultProviders func() []string
 }
 
-// New constructs a Tool that resolves its read locations via sources.
-func New(sources SourcesProvider) *Tool {
-	return &Tool{sources: sources}
+// New constructs a Tool that resolves its read locations via sources and falls
+// back to defaultProviders when no `include` argument is given. defaultProviders
+// may be nil.
+func New(sources SourcesProvider, defaultProviders func() []string) *Tool {
+	return &Tool{sources: sources, defaultProviders: defaultProviders}
 }
 
 // Name returns the registry key.
@@ -89,9 +95,14 @@ func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 		redact = v
 	}
 
+	providers := stringSlice(args["include"])
+	if len(providers) == 0 && t.defaultProviders != nil {
+		providers = t.defaultProviders()
+	}
+
 	opts := troubleshoot.Options{
 		Note:        note,
-		Providers:   stringSlice(args["include"]),
+		Providers:   providers,
 		MaxLogBytes: toInt64(args["max_log_bytes"]),
 		NoRedact:    !redact,
 		OutPath:     strings.TrimSpace(out),
