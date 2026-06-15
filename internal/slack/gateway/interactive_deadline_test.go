@@ -18,7 +18,7 @@ type deadlineCapturingWorkflow struct {
 	deadline    time.Time
 }
 
-func (w *deadlineCapturingWorkflow) Execute(ctx context.Context, _ slack.InteractionCallback) error {
+func (w *deadlineCapturingWorkflow) Execute(ctx context.Context, _ slack.InteractionCallback, _ []byte) error {
 	w.deadline, w.hasDeadline = ctx.Deadline()
 	close(w.done)
 	return nil
