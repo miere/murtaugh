@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"regexp"
 	"testing"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -97,8 +98,10 @@ func TestServer_CallTool_StructResult_JSONMarshalled(t *testing.T) {
 	})
 	session := newConnectedClient(t, New(reg))
 
+	// A dotted registry name ("jobs.run") is published dot-free ("jobs_run"),
+	// and the call dispatches on the published id.
 	res, err := session.CallTool(context.Background(), &mcpsdk.CallToolParams{
-		Name:      "jobs.run",
+		Name:      "jobs_run",
 		Arguments: map[string]any{"name": "demo"},
 	})
 	if err != nil {
@@ -151,4 +154,65 @@ func TestServer_PublishesInputSchema(t *testing.T) {
 	if len(got.Required) != 1 || got.Required[0] != "name" {
 		t.Fatalf("required = %v, want [name]", got.Required)
 	}
+}
+
+func TestServer_PublishesDotFreeName(t *testing.T) {
+	// Murtaugh's tools are dot-namespaced (jobs.define, journal.query, …) but
+	// providers such as Gemini reject the dot in a function name. The MCP
+	// frontend must publish a dot-free id.
+	reg := tools.NewRegistry()
+	reg.Register(&fakeTool{name: "jobs.define", result: "ok"})
+
+	session := newConnectedClient(t, New(reg))
+
+	res, err := session.ListTools(context.Background(), &mcpsdk.ListToolsParams{})
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	if len(res.Tools) != 1 || res.Tools[0].Name != "jobs_define" {
+		t.Fatalf("ListTools = %+v, want one tool published as jobs_define", res.Tools)
+	}
+	if !validMCPName.MatchString(res.Tools[0].Name) {
+		t.Fatalf("published name %q is not a valid MCP/LLM identifier", res.Tools[0].Name)
+	}
+}
+
+// validMCPName mirrors the strictest provider constraint (Gemini's
+// function-name regex) so the test fails if a published name regresses to
+// containing a dot, space, or other disallowed character.
+var validMCPName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+func TestMCPToolName(t *testing.T) {
+	cases := map[string]string{
+		"jobs.define":        "jobs_define",
+		"journal.query":      "journal_query",
+		"setup.mcp-register": "setup_mcp-register", // hyphen already valid, kept
+		"slack.send-msg":     "slack_send-msg",
+		"ping":               "ping", // already valid, unchanged
+		"a.b.c":              "a_b_c",
+	}
+	for in, want := range cases {
+		if got := mcpToolName(in); got != want {
+			t.Errorf("mcpToolName(%q) = %q, want %q", in, got, want)
+		}
+		if !validMCPName.MatchString(mcpToolName(in)) {
+			t.Errorf("mcpToolName(%q) = %q is not a valid MCP/LLM identifier", in, mcpToolName(in))
+		}
+	}
+}
+
+func TestServer_PanicsOnNameCollision(t *testing.T) {
+	// Two registry keys that sanitise to the same published name must fail
+	// loudly rather than silently shadow each other.
+	// "a.b" and "a_b" are distinct registry keys that both sanitise to "a_b".
+	reg := tools.NewRegistry()
+	reg.Register(&fakeTool{name: "a.b", result: "x"})
+	reg.Register(&fakeTool{name: "a_b", result: "y"})
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("Server() did not panic on a published-name collision")
+		}
+	}()
+	_ = New(reg).Server()
 }
