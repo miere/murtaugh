@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -42,10 +43,41 @@ func (f *Frontend) Server() *mcpsdk.Server {
 		Name:    ServerName,
 		Version: ServerVersion,
 	}, nil)
-	for _, t := range f.registry.All() {
+	// Guard against two registry keys collapsing onto the same published name
+	// (e.g. "a.b" and "a-b" would both sanitise to "a_b"). The MCP SDK silently
+	// shadows a duplicate rather than erroring, so we fail loudly at startup —
+	// a collision is a programming error in the tool registry, not a runtime
+	// condition. None exist today; this keeps it that way.
+	all := f.registry.All()
+	seen := make(map[string]string, len(all))
+	for _, t := range all {
+		published := mcpToolName(t.Name())
+		if prior, dup := seen[published]; dup {
+			panic(fmt.Sprintf("mcp: tool name collision: %q and %q both publish as %q", prior, t.Name(), published))
+		}
+		seen[published] = t.Name()
 		registerTool(s, t)
 	}
 	return s
+}
+
+// invalidMCPNameChar matches any rune disallowed in an LLM-facing tool name.
+// The MCP Go SDK tolerates '.', but stricter providers reject it — Gemini's
+// function-name regex is exactly [a-zA-Z0-9_-]+, so a dotted name like
+// "jobs.define" (after Goose namespacing, "murtaugh__jobs.define") is refused
+// with a -32600 "invalid characters" error and the tool call never runs.
+var invalidMCPNameChar = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
+
+// mcpToolName normalises a registry tool name into an identifier safe to
+// expose over MCP: every character outside [A-Za-z0-9_-] becomes '_', so
+// "jobs.define" is published as "jobs_define". This is done here, at the single
+// boundary where the dotted registry key becomes the LLM-facing id, rather than
+// renaming the tools themselves — the dotted keys stay load-bearing for the CLI
+// ("murtaugh jobs define") and help. Dispatch is unaffected: AddTool keys the
+// handler on the published name, so an inbound CallTool carrying "jobs_define"
+// matches and invokes the captured tool directly.
+func mcpToolName(name string) string {
+	return invalidMCPNameChar.ReplaceAllString(name, "_")
 }
 
 // Serve runs the MCP server over a stdio transport. It blocks until the
@@ -80,7 +112,7 @@ func registerTool(s *mcpsdk.Server, t tools.Tool) {
 		}, nil
 	}
 	s.AddTool(&mcpsdk.Tool{
-		Name:        t.Name(),
+		Name:        mcpToolName(t.Name()),
 		Description: t.Description(),
 		InputSchema: schema,
 	}, handler)
