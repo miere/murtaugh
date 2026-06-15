@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/miere/murtaugh-dev-toolkit/internal/agentdelegate"
 	"github.com/miere/murtaugh-dev-toolkit/internal/config"
 	"github.com/miere/murtaugh-dev-toolkit/internal/journal"
+	slackclient "github.com/miere/murtaugh-dev-toolkit/internal/slack/client"
 	"github.com/miere/murtaugh-dev-toolkit/internal/unfurl"
 	"github.com/miere/murtaugh-dev-toolkit/internal/workflow"
 	"github.com/slack-go/slack"
@@ -33,6 +35,13 @@ type workflowDispatcher interface {
 // shutdown sequence has begun, false when the request was declined
 // (already firing, within cool-down, or no coordinator is wired).
 type RestartTrigger func(source, userID, channel, reason string) bool
+
+// TroubleshootBundler assembles a diagnostics bundle described by note and
+// returns the path to the written zip plus any non-fatal collection warnings.
+// The gateway owns Slack delivery; the composition root supplies this closure
+// over the deterministic troubleshoot bundler. nil disables the
+// `/murtaugh troubleshoot` slash command.
+type TroubleshootBundler func(ctx context.Context, note string) (zipPath string, warnings []string, err error)
 
 type Gateway struct {
 	api             userDirectoryAPI
@@ -102,6 +111,13 @@ type Gateway struct {
 	// engine and unfurl handler. Never nil after New: a nil argument becomes a
 	// no-op recorder so call sites never branch.
 	recorder journal.Recorder
+	// troubleshoot assembles a diagnostics bundle for the
+	// `/murtaugh troubleshoot` slash command. nil disables the command.
+	troubleshoot TroubleshootBundler
+	// botToken is the bot OAuth token, retained so the troubleshoot handler can
+	// build a Slack client that uploads the bundle to the admin DM (the narrow
+	// api/messaging interfaces deliberately do not expose file upload).
+	botToken string
 	// journalSweep runs one retention pass over the journal; journalSweepEvery
 	// is its cadence. Wired by the composition root (WithJournalSweeper) as a
 	// closure over the daemon's store. nil disables the sweeper, so CLI/MCP and
@@ -235,6 +251,7 @@ func New(cfg config.Config, logger *slog.Logger, recorder journal.Recorder) *Gat
 		messaging:       api,
 		scheduledJobs:   cfg.Jobs,
 		recorder:        recorder,
+		botToken:        cfg.OAuth.BotToken,
 	}
 }
 
@@ -305,6 +322,14 @@ func (a *Gateway) WithScheduledRunner(runner ScheduledRunner) *Gateway {
 func (a *Gateway) WithJournalSweeper(sweep func(context.Context) error, every time.Duration) *Gateway {
 	a.journalSweep = sweep
 	a.journalSweepEvery = every
+	return a
+}
+
+// WithTroubleshootBundler attaches the diagnostics-bundle assembler that backs
+// the `/murtaugh troubleshoot` slash command. nil (the default) disables the
+// command. Returns the receiver for fluent wiring.
+func (a *Gateway) WithTroubleshootBundler(bundler TroubleshootBundler) *Gateway {
+	a.troubleshoot = bundler
 	return a
 }
 
@@ -585,6 +610,10 @@ func (a *Gateway) handleSlashCommand(ctx context.Context, event socketmode.Event
 		a.handleStopSlashCommand(event, command, slashCommandThreadTS(event))
 		return
 	}
+	if isTroubleshootSlashCommand(command.Text) {
+		a.handleTroubleshootSlashCommand(ctx, event, command)
+		return
+	}
 	if err != nil {
 		a.logger.Error("slash command failed", "command", command.Command, "error", err)
 		response = ephemeralText("Murtaugh hit an error while handling that command.")
@@ -641,6 +670,95 @@ func (a *Gateway) handleChatSlashCommand(ctx context.Context, event socketmode.E
 	}
 	a.ack(event, ephemeralText("Murtaugh is answering in the channel."))
 	a.startChat(ctx, ChatRequest{TeamID: command.TeamID, ChannelID: command.ChannelID, UserID: command.UserID, Text: text, Source: "slash_command"})
+}
+
+// handleTroubleshootSlashCommand assembles a diagnostics bundle and uploads it
+// to the admin's DM. Any allowed user may trigger it (the outer
+// handleSlashCommand already enforced IsAllowedUser); the bundle is delivered
+// only to the admin — never echoed to the invoking channel — because it can
+// contain sensitive data. The bundle is built and uploaded in a goroutine so
+// the slash command is acked within Slack's ~3s window.
+func (a *Gateway) handleTroubleshootSlashCommand(ctx context.Context, event socketmode.Event, command slack.SlashCommand) {
+	if a.troubleshoot == nil {
+		a.ack(event, ephemeralText("Troubleshooting bundles are not available in this deployment."))
+		return
+	}
+	admin := strings.TrimSpace(a.cfg.AdminUser)
+	if admin == "" {
+		a.ack(event, ephemeralText("No admin user is configured, so there is nowhere private to send the bundle."))
+		return
+	}
+	if strings.TrimSpace(a.botToken) == "" {
+		a.ack(event, ephemeralText("The bot token is not configured, so I cannot upload a bundle."))
+		return
+	}
+	note := slashTroubleshootText(command.Text)
+	a.ack(event, ephemeralText("Assembling a diagnostics bundle and sending it to the admin's DM. This can take a moment."))
+
+	go func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+
+		api, err := slackclient.NewClient(a.botToken)
+		if err != nil {
+			a.logger.Error("troubleshoot: build slack client failed", "error", err)
+			return
+		}
+		dm, err := api.OpenDM(bgCtx, admin)
+		if err != nil {
+			a.logger.Error("troubleshoot: open admin DM failed", "error", err, "admin", admin)
+			return
+		}
+
+		zipPath, warnings, err := a.troubleshoot(bgCtx, note)
+		if err != nil {
+			a.logger.Error("troubleshoot bundle failed", "error", err, "user", command.UserID)
+			_, _ = api.PostMessage(bgCtx, slackclient.PostMessageParams{
+				ChannelID: dm,
+				Text:      fmt.Sprintf(":warning: Troubleshooting bundle requested by <@%s> failed: %v", command.UserID, err),
+			})
+			return
+		}
+		defer os.Remove(zipPath)
+
+		if _, err := api.UploadFile(bgCtx, slackclient.UploadFileParams{
+			ChannelID:      dm,
+			FilePath:       zipPath,
+			Filename:       filepath.Base(zipPath),
+			Title:          "Murtaugh troubleshooting bundle",
+			InitialComment: troubleshootComment(command, note, warnings),
+		}); err != nil {
+			a.logger.Error("troubleshoot: upload bundle failed", "error", err)
+			_, _ = api.PostMessage(bgCtx, slackclient.PostMessageParams{
+				ChannelID: dm,
+				Text:      fmt.Sprintf(":warning: Assembled the diagnostics bundle but the upload failed: %v", err),
+			})
+			return
+		}
+		a.logger.Info("troubleshoot bundle delivered", "user", command.UserID, "warnings", len(warnings))
+	}()
+}
+
+// troubleshootComment builds the message that accompanies the uploaded bundle,
+// carrying who asked, their symptom description, the redaction caveat, and any
+// non-fatal collection warnings.
+func troubleshootComment(command slack.SlashCommand, note string, warnings []string) string {
+	var b strings.Builder
+	b.WriteString(":card_file_box: *Murtaugh troubleshooting bundle*\n")
+	fmt.Fprintf(&b, "Requested by <@%s>.\n", command.UserID)
+	if strings.TrimSpace(note) != "" {
+		fmt.Fprintf(&b, "*Symptoms:* %s\n", strings.TrimSpace(note))
+	} else {
+		b.WriteString("_No symptom description provided._\n")
+	}
+	b.WriteString(":warning: Secrets are redacted best-effort (Slack tokens + obvious config secrets). Transcripts and `*.db` files are NOT scrubbed — treat as sensitive.\n")
+	if len(warnings) > 0 {
+		b.WriteString("\n*Collection notes:*\n")
+		for _, w := range warnings {
+			fmt.Fprintf(&b, "• %s\n", w)
+		}
+	}
+	return b.String()
 }
 
 // handleStopSlashCommand cancels the in-flight chat for the
@@ -880,6 +998,22 @@ func (a *Gateway) buildInterruptCancel(key acp.ConversationKey, agent string, ca
 func isChatSlashCommand(text string) bool {
 	fields := strings.Fields(text)
 	return len(fields) > 0 && strings.EqualFold(fields[0], "chat")
+}
+
+func isTroubleshootSlashCommand(text string) bool {
+	fields := strings.Fields(text)
+	return len(fields) > 0 && strings.EqualFold(fields[0], "troubleshoot")
+}
+
+// slashTroubleshootText returns the free-text symptom description following the
+// `troubleshoot` verb, or "" when the verb is absent. An empty description is
+// allowed (the bundle is still useful) — it is not an error.
+func slashTroubleshootText(text string) string {
+	fields := strings.Fields(text)
+	if len(fields) == 0 || !strings.EqualFold(fields[0], "troubleshoot") {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(text), fields[0]))
 }
 
 // isStopSlashCommand recognises both the standalone `/stop` slash
