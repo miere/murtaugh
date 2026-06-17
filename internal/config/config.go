@@ -148,6 +148,14 @@ type AgentProfile struct {
 	MCPServers []string `yaml:"mcp_servers"`
 	// MaxTurns bounds tool-call iterations in a single prompt. 0 uses a default.
 	MaxTurns int `yaml:"max_turns"`
+	// ContextLimit is the conversation token budget that drives compaction. 0
+	// uses a per-provider-family default. The loop compacts the message array
+	// before a turn would exceed this.
+	ContextLimit int `yaml:"context_limit"`
+	// Compaction selects how the conversation is kept within ContextLimit:
+	// "truncate" (default — drop oldest turn-groups) or "summarize" (LLM-compress
+	// the oldest groups, with truncation as the fallback). Empty means truncate.
+	Compaction string `yaml:"compaction"`
 	// Interruptible overrides auto-detection of session/cancel support. When
 	// nil (the default) Murtaugh probes the agent at warmup; set it explicitly
 	// to skip the probe or to correct a wrong verdict.
@@ -886,6 +894,14 @@ func validateNativeAgent(name string, p AgentProfile, servers map[string]MCPServ
 	}
 	if strings.TrimSpace(p.SystemPrompt) != "" && strings.TrimSpace(p.SystemPromptFile) != "" {
 		errs = append(errs, fmt.Errorf("agents[%s] sets both system_prompt and system_prompt_file; use exactly one", name))
+	}
+	if p.ContextLimit < 0 {
+		errs = append(errs, fmt.Errorf("agents[%s].context_limit must be greater than or equal to zero", name))
+	}
+	switch strings.ToLower(strings.TrimSpace(p.Compaction)) {
+	case "", "truncate", "summarize":
+	default:
+		errs = append(errs, fmt.Errorf("agents[%s].compaction must be %q or %q", name, "truncate", "summarize"))
 	}
 	for _, ref := range p.MCPServers {
 		if _, ok := servers[ref]; !ok {

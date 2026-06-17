@@ -307,6 +307,21 @@ the choice is made, shared by the gateway and the `agentdelegate` runner:
 Both implementations satisfy the same interface, so `SessionManager`, the Slack
 `ChatHandler`, streaming, and the journal are identical across backends.
 
+**Context-window management (native).** A native session's conversation would
+otherwise grow unbounded across turns. `native/compaction.go` keeps it within a
+per-agent token budget (`context_limit`, defaulting per provider family via
+`llm.DefaultContextLimit`). Before each provider turn the loop compares the
+estimated prompt size — and the provider-reported input-token count from the
+prior turn, which is authoritative — against a high-water mark (¾ of budget) and,
+when over, compacts down toward a low-water mark (½). Two strategies, set per
+agent by `compaction:`: **truncate** (default, always-on safety net) drops the
+oldest whole turn-groups, cutting only on user-message boundaries so tool
+pairings stay intact and the array still starts with a user message and never
+violates `assertNoConsecutiveUserAfterTool`; **summarize** LLM-compresses the
+oldest groups into a `<conversation-summary>` message, falling back to truncation
+if the summary call fails. The token count is tracked per-`Conversation` (not the
+`Loop`, which is shared across a client's sessions).
+
 `SessionManager` caches sessions keyed by `ConversationKey`
 (`TeamID`/`ChannelID`/`ThreadTS`/`DM`). It initializes the client lazily (or via
 `Warm`), evicts on idle timeout / `max_sessions`, and reuses sessions so a Slack

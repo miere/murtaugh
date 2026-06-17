@@ -39,6 +39,8 @@ type Client struct {
 	registry     *tools.Registry
 	toolAllow    []string
 	serverCfgs   []mcpclient.ServerConfig
+	contextLimit int
+	compaction   CompactionMode
 	logger       *slog.Logger
 	now          func() time.Time
 
@@ -92,6 +94,10 @@ func Build(profile config.AgentProfile, deps BuildDeps) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("native: build provider: %w", err)
 	}
+	contextLimit := profile.ContextLimit
+	if contextLimit <= 0 {
+		contextLimit = llm.DefaultContextLimit(family)
+	}
 	systemPrompt, err := resolveSystemPrompt(profile, deps.BaseDir)
 	if err != nil {
 		return nil, err
@@ -130,6 +136,8 @@ func Build(profile config.AgentProfile, deps BuildDeps) (*Client, error) {
 		registry:     deps.Registry,
 		toolAllow:    profile.Tools,
 		serverCfgs:   serverCfgs,
+		contextLimit: contextLimit,
+		compaction:   parseCompaction(profile.Compaction),
 		logger:       logger,
 		now:          time.Now,
 		sessions:     make(map[string]*nativeSession),
@@ -155,9 +163,10 @@ func (c *Client) Initialize(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("native: resolve toolset: %w", err)
 	}
-	c.loop = NewLoop(c.provider, c.model, ts, c.maxTurns)
+	c.loop = NewLoop(c.provider, c.model, ts, c.maxTurns).WithCompaction(c.contextLimit, c.compaction)
 	c.initialized = true
-	c.logger.Info("native agent initialized", "model", c.model, "tools", len(ts), "mcp_servers", len(c.serverCfgs))
+	c.logger.Info("native agent initialized", "model", c.model, "tools", len(ts), "mcp_servers", len(c.serverCfgs),
+		"context_limit", c.contextLimit, "compaction", c.compaction)
 	return nil
 }
 

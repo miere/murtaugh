@@ -23,11 +23,23 @@ import (
 // assertNoConsecutiveUserAfterTool guard makes the invariant testable.
 type Conversation struct {
 	messages []llm.Message
+	// lastInputTokens is the prompt token count the provider reported on the
+	// previous turn (authoritative, when available). The loop uses it alongside
+	// a char-based estimate to decide when to compact. Per-conversation, since
+	// one Loop is shared across a client's sessions.
+	lastInputTokens int
 }
 
 // NewConversation returns an empty Conversation.
 func NewConversation() *Conversation {
 	return &Conversation{}
+}
+
+// recordInputTokens stores the provider-reported prompt token count from a turn.
+func (c *Conversation) recordInputTokens(n int) {
+	if n > 0 {
+		c.lastInputTokens = n
+	}
 }
 
 // Messages returns the owned message array as sent to the provider. The returned

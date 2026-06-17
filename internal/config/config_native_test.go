@@ -133,6 +133,20 @@ func TestNativeAgentValidation(t *testing.T) {
 			profile: AgentProfile{Provider: "openai", Model: "m", APIKeyEnv: "K", MCPServers: []string{"vaultre"}},
 			servers: map[string]MCPServerConfig{"vaultre": {Command: "vaultre-mcp"}},
 		},
+		{
+			name:    "negative context_limit",
+			profile: AgentProfile{Provider: "gemini", Model: "m", APIKeyEnv: "K", ContextLimit: -1},
+			wantErr: "context_limit must be greater than or equal to zero",
+		},
+		{
+			name:    "bad compaction",
+			profile: AgentProfile{Provider: "gemini", Model: "m", APIKeyEnv: "K", Compaction: "shrink"},
+			wantErr: "compaction must be",
+		},
+		{
+			name:    "valid summarize compaction",
+			profile: AgentProfile{Provider: "gemini", Model: "m", APIKeyEnv: "K", Compaction: "summarize", ContextLimit: 200000},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

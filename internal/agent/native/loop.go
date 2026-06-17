@@ -24,6 +24,10 @@ type Loop struct {
 	tools    map[string]tools.Tool
 	toolList []tools.Tool // registration order, for stable ToolSpec ordering
 	maxTurns int
+	// contextLimit is the conversation token budget; 0 disables compaction.
+	// compaction selects the strategy. Set via WithCompaction.
+	contextLimit int
+	compaction   CompactionMode
 }
 
 // NewLoop constructs a Loop. maxTurns ≤ 0 falls back to defaultMaxTurns.
@@ -50,6 +54,14 @@ func NewLoop(provider llm.Provider, model string, ts []tools.Tool, maxTurns int)
 		toolList: list,
 		maxTurns: maxTurns,
 	}
+}
+
+// WithCompaction sets the conversation token budget and strategy. A limit ≤ 0
+// disables compaction (the conversation grows unbounded). Returns the receiver.
+func (l *Loop) WithCompaction(contextLimit int, mode CompactionMode) *Loop {
+	l.contextLimit = contextLimit
+	l.compaction = mode
+	return l
 }
 
 // toolSpecs builds the provider-facing tool advertisement list from the loop's
@@ -94,6 +106,11 @@ func (l *Loop) Run(ctx context.Context, conv *Conversation, system string, emit 
 			emit(eventError(err))
 			return "", err
 		}
+
+		// Keep the conversation within the context budget before sending it.
+		// Runs every turn so growth from tool results (appended within a prompt)
+		// is also caught, not just growth across prompts.
+		l.compact(ctx, conv, system, emit)
 
 		// Invariant guard: the array we are about to send must never contain a
 		// tool-result immediately followed by a standalone user message. This is
@@ -177,6 +194,9 @@ func (l *Loop) runTurn(ctx context.Context, conv *Conversation, system string, e
 		}
 		if ev.Done {
 			res.stopReason = ev.StopReason
+			if ev.Usage != nil {
+				conv.recordInputTokens(ev.Usage.InputTokens)
+			}
 		}
 	}
 	return res, nil
