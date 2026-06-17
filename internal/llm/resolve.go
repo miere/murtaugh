@@ -42,6 +42,25 @@ func (f Family) providerName() string {
 	return string(f)
 }
 
+// DefaultContextLimit returns a conservative default context-window budget (in
+// tokens) for a family, used when a native agent does not set context_limit.
+// These are coarse, model-agnostic floors meant to drive compaction safely;
+// they intentionally undershoot the largest models so an agent on a smaller
+// model in the same family does not blow its window. An explicit context_limit
+// in the agent profile overrides this.
+func DefaultContextLimit(f Family) int {
+	switch f {
+	case FamilyGemini:
+		return 1_000_000
+	case FamilyAnthropic:
+		return 200_000
+	case FamilyOpenAI:
+		return 128_000
+	default:
+		return 128_000
+	}
+}
+
 // New constructs a litellm-backed Provider for the given family/model. baseURL
 // is optional and, when set, overrides the family's default endpoint (this is
 // how compat providers — Z.ai/DeepSeek/Kimi on anthropic or openai — are

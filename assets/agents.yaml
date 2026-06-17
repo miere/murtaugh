@@ -47,6 +47,12 @@ agents:
   #   tools: [files, terminal, skills, slack, jobs]  # native groups + registry namespaces
   #   mcp_servers: [vaultre, data-api]               # from the block above
   #   max_turns: 40
+  #   # Context-window management — keeps a long thread within the model window.
+  #   # context_limit: token budget; omit to use a per-provider-family default.
+  #   # compaction: "truncate" (default — drop oldest turns) or "summarize"
+  #   #             (LLM-compress the oldest turns, truncation as the fallback).
+  #   context_limit: 1000000
+  #   compaction: truncate
 
   # --- ACP agent (kind: acp — external process over ACP) ---------------------
   default:
