@@ -296,13 +296,21 @@ the choice is made, shared by the gateway and the `agentdelegate` runner:
   same `Event`s. Its tools are resolved per-agent by `internal/toolset` from the
   `tools:` allowlist (native `files`/`terminal`/`skills` rooted at the agent's
   workdir + registry namespaces) plus any attached `mcp_servers:` (external MCP
-  servers via `internal/mcpclient`). Per-turn context (time, cwd, skills, Slack
-  location) lives in the **system prompt**, never as a standalone message —
-  `native.Conversation` exposes no API to do otherwise, and
-  `assertNoConsecutiveUserAfterTool` guards every provider call. This is the
-  structural fix for the consecutive-`user` empty-completion bug that motivated
-  owning the loop. Provider credentials come from `~/.config/murtaugh/.env`
-  (`api_key_env` names the variable); secrets never live in YAML.
+  servers via `internal/mcpclient`).
+  - **Prompt layout (caching-aware).** The **system prompt is static**: the base
+    prompt + a stable skills index (the allowlisted skills' name + description,
+    so the agent knows what it can load). Static so providers cache the
+    system+tools prefix across turns and conversations. The **volatile per-turn
+    context** (time, cwd, Slack channel/thread) is folded into the *current user
+    message* instead — never a standalone message, so `native.Conversation`
+    (which exposes no API to do otherwise) and `assertNoConsecutiveUserAfterTool`
+    keep the array clean. That single design serves both goals: the structural
+    fix for the consecutive-`user` empty-completion bug, and a cacheable prefix.
+    Caching is requested via `llm.Request.CacheRetention` (default `5m`), gated to
+    Anthropic/OpenAI in the provider layer (Gemini rejects the extra and caches a
+    static prefix implicitly).
+  - Provider credentials come from `~/.config/murtaugh/.env` (`api_key_env` names
+    the variable); secrets never live in YAML.
 
 Both implementations satisfy the same interface, so `SessionManager`, the Slack
 `ChatHandler`, streaming, and the journal are identical across backends.

@@ -21,6 +21,7 @@ import (
 	"github.com/miere/murtaugh-dev-toolkit/internal/llm"
 	"github.com/miere/murtaugh-dev-toolkit/internal/mcpclient"
 	"github.com/miere/murtaugh-dev-toolkit/internal/tools"
+	"github.com/miere/murtaugh-dev-toolkit/internal/tools/skills"
 	"github.com/miere/murtaugh-dev-toolkit/internal/toolset"
 )
 
@@ -132,13 +133,25 @@ func Build(profile config.AgentProfile, deps BuildDeps) (*Client, error) {
 		})
 	}
 
+	// Advertise the available skills in the (static, cacheable) system prompt —
+	// but only when the agent can actually load them, i.e. the skills tool is in
+	// its allowlist. Read once here; skills change rarely and a restart re-reads,
+	// which keeps the index stable across turns so the system prompt stays
+	// cacheable.
+	skillsDir := filepath.Join(deps.BaseDir, ".agents", "skills")
+	var skillsIndex string
+	if containsString(profile.Tools, toolset.GroupSkills) {
+		skillsIndex = renderSkillsIndex(skillsDir)
+	}
+
 	return &Client{
 		provider:       provider,
 		model:          profile.Model,
 		systemPrompt:   systemPrompt,
+		skillsIndex:    skillsIndex,
 		maxTurns:       profile.MaxTurns,
 		workDir:        workDir,
-		skillsDir:      filepath.Join(deps.BaseDir, ".agents", "skills"),
+		skillsDir:      skillsDir,
 		registry:       deps.Registry,
 		toolAllow:      profile.Tools,
 		serverCfgs:     serverCfgs,
@@ -309,6 +322,36 @@ func resolveSystemPrompt(profile config.AgentProfile, baseDir string) (string, e
 		return "", fmt.Errorf("native: read system_prompt_file %q: %w", file, err)
 	}
 	return string(data), nil
+}
+
+// renderSkillsIndex builds the compact "- name: description" listing of the
+// agent's bundled skills, for the static system prompt. Returns "" when there
+// are no skills or the directory is unreadable (the index is best-effort
+// advertising, never a hard dependency).
+func renderSkillsIndex(skillsDir string) string {
+	summaries, err := skills.List(skillsDir)
+	if err != nil || len(summaries) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, s := range summaries {
+		if strings.TrimSpace(s.Description) != "" {
+			fmt.Fprintf(&b, "- %s: %s\n", s.Name, s.Description)
+		} else {
+			fmt.Fprintf(&b, "- %s\n", s.Name)
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// containsString reports whether want appears in xs (trimmed).
+func containsString(xs []string, want string) bool {
+	for _, x := range xs {
+		if strings.TrimSpace(x) == want {
+			return true
+		}
+	}
+	return false
 }
 
 // expandEnvMap expands ${VAR} references in an MCP server's env values against
