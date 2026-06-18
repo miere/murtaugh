@@ -16,8 +16,9 @@ func TestTool_Metadata(t *testing.T) {
 	if strings.TrimSpace(tl.Description()) == "" {
 		t.Fatal("Description() must not be blank")
 	}
-	if tl.InputSchema() != nil {
-		t.Fatalf("InputSchema() = %v, want nil", tl.InputSchema())
+	schema := tl.InputSchema()
+	if schema == nil || schema.Properties["force"] == nil {
+		t.Fatalf("InputSchema() must declare the optional force flag, got %v", schema)
 	}
 }
 

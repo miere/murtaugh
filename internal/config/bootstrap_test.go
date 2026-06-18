@@ -164,7 +164,7 @@ func TestBootstrapReportClassifiesSkillRefresh(t *testing.T) {
 		t.Fatalf("seed shipped skill: %v", err)
 	}
 
-	first, err := BootstrapWithReport(configPath)
+	first, err := BootstrapWithReport(configPath, false)
 	if err != nil {
 		t.Fatalf("first BootstrapWithReport: %v", err)
 	}
@@ -175,12 +175,50 @@ func TestBootstrapReportClassifiesSkillRefresh(t *testing.T) {
 		t.Fatalf("drifted skill should not be reported as Created")
 	}
 
-	second, err := BootstrapWithReport(configPath)
+	second, err := BootstrapWithReport(configPath, false)
 	if err != nil {
 		t.Fatalf("second BootstrapWithReport: %v", err)
 	}
 	if contains(second.Updated, shippedSkill) || contains(second.Created, shippedSkill) {
 		t.Fatalf("unchanged skill should be neither Updated nor Created on re-run")
+	}
+}
+
+func TestBootstrapSeedsSystemPromptWithForceRefresh(t *testing.T) {
+	baseDir := filepath.Join(t.TempDir(), "murtaugh")
+	configPath := filepath.Join(baseDir, "slack.yaml")
+	promptPath := filepath.Join(baseDir, DefaultSystemPromptFile)
+
+	want, err := assets.FS.ReadFile(DefaultSystemPromptFile)
+	if err != nil {
+		t.Fatalf("read embedded default prompt: %v", err)
+	}
+
+	// Fresh install seeds the bundled default.
+	if _, err := BootstrapWithReport(configPath, false); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	if got, _ := os.ReadFile(promptPath); string(got) != string(want) {
+		t.Fatalf("system prompt not seeded to the shipped default")
+	}
+
+	// An operator edit survives a normal re-run (preserveExisting).
+	if err := os.WriteFile(promptPath, []byte("EDITED BY OPERATOR"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := BootstrapWithReport(configPath, false); err != nil {
+		t.Fatalf("bootstrap re-run: %v", err)
+	}
+	if got, _ := os.ReadFile(promptPath); string(got) != "EDITED BY OPERATOR" {
+		t.Fatalf("non-force bootstrap overwrote the operator's edit: %q", got)
+	}
+
+	// --force refreshes it back to the shipped default.
+	if _, err := BootstrapWithReport(configPath, true); err != nil {
+		t.Fatalf("bootstrap --force: %v", err)
+	}
+	if got, _ := os.ReadFile(promptPath); string(got) != string(want) {
+		t.Fatalf("force did not refresh the prompt to the shipped default")
 	}
 }
 

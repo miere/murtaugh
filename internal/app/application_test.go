@@ -27,7 +27,7 @@ func TestRegistry_ContainsAllExpectedTools(t *testing.T) {
 		{"ping", nil},
 		{"jobs.run", []string{"name"}},
 		{"jobs.define", []string{"name", "command"}},
-		{"setup.bootstrap", nil},
+		{"setup.bootstrap", []string{}}, // optional --force flag; no required fields
 		{"setup.slack", []string{"app_token", "bot_token", "admin_user"}},
 		{"setup.agents", []string{}},
 		{"setup.mcp-register", []string{"client", "binary_path"}},

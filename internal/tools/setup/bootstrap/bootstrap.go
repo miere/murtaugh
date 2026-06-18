@@ -43,8 +43,18 @@ func (t *Tool) Description() string {
 	return "Seed the Murtaugh config directory with embedded defaults (idempotent)."
 }
 
-// InputSchema returns nil because the tool takes no arguments.
-func (t *Tool) InputSchema() *jsonschema.Schema { return nil }
+// InputSchema documents the optional force flag.
+func (t *Tool) InputSchema() *jsonschema.Schema {
+	return &jsonschema.Schema{
+		Type: "object",
+		Properties: map[string]*jsonschema.Schema{
+			"force": {
+				Type:        "boolean",
+				Description: "Refresh the bundled default system prompt to the shipped version (user config, secrets, and AGENTS.md are always preserved).",
+			},
+		},
+	}
+}
 
 // Result is the structured payload returned by Invoke.
 type Result struct {
@@ -72,14 +82,15 @@ func (r Result) String() string {
 }
 
 // Invoke seeds the config directory and returns a structured report of the
-// result. Arguments are ignored.
-func (t *Tool) Invoke(_ context.Context, _ map[string]any) (any, error) {
+// result. The optional force flag refreshes the bundled default system prompt.
+func (t *Tool) Invoke(_ context.Context, args map[string]any) (any, error) {
 	path := t.path()
 	if strings.TrimSpace(path) == "" {
 		return nil, errors.New("config path is not configured")
 	}
+	force, _ := args["force"].(bool)
 
-	report, err := config.BootstrapWithReport(path)
+	report, err := config.BootstrapWithReport(path, force)
 	if err != nil {
 		return nil, err
 	}
