@@ -405,14 +405,14 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest) (retErr error
 			}
 			resetIdleTimer(idle, h.effectiveIdleTimeout())
 			switch event.Type {
-			case agent.EventText, agent.EventStatus:
+			case agent.EventText:
 				if event.Text != "" {
 					chunkSeen++
 					byteSeen += len(event.Text)
 					respBuf.WriteString(event.Text)
 					if !firstChunkLogged {
 						firstChunkLogged = true
-						h.logger.Info("received first ACP text chunk", "source", req.Source, "channel", req.ChannelID, "duration", time.Since(startedAt), "bytes", len(event.Text))
+						h.logger.Info("received first agent text chunk", "source", req.Source, "channel", req.ChannelID, "duration", time.Since(startedAt), "bytes", len(event.Text))
 					}
 				}
 				if !streamStarted && event.Text != "" {
@@ -425,6 +425,15 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest) (retErr error
 					if err := writer.Append(ctx, event.Text); err != nil {
 						return err
 					}
+				}
+			case agent.EventStatus:
+				// Progress/meta only (e.g. compaction, empty-reply retry) — NOT
+				// part of the answer. It must never start or append to the answer
+				// message; doing so would mix activity into the reply and push the
+				// thinking/status surface below it. The idle timer was already reset
+				// above. (ACP never emits EventStatus; this is native meta.)
+				if event.Text != "" {
+					h.logger.Debug("agent status", "source", req.Source, "channel", req.ChannelID, "status", event.Text)
 				}
 			case agent.EventTask:
 				if event.Task == nil {
