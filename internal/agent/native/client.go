@@ -24,25 +24,31 @@ import (
 	"github.com/miere/murtaugh-dev-toolkit/internal/toolset"
 )
 
+// defaultCacheRetention is the prompt-cache TTL native agents request. "5m"
+// (ephemeral) matches the providers' short cache window and has no behavioural
+// effect — it only lets the static system+tools prefix be reused across turns.
+const defaultCacheRetention = "5m"
+
 // Client is the native LLM-backed agent.Client. It holds the static
 // configuration resolved from an AgentProfile; the MCP servers are opened and
 // the toolset resolved lazily in Initialize (matching ACP, whose Initialize
 // starts the agent process), so constructing a Client does no I/O.
 type Client struct {
-	provider     llm.Provider
-	model        string
-	systemPrompt string
-	skillsIndex  string
-	maxTurns     int
-	workDir      string
-	skillsDir    string
-	registry     *tools.Registry
-	toolAllow    []string
-	serverCfgs   []mcpclient.ServerConfig
-	contextLimit int
-	compaction   CompactionMode
-	logger       *slog.Logger
-	now          func() time.Time
+	provider       llm.Provider
+	model          string
+	systemPrompt   string
+	skillsIndex    string
+	maxTurns       int
+	workDir        string
+	skillsDir      string
+	registry       *tools.Registry
+	toolAllow      []string
+	serverCfgs     []mcpclient.ServerConfig
+	contextLimit   int
+	compaction     CompactionMode
+	cacheRetention string
+	logger         *slog.Logger
+	now            func() time.Time
 
 	mu          sync.Mutex
 	mcp         *mcpclient.Manager
@@ -127,21 +133,22 @@ func Build(profile config.AgentProfile, deps BuildDeps) (*Client, error) {
 	}
 
 	return &Client{
-		provider:     provider,
-		model:        profile.Model,
-		systemPrompt: systemPrompt,
-		maxTurns:     profile.MaxTurns,
-		workDir:      workDir,
-		skillsDir:    filepath.Join(deps.BaseDir, ".agents", "skills"),
-		registry:     deps.Registry,
-		toolAllow:    profile.Tools,
-		serverCfgs:   serverCfgs,
-		contextLimit: contextLimit,
-		compaction:   parseCompaction(profile.Compaction),
-		logger:       logger,
-		now:          time.Now,
-		sessions:     make(map[string]*nativeSession),
-		cancels:      make(map[string]*inflight),
+		provider:       provider,
+		model:          profile.Model,
+		systemPrompt:   systemPrompt,
+		maxTurns:       profile.MaxTurns,
+		workDir:        workDir,
+		skillsDir:      filepath.Join(deps.BaseDir, ".agents", "skills"),
+		registry:       deps.Registry,
+		toolAllow:      profile.Tools,
+		serverCfgs:     serverCfgs,
+		contextLimit:   contextLimit,
+		compaction:     parseCompaction(profile.Compaction),
+		cacheRetention: defaultCacheRetention,
+		logger:         logger,
+		now:            time.Now,
+		sessions:       make(map[string]*nativeSession),
+		cancels:        make(map[string]*inflight),
 	}, nil
 }
 
@@ -163,7 +170,9 @@ func (c *Client) Initialize(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("native: resolve toolset: %w", err)
 	}
-	c.loop = NewLoop(c.provider, c.model, ts, c.maxTurns).WithCompaction(c.contextLimit, c.compaction)
+	c.loop = NewLoop(c.provider, c.model, ts, c.maxTurns).
+		WithCompaction(c.contextLimit, c.compaction).
+		WithCache(c.cacheRetention)
 	c.initialized = true
 	c.logger.Info("native agent initialized", "model", c.model, "tools", len(ts), "mcp_servers", len(c.serverCfgs),
 		"context_limit", c.contextLimit, "compaction", c.compaction)
@@ -184,9 +193,10 @@ func (c *Client) NewSession(_ context.Context, _ agent.SessionMetadata) (agent.S
 
 // Prompt appends the user's turn to the session conversation and runs the loop,
 // streaming agent.Event values on the returned channel until the turn completes.
-// Per-turn context (time, cwd, skills, Slack location) goes into the system
-// prompt; a cold-session History backfill is folded into the SAME user message
-// so the array never gains a second consecutive message.
+// The system prompt stays static (base + skills index) so the provider caches
+// it; the volatile per-turn context (time, cwd, Slack location) and a
+// cold-session History backfill are folded into the SAME user message, so the
+// array never gains a second consecutive message.
 func (c *Client) Prompt(ctx context.Context, sessionID string, req agent.PromptRequest) (<-chan agent.Event, error) {
 	c.mu.Lock()
 	sess, ok := c.sessions[sessionID]
@@ -205,13 +215,22 @@ func (c *Client) Prompt(ctx context.Context, sessionID string, req agent.PromptR
 		return nil, errors.New("native: client not initialized (call Initialize first)")
 	}
 
-	userText := req.Text
-	if h := strings.TrimSpace(req.History); h != "" {
-		userText = "<thread-transcript>\n" + h + "\n</thread-transcript>\n\n" + req.Text
-	}
-	sess.conv.AppendUser(userText)
+	// The system prompt is STATIC (base + stable skills index) so the provider
+	// caches it across turns and conversations. The volatile per-turn context
+	// (time, cwd, Slack location) and the cold-start history backfill are folded
+	// into THIS user message — never a standalone message, so the MOIM-safety
+	// invariant holds. See the native-context-caching decision.
+	system := BuildSystemPrompt(c.systemPrompt, c.skillsIndex)
 
-	system := BuildSystemPrompt(c.systemPrompt, SystemContextFromRequest(req, c.now(), c.workDir, c.skillsIndex))
+	var parts []string
+	if ctxBlock := RenderTurnContext(VolatileContextFromRequest(req, c.now(), c.workDir)); ctxBlock != "" {
+		parts = append(parts, ctxBlock)
+	}
+	if h := strings.TrimSpace(req.History); h != "" {
+		parts = append(parts, "<thread-transcript>\n"+h+"\n</thread-transcript>")
+	}
+	parts = append(parts, req.Text)
+	sess.conv.AppendUser(strings.Join(parts, "\n\n"))
 
 	runCtx, cancel := context.WithCancel(ctx)
 	inf := &inflight{cancel: cancel}
