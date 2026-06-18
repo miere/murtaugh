@@ -129,16 +129,30 @@ func (t *Tool) Invoke(_ context.Context, args map[string]any) (any, error) {
 // list scans skillsDir for subdirectories containing a SKILL.md and returns a
 // sorted summary for each.
 func (t *Tool) list() (ListResult, error) {
-	entries, err := os.ReadDir(t.skillsDir)
+	out, err := List(t.skillsDir)
 	if err != nil {
 		return ListResult{}, fmt.Errorf("Error: cannot read skills directory: %w", err)
+	}
+	return ListResult{Skills: out}, nil
+}
+
+// List scans skillsDir for skills (subdirectories containing a SKILL.md) and
+// returns a sorted summary (name + description) for each. It is the shared lister
+// behind both the `skills` tool's list mode and the native agent's system-prompt
+// skills index, so both parse SKILL.md identically. A missing skillsDir returns
+// the os error; callers decide whether that is fatal (the tool) or simply "no
+// index" (the native prompt builder).
+func List(skillsDir string) ([]SkillSummary, error) {
+	entries, err := os.ReadDir(skillsDir)
+	if err != nil {
+		return nil, err
 	}
 	var out []SkillSummary
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
-		mdPath := filepath.Join(t.skillsDir, e.Name(), skillFile)
+		mdPath := filepath.Join(skillsDir, e.Name(), skillFile)
 		data, err := os.ReadFile(mdPath)
 		if err != nil {
 			continue // not a skill directory
@@ -155,7 +169,7 @@ func (t *Tool) list() (ListResult, error) {
 		out = append(out, SkillSummary{Name: name, Description: desc})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return ListResult{Skills: out}, nil
+	return out, nil
 }
 
 // read returns the named skill's SKILL.md content and file inventory. The name
