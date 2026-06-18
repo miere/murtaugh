@@ -96,6 +96,17 @@ func (p *litellmProvider) buildRequest(req Request) (*litellm.Request, error) {
 		}
 		opts = append(opts, litellm.WithTools(tools...))
 	}
+	// Prompt caching: litellm places the marker per-family — Anthropic
+	// cache_control on the system blocks and the last user message (the rolling
+	// breakpoint), OpenAI prompt_cache_retention. Gemini is deliberately excluded:
+	// it caches a stable prefix implicitly (our static System already gives us the
+	// win) AND its litellm provider rejects the cache_retention extra outright.
+	if r := strings.TrimSpace(req.CacheRetention); r != "" {
+		switch p.family {
+		case FamilyAnthropic, FamilyOpenAI:
+			opts = append(opts, litellm.WithCacheRetention(r))
+		}
+	}
 
 	return litellm.NewRequestWithMessages(p.model, msgs, opts...), nil
 }

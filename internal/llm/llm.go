@@ -68,6 +68,12 @@ type Request struct {
 	Tools       []ToolSpec
 	MaxTokens   int     // 0 = provider default
 	Temperature float64 // 0 = provider default
+	// CacheRetention enables provider prompt-caching when non-empty: "5m"
+	// (ephemeral, ~5-minute TTL) or "1h". Empty disables it. The provider layer
+	// maps it to the right mechanism per family (Anthropic cache_control on the
+	// system blocks + last user message, OpenAI prompt_cache_retention); Gemini
+	// caches a stable prefix implicitly, so a static System benefits regardless.
+	CacheRetention string
 }
 
 // StreamEvent is one increment of a streamed completion. Exactly one of

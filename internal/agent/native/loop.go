@@ -28,6 +28,9 @@ type Loop struct {
 	// compaction selects the strategy. Set via WithCompaction.
 	contextLimit int
 	compaction   CompactionMode
+	// cacheRetention enables provider prompt-caching on each turn's request
+	// ("5m"/"1h"); empty disables it. Set via WithCache.
+	cacheRetention string
 }
 
 // NewLoop constructs a Loop. maxTurns ≤ 0 falls back to defaultMaxTurns.
@@ -61,6 +64,14 @@ func NewLoop(provider llm.Provider, model string, ts []tools.Tool, maxTurns int)
 func (l *Loop) WithCompaction(contextLimit int, mode CompactionMode) *Loop {
 	l.contextLimit = contextLimit
 	l.compaction = mode
+	return l
+}
+
+// WithCache sets the provider prompt-cache retention applied to each turn's
+// request ("5m"/"1h"; empty disables). The static system prompt makes the
+// cached prefix stable across turns and conversations. Returns the receiver.
+func (l *Loop) WithCache(retention string) *Loop {
+	l.cacheRetention = retention
 	return l
 }
 
@@ -170,10 +181,11 @@ func (l *Loop) Run(ctx context.Context, conv *Conversation, system string, emit 
 // accumulating tool calls. It does not mutate conv.
 func (l *Loop) runTurn(ctx context.Context, conv *Conversation, system string, emit func(agent.Event)) (turnResult, error) {
 	req := llm.Request{
-		Model:    l.model,
-		System:   system,
-		Messages: conv.Messages(),
-		Tools:    l.toolSpecs(),
+		Model:          l.model,
+		System:         system,
+		Messages:       conv.Messages(),
+		Tools:          l.toolSpecs(),
+		CacheRetention: l.cacheRetention,
 	}
 	stream, err := l.provider.Stream(ctx, req)
 	if err != nil {
