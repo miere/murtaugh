@@ -225,11 +225,13 @@ func (l *Loop) appendAndRunTools(ctx context.Context, conv *Conversation, res tu
 	}
 }
 
-// invokeTool runs one tool call in-process, emitting status/task events around
-// it, and returns the string to feed back as the tool result. Unknown tools and
-// tool errors both produce an error result string rather than aborting.
+// invokeTool runs one tool call in-process, emitting task events around it, and
+// returns the string to feed back as the tool result. Unknown tools and tool
+// errors both produce an error result string rather than aborting. Tool activity
+// is reported ONLY as task events (the gateway renders them in the thinking/
+// status surface, above the answer) — never as EventStatus/EventText, which the
+// gateway streams into the answer message itself.
 func (l *Loop) invokeTool(ctx context.Context, call llm.ToolCall, emit func(agent.Event)) string {
-	emit(eventStatus("Running tool " + call.Name))
 	emit(eventTask(call.ID, call.Name, agent.TaskStatusInProgress, ""))
 
 	t, ok := l.tools[call.Name]

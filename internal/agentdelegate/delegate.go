@@ -199,7 +199,10 @@ func (r *Runner) Run(ctx context.Context, agentName, prompt string) (string, err
 			}
 			resetIdleTimer(idle, r.idleTimeout)
 			switch event.Type {
-			case agent.EventText, agent.EventStatus:
+			case agent.EventText:
+				// Only the agent's reply text is captured. EventStatus is
+				// progress/meta (e.g. compaction) and must not pollute the
+				// captured output, which a caller may parse as JSON.
 				buf.WriteString(event.Text)
 			case agent.EventError:
 				return buf.String(), fmt.Errorf("delegate-to-agent: agent %q failed: %w", agentName, event.Error)
