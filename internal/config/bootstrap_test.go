@@ -89,11 +89,21 @@ func TestBootstrapFreshInstall(t *testing.T) {
 		t.Fatalf("skill not reachable through .claude/skills symlink: %v", err)
 	}
 
-	// Optional docs are not embedded, so they must be skipped silently.
-	for _, name := range optionalBootstrapDocs {
-		if _, err := os.Stat(filepath.Join(baseDir, name)); !os.IsNotExist(err) {
-			t.Fatalf("expected optional doc %q to be skipped, stat err=%v", name, err)
-		}
+	// AGENTS.md is embedded, so it is seeded on a fresh install.
+	wantDoc, err := assets.FS.ReadFile("AGENTS.md")
+	if err != nil {
+		t.Fatalf("read embedded AGENTS.md: %v", err)
+	}
+	gotDoc, err := os.ReadFile(filepath.Join(baseDir, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("AGENTS.md not seeded: %v", err)
+	}
+	if string(gotDoc) != string(wantDoc) {
+		t.Fatalf("seeded AGENTS.md content mismatch")
+	}
+	// BOOTSTRAP.md is not embedded, so it must be skipped silently.
+	if _, err := os.Stat(filepath.Join(baseDir, "BOOTSTRAP.md")); !os.IsNotExist(err) {
+		t.Fatalf("expected BOOTSTRAP.md to be skipped, stat err=%v", err)
 	}
 }
 
@@ -219,6 +229,28 @@ func TestBootstrapSeedsSystemPromptWithForceRefresh(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(promptPath); string(got) != string(want) {
 		t.Fatalf("force did not refresh the prompt to the shipped default")
+	}
+}
+
+func TestBootstrapForceNeverOverwritesAgentsDoc(t *testing.T) {
+	baseDir := filepath.Join(t.TempDir(), "murtaugh")
+	configPath := filepath.Join(baseDir, "slack.yaml")
+	agentsDocPath := filepath.Join(baseDir, "AGENTS.md")
+
+	if _, err := BootstrapWithReport(configPath, false); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	// Simulate an onboarded identity the agent wrote into AGENTS.md.
+	const named = "## Persona\nI am Nova, terse and dry."
+	if err := os.WriteFile(agentsDocPath, []byte(named), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// --force refreshes the system prompt but must NOT touch the agent's identity.
+	if _, err := BootstrapWithReport(configPath, true); err != nil {
+		t.Fatalf("bootstrap --force: %v", err)
+	}
+	if got, _ := os.ReadFile(agentsDocPath); string(got) != named {
+		t.Fatalf("--force clobbered the agent's AGENTS.md identity: %q", got)
 	}
 }
 
