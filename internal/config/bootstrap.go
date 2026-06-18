@@ -22,6 +22,12 @@ const (
 // asset is not bundled, satisfying the "skip if they don't exist" convention.
 var optionalBootstrapDocs = []string{"AGENTS.md", "BOOTSTRAP.md"}
 
+// DefaultSystemPromptFile is the bundled default system prompt. Bootstrap seeds
+// it into the config dir (preserved thereafter; refreshed only under force), and
+// native agents that set neither system_prompt nor system_prompt_file fall back
+// to it (the on-disk copy first, then the embedded copy).
+const DefaultSystemPromptFile = "system-prompt.md"
+
 // BootstrapReport summarises the result of a Bootstrap pass: which on-disk
 // files were written for the first time, which were refreshed to the shipped
 // version, and which were preserved because they already existed and are
@@ -39,7 +45,7 @@ type BootstrapReport struct {
 // returned report is discarded; callers that need it should use
 // BootstrapWithReport instead.
 func Bootstrap(configPath string) error {
-	_, err := BootstrapWithReport(configPath)
+	_, err := BootstrapWithReport(configPath, false)
 	return err
 }
 
@@ -67,7 +73,7 @@ func Bootstrap(configPath string) error {
 // Because skills are refreshed in place, a local edit to a shipped skill file
 // is overwritten on the next run; add a new skill directory instead of editing
 // one Murtaugh ships.
-func BootstrapWithReport(configPath string) (BootstrapReport, error) {
+func BootstrapWithReport(configPath string, force bool) (BootstrapReport, error) {
 	report := BootstrapReport{}
 	baseDir := filepath.Dir(configPath)
 	if err := os.MkdirAll(baseDir, bootstrapDirPerm); err != nil {
@@ -96,6 +102,22 @@ func BootstrapWithReport(configPath string) (BootstrapReport, error) {
 		}
 		report.absorb(outcome, entry.dst)
 	}
+
+	// The default system prompt is a Murtaugh-owned default: seeded once and then
+	// preserved (operators may edit it), but refreshed to the shipped version
+	// under force so a binary upgrade can deliver an improved default on request.
+	// User-state files above (slack/agents/jobs/journal/.env) and AGENTS.md — the
+	// agent's identity — are always preserved, never force-overwritten.
+	promptPolicy := preserveExisting
+	if force {
+		promptPolicy = refreshFromAssets
+	}
+	promptPath := filepath.Join(baseDir, DefaultSystemPromptFile)
+	outcome, err := copyAssetFile(DefaultSystemPromptFile, promptPath, promptPolicy)
+	if err != nil {
+		return report, err
+	}
+	report.absorb(outcome, promptPath)
 
 	// Block Kit templates land at <workspace>/templates/...; the agent skills
 	// land at <workspace>/.agents/skills/... Templates are preserved once on

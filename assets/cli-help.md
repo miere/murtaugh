@@ -286,22 +286,29 @@ murtaugh mcp
 ## murtaugh setup bootstrap
 
 Seed the Murtaugh config directory with embedded defaults (`slack.yaml`,
-`agents.yaml`, `jobs.yaml`, Block Kit templates, bundled skills). Takes no
-flags. Runs on every Murtaugh start, not just the first.
+`agents.yaml`, `jobs.yaml`, `system-prompt.md`, Block Kit templates, bundled
+skills). Runs on every Murtaugh start, not just the first.
+
+| Flag      | Required | Type    | Notes                                                              |
+|-----------|----------|---------|-------------------------------------------------------------------|
+| `--force` | no       | boolean | Refresh the bundled default `system-prompt.md` to the shipped version. |
 
 - **Config files and templates** (`slack.yaml`, `agents.yaml`, `jobs.yaml`,
-  `templates/`) are created once and then **preserved** — your tokens and edits
-  are never overwritten.
-- **Bundled skills** (`.agents/skills/`) are **refreshed** to the version shipped
-  with the running binary on every run, so the workspace tracks upgrades. A
-  skill directory you add yourself is left untouched; an edit to a skill
-  Murtaugh ships is overwritten — add a new skill instead of editing a shipped
-  one.
+  `templates/`) and **`AGENTS.md`** (the agent's identity) are created once and
+  then **preserved** — your tokens, edits, and chosen persona are never
+  overwritten, even with `--force`.
+- **`system-prompt.md`** (the default base prompt) is created once and preserved,
+  but `--force` refreshes it to the version shipped with the binary.
+- **Bundled skills** (`.agents/skills/`) are **refreshed** to the shipped version
+  on every run, so the workspace tracks upgrades. A skill directory you add
+  yourself is left untouched; an edit to a skill Murtaugh ships is overwritten —
+  add a new skill instead of editing a shipped one.
 
 The report lists which files were created, updated (refreshed), and preserved.
 
 ```
 murtaugh setup bootstrap
+murtaugh setup bootstrap --force true   # refresh the default system prompt
 ```
 
 ## murtaugh setup slack

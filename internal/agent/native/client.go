@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/miere/murtaugh-dev-toolkit/assets"
 	"github.com/miere/murtaugh-dev-toolkit/internal/agent"
 	"github.com/miere/murtaugh-dev-toolkit/internal/config"
 	"github.com/miere/murtaugh-dev-toolkit/internal/llm"
@@ -321,25 +322,39 @@ func (c *Client) Close() error {
 	return nil
 }
 
-// resolveSystemPrompt returns the agent's base system prompt from the inline
-// value or the referenced file (resolved against the config base dir). Config
-// validation guarantees the two are not both set.
+// resolveSystemPrompt returns the agent's base system prompt by precedence:
+//  1. an inline system_prompt,
+//  2. an explicit system_prompt_file (resolved against the config base dir),
+//  3. the seeded default at <baseDir>/system-prompt.md (operator-editable),
+//  4. the embedded default shipped in the binary (the floor).
+//
+// So every native agent has a sane base prompt even with no configuration, and
+// an operator can override it per-agent or by editing the seeded file. Config
+// validation guarantees 1 and 2 are not both set.
 func resolveSystemPrompt(profile config.AgentProfile, baseDir string) (string, error) {
 	if p := strings.TrimSpace(profile.SystemPrompt); p != "" {
 		return profile.SystemPrompt, nil
 	}
-	file := strings.TrimSpace(profile.SystemPromptFile)
-	if file == "" {
-		return "", nil
+	if file := strings.TrimSpace(profile.SystemPromptFile); file != "" {
+		if !filepath.IsAbs(file) {
+			file = filepath.Join(baseDir, file)
+		}
+		data, err := os.ReadFile(file)
+		if err != nil {
+			return "", fmt.Errorf("native: read system_prompt_file %q: %w", file, err)
+		}
+		return string(data), nil
 	}
-	if !filepath.IsAbs(file) {
-		file = filepath.Join(baseDir, file)
+	// Default: the seeded, operator-editable copy, then the embedded floor.
+	if baseDir != "" {
+		if data, err := os.ReadFile(filepath.Join(baseDir, config.DefaultSystemPromptFile)); err == nil {
+			return string(data), nil
+		}
 	}
-	data, err := os.ReadFile(file)
-	if err != nil {
-		return "", fmt.Errorf("native: read system_prompt_file %q: %w", file, err)
+	if data, err := assets.FS.ReadFile(config.DefaultSystemPromptFile); err == nil {
+		return string(data), nil
 	}
-	return string(data), nil
+	return "", nil
 }
 
 // agentsDocFile is the conventional per-agent guidelines file auto-loaded from

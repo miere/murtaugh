@@ -655,8 +655,12 @@ main() {
       log "[DRY-RUN] Would write ${slack_yaml} and ${agents_yaml}"
     else
       # Seed embedded defaults first so skills/ + docs land before the
-      # user-provided slack/agents writes overlay on top.
-      "$installed_bin" setup bootstrap >&2
+      # user-provided slack/agents writes overlay on top. On --reconfigure also
+      # refresh the bundled default system prompt to the shipped version (user
+      # config, secrets, and AGENTS.md are always preserved).
+      local boot_args=(setup bootstrap)
+      [[ "$RECONFIGURE" -eq 1 ]] && boot_args+=(--force true)
+      "$installed_bin" "${boot_args[@]}" >&2
       write_slack_config "$installed_bin" "$app_token" "$bot_token" "$admin_user" "$chat_choice" "$chat_command" ${chat_args[@]+"${chat_args[@]}"}
       log "Wrote Slack config to ${slack_yaml}"
       log "Wrote agent config to ${agents_yaml}"
