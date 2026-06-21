@@ -230,7 +230,8 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 			logger,
 		).WithIdleTimeout(cfg.ACP.EffectiveRequestTimeout()).WithSessionLogger(sessionLog).
 			WithProgressDisplay(cfg.EffectiveProgressDisplay).WithStatusMessenger(api).
-			WithBackfiller(NewThreadBackfiller(api, botUserID, logger))
+			WithBackfiller(NewThreadBackfiller(api, botUserID, logger)).
+			WithFileFetcher(api)
 	}
 	// One shared runner backs every delegate-to-agent surface (jobs, workflow
 	// triggers, unfurls). Each delegation spins its own isolated agent process,
@@ -841,13 +842,19 @@ func (a *Gateway) handleEventsAPI(event socketmode.Event) {
 			return
 		}
 		text := stripSlackMentions(inner.Text)
-		a.startChat(context.Background(), ChatRequest{TeamID: eventsAPI.TeamID, ChannelID: inner.Channel, UserID: inner.User, ThreadTS: inner.ThreadTimeStamp, MessageTS: inner.TimeStamp, Text: text, Source: "app_mention"})
+		a.startChat(context.Background(), ChatRequest{TeamID: eventsAPI.TeamID, ChannelID: inner.Channel, UserID: inner.User, ThreadTS: inner.ThreadTimeStamp, MessageTS: inner.TimeStamp, Text: text, Files: inner.Files, Source: "app_mention"})
 	case *slackevents.MessageEvent:
 		if a.chat == nil {
 			a.logger.Debug("ignored message because ACP chat is disabled")
 			return
 		}
-		if inner.BotID != "" || inner.SubType != "" || inner.ChannelType != "im" {
+		if inner.BotID != "" || inner.ChannelType != "im" {
+			return
+		}
+		// Allow plain messages and file uploads ("file_share"); drop other
+		// subtypes (edits, deletes, joins, bot messages, …). Without this a DM
+		// that carries an attachment is silently ignored.
+		if inner.SubType != "" && inner.SubType != "file_share" {
 			return
 		}
 		if !a.cfg.IsAllowedUser(inner.User) {
@@ -858,7 +865,7 @@ func (a *Gateway) handleEventsAPI(event socketmode.Event) {
 			a.logger.Info("ignored duplicate DM", "channel", inner.Channel, "ts", inner.TimeStamp)
 			return
 		}
-		a.startChat(context.Background(), ChatRequest{TeamID: eventsAPI.TeamID, ChannelID: inner.Channel, UserID: inner.User, ThreadTS: inner.ThreadTimeStamp, MessageTS: inner.TimeStamp, Text: inner.Text, DM: true, Source: "dm"})
+		a.startChat(context.Background(), ChatRequest{TeamID: eventsAPI.TeamID, ChannelID: inner.Channel, UserID: inner.User, ThreadTS: inner.ThreadTimeStamp, MessageTS: inner.TimeStamp, Text: inner.Text, Files: eventFiles(event), DM: true, Source: "dm"})
 	default:
 		a.logger.Debug("ignored Events API event", "inner_type", eventsAPI.InnerEvent.Type)
 	}
@@ -1074,6 +1081,25 @@ func slashCommandThreadTS(event socketmode.Event) string {
 		return ""
 	}
 	return payload.ThreadTS
+}
+
+// eventFiles extracts the file attachments from the raw Events API payload.
+// slack-go's MessageEvent struct does not surface `files` (only AppMentionEvent
+// does), so we re-parse the JSON — the same approach as slashCommandThreadTS.
+// Returns nil when there is no payload or no files.
+func eventFiles(event socketmode.Event) []slack.File {
+	if event.Request == nil {
+		return nil
+	}
+	var payload struct {
+		Event struct {
+			Files []slack.File `json:"files"`
+		} `json:"event"`
+	}
+	if err := json.Unmarshal(event.Request.Payload, &payload); err != nil {
+		return nil
+	}
+	return payload.Event.Files
 }
 
 // restartSourceSlash mirrors internal/app.RestartSourceSlash. It is

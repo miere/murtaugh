@@ -73,6 +73,10 @@ type ChatHandler struct {
 	// conversation as context. nil disables backfill (the prompt is the single
 	// triggering message only).
 	backfiller threadBackfiller
+	// fileFetcher downloads plain-text attachments so their contents can be
+	// folded into the prompt. nil disables attachment handling (tests that do
+	// not wire Slack); the gateway always supplies it in production.
+	fileFetcher fileFetcher
 }
 
 // threadBackfiller renders a Slack thread into a transcript block for a cold
@@ -90,6 +94,9 @@ type ChatRequest struct {
 	Text      string
 	DM        bool
 	Source    string
+	// Files carries any attachments on the triggering Slack message. Plain-text
+	// files are fetched and folded into the prompt so the agent can read them.
+	Files []slack.File
 }
 
 func NewChatHandler(api StreamAPI, sessions map[string]ChatSessionManager, resolver func(ChatRequest) string, interval time.Duration, minChars int, logger *slog.Logger) *ChatHandler {
@@ -148,6 +155,17 @@ func (h *ChatHandler) WithBackfiller(b *ThreadBackfiller) *ChatHandler {
 		return h
 	}
 	h.backfiller = b
+	return h
+}
+
+// WithFileFetcher wires the downloader used to fold plain-text attachments into
+// the prompt. Returns the handler for chaining. nil (the default) disables
+// attachment handling.
+func (h *ChatHandler) WithFileFetcher(f fileFetcher) *ChatHandler {
+	if f == nil {
+		return h
+	}
+	h.fileFetcher = f
 	return h
 }
 
@@ -245,8 +263,19 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest) (retErr error
 	}
 
 	prompt := strings.TrimSpace(req.Text)
-	if prompt == "" {
+	// Fold any plain-text attachments into the message the agent sees. A
+	// caption-less upload (no text, only files) is still a valid prompt.
+	attachments := h.renderAttachments(ctx, req.Files)
+	if prompt == "" && attachments == "" {
 		return fmt.Errorf("chat prompt is empty")
+	}
+	promptForAgent := prompt
+	if attachments != "" {
+		if promptForAgent == "" {
+			promptForAgent = attachments
+		} else {
+			promptForAgent += "\n\n" + attachments
+		}
 	}
 	key := conversationKey(req)
 	metadata := agent.SessionMetadata{TeamID: req.TeamID, ChannelID: req.ChannelID, ThreadTS: key.ThreadTS, UserID: req.UserID, Source: req.Source}
@@ -362,7 +391,7 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest) (retErr error
 	// parent rather than tripping the interrupt path.
 	promptCtx, cancelPrompt := context.WithCancel(ctx)
 	defer cancelPrompt()
-	events, err := sessions.Prompt(promptCtx, key, metadata, agent.PromptRequest{Text: prompt, History: history})
+	events, err := sessions.Prompt(promptCtx, key, metadata, agent.PromptRequest{Text: promptForAgent, History: history})
 	if err != nil {
 		turnErr = err
 		return renderer.Fail(ctx, err)
