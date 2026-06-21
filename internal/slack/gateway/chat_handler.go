@@ -506,15 +506,19 @@ func (h *ChatHandler) refreshAssistantStatus(ctx context.Context, channelID, thr
 	}
 }
 
+// conversationKey identifies the agent session a request belongs to. Every
+// conversation — channel thread OR DM — is bound to its thread, so a session is
+// never shared across threads. The thread is the request's ThreadTS, falling
+// back to its own MessageTS for a top-level message that roots a new thread
+// (mirroring streamThreadTS, so the key matches where replies are posted). The
+// DM flag is retained so a DM thread and a same-id channel thread cannot collide
+// and so session metadata/logging still distinguishes the two surfaces.
 func conversationKey(req ChatRequest) agent.ConversationKey {
-	if req.DM {
-		return agent.ConversationKey{TeamID: req.TeamID, ChannelID: req.ChannelID, DM: true}
-	}
 	threadTS := req.ThreadTS
 	if threadTS == "" {
 		threadTS = req.MessageTS
 	}
-	return agent.ConversationKey{TeamID: req.TeamID, ChannelID: req.ChannelID, ThreadTS: threadTS}
+	return agent.ConversationKey{TeamID: req.TeamID, ChannelID: req.ChannelID, ThreadTS: threadTS, DM: req.DM}
 }
 
 // isTerminalTaskStatus reports whether an ACP task status is a final outcome.

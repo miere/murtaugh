@@ -791,16 +791,19 @@ func troubleshootComment(command slack.SlashCommand, note string, warnings []str
 // payload carries `thread_ts` when the command was issued from inside
 // a thread (the slack-go SlashCommand struct does not surface it, so
 // the caller re-parses the raw socketmode payload via
-// slashCommandThreadTS and passes it in). For channel-root
-// invocations there is no thread context, so we fall back to a
-// channel-scoped key — that matches DMs (which have no thread either).
+// slashCommandThreadTS and passes it in). Sessions are bound to their
+// thread (DMs included), so the key mirrors conversationKey: it carries
+// the thread context and flags DM channels. A /stop must therefore be
+// issued from inside the target thread to cancel it.
 //
 // Authorisation: the outer handleSlashCommand has already enforced
 // IsAllowedUser, so no extra admin gate is required here.
 func (a *Gateway) handleStopSlashCommand(event socketmode.Event, command slack.SlashCommand, threadTS string) {
-	key := agent.ConversationKey{TeamID: command.TeamID, ChannelID: command.ChannelID, ThreadTS: threadTS}
-	if threadTS == "" && strings.HasPrefix(command.ChannelID, "D") {
-		key.DM = true
+	key := agent.ConversationKey{
+		TeamID:    command.TeamID,
+		ChannelID: command.ChannelID,
+		ThreadTS:  threadTS,
+		DM:        strings.HasPrefix(command.ChannelID, "D"),
 	}
 	if a.inFlight.Cancel(key) {
 		a.logger.Info("stop slash command cancelled in-flight chat", "user", command.UserID, "channel", command.ChannelID, "thread_ts", threadTS)

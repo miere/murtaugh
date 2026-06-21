@@ -434,10 +434,23 @@ func TestChatHandlerClearsStatusOnFreshContextAfterCancel(t *testing.T) {
 	}
 }
 
-func TestConversationKeyUsesDMChannelWithoutThread(t *testing.T) {
-	key := conversationKey(ChatRequest{TeamID: "T1", ChannelID: "D1", MessageTS: "123.4", DM: true})
-	if !key.DM || key.ThreadTS != "" || key.ChannelID != "D1" {
-		t.Fatalf("unexpected DM conversation key: %#v", key)
+func TestConversationKeyBindsDMToThread(t *testing.T) {
+	// A top-level DM message roots its own thread, keyed by its MessageTS.
+	root := conversationKey(ChatRequest{TeamID: "T1", ChannelID: "D1", MessageTS: "123.4", DM: true})
+	if !root.DM || root.ThreadTS != "123.4" || root.ChannelID != "D1" {
+		t.Fatalf("top-level DM key should bind to its own MessageTS: %#v", root)
+	}
+
+	// A reply inside a DM thread is keyed by that thread's root.
+	reply := conversationKey(ChatRequest{TeamID: "T1", ChannelID: "D1", ThreadTS: "123.4", MessageTS: "999.9", DM: true})
+	if reply != root {
+		t.Fatalf("a DM reply must map to the same key as its thread root: %#v vs %#v", reply, root)
+	}
+
+	// Two distinct DM threads must NOT share a session.
+	other := conversationKey(ChatRequest{TeamID: "T1", ChannelID: "D1", MessageTS: "555.5", DM: true})
+	if other == root {
+		t.Fatalf("distinct DM threads must have distinct keys: %#v", other)
 	}
 }
 
