@@ -38,7 +38,26 @@ logged at startup.
 | Link previews don't appear | The domain isn't in the Slack app's **App Unfurl Domains** (no `link_shared` is delivered), or no matching `unfurl-rules`. See `murtaugh-unfurl`. |
 | A scheduled job didn't run | The gateway was down at fire time (no catch-up), or the schedule edit needs a restart. See `murtaugh-jobs`. |
 | A message handled twice | Not redelivery (that's de-duped) — check you don't have **two daemons** running. |
+| A chat turn "hangs" with no reply | It may be **legitimately waiting on a human**, not stuck — see *A turn that's waiting, not hung* below. |
 | Need to see what happened | `~/Library/Logs/murtaugh/slack.out.log` and `…/slack.err.log` (launchd). |
+
+### A turn that's waiting, not hung
+
+A native chat turn can now legitimately **block waiting on a person** — this is by
+design, not a hang, and the turn stays alive (a keep-alive heartbeat keeps the
+idle watchdog from cancelling it). Before treating a quiet turn as stuck, look in
+the **Slack thread** for a pending prompt the agent posted and is waiting on:
+
+- A **terminal** Approve / Deny — an operational `terminal` command an agent ran
+  in live chat is approval-gated; the command doesn't run until someone clicks.
+  Deny skips it with a note to the model — the turn still completes normally.
+- An **`ask`** question or a **`present_plan`** Proceed / Revise / Cancel prompt —
+  the agent is waiting for the answer / sign-off and will not assume one.
+- A **held job's first-run confirmation** — an agent-defined job awaiting its
+  first-run go-ahead asks before it runs.
+
+Answer (or Approve/Deny) in Slack and the turn proceeds. If the prompt was missed
+and timed out, the agent is told no answer came — it won't proceed on a guess.
 
 ## Logs
 
