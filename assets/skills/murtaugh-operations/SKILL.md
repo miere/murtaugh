@@ -40,6 +40,10 @@ job runs, and errors are all there.
   `reference/auth-and-troubleshooting.md`
 - **Restart is admin-only** (`/murtaugh restart` or the suggestion button) and
   preserves a "restarting… / back online" notice across the restart.
+- **Some chat turns now wait on a human** — a `terminal` command an agent runs in
+  live chat is approval-gated, and `ask`/`present_plan`/a held job's first-run can
+  block on an Approve/Deny or answer in Slack. A quiet turn may be waiting, not
+  hung. → `reference/auth-and-troubleshooting.md`
 - The daemon also runs the **job scheduler** (see the `murtaugh-jobs` skill) and
   the **chat** and **unfurl** handlers (see `murtaugh-agents`, `murtaugh-unfurl`).
 - **The daemon takes no tool flags** — only the global `--config PATH`

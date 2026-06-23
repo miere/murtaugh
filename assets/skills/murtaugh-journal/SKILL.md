@@ -31,7 +31,9 @@ Over MCP the names are dotted (`journal_query`); on the CLI they are spaced
 
 - **`gateway`** — everything from a Slack interaction: slash commands, button
   clicks / form submissions, workflow rules, and link unfurls. This is the GDM
-  stream.
+  stream. It also records **socket-connection health** (`connection` events from
+  the connection watchdog: connecting / reconnecting / stalled / heartbeat_failed)
+  — the place to look for *"why did the daemon go silent?"*.
 - **`job`** — `jobs_run` executions (command or agent), with exit code/duration.
 - **`acp_session`** — chat session events (when enabled).
 

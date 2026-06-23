@@ -8,9 +8,11 @@ What `murtaugh slack gateway` does, in order, when it starts:
    lists are empty, it logs a warning and runs locked down. →
    `reference/auth-and-troubleshooting.md`
 2. **Connect** to Slack over Socket Mode (in the background).
-3. **Warm the agents.** Each ACP agent is probed for session/cancel support
+3. **Warm the agents.** Each **ACP** agent is probed for session/cancel support
    (bounded by `startup_timeout`); the verdict is logged. A failed warmup is
-   logged, not fatal. (See the `murtaugh-agents` skill.)
+   logged, not fatal. Native (in-process) agents have no such probe — there's no
+   subprocess to handshake with — so they aren't warmed here. (See the
+   `murtaugh-agents` skill.)
 4. **Start the config watcher** (if config-watch paths are set) — polls
    `slack.yaml`, `agents.yaml`, `jobs.yaml`. → `reference/config-and-restart.md`
 5. **Start the job scheduler** — registers cron/`every` jobs from `jobs.yaml`
