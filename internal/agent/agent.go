@@ -115,3 +115,28 @@ func TurnLocationFromContext(ctx context.Context) (TurnLocation, bool) {
 	loc, ok := ctx.Value(turnLocationKey{}).(TurnLocation)
 	return loc, ok && loc.ChannelID != ""
 }
+
+// PermissionOption is one choice an ACP agent offers for a session/request_permission
+// request. Kind is the ACP PermissionOptionKind ("allow_once", "allow_always",
+// "reject_once", "reject_always"); ID is the optionId echoed back in the response.
+type PermissionOption struct {
+	ID   string
+	Name string
+	Kind string
+}
+
+// PermissionRequest is an agent-initiated session/request_permission: the agent is
+// about to use a tool (ToolName) and wants the client to pick one of Options.
+type PermissionRequest struct {
+	SessionID string
+	ToolName  string
+	Options   []PermissionOption
+}
+
+// PermissionAsker resolves an ACP permission request by getting a human decision
+// (e.g. via Slack buttons). It returns the chosen option's ID, or "" when no option
+// was chosen (timeout / dismissal), which the ACP client maps to a "cancelled"
+// outcome. Implemented in internal/slack/interaction; nil on headless/CLI paths.
+type PermissionAsker interface {
+	AskPermission(ctx context.Context, loc TurnLocation, req PermissionRequest) (optionID string, err error)
+}

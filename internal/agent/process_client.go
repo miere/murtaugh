@@ -25,6 +25,14 @@ type ProcessOptions struct {
 	// with Murtaugh's own environment unchanged.
 	Env    []string
 	Logger *slog.Logger
+
+	// PermissionPolicy governs how agent-initiated session/request_permission
+	// requests are answered: "ask" (route to PermissionAsker), "auto-allow", or
+	// "auto-deny". Empty is treated as "ask".
+	PermissionPolicy string
+	// PermissionAsker resolves "ask" permission requests via a human (Slack
+	// buttons). nil on headless/CLI paths, where "ask" falls back to deny.
+	PermissionAsker PermissionAsker
 }
 
 type ProcessClient struct {
@@ -39,6 +47,27 @@ type ProcessClient struct {
 	nextID      atomic.Int64
 	pending     map[int64]chan rpcResponse
 	subscribers map[string]chan Event
+	// dests records, per active session, the Slack conversation and the prompt's
+	// context so an agent-initiated session/request_permission can be routed to a
+	// human in the right thread and cancelled when that turn is interrupted.
+	dests map[string]promptScope
+}
+
+// promptScope is the in-flight context for a session's current prompt: where it
+// is talking (loc) and the context that is cancelled when the turn ends.
+type promptScope struct {
+	loc TurnLocation
+	ctx context.Context
+}
+
+// rpcOutgoingResponse is a JSON-RPC response Murtaugh writes back to the agent
+// when it serves an agent-initiated request (e.g. session/request_permission).
+// ID is echoed verbatim as raw JSON so a string- or number-typed id round-trips.
+type rpcOutgoingResponse struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id"`
+	Result  any             `json:"result,omitempty"`
+	Error   *rpcError       `json:"error,omitempty"`
 }
 
 type rpcRequest struct {
@@ -102,7 +131,7 @@ func NewProcessClient(opts ProcessOptions) *ProcessClient {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &ProcessClient{opts: opts, log: logger, pending: make(map[int64]chan rpcResponse), subscribers: make(map[string]chan Event)}
+	return &ProcessClient{opts: opts, log: logger, pending: make(map[int64]chan rpcResponse), subscribers: make(map[string]chan Event), dests: make(map[string]promptScope)}
 }
 
 func (c *ProcessClient) Initialize(ctx context.Context) error {
@@ -170,6 +199,9 @@ func (c *ProcessClient) Prompt(ctx context.Context, sessionID string, request Pr
 	events := make(chan Event, 32)
 	c.mu.Lock()
 	c.subscribers[sessionID] = events
+	// Stash where this turn is talking and its context so a permission request
+	// raised mid-turn can be asked in the same thread and cancelled with the turn.
+	c.dests[sessionID] = promptScope{loc: TurnLocation{ChannelID: request.Channel, ThreadTS: request.Thread}, ctx: ctx}
 	c.mu.Unlock()
 
 	go func() {
@@ -236,6 +268,7 @@ func (c *ProcessClient) unsubscribe(sessionID string, events chan Event) {
 	defer c.mu.Unlock()
 	if c.subscribers[sessionID] == events {
 		delete(c.subscribers, sessionID)
+		delete(c.dests, sessionID)
 	}
 }
 
@@ -379,21 +412,30 @@ func (c *ProcessClient) readLoop(reader io.Reader) {
 			c.failAll(fmt.Errorf("decode ACP message: %w", err))
 			return
 		}
-		if _, hasID := envelope["id"]; hasID {
+		_, hasID := envelope["id"]
+		_, hasMethod := envelope["method"]
+		switch {
+		case hasID && hasMethod:
+			// An agent-initiated *request* (it wants a response): permission
+			// prompts, fs/terminal calls. Handle off the read loop so a blocking
+			// human approval never stalls delivery for every other conversation.
+			payload := append([]byte(nil), line...)
+			go c.handleAgentRequest(payload)
+		case hasID:
 			var response rpcResponse
 			if err := json.Unmarshal(line, &response); err != nil {
 				c.failAll(fmt.Errorf("decode ACP response: %w", err))
 				return
 			}
 			c.deliverResponse(response)
-			continue
+		default:
+			var notification rpcNotification
+			if err := json.Unmarshal(line, &notification); err != nil {
+				c.failAll(fmt.Errorf("decode ACP notification: %w", err))
+				return
+			}
+			c.deliverNotification(notification)
 		}
-		var notification rpcNotification
-		if err := json.Unmarshal(line, &notification); err != nil {
-			c.failAll(fmt.Errorf("decode ACP notification: %w", err))
-			return
-		}
-		c.deliverNotification(notification)
 	}
 	if err := scanner.Err(); err != nil {
 		c.failAll(fmt.Errorf("read ACP stdout: %w", err))
@@ -411,8 +453,158 @@ func (c *ProcessClient) deliverResponse(response rpcResponse) {
 	}
 }
 
+// handleAgentRequest serves a request the agent sends to us (the ACP client). The
+// only method we implement is session/request_permission; anything else gets a
+// method-not-found reply (and a warn) so the agent fails fast instead of blocking
+// forever waiting for a response we would otherwise never send.
+func (c *ProcessClient) handleAgentRequest(line []byte) {
+	var req struct {
+		ID     json.RawMessage `json:"id"`
+		Method string          `json:"method"`
+		Params json.RawMessage `json:"params"`
+	}
+	if err := json.Unmarshal(line, &req); err != nil {
+		c.log.Warn("ignoring malformed ACP agent request", "error", err)
+		return
+	}
+	switch req.Method {
+	case "session/request_permission":
+		c.handlePermissionRequest(req.ID, req.Params)
+	default:
+		c.log.Warn("unhandled ACP agent request; replying method-not-found", "method", req.Method)
+		c.respondError(req.ID, jsonRPCMethodNotFound, "method not implemented by murtaugh ACP client")
+	}
+}
+
+// handlePermissionRequest resolves a session/request_permission per the configured
+// policy and writes the ACP RequestPermissionResponse. An empty chosen option (no
+// human decision, or no allow/reject option to auto-pick) maps to "cancelled".
+func (c *ProcessClient) handlePermissionRequest(id, params json.RawMessage) {
+	sessionID, toolName, options := parsePermissionRequest(params)
+	optionID := c.decidePermission(sessionID, toolName, options)
+	var outcome map[string]any
+	if optionID == "" {
+		outcome = map[string]any{"outcome": "cancelled"}
+	} else {
+		outcome = map[string]any{"outcome": "selected", "optionId": optionID}
+	}
+	c.respondResult(id, map[string]any{"outcome": outcome})
+}
+
+// decidePermission returns the optionId to grant for a permission request, or ""
+// to cancel. auto-allow/auto-deny pick a matching option without a human; ask
+// routes to the PermissionAsker in the session's Slack thread. ask with no asker
+// or no known thread denies (returns "") — fail-safe and fast, unlike the hang it
+// replaces.
+func (c *ProcessClient) decidePermission(sessionID, toolName string, options []PermissionOption) string {
+	switch strings.ToLower(strings.TrimSpace(c.opts.PermissionPolicy)) {
+	case "auto-allow":
+		return pickOptionByKind(options, "allow")
+	case "auto-deny":
+		return pickOptionByKind(options, "reject")
+	default: // ask
+		if c.opts.PermissionAsker == nil {
+			c.log.Warn("ACP permission request but no human to ask (headless); denying", "tool", toolName, "session_id", sessionID)
+			return ""
+		}
+		c.mu.Lock()
+		scope, ok := c.dests[sessionID]
+		c.mu.Unlock()
+		if !ok || scope.loc.ChannelID == "" {
+			c.log.Warn("ACP permission request without a Slack location; denying", "tool", toolName, "session_id", sessionID)
+			return ""
+		}
+		ctx := scope.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		optionID, err := c.opts.PermissionAsker.AskPermission(ctx, scope.loc, PermissionRequest{SessionID: sessionID, ToolName: toolName, Options: options})
+		if err != nil {
+			c.log.Warn("ACP permission ask failed; denying", "tool", toolName, "error", err)
+			return ""
+		}
+		return optionID
+	}
+}
+
+// pickOptionByKind returns the optionId of the first option whose kind matches the
+// wanted action ("allow" or "reject"), preferring the _once variant over _always,
+// then any kind with the wanted prefix. Returns "" when none match.
+func pickOptionByKind(options []PermissionOption, want string) string {
+	for _, kind := range []string{want + "_once", want + "_always"} {
+		for _, o := range options {
+			if o.Kind == kind {
+				return o.ID
+			}
+		}
+	}
+	for _, o := range options {
+		if strings.HasPrefix(o.Kind, want) {
+			return o.ID
+		}
+	}
+	return ""
+}
+
+// parsePermissionRequest extracts the session id, a human-facing tool name, and the
+// offered options from a session/request_permission params object.
+func parsePermissionRequest(raw json.RawMessage) (sessionID, toolName string, options []PermissionOption) {
+	var p struct {
+		SessionID string `json:"sessionId"`
+		ToolCall  struct {
+			Title string `json:"title"`
+			Kind  string `json:"kind"`
+		} `json:"toolCall"`
+		Options []struct {
+			OptionID string `json:"optionId"`
+			Name     string `json:"name"`
+			Kind     string `json:"kind"`
+		} `json:"options"`
+	}
+	_ = json.Unmarshal(raw, &p)
+	sessionID = p.SessionID
+	toolName = p.ToolCall.Title
+	if toolName == "" {
+		toolName = p.ToolCall.Kind
+	}
+	for _, o := range p.Options {
+		options = append(options, PermissionOption{ID: o.OptionID, Name: o.Name, Kind: o.Kind})
+	}
+	return sessionID, toolName, options
+}
+
+// respondResult writes a JSON-RPC success response to the agent, echoing id.
+func (c *ProcessClient) respondResult(id json.RawMessage, result any) {
+	c.writeResponse(rpcOutgoingResponse{JSONRPC: "2.0", ID: id, Result: result})
+}
+
+// respondError writes a JSON-RPC error response to the agent, echoing id.
+func (c *ProcessClient) respondError(id json.RawMessage, code int, message string) {
+	c.writeResponse(rpcOutgoingResponse{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: code, Message: message}})
+}
+
+func (c *ProcessClient) writeResponse(resp rpcOutgoingResponse) {
+	encoded, err := json.Marshal(resp)
+	if err != nil {
+		c.log.Warn("encode ACP response", "error", err)
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed || c.stdin == nil {
+		return
+	}
+	if _, err := c.stdin.Write(append(encoded, '\n')); err != nil {
+		c.log.Warn("write ACP response", "error", err)
+	}
+}
+
 func (c *ProcessClient) deliverNotification(notification rpcNotification) {
 	if notification.Method != "session/update" {
+		// Surface any ACP notification we don't implement so a protocol feature we
+		// silently ignore is visible in the log rather than invisible (the class of
+		// gap that hid the dropped permission request).
+		c.log.Warn("ignoring unhandled ACP notification", "method", notification.Method)
 		return
 	}
 	var params map[string]any

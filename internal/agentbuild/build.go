@@ -30,6 +30,11 @@ type Deps struct {
 	// approval. nil disables gating — set only on the interactive chat path,
 	// never for headless/delegated agents. Ignored for ACP agents.
 	Approver native.Approver
+	// ACPPermissionAsker answers an ACP agent's session/request_permission
+	// requests via a human in Slack. nil on headless/delegated paths, where the
+	// agent's acp_permission policy still applies (auto-allow/auto-deny work;
+	// "ask" denies). Ignored for native agents.
+	ACPPermissionAsker agent.PermissionAsker
 }
 
 // Client builds the backend for profile. It does no network/process I/O — both
@@ -54,11 +59,13 @@ func Client(profile config.AgentProfile, deps Deps) (agent.Client, error) {
 			workDir = deps.BaseDir
 		}
 		return agent.NewProcessClient(agent.ProcessOptions{
-			Command: profile.Command,
-			Args:    profile.Args,
-			WorkDir: workDir,
-			Env:     profile.EnvOverrides(),
-			Logger:  logger,
+			Command:          profile.Command,
+			Args:             profile.Args,
+			WorkDir:          workDir,
+			Env:              profile.EnvOverrides(),
+			Logger:           logger,
+			PermissionPolicy: profile.ResolvedACPPermission(),
+			PermissionAsker:  deps.ACPPermissionAsker,
 		}), nil
 	default:
 		return nil, fmt.Errorf("agentbuild: unknown agent kind %q", profile.ResolvedKind())

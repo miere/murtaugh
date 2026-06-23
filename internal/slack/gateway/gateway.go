@@ -216,8 +216,14 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 		// approval in the thread. nil broker leaves them ungated. Headless and
 		// delegated agents (built elsewhere) never get an approver.
 		var approver native.Approver
+		var acpPermissionAsker agent.PermissionAsker
 		if broker != nil {
 			approver = askbroker.NewApprover(broker)
+			// ACP agents answer their own permission requests through the same
+			// broker: a session/request_permission is posted as buttons in the
+			// thread. nil (headless) leaves ACP agents to their auto-allow/deny
+			// policy. Set only on this interactive path, like the native approver.
+			acpPermissionAsker = askbroker.NewPermissionGate(broker)
 		}
 		for name, profile := range cfg.Agents {
 			// Default an agent's working directory to the workspace (the
@@ -225,11 +231,12 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 			// unset, so agents start where the bundled skills and templates
 			// live and can auto-discover them.
 			client, err := agentbuild.Client(profile, agentbuild.Deps{
-				Registry:   registry,
-				MCPServers: cfg.MCPServers,
-				BaseDir:    cfg.BaseDir,
-				Logger:     logger.With("agent", name),
-				Approver:   approver,
+				Registry:           registry,
+				MCPServers:         cfg.MCPServers,
+				BaseDir:            cfg.BaseDir,
+				Logger:             logger.With("agent", name),
+				Approver:           approver,
+				ACPPermissionAsker: acpPermissionAsker,
 			})
 			if err != nil {
 				logger.Error("agent disabled: could not build client", "agent", name, "kind", profile.ResolvedKind(), "error", err)

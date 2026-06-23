@@ -87,6 +87,33 @@ func TestResolvedKind(t *testing.T) {
 	}
 }
 
+func TestACPAgentPermissionValidation(t *testing.T) {
+	cases := []struct {
+		name    string
+		value   string
+		wantErr string
+	}{
+		{"default empty ⇒ ask", "", ""},
+		{"ask", "ask", ""},
+		{"auto-allow", "auto-allow", ""},
+		{"auto-deny", "auto-deny", ""},
+		{"bad value", "yolo", "acp_permission must be"},
+	}
+	for _, tc := range cases {
+		profile := AgentProfile{Kind: "acp", Command: "claude-code-acp-rs", ACPPermission: tc.value}
+		err := profile.Validate()
+		if tc.wantErr == "" {
+			if err != nil {
+				t.Errorf("%s: unexpected error: %v", tc.name, err)
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			t.Errorf("%s: got %v, want substring %q", tc.name, err, tc.wantErr)
+		}
+	}
+}
+
 func TestNativeAgentValidation(t *testing.T) {
 	cases := []struct {
 		name    string

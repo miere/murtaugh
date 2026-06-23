@@ -162,6 +162,12 @@ type AgentProfile struct {
 	Command string   `yaml:"command"`
 	Args    []string `yaml:"args"`
 	WorkDir string   `yaml:"workdir"`
+	// ACPPermission governs how agent-initiated permission requests
+	// (session/request_permission) are answered: "ask" (default — route to a
+	// human in the Slack thread), "auto-allow", or "auto-deny". Headless/CLI
+	// callers have no human, so "ask" there denies; set "auto-allow" for
+	// unattended ACP automation. Ignored for native agents.
+	ACPPermission string `yaml:"acp_permission"`
 
 	// --- Native backend (kind: native) ---
 	// Provider selects the litellm provider family: "gemini", "anthropic"
@@ -574,6 +580,8 @@ func (c Config) Validate() error {
 		}
 		if profile.ResolvedKind() == AgentKindNative {
 			errs = append(errs, validateNativeAgent(name, profile, c.MCPServers)...)
+		} else if err := profile.Validate(); err != nil {
+			errs = append(errs, fmt.Errorf("agents[%s]: %w", name, err))
 		}
 	}
 
@@ -775,10 +783,26 @@ func (c ACPConfig) Validate() error {
 }
 
 func (p AgentProfile) Validate() error {
-	if p.ResolvedKind() == AgentKindACP && strings.TrimSpace(p.Command) == "" {
-		return errors.New("agent profile command is required")
+	if p.ResolvedKind() == AgentKindACP {
+		if strings.TrimSpace(p.Command) == "" {
+			return errors.New("agent profile command is required")
+		}
+		switch p.ResolvedACPPermission() {
+		case "ask", "auto-allow", "auto-deny":
+		default:
+			return fmt.Errorf("agent profile acp_permission must be ask, auto-allow, or auto-deny (got %q)", p.ACPPermission)
+		}
 	}
 	return nil
+}
+
+// ResolvedACPPermission reports the effective permission policy for an ACP agent,
+// defaulting an empty value to "ask".
+func (p AgentProfile) ResolvedACPPermission() string {
+	if v := strings.ToLower(strings.TrimSpace(p.ACPPermission)); v != "" {
+		return v
+	}
+	return "ask"
 }
 
 // ResolvedKind reports the effective backend for the profile. An explicit Kind
