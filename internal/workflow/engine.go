@@ -103,7 +103,6 @@ func NewEngine(cfg config.Config, opts Options) *Engine {
 	return &Engine{rules: rules, poster: poster, runner: runner, delegator: opts.Delegator, templateDir: templateDir, templateFS: templateFS, logger: logger, recorder: recorder}
 }
 
-
 // Execute matches interaction against the configured rules and runs the
 // triggers of the first match. rawPayload is the verbatim Slack interaction
 // callback as delivered over the wire; it is what a `run` trigger receives on
