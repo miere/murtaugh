@@ -62,6 +62,12 @@ type Gateway struct {
 	chat            *ChatHandler
 	chatSessions    map[string]ChatSessionManager
 	chatWarmTimeout time.Duration
+	// chatRouting and agentProfiles are config snapshots captured at construction
+	// so the startup routing summary (logStartupRouting) can report the configured
+	// agents and channel routing — and flag routes whose target agent failed to
+	// build — without re-reading the full config.
+	chatRouting   config.ChatConfig
+	agentProfiles map[string]config.AgentProfile
 	// cancelGrace is how long the interrupt path waits after asking the
 	// ACP agent to cancel its in-flight prompt before hard-cancelling the
 	// chat goroutine's context. Short enough that the user does not stare
@@ -321,6 +327,8 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 		interactions:    broker,
 		chat:            chat,
 		chatSessions:    sessions,
+		chatRouting:     cfg.Chat,
+		agentProfiles:   cfg.Agents,
 		chatWarmTimeout: cfg.ACP.EffectiveStartupTimeout(),
 		cancelGrace:     cfg.ACP.EffectiveCancelGracePeriod(),
 		inFlight:        NewInFlightRegistry(),
@@ -427,6 +435,7 @@ func (a *Gateway) Run(ctx context.Context) error {
 		return fmt.Errorf("resolve allowed users: %w", err)
 	}
 
+	a.logStartupRouting(ctx)
 	a.warmChat(ctx)
 	a.startChannelCache(ctx)
 	a.startConfigWatcher(ctx)
