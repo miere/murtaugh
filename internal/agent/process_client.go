@@ -41,6 +41,11 @@ type ProcessOptions struct {
 	// aggregator and supplies the stdio bridge server advertised in session/new,
 	// so the agent can reach Murtaugh's own tools. nil leaves mcpServers empty.
 	Aggregator Aggregator
+	// Persona is Murtaugh's shared persona (SOUL.md). ACP exposes no system role,
+	// so when set it is injected as a leading <persona> block on every prompt,
+	// keeping an ACP agent's voice aligned with native — even when the agent runs
+	// in an external project with its own AGENTS.md. Empty injects nothing.
+	Persona string
 }
 
 type ProcessClient struct {
@@ -366,6 +371,9 @@ func (c *ProcessClient) Prompt(ctx context.Context, sessionID string, request Pr
 // promptBlocks renders a PromptRequest into ACP `session/prompt` content
 // blocks. ACP exposes no system role, so leading delimited blocks are the
 // closest stand-in for a system note. Order:
+//  0. a <persona> block (only when a shared persona is configured) carrying
+//     Murtaugh's voice, so an ACP agent reads as the same character as native
+//     even when it runs in an external project with its own AGENTS.md.
 //  1. a <context> block carrying the volatile per-turn facts (current time,
 //     working directory) — the ACP analogue of native's RenderTurnContext, so
 //     an ACP agent knows what day it is and where it is rooted, just like the
@@ -379,7 +387,10 @@ func (c *ProcessClient) Prompt(ctx context.Context, sessionID string, request Pr
 //     backfilling an existing thread).
 //  4. the user's text.
 func (c *ProcessClient) promptBlocks(request PromptRequest) []map[string]string {
-	blocks := make([]map[string]string, 0, 4)
+	blocks := make([]map[string]string, 0, 5)
+	if persona := strings.TrimSpace(c.opts.Persona); persona != "" {
+		blocks = append(blocks, map[string]string{"type": "text", "text": "<persona>\n" + persona + "\n</persona>"})
+	}
 	if ctxText := c.renderTurnContext(); ctxText != "" {
 		blocks = append(blocks, map[string]string{"type": "text", "text": ctxText})
 	}

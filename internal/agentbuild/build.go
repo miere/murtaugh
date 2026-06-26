@@ -87,6 +87,9 @@ func Client(profile config.AgentProfile, deps Deps) (agent.Client, error) {
 			PermissionPolicy: profile.ResolvedACPPermission(),
 			PermissionAsker:  deps.ACPPermissionAsker,
 			Aggregator:       aggregator,
+			// Share Murtaugh's persona with the ACP agent (it has no system role of
+			// our making); read from the config/workspace dir where SOUL.md lives.
+			Persona: native.ReadSoul(deps.BaseDir),
 		}), nil
 	default:
 		return nil, fmt.Errorf("agentbuild: unknown agent kind %q", profile.ResolvedKind())
