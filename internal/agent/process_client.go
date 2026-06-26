@@ -57,6 +57,37 @@ type ProcessClient struct {
 	// context so an agent-initiated session/request_permission can be routed to a
 	// human in the right thread and cancelled when that turn is interrupted.
 	dests map[string]promptScope
+	// caps records what the agent advertised in its initialize response. Set once
+	// by Initialize before any prompt runs, then read-only; guarded by mu.
+	caps AgentCapabilities
+}
+
+// AgentCapabilities captures the parts of an ACP agent's initialize response
+// that govern how Murtaugh may talk to it — chiefly which MCP server transports
+// it accepts in session/new. Stdio is always available (mandatory in ACP); HTTP
+// and SSE are only honoured when the agent advertises them. Note: an advertised
+// transport is necessary but not sufficient — at least one shipping agent
+// advertises http while silently dropping http servers, so any future HTTP path
+// must verify a connection actually formed rather than trust this flag.
+type AgentCapabilities struct {
+	ProtocolVersion int
+	MCP             MCPCapabilities
+	LoadSession     bool
+}
+
+// MCPCapabilities reports which url-based MCP server transports the agent
+// accepts in session/new (beyond the mandatory stdio).
+type MCPCapabilities struct {
+	HTTP bool
+	SSE  bool
+}
+
+// Capabilities returns what the agent advertised at initialize. Zero value until
+// Initialize completes.
+func (c *ProcessClient) Capabilities() AgentCapabilities {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.caps
 }
 
 // promptScope is the in-flight context for a session's current prompt: where it
@@ -145,7 +176,7 @@ func (c *ProcessClient) Initialize(ctx context.Context) error {
 	if err := c.start(ctx); err != nil {
 		return err
 	}
-	_, err := c.call(ctx, "initialize", map[string]any{
+	result, err := c.call(ctx, "initialize", map[string]any{
 		"protocolVersion": 1,
 		"clientInfo": map[string]any{
 			"name":    "murtaugh",
@@ -154,10 +185,50 @@ func (c *ProcessClient) Initialize(ctx context.Context) error {
 		},
 		"clientCapabilities": map[string]any{},
 	})
-	if err == nil {
-		c.log.Info("initialized ACP client", "duration", time.Since(startedAt))
+	if err != nil {
+		return err
 	}
-	return err
+	caps := parseAgentCapabilities(result)
+	c.mu.Lock()
+	c.caps = caps
+	c.mu.Unlock()
+	c.log.Info("initialized ACP client",
+		"duration", time.Since(startedAt),
+		"protocol_version", caps.ProtocolVersion,
+		"mcp_http", caps.MCP.HTTP,
+		"mcp_sse", caps.MCP.SSE,
+		"load_session", caps.LoadSession,
+	)
+	return nil
+}
+
+// parseAgentCapabilities decodes the subset of an ACP initialize response that
+// Murtaugh acts on. Missing fields decode to their zero value (stdio-only), the
+// safe default. An unparseable result yields zero capabilities rather than an
+// error: the handshake already succeeded, and stdio — all Murtaugh needs today —
+// is always available.
+func parseAgentCapabilities(result json.RawMessage) AgentCapabilities {
+	var decoded struct {
+		ProtocolVersion   int `json:"protocolVersion"`
+		AgentCapabilities struct {
+			LoadSession     bool `json:"loadSession"`
+			MCPCapabilities struct {
+				HTTP bool `json:"http"`
+				SSE  bool `json:"sse"`
+			} `json:"mcpCapabilities"`
+		} `json:"agentCapabilities"`
+	}
+	if len(result) > 0 {
+		_ = json.Unmarshal(result, &decoded)
+	}
+	return AgentCapabilities{
+		ProtocolVersion: decoded.ProtocolVersion,
+		MCP: MCPCapabilities{
+			HTTP: decoded.AgentCapabilities.MCPCapabilities.HTTP,
+			SSE:  decoded.AgentCapabilities.MCPCapabilities.SSE,
+		},
+		LoadSession: decoded.AgentCapabilities.LoadSession,
+	}
 }
 
 func (c *ProcessClient) NewSession(ctx context.Context, _ SessionMetadata) (Session, error) {
