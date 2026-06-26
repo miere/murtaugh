@@ -1,6 +1,11 @@
 ---
 name: murtaugh-jobs
-description: Defines, runs, and schedules Murtaugh jobs — named units of work in `jobs.yaml` that execute either a shell command (args, workdir, timeout) or an agent (`agent` + `prompt`), with one of three trigger modes (manual, `schedule:` cron, or `every:` interval). Use when creating or editing `jobs.yaml`, wiring the `jobs_run`/`jobs_define` CLI or MCP tools, or setting up backups, syncs, reconcile scripts, or agent-delegated chores that Murtaugh runs on demand or automatically. Use when choosing a cron/interval value, configuring the `slack gateway` daemon that owns the scheduler, or running `murtaugh jobs run`/`murtaugh jobs define`.
+description: Define, run, and schedule Murtaugh jobs in jobs.yaml — a shell command or an agent, run manually or on a cron/interval — via the jobs_run/jobs_define tools.
+requires: [jobs]
+files:
+  reference/configuring.md: { requires: [jobs], summary: "define a job's command / agent+prompt / args / workdir / timeout" }
+  reference/scheduling.md:  { requires: [jobs], summary: "choose a schedule (cron) / every (interval) value; held-job approval" }
+  reference/running.md:     { requires: [jobs], summary: "run a job by hand or wire jobs_run / jobs_define" }
 ---
 
 # Skill: Murtaugh Jobs

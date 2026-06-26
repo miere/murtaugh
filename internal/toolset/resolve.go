@@ -34,6 +34,14 @@ const (
 	GroupSkills   = "skills"
 )
 
+// GroupManage is a capability grant that adds no tool of its own — it exists
+// purely as a skills-visibility token. Build/operate skills (those that author
+// config and so can't gate on a tool the way slack/journal/setup do) declare
+// `requires: [manage]`; listing `manage` in an agent's `tools:` makes those
+// skills visible to it. It falls through to the registry match below, finds
+// nothing, and contributes no tool — exactly as intended.
+const GroupManage = "manage"
+
 // Deps carries the per-agent context the resolver needs to build native tools
 // and select registry tools.
 type Deps struct {
@@ -113,7 +121,9 @@ func Resolve(allow []string, mcpTools []tools.Tool, deps Deps) ([]tools.Tool, er
 			if strings.TrimSpace(deps.SkillsDir) == "" {
 				return nil, fmt.Errorf("toolset: skills_dir is required for the %q tool", GroupSkills)
 			}
-			add(skills.New(deps.SkillsDir))
+			// Pass the whole allowlist so the skills tool gates what it lists,
+			// reads, and serves to the same capability set that selects tools.
+			add(skills.New(deps.SkillsDir, allow...))
 		default:
 			for _, t := range registryMatches(deps.Registry, entry) {
 				add(t)

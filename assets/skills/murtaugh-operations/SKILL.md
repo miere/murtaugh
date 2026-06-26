@@ -1,6 +1,11 @@
 ---
 name: murtaugh-operations
-description: Operator guide for running and diagnosing the long-lived `murtaugh slack gateway` Socket Mode daemon that handles all Slack events (slash commands, button clicks, mentions, DMs, link previews) and runs scheduled jobs. Use when debugging or operating a running gateway — inspecting its launchd stdout/stderr logs at `~/Library/Logs/murtaugh/slack.out.log` and `slack.err.log`, tracing startup/warmup/scheduler lifecycle, applying config changes or doing a graceful restart (`/murtaugh restart`), or troubleshooting auth issues like the bot ignoring users (`admin_user`/`allowed_users` fail-closed authorization). Concerns the `murtaugh --config PATH slack gateway` command and its `reference/lifecycle.md`, `reference/config-and-restart.md`, and `reference/auth-and-troubleshooting.md` files; for installing the daemon use murtaugh-setup instead.
+description: Run and diagnose the long-lived murtaugh slack gateway daemon — lifecycle, launchd logs, config changes, graceful restart, and fail-closed auth troubleshooting.
+requires: [restart]
+files:
+  reference/lifecycle.md:                { requires: [restart], summary: "what happens at startup — warmup, ping, scheduler" }
+  reference/config-and-restart.md:       { requires: [restart], summary: "apply config changes / do a graceful restart" }
+  reference/auth-and-troubleshooting.md: { requires: [restart], summary: "diagnose auth / 'bot ignores me' / anything not working" }
 ---
 
 # Skill: Murtaugh Gateway Operations
@@ -45,7 +50,8 @@ job runs, and errors are all there.
   block on an Approve/Deny or answer in Slack. A quiet turn may be waiting, not
   hung. → `reference/auth-and-troubleshooting.md`
 - The daemon also runs the **job scheduler** (see the `murtaugh-jobs` skill) and
-  the **chat** and **unfurl** handlers (see `murtaugh-agents`, `murtaugh-unfurl`).
+  the **chat** and **unfurl** handlers (see `murtaugh-agents` and the
+  `murtaugh-slack` skill's `unfurl.md`).
 - **The daemon takes no tool flags** — only the global `--config PATH`
   (`murtaugh --config /path/slack.yaml slack gateway`). Run
   `murtaugh help slack gateway` for the full reference, or `murtaugh help` to

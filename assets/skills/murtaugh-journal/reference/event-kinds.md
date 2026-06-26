@@ -62,5 +62,5 @@ When a turn shows `bytes: 0` (an **empty reply**), check `stop_reason`: a value 
 
 The in-turn interaction flows — a `terminal` approval gate, the `ask`/`present_plan` prompts, a held job's first-run confirmation — emit **no journal events** of their own, and a denied/timed-out approval does **not** add a turn outcome: it's a skip-with-note, so the turn still ends `completed`. There is no `outcome` value or event kind to look for here; to see whether the agent was waiting on a human, look in the Slack thread, not the journal.
 
-Reviewing transcripts (as opposed to debugging gateway interactions) has its own
-skill: `murtaugh-acp-sessions`.
+Reviewing transcripts (as opposed to debugging gateway interactions) is covered
+by `reference/chat-sessions.md` in this skill.

@@ -166,7 +166,7 @@ func Build(profile config.AgentProfile, deps BuildDeps) (*Client, error) {
 	skillsDir := filepath.Join(deps.BaseDir, ".agents", "skills")
 	var skillsIndex string
 	if containsString(profile.Tools, toolset.GroupSkills) {
-		skillsIndex = renderSkillsIndex(skillsDir)
+		skillsIndex = renderSkillsIndex(skillsDir, profile.Tools)
 	}
 
 	return &Client{
@@ -393,11 +393,13 @@ func readAgentsDoc(workDir string) string {
 }
 
 // renderSkillsIndex builds the compact "- name: description" listing of the
-// agent's bundled skills, for the static system prompt. Returns "" when there
-// are no skills or the directory is unreadable (the index is best-effort
-// advertising, never a hard dependency).
-func renderSkillsIndex(skillsDir string) string {
-	summaries, err := skills.List(skillsDir)
+// agent's bundled skills, for the static system prompt. It lists only the skills
+// the agent's `tools:` make visible (the L1 capability gate); filtering by the
+// static profile tokens keeps the index stable per profile, so the system prompt
+// stays cacheable. Returns "" when there are no visible skills or the directory
+// is unreadable (the index is best-effort advertising, never a hard dependency).
+func renderSkillsIndex(skillsDir string, have []string) string {
+	summaries, err := skills.ListVisible(skillsDir, have)
 	if err != nil || len(summaries) == 0 {
 		return ""
 	}

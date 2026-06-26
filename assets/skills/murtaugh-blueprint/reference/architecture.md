@@ -18,11 +18,11 @@ capability skill — defer to them for flag/tool details:
 | Surface | What it is | Deep-dive skill |
 |---|---|---|
 | `automations/` | Python (or shell) routines that do the work | — (rules below) |
-| `slack.yaml` | Slack workflow rules: reply / run / unfurl / interactive (buttons) | `murtaugh-slack` |
-| active Slack actions | post / update / read messages from code | `murtaugh-slack-tools` |
+| `slack.yaml` | Slack workflow rules: reply / run / unfurl / interactive (buttons) | `murtaugh-slack` (`workflow-rules.md`) |
+| active Slack actions | post / update / read messages from code | `murtaugh-slack` (`messaging.md`) |
 | `agents.yaml` | agent definitions: provider/model, tools, `approval:` gate, context/cache | `murtaugh-agents` |
-| `templates/` | static Block Kit payloads | — (rules below) |
-| link previews | URL unfurling | `murtaugh-unfurl` |
+| `templates/` | static Block Kit payloads | `murtaugh-slack` (`blocks.md`) |
+| link previews | URL unfurling | `murtaugh-slack` (`unfurl.md`) |
 | `jobs.yaml` | scheduled / on-demand job execution | `murtaugh-jobs` |
 
 > **`agents.yaml` carries an `approval:` block** (per agent) that gates side-effecting
@@ -115,7 +115,8 @@ Routines are registered where Murtaugh invokes them, by their **deployed**
 absolute path under `~/.config/murtaugh/automations/...`:
 
 - Scheduled / on-demand jobs → `jobs.yaml` (see `murtaugh-jobs`).
-- Slack interaction / workflow triggers → `slack.yaml` (see `murtaugh-slack`).
+- Slack interaction / workflow triggers → `slack.yaml` (see `murtaugh-slack`,
+  `workflow-rules.md`).
 
 When you move or rename a routine, update those references too. Changes take
 effect once the daemon reloads the config (or after a redeploy to
@@ -131,7 +132,7 @@ static Block Kit payload** rather than build blocks dynamically in code:
 - Reply / run acks and fixed responses → referenced by `template:` in a
   `slack.yaml` rule (e.g. `templates/github/approved.json`).
 - Link unfurls → `templates/unfurl/...` (e.g. `templates/unfurl/github-pr.json`;
-  see `murtaugh-unfurl`).
+  see the `murtaugh-slack` skill's `unfurl.md`).
 
 Use a template when the structure is fixed and only values are interpolated. When
 a message's *shape* depends on runtime logic (conditional blocks, loops over a

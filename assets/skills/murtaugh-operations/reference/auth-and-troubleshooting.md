@@ -35,7 +35,7 @@ logged at startup.
 | Bot ignores my DM / @-mention | Your user isn't in `admin_user`/`allowed_users` (mentions/DMs fail **silently**); or ACP chat is disabled (`acp.enabled: false`, no `chat.default_agent`). See `murtaugh-agents`. |
 | "you are not authorized" on a slash command | Same allowlist issue, surfaced because slash commands deny loudly. |
 | Config edit had no effect | Config loads once — **restart** to apply. See `reference/config-and-restart.md`. |
-| Link previews don't appear | The domain isn't in the Slack app's **App Unfurl Domains** (no `link_shared` is delivered), or no matching `unfurl-rules`. See `murtaugh-unfurl`. |
+| Link previews don't appear | The domain isn't in the Slack app's **App Unfurl Domains** (no `link_shared` is delivered), or no matching `unfurl-rules`. See the `murtaugh-slack` skill's `unfurl.md`. |
 | A scheduled job didn't run | The gateway was down at fire time (no catch-up), or the schedule edit needs a restart. See `murtaugh-jobs`. |
 | A message handled twice | Not redelivery (that's de-duped) — check you don't have **two daemons** running. |
 | A chat turn "hangs" with no reply | It may be **legitimately waiting on a human**, not stuck — see *A turn that's waiting, not hung* below. |

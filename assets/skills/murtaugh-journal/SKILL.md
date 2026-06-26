@@ -1,6 +1,10 @@
 ---
 name: murtaugh-journal
-description: Debugs Murtaugh gateway interactions, workflow rules, link unfurls, and job runs by querying its structured event journal (a local SQLite database, the engine behind Gateway Debug Mode/GDM) instead of reading log files. Use when someone asks why a Slack workflow button did nothing, why a link unfurl is wrong, or whether a job ran, or otherwise needs to inspect the gateway/job/acp_session streams. Concerns the journal_query, journal_stats, and journal_prune tools (CLI `murtaugh journal query|stats|prune`), correlation-id tracing via --corr-id, filters like --stream/--channel/--level/--since, the journal.yaml config, and reference/event-kinds.md.
+description: Debug and audit Murtaugh by querying its structured event journal — gateway interactions, workflow rules, link unfurls, job runs, and chat sessions — instead of reading log files.
+requires: [journal]
+files:
+  reference/event-kinds.md:   { requires: [journal], summary: "which gateway/job event kind means what" }
+  reference/chat-sessions.md: { requires: [journal], summary: "review the acp_session stream + chat transcripts for quality/UX/failures" }
 ---
 
 # Skill: Debugging Murtaugh with the Event Journal
@@ -35,7 +39,9 @@ Over MCP the names are dotted (`journal_query`); on the CLI they are spaced
   the connection watchdog: connecting / reconnecting / stalled / heartbeat_failed)
   — the place to look for *"why did the daemon go silent?"*.
 - **`job`** — `jobs_run` executions (command or agent), with exit code/duration.
-- **`acp_session`** — chat session events (when enabled).
+- **`acp_session`** — chat session turns (when enabled). For *reviewing* real
+  conversations (quality, UX, failure patterns) and reading transcripts —
+  distinct from debugging a gateway interaction — see `reference/chat-sessions.md`.
 
 ## The debugging move (mental model)
 
@@ -78,3 +84,4 @@ timestamp. Results are most-recent-first; default limit 50, capped at 500.
 | When you're… | Read |
 |--------------|------|
 | Figuring out which event kind means what (gateway/job catalog) | `reference/event-kinds.md` |
+| Reviewing/auditing real chat conversations + reading transcripts | `reference/chat-sessions.md` |

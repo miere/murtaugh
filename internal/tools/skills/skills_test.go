@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -214,4 +215,174 @@ func mustWrite(t *testing.T, path, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// gatedSkill is a multi-audience skill: top-level requires is the union, and it
+// is templated with a {{FILES}} marker plus a per-file manifest.
+const gatedSkill = `---
+name: gated
+description: A gated, templated skill.
+requires: [slack, manage]
+templated: true
+files:
+  reference/messaging.md:      { requires: [slack],  summary: "post and read messages" }
+  reference/workflow-rules.md: { requires: [manage], summary: "wire button clicks" }
+---
+
+# Skill: Gated
+
+Read only the file your task needs.
+
+{{FILES}}
+
+## Boundary
+
+Operator rows are config.
+`
+
+// writeGated writes the gated skill plus its two reference files.
+func writeGated(t *testing.T, root string) {
+	t.Helper()
+	dir := writeSkill(t, root, "gated", gatedSkill)
+	mustWrite(t, filepath.Join(dir, "reference", "messaging.md"), "MESSAGING BODY")
+	mustWrite(t, filepath.Join(dir, "reference", "workflow-rules.md"), "WORKFLOW BODY")
+}
+
+func TestVisible(t *testing.T) {
+	have := map[string]bool{"slack": true}
+	cases := []struct {
+		requires []string
+		want     bool
+	}{
+		{nil, true},                         // ungated → always visible
+		{[]string{"slack"}, true},           // any-of hit
+		{[]string{"manage"}, false},         // miss
+		{[]string{"manage", "slack"}, true}, // any-of: one hit is enough
+		{[]string{"manage", "journal"}, false},
+	}
+	for _, c := range cases {
+		if got := visible(c.requires, have); got != c.want {
+			t.Errorf("visible(%v) = %v, want %v", c.requires, got, c.want)
+		}
+	}
+}
+
+func TestList_GatedByRequires(t *testing.T) {
+	root := t.TempDir()
+	writeSkill(t, root, "open", withFrontmatter) // ungated
+	writeSkill(t, root, "ops", `---
+name: ops
+description: operator only.
+requires: [manage]
+---
+body`)
+
+	// A slack-only agent sees the ungated skill, not the manage-gated one.
+	res, err := New(root, "slack").Invoke(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := skillNames(res.(ListResult))
+	if _, ok := names["alpha-skill"]; !ok {
+		t.Errorf("ungated skill missing from list: %v", names)
+	}
+	if _, ok := names["ops"]; ok {
+		t.Errorf("manage-gated skill leaked to a slack-only agent: %v", names)
+	}
+
+	// A manage agent sees both.
+	res2, _ := New(root, "slack", "manage").Invoke(context.Background(), nil)
+	if _, ok := skillNames(res2.(ListResult))["ops"]; !ok {
+		t.Errorf("manage agent should see the ops skill")
+	}
+}
+
+func TestRead_TemplatedRendersVisibleRowsOnly(t *testing.T) {
+	root := t.TempDir()
+	writeGated(t, root)
+
+	// slack-only: frontmatter stripped, only the messaging row in the table,
+	// no mention of the workflow-rules file, inventory hides it.
+	got, err := New(root, "slack").Invoke(context.Background(), map[string]any{"name": "gated"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := got.(ReadResult)
+	if strings.Contains(res.Content, "---") && strings.Contains(res.Content, "requires:") {
+		t.Errorf("templated body still carries frontmatter:\n%s", res.Content)
+	}
+	if strings.Contains(res.Content, "{{FILES}}") {
+		t.Errorf("marker not rendered:\n%s", res.Content)
+	}
+	if !strings.Contains(res.Content, "reference/messaging.md") {
+		t.Errorf("visible row missing:\n%s", res.Content)
+	}
+	if strings.Contains(res.Content, "workflow-rules.md") {
+		t.Errorf("manage row leaked to a slack-only agent:\n%s", res.Content)
+	}
+	if contains(res.Files, "reference/workflow-rules.md") {
+		t.Errorf("manage file leaked into inventory: %v", res.Files)
+	}
+	if !contains(res.Files, "reference/messaging.md") {
+		t.Errorf("visible file missing from inventory: %v", res.Files)
+	}
+
+	// manage agent sees both rows and both files.
+	got2, _ := New(root, "slack", "manage").Invoke(context.Background(), map[string]any{"name": "gated"})
+	res2 := got2.(ReadResult)
+	if !strings.Contains(res2.Content, "workflow-rules.md") {
+		t.Errorf("manage agent should see the workflow-rules row:\n%s", res2.Content)
+	}
+	if !contains(res2.Files, "reference/workflow-rules.md") {
+		t.Errorf("manage agent inventory should include workflow-rules.md: %v", res2.Files)
+	}
+}
+
+func TestReadFile_GatedServe(t *testing.T) {
+	root := t.TempDir()
+	writeGated(t, root)
+
+	// Visible file serves its body.
+	got, err := New(root, "slack").Invoke(context.Background(), map[string]any{"name": "gated", "file": "reference/messaging.md"})
+	if err != nil {
+		t.Fatalf("serve visible file: %v", err)
+	}
+	if got.(FileResult).Content != "MESSAGING BODY" {
+		t.Errorf("unexpected body: %q", got.(FileResult).Content)
+	}
+
+	// Gated file is refused (as "not found") for a slack-only agent.
+	if _, err := New(root, "slack").Invoke(context.Background(), map[string]any{"name": "gated", "file": "reference/workflow-rules.md"}); err == nil {
+		t.Error("manage-gated file served to a slack-only agent")
+	}
+
+	// The manage agent can read it.
+	got2, err := New(root, "slack", "manage").Invoke(context.Background(), map[string]any{"name": "gated", "file": "reference/workflow-rules.md"})
+	if err != nil || got2.(FileResult).Content != "WORKFLOW BODY" {
+		t.Errorf("manage agent could not read the gated file: %v / %v", err, got2)
+	}
+
+	// Path traversal / outside reference|examples is refused.
+	for _, bad := range []string{"../../etc/passwd", "/etc/passwd", "SKILL.md", "reference/../../x"} {
+		if _, err := New(root, "manage").Invoke(context.Background(), map[string]any{"name": "gated", "file": bad}); err == nil {
+			t.Errorf("readFile(%q) = nil error, want refusal", bad)
+		}
+	}
+}
+
+func skillNames(r ListResult) map[string]bool {
+	out := make(map[string]bool, len(r.Skills))
+	for _, s := range r.Skills {
+		out[s.Name] = true
+	}
+	return out
+}
+
+func contains(xs []string, want string) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
 }

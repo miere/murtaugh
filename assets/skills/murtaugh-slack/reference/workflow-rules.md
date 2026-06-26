@@ -1,17 +1,19 @@
-# Inbound: handling interactions
+# Workflow-rules: handling button clicks
 
-How Murtaugh turns a button click into a response. This is the *interaction* half
-of the dance (steps 2–4). For composing and sending the message that carries the
-buttons, see `outbound.md`; for the blocks themselves, see `blocks.md`.
+How Murtaugh turns a button click into a response — the *reactive* half of Slack.
+For composing and sending the message that carries the buttons, see
+`messaging.md`; for the blocks themselves, see `blocks.md`. This is operator
+config (it edits `slack.yaml`).
 
 > **`workflow-rules` are buttons-only.** A `workflow-rules` entry can only match
 > `block_actions` interactions; it **cannot** trigger on a modal `view_submission`.
 > This is a limitation of the *rules* surface, **not** the daemon: Murtaugh's native
 > interaction broker (backing the `ask` / `present_plan` tools and the terminal
-> approval gate) *does* open real modals and parse their `view_submission`s — the
-> gateway routes those to the blocked agent turn before workflow-rules ever see them.
-> So if you need a multi-field prompt, reach for the `ask` tool (it opens a modal and
-> returns the answers) rather than trying to wire one through a workflow-rule.
+> approval gate — see `asking.md`) *does* open real modals and parse their
+> `view_submission`s — the gateway routes those to the blocked agent turn before
+> workflow-rules ever see them. So if you need a multi-field prompt, reach for the
+> `ask` tool (it opens a modal and returns the answers) rather than trying to wire
+> one through a workflow-rule.
 
 ## How it works
 
@@ -112,10 +114,10 @@ outsiders are silently dropped), but does **not** control *who can see*.
 > whether you actually want the agent to *ask*. For agent-driven approval and
 > decisions, prefer the `present_plan` tool (plan sign-off), the `ask` tool (a
 > question with options, or a multi-field modal), or the terminal **approval gate**
-> (`agents.yaml` → `approval:`, which confirms side-effecting commands in the thread).
-> Those block the turn and return the user's choice directly — no rule wiring, and
-> no secrets travelling in `value`. Hand-wired forms are for *standalone* reactive
-> flows that aren't part of an agent turn (PR action cards, status mirrors).
+> — all in `asking.md`. Those block the turn and return the user's choice directly —
+> no rule wiring, and no secrets travelling in `value`. Hand-wired forms are for
+> *standalone* reactive flows that aren't part of an agent turn (PR action cards,
+> status mirrors).
 
 Before drafting a hand-wired form, walk the user through:
 
@@ -141,4 +143,4 @@ ephemeral, scope `allowed_users`, gate destructive actions) rather than ship-and
 - A worked, wired example lives in `slack.yaml` (`workflow-rules.code-review-approval`)
   with its template at `templates/code-review/02-approved.json` — see `examples/`.
 - Unfurling bare URLs into rich previews is a *different* mechanism (`unfurl-rules`
-  + `link_shared`), covered by the separate `murtaugh-unfurl` skill.
+  + `link_shared`), covered by `unfurl.md` in this skill.
