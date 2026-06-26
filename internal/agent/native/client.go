@@ -137,6 +137,10 @@ func Build(profile config.AgentProfile, deps BuildDeps) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The shared persona (SOUL.md, set up once for Murtaugh) is prepended to the
+	// static system prompt so it stays in the cacheable prefix. It is the same
+	// persona an ACP agent gets injected, keeping the two backends' voice aligned.
+	systemPrompt = PrependPersona(ReadSoul(deps.BaseDir), systemPrompt)
 	workDir := strings.TrimSpace(profile.WorkDir)
 	if workDir == "" {
 		workDir = deps.BaseDir
@@ -387,6 +391,40 @@ func readAgentsDoc(workDir string) string {
 		return ""
 	}
 	return string(data)
+}
+
+// soulFile is the conventional file holding Murtaugh's shared persona (name and
+// personality, set up once). It lives in the config/workspace dir and is the
+// single source of voice shared by native and ACP agents.
+const soulFile = "SOUL.md"
+
+// ReadSoul loads <dir>/SOUL.md when present. Best-effort: a missing or unreadable
+// file yields "" (no persona), never an error. dir is the config/workspace dir
+// (BaseDir), where the persona is set up — not the agent's per-agent workdir.
+func ReadSoul(dir string) string {
+	if strings.TrimSpace(dir) == "" {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(dir, soulFile))
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+// PrependPersona wraps soul in a <persona> block and prepends it to base,
+// returning base unchanged when soul is empty. Used to fold the shared persona
+// into the static system prompt (native) ahead of the harness code-of-conduct.
+func PrependPersona(soul, base string) string {
+	soul = strings.TrimSpace(soul)
+	if soul == "" {
+		return base
+	}
+	block := "<persona>\n" + soul + "\n</persona>"
+	if strings.TrimSpace(base) == "" {
+		return block
+	}
+	return block + "\n\n" + base
 }
 
 // renderSkillsIndex builds the compact "- name: description" listing of the

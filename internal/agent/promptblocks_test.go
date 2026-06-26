@@ -37,6 +37,38 @@ func TestPromptBlocksRendersVolatileContext(t *testing.T) {
 	}
 }
 
+func TestPromptBlocksInjectsPersona(t *testing.T) {
+	c := zeroContextClient()
+	c.opts.Persona = "You are Murtaugh."
+	blocks := c.promptBlocks(PromptRequest{Text: "hi"})
+	if len(blocks) != 2 {
+		t.Fatalf("expected a leading persona block plus the user text, got %d", len(blocks))
+	}
+	if want := "<persona>\nYou are Murtaugh.\n</persona>"; blocks[0]["text"] != want {
+		t.Fatalf("first block = %q, want the persona block %q", blocks[0]["text"], want)
+	}
+	if blocks[1]["text"] != "hi" {
+		t.Fatalf("user text must remain last, got %q", blocks[1]["text"])
+	}
+}
+
+func TestPromptBlocksPersonaLeadsContext(t *testing.T) {
+	now := time.Date(2026, 6, 26, 14, 30, 0, 0, time.UTC)
+	c := clockClient(now, "/work")
+	c.opts.Persona = "Be Murtaugh."
+	blocks := c.promptBlocks(PromptRequest{Text: "go", Channel: "C1"})
+	// persona, context, conversation-context, text
+	if len(blocks) != 4 {
+		t.Fatalf("expected persona, context, conversation-context, text, got %d", len(blocks))
+	}
+	if !strings.Contains(blocks[0]["text"], "<persona>") {
+		t.Fatalf("persona must lead, got %q", blocks[0]["text"])
+	}
+	if !strings.Contains(blocks[1]["text"], "<context>") {
+		t.Fatalf("context must follow persona, got %q", blocks[1]["text"])
+	}
+}
+
 func TestPromptBlocksWithoutVolatileContext(t *testing.T) {
 	blocks := zeroContextClient().promptBlocks(PromptRequest{Text: "hello"})
 	if len(blocks) != 1 {
