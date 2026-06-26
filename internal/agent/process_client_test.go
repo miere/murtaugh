@@ -316,7 +316,13 @@ func TestACPHelperProcess(t *testing.T) {
 		}
 		switch req.Method {
 		case "initialize":
-			_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{"protocolVersion": 1}})
+			_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{
+				"protocolVersion": 1,
+				"agentCapabilities": map[string]any{
+					"loadSession":     true,
+					"mcpCapabilities": map[string]any{"http": true, "sse": false},
+				},
+			}})
 		case "session/new":
 			var params struct {
 				CWD        string `json:"cwd"`
