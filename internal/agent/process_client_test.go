@@ -334,9 +334,11 @@ func TestACPHelperProcess(t *testing.T) {
 				} `json:"prompt"`
 			}
 			_ = json.Unmarshal(req.Params, &params)
+			// The user's text is always the final content block; any leading
+			// blocks are the <context>/<conversation-context> stand-ins.
 			promptText := ""
 			if len(params.Prompt) > 0 {
-				promptText = params.Prompt[0].Text
+				promptText = params.Prompt[len(params.Prompt)-1].Text
 			}
 			if name, ok := strings.CutPrefix(promptText, "echoenv:"); ok {
 				_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{"sessionId": "session-1", "update": map[string]any{"sessionUpdate": "agent_message", "content": []map[string]string{{"type": "text", "text": os.Getenv(name)}}}}})
