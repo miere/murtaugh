@@ -41,6 +41,9 @@ type ProcessOptions struct {
 type ProcessClient struct {
 	opts ProcessOptions
 	log  *slog.Logger
+	// now sources the current time for the per-turn <context> block. Injectable
+	// so tests can assert a fixed timestamp; defaults to time.Now.
+	now func() time.Time
 
 	mu          sync.Mutex
 	cmd         *exec.Cmd
@@ -134,7 +137,7 @@ func NewProcessClient(opts ProcessOptions) *ProcessClient {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &ProcessClient{opts: opts, log: logger, pending: make(map[int64]chan rpcResponse), subscribers: make(map[string]chan Event), dests: make(map[string]promptScope)}
+	return &ProcessClient{opts: opts, log: logger, now: time.Now, pending: make(map[int64]chan rpcResponse), subscribers: make(map[string]chan Event), dests: make(map[string]promptScope)}
 }
 
 func (c *ProcessClient) Initialize(ctx context.Context) error {
@@ -214,7 +217,7 @@ func (c *ProcessClient) Prompt(ctx context.Context, sessionID string, request Pr
 		}()
 		result, err := c.call(ctx, "session/prompt", map[string]any{
 			"sessionId": sessionID,
-			"prompt":    promptBlocks(request),
+			"prompt":    c.promptBlocks(request),
 		})
 		if err != nil {
 			events <- Event{Type: EventError, Error: err}
@@ -235,16 +238,25 @@ func (c *ProcessClient) Prompt(ctx context.Context, sessionID string, request Pr
 }
 
 // promptBlocks renders a PromptRequest into ACP `session/prompt` content
-// blocks. When the request carries a Slack conversation, a delimited context
-// block is prepended ahead of the user's text — ACP exposes no system role, so
-// this leading block is the closest stand-in for a system note. It tells the
-// agent where it is so it can hand the same channel/thread to the `restart`
-// tool. A second block carrying the thread transcript follows it when History
-// is set (a freshly opened session backfilling an existing thread). Without
-// conversation context (CLI and other non-chat callers) the single text block
-// is emitted unchanged.
-func promptBlocks(request PromptRequest) []map[string]string {
-	blocks := make([]map[string]string, 0, 3)
+// blocks. ACP exposes no system role, so leading delimited blocks are the
+// closest stand-in for a system note. Order:
+//  1. a <context> block carrying the volatile per-turn facts (current time,
+//     working directory) — the ACP analogue of native's RenderTurnContext, so
+//     an ACP agent knows what day it is and where it is rooted, just like the
+//     native loop. Emitted for every caller, chat or CLI.
+//  2. a <conversation-context> block (only when the prompt carries a Slack
+//     conversation) telling the agent where it is talking so it can hand the
+//     same channel/thread to the `restart` tool. Kept as a separate block with
+//     machine-readable channel/thread attributes so that parseability is
+//     unchanged.
+//  3. the thread transcript, when History is set (a freshly opened session
+//     backfilling an existing thread).
+//  4. the user's text.
+func (c *ProcessClient) promptBlocks(request PromptRequest) []map[string]string {
+	blocks := make([]map[string]string, 0, 4)
+	if ctxText := c.renderTurnContext(); ctxText != "" {
+		blocks = append(blocks, map[string]string{"type": "text", "text": ctxText})
+	}
 	if request.Channel != "" {
 		ctxText := fmt.Sprintf(
 			"<conversation-context channel=%q thread=%q>You are responding in this Slack conversation. "+
@@ -259,6 +271,27 @@ func promptBlocks(request PromptRequest) []map[string]string {
 	}
 	blocks = append(blocks, map[string]string{"type": "text", "text": request.Text})
 	return blocks
+}
+
+// renderTurnContext renders the volatile per-turn <context> block (current time
+// and working directory) for an ACP prompt, or "" when there is nothing to say.
+// It mirrors the native RenderTurnContext format so the two backends present the
+// same facts to the model; the Slack location is intentionally left to the
+// separate <conversation-context> block above.
+func (c *ProcessClient) renderTurnContext() string {
+	var lines []string
+	if c.now != nil {
+		if now := c.now(); !now.IsZero() {
+			lines = append(lines, "It is currently "+now.Format("2006-01-02 15:04 MST"))
+		}
+	}
+	if cwd := c.sessionCWD(); cwd != "" && cwd != "." {
+		lines = append(lines, "Working directory: "+cwd)
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return "<context>\n" + strings.Join(lines, "\n") + "\n</context>"
 }
 
 // unsubscribe retracts a prompt's event subscription, but only if it is still
