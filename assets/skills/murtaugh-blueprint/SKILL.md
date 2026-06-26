@@ -1,6 +1,10 @@
 ---
 name: murtaugh-blueprint
-description: Connective architecture and conventions for organising and implementing a Murtaugh customisation — how automations, Slack workflow rules, Block Kit templates, and scheduled jobs fit together consistently and maintainably. Use when building or changing how Murtaugh behaves — adding or editing an automation routine under automations/ (self-contained folders with a single main.py entrypoint, shared/, routine-local lib/, state/), wiring a Slack workflow rule in slack.yaml, creating a Block Kit template under templates/, scheduling a job in jobs.yaml, or reorganising any of these. It directs which reference (reference/architecture.md) and capability skills to load and how to update the automations/AGENTS.md registry. Do NOT use for ordinary chat, reading data (reminders, mail, etc.), or one-off tasks that do not touch the config.
+description: Architecture and conventions for customising Murtaugh — automations/, templates/, Slack rules, and scheduled jobs, and how they fit together; the entry point before changing how Murtaugh behaves.
+requires: [manage]
+files:
+  reference/architecture.md: { requires: [manage], summary: "layout, conventions, and wiring of a customisation" }
+  reference/bdd.md:          { requires: [manage], summary: "confirm behaviour with the user and lock it as behave tests" }
 ---
 
 # Skill: Murtaugh Customisation Blueprint
@@ -15,9 +19,9 @@ It is **not** needed for ordinary chat, reading data (reminders, mail, etc.), or
 one-off tasks that don't touch the config.
 
 > This is the *connective architecture* skill. For the mechanics of each surface,
-> defer to the capability skills: `murtaugh-slack` (workflow rules / buttons),
-> `murtaugh-slack-tools` (post / update / read messages), `murtaugh-unfurl` (link
-> previews), `murtaugh-jobs` (scheduling). This skill is how you fit them together.
+> defer to the capability skills: `murtaugh-slack` (messaging, buttons/workflow
+> rules, link previews — see its `messaging.md` / `workflow-rules.md` / `unfurl.md`)
+> and `murtaugh-jobs` (scheduling). This skill is how you fit them together.
 
 ## Read the right file (don't load everything)
 

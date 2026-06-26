@@ -1,6 +1,11 @@
 ---
 name: murtaugh-agents
-description: Configures Murtaugh's agent chat feature, which routes Slack DMs and @-mentions to an AI agent and streams replies into the thread. Agents come in two kinds — `native` (the default, an in-process LLM loop) and `acp` (a legacy external agent process over the Agent Client Protocol). Use when enabling or tuning agent chat via `agents.yaml` (a native profile's `provider`/`model`/`api_key_env`/`tools`/`mcp_servers`/`approval`/`context_limit`, or an ACP profile's `command`/`workdir`/`interruptible`, plus the shared `acp:`/`agent:` runtime block — timeouts, streaming, sessions) or `slack.yaml` (`chat.default_agent`, `channel_agents`). Use when wiring which agent answers DMs versus specific channels, when explaining the agent's mid-turn `ask`/`present_plan` tools or the terminal approval gate, or when explaining the `/murtaugh chat` and `/stop` commands, reply streaming, interrupts, or agent warmup.
+description: Configure Murtaugh's agent chat in agents.yaml/slack.yaml — native vs ACP profiles, which tools an agent may call, the runtime block, and which agent answers DMs vs each channel.
+requires: [manage]
+files:
+  reference/agents-yaml.md: { requires: [manage], summary: "define agents (provider/model/tools/approval/runtime block) or a legacy ACP command" }
+  reference/routing.md:      { requires: [manage], summary: "wire which agent answers DMs vs each channel" }
+  reference/interaction.md:  { requires: [manage], summary: "chat triggers, streaming, interrupts/stop, warmup (how chat behaves)" }
 ---
 
 # Skill: Murtaugh Agent Chat
@@ -53,7 +58,8 @@ With chat disabled (the default), DMs and mentions are ignored.
 |---|---|
 | Defining agents (native `provider`/`model`/`tools`/`approval` or legacy ACP `command`) and tuning the runtime block (timeouts, streaming, sessions) | `reference/agents-yaml.md` |
 | Wiring which agent answers DMs vs each channel | `reference/routing.md` |
-| Understanding `/chat`, `/stop`, interrupts, the `ask`/`present_plan` tools, the approval gate, and warmup | `reference/interaction.md` |
+| Understanding `/chat`, `/stop`, interrupts, streaming, and warmup (how chat behaves) | `reference/interaction.md` |
+| How an agent *uses* `ask` / `present_plan` / the approval gate (vs *enabling* them here) | the `murtaugh-slack` skill (`reference/asking.md`) |
 | Wanting a working `agents.yaml` + `chat` block | `examples/` |
 
 ## Global guidelines (defaults — follow unless the user says otherwise)

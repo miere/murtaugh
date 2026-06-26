@@ -10,7 +10,7 @@ the internet for the common cases. Live, copy-paste examples sit in `examples/`
 - `plan` block: https://docs.slack.dev/reference/block-kit/blocks/plan-block/
 
 A message is `{ "blocks": [ … ] }` (optionally with a top-level `"text"` fallback
-for notifications, and `"thread_ts"` to reply in a thread — see `outbound.md`).
+for notifications, and `"thread_ts"` to reply in a thread — see `messaging.md`).
 
 ## Useful blocks (the shortlist)
 
@@ -28,7 +28,7 @@ for notifications, and `"thread_ts"` to reply in a thread — see `outbound.md`)
 ### `actions` — the interactive one
 
 Every button needs a stable `action_id`; the block usually carries a `block_id`.
-These are your routing keys (see `inbound.md`) — **reuse the keys already in
+These are your routing keys (see `workflow-rules.md`) — **reuse the keys already in
 `slack.yaml`**, and never put secrets in `value`.
 
 ```json
@@ -66,7 +66,7 @@ A compact header. Example from `templates/code-review/01-open-pull-request.json`
 A task checklist with per-task status — ideal for showing where something sits in
 a lifecycle. (Not to be confused with the agent's `present_plan` *tool*, which posts
 a plan with Proceed / Revise / Cancel buttons and blocks the turn for sign-off — a
-different surface entirely; see the `murtaugh-agents` skill.)
+different surface entirely; see `asking.md`.)
 
 **Fields:** `type` (`"plan"`), `title` (**object**: `{ "type": "plain_text",
 "text": … }` — not a bare string), optional `block_id`, `tasks[]`.

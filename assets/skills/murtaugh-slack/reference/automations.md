@@ -68,7 +68,7 @@ file under `automations/state/`.
 Each run: list current entities → derive each one's state → post-or-update its
 message → fire one-shot follow-ups → save state. Running twice back-to-back must
 change nothing the second time. The full loop and the post-vs-update logic are in
-`outbound.md`.
+`messaging.md`.
 
 ## Operational hygiene
 

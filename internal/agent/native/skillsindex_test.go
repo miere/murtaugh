@@ -36,7 +36,7 @@ func TestRenderSkillsIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	idx := renderSkillsIndex(dir)
+	idx := renderSkillsIndex(dir, nil)
 	if !strings.Contains(idx, "- alpha: Do alpha things") {
 		t.Errorf("index missing alpha entry:\n%s", idx)
 	}
@@ -48,11 +48,45 @@ func TestRenderSkillsIndex(t *testing.T) {
 	}
 }
 
+func TestRenderSkillsIndex_GatedByRequires(t *testing.T) {
+	dir := t.TempDir()
+	// An ungated runtime skill and a manage-gated operator skill.
+	writeSkill(t, dir, "chat", "chat", "Chat surface", "# Chat")
+	mustWriteSkill(t, dir, "ops", "---\nname: ops\ndescription: Operator only.\nrequires: [manage]\n---\n# Ops")
+
+	// A slack/ask agent (no manage) sees only the ungated skill.
+	idx := renderSkillsIndex(dir, []string{"slack", "ask"})
+	if !strings.Contains(idx, "- chat:") {
+		t.Errorf("ungated skill missing from index:\n%s", idx)
+	}
+	if strings.Contains(idx, "ops") {
+		t.Errorf("manage-gated skill leaked into a non-manage agent's index:\n%s", idx)
+	}
+
+	// A manage agent sees both.
+	idxOp := renderSkillsIndex(dir, []string{"slack", "manage"})
+	if !strings.Contains(idxOp, "- ops:") {
+		t.Errorf("manage agent's index should include ops:\n%s", idxOp)
+	}
+}
+
+// mustWriteSkill writes raw SKILL.md content (frontmatter included) for a skill.
+func mustWriteSkill(t *testing.T, skillsDir, name, content string) {
+	t.Helper()
+	dir := filepath.Join(skillsDir, name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRenderSkillsIndex_EmptyWhenNoSkills(t *testing.T) {
-	if got := renderSkillsIndex(t.TempDir()); got != "" {
+	if got := renderSkillsIndex(t.TempDir(), nil); got != "" {
 		t.Errorf("expected empty index for an empty dir, got %q", got)
 	}
-	if got := renderSkillsIndex(filepath.Join(t.TempDir(), "does-not-exist")); got != "" {
+	if got := renderSkillsIndex(filepath.Join(t.TempDir(), "does-not-exist"), nil); got != "" {
 		t.Errorf("expected empty index for a missing dir, got %q", got)
 	}
 }

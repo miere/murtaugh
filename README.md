@@ -421,8 +421,9 @@ ACP **chat conversations** are recorded too, on the `acp_session` stream: one
 `session.turn` row per turn (queryable like above) plus a full per-session
 transcript written under `blob_dir` and referenced by the row's `blob_ref`.
 Review them with `journal query --stream acp_session --session <id>` and read the
-transcript file for the message bodies — the `murtaugh-acp-sessions` skill walks
-a curator through it. Pruning removes transcripts along with their rows.
+transcript file for the message bodies — the `murtaugh-journal` skill
+(`reference/chat-sessions.md`) walks a curator through it. Pruning removes
+transcripts along with their rows.
 
 ---
 
