@@ -55,7 +55,7 @@ func Bootstrap(configPath string) error {
 //
 // Under the workspace directory (the directory holding configPath, e.g.
 // ~/.config/murtaugh) it manages:
-//   - slack.yaml (seeded with the default Slack configuration), agents.yaml,
+//   - gateway.yaml (seeded with the default Slack configuration), agents.yaml,
 //     and jobs.yaml — created on first run, then PRESERVED: these hold the
 //     user's tokens and customisations and are never overwritten.
 //   - templates/ — the bundled Block Kit templates (ping/, unfurl/), also
@@ -78,7 +78,7 @@ func BootstrapWithReport(configPath string, force bool) (BootstrapReport, error)
 	// Config files and workspace docs are seeded once and then preserved —
 	// they carry the user's tokens and edits.
 	plan := []struct{ src, dst string }{
-		{"slack.yaml", configPath},
+		{"gateway.yaml", configPath},
 		{"agents.yaml", filepath.Join(baseDir, "agents.yaml")},
 		{"jobs.yaml", filepath.Join(baseDir, "jobs.yaml")},
 		{"journal.yaml", filepath.Join(baseDir, "journal.yaml")},

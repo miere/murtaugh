@@ -556,13 +556,13 @@ func TestParseDelegateRejectsUnknownAgent(t *testing.T) {
 // as a unit. It catches indentation slips and dangling delegate-to-agent agent
 // references before they reach a fresh install.
 func TestEmbeddedExampleConfigValidates(t *testing.T) {
-	// Credentials live in .env / the environment now; the shipped slack.yaml
+	// Credentials live in .env / the environment now; the shipped gateway.yaml
 	// references them as ${SLACK_APP_TOKEN}/${SLACK_BOT_TOKEN}. Provide them as a
 	// real .env would so the bundled config validates as a unit.
 	t.Setenv("SLACK_APP_TOKEN", "xapp-test")
 	t.Setenv("SLACK_BOT_TOKEN", "xoxb-test")
 	baseDir := t.TempDir()
-	for _, name := range []string{"slack.yaml", "agents.yaml", "jobs.yaml"} {
+	for _, name := range []string{"gateway.yaml", "agents.yaml", "jobs.yaml", "workflow-rules.yaml", "unfurl-rules.yaml"} {
 		data, err := assets.FS.ReadFile(name)
 		if err != nil {
 			t.Fatalf("read embedded %s: %v", name, err)
@@ -571,7 +571,7 @@ func TestEmbeddedExampleConfigValidates(t *testing.T) {
 			t.Fatalf("write %s: %v", name, err)
 		}
 	}
-	if _, err := Load(filepath.Join(baseDir, "slack.yaml")); err != nil {
+	if _, err := Load(filepath.Join(baseDir, "gateway.yaml")); err != nil {
 		t.Fatalf("bundled example config failed to load/validate: %v", err)
 	}
 }

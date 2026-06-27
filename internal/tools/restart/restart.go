@@ -34,7 +34,7 @@ type Tool struct {
 }
 
 // New constructs a Tool that posts the approval card with the given bot token
-// (oauth.bot_token in slack.yaml). adminUser is the configured admin
+// (oauth.bot_token in gateway.yaml). adminUser is the configured admin
 // (configuration.admin_user) used as the fallback destination when no channel
 // is supplied.
 func New(token, adminUser string) *Tool {

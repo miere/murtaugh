@@ -21,7 +21,7 @@ type Tool struct {
 }
 
 // New constructs a Tool with a SlackClient built lazily from the given bot
-// token (sourced from oauth.bot_token in slack.yaml).
+// token (sourced from oauth.bot_token in gateway.yaml).
 func New(token string) *Tool {
 	return &Tool{client: slacklib.NewLazyClient(token)}
 }

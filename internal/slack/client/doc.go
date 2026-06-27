@@ -4,6 +4,6 @@
 // implementation of the SlackAPI interface without touching the network.
 //
 // Unlike a standalone CLI, Murtaugh sources the bot token from its loaded
-// configuration (oauth.bot_token in slack.yaml) rather than the environment;
+// configuration (oauth.bot_token in gateway.yaml) rather than the environment;
 // callers pass the token into NewClient / NewLazyClient at construction time.
 package client

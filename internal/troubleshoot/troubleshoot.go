@@ -67,7 +67,7 @@ type Sources struct {
 	Version     string
 	JournalDB   string   // EffectivePath of journal.db
 	BlobDir     string   // EffectiveBlobDir (ACP transcripts)
-	ConfigFiles []string // slack.yaml, agents.yaml, jobs.yaml, journal.yaml
+	ConfigFiles []string // gateway.yaml, agents.yaml, jobs.yaml, journal.yaml
 	LogFiles    []string // daemon stdout/stderr logs
 	Home        string
 	GOOS        string
@@ -117,7 +117,7 @@ func ResolveSources(journalDB, blobDir, baseDir, version string) Sources {
 		baseDir = filepath.Join(home, ".config", "murtaugh")
 	}
 	configFiles := make([]string, 0, 6)
-	for _, name := range []string{"slack.yaml", "agents.yaml", "jobs.yaml", "journal.yaml", "workflow-rules.yaml", "unfurl-rules.yaml"} {
+	for _, name := range []string{"gateway.yaml", "agents.yaml", "jobs.yaml", "journal.yaml", "workflow-rules.yaml", "unfurl-rules.yaml"} {
 		configFiles = append(configFiles, filepath.Join(baseDir, name))
 	}
 	var logFiles []string

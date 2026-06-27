@@ -39,22 +39,22 @@ func assertEmbeddedTreeCopied(t *testing.T, srcRoot, dstRoot string) {
 
 func TestBootstrapFreshInstall(t *testing.T) {
 	baseDir := filepath.Join(t.TempDir(), "murtaugh")
-	configPath := filepath.Join(baseDir, "slack.yaml")
+	configPath := filepath.Join(baseDir, "gateway.yaml")
 
 	if err := Bootstrap(configPath); err != nil {
 		t.Fatalf("Bootstrap returned error: %v", err)
 	}
 
-	want, err := assets.FS.ReadFile("slack.yaml")
+	want, err := assets.FS.ReadFile("gateway.yaml")
 	if err != nil {
-		t.Fatalf("read embedded slack.yaml: %v", err)
+		t.Fatalf("read embedded gateway.yaml: %v", err)
 	}
 	got, err := os.ReadFile(configPath)
 	if err != nil {
-		t.Fatalf("read bootstrapped slack.yaml: %v", err)
+		t.Fatalf("read bootstrapped gateway.yaml: %v", err)
 	}
 	if string(got) != string(want) {
-		t.Fatalf("slack.yaml content mismatch: got %q want %q", got, want)
+		t.Fatalf("gateway.yaml content mismatch: got %q want %q", got, want)
 	}
 
 	wantAgents, err := assets.FS.ReadFile("agents.yaml")
@@ -118,7 +118,7 @@ func TestBootstrapFreshInstall(t *testing.T) {
 // bespoke skill the user authored.
 func TestBootstrapDoesNotMirrorBundledSkills(t *testing.T) {
 	baseDir := filepath.Join(t.TempDir(), "murtaugh")
-	configPath := filepath.Join(baseDir, "slack.yaml")
+	configPath := filepath.Join(baseDir, "gateway.yaml")
 
 	// Config carries the user's secrets and must never be overwritten.
 	const customConfig = "oauth:\n  app_token: keep-me\n"
@@ -126,7 +126,7 @@ func TestBootstrapDoesNotMirrorBundledSkills(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(configPath, []byte(customConfig), 0o644); err != nil {
-		t.Fatalf("seed slack.yaml: %v", err)
+		t.Fatalf("seed gateway.yaml: %v", err)
 	}
 
 	// A skill the user authored (not shipped by Murtaugh) must be left alone.
@@ -144,7 +144,7 @@ func TestBootstrapDoesNotMirrorBundledSkills(t *testing.T) {
 	}
 
 	if got, _ := os.ReadFile(configPath); string(got) != customConfig {
-		t.Fatalf("slack.yaml was overwritten: got %q", got)
+		t.Fatalf("gateway.yaml was overwritten: got %q", got)
 	}
 	// No bundled skill was written to disk.
 	if _, err := os.Stat(filepath.Join(baseDir, ".agents", "skills", "murtaugh-slack")); !os.IsNotExist(err) {
@@ -225,7 +225,7 @@ func TestReconcileExportedSkills(t *testing.T) {
 
 func TestBootstrapSeedsSystemPromptWithForceRefresh(t *testing.T) {
 	baseDir := filepath.Join(t.TempDir(), "murtaugh")
-	configPath := filepath.Join(baseDir, "slack.yaml")
+	configPath := filepath.Join(baseDir, "gateway.yaml")
 	promptPath := filepath.Join(baseDir, DefaultSystemPromptFile)
 
 	want, err := assets.FS.ReadFile(DefaultSystemPromptFile)
@@ -263,7 +263,7 @@ func TestBootstrapSeedsSystemPromptWithForceRefresh(t *testing.T) {
 
 func TestBootstrapForceNeverOverwritesAgentsDoc(t *testing.T) {
 	baseDir := filepath.Join(t.TempDir(), "murtaugh")
-	configPath := filepath.Join(baseDir, "slack.yaml")
+	configPath := filepath.Join(baseDir, "gateway.yaml")
 	agentsDocPath := filepath.Join(baseDir, "AGENTS.md")
 
 	if _, err := BootstrapWithReport(configPath, false); err != nil {
@@ -294,7 +294,7 @@ func contains(xs []string, want string) bool {
 
 func TestBootstrapCopiesJobsYAML(t *testing.T) {
 	baseDir := filepath.Join(t.TempDir(), "murtaugh")
-	configPath := filepath.Join(baseDir, "slack.yaml")
+	configPath := filepath.Join(baseDir, "gateway.yaml")
 
 	if err := Bootstrap(configPath); err != nil {
 		t.Fatalf("Bootstrap returned error: %v", err)
@@ -315,7 +315,7 @@ func TestBootstrapCopiesJobsYAML(t *testing.T) {
 
 func TestBootstrapDoesNotOverwriteExistingJobsYAML(t *testing.T) {
 	baseDir := filepath.Join(t.TempDir(), "murtaugh")
-	configPath := filepath.Join(baseDir, "slack.yaml")
+	configPath := filepath.Join(baseDir, "gateway.yaml")
 	if err := os.MkdirAll(baseDir, 0o755); err != nil {
 		t.Fatalf("seed dir: %v", err)
 	}
@@ -336,7 +336,7 @@ func TestBootstrapDoesNotOverwriteExistingJobsYAML(t *testing.T) {
 }
 
 func TestBootstrapIsIdempotent(t *testing.T) {
-	configPath := filepath.Join(t.TempDir(), "murtaugh", "slack.yaml")
+	configPath := filepath.Join(t.TempDir(), "murtaugh", "gateway.yaml")
 
 	if err := Bootstrap(configPath); err != nil {
 		t.Fatalf("first Bootstrap returned error: %v", err)

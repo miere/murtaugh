@@ -69,7 +69,7 @@ func (t *Tool) InputSchema() *jsonschema.Schema {
 
 // Result is the structured payload returned by Invoke. Enabled reports whether
 // an agent was configured (not whether chat is on — that gate, chat.enabled,
-// lives in slack.yaml and is written by setup.slack).
+// lives in gateway.yaml and is written by setup.slack).
 type Result struct {
 	Path       string `json:"path"`
 	Created    bool   `json:"created"`
@@ -97,7 +97,7 @@ func (r Result) String() string {
 
 // runtimeDefaults captures the runtime tuning baked into every fresh
 // agents.yaml, split by the concern each knob serves. The chat-surface gate
-// (chat.enabled) lives in slack.yaml, written by setup.slack.
+// (chat.enabled) lives in gateway.yaml, written by setup.slack.
 var runtimeDefaults = defaultsBlock{
 	Session:   sessionBlock{IdleTimeout: "30m", RequestTimeout: "10m", MaxConcurrent: 100},
 	Rendering: renderingBlock{ProgressDisplay: "simplified", StreamMinChunkChars: 96, StreamAppendInterval: "750ms"},
