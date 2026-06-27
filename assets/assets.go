@@ -14,7 +14,7 @@ import (
 // troubleshoot/ (the diagnostics-bundle instructions surfaced by
 // `troubleshoot.bundle`).
 //
-//go:embed slack.yaml agents.yaml jobs.yaml journal.yaml env.example system-prompt.md AGENTS.md cli-help.md templates skills troubleshoot
+//go:embed gateway.yaml agents.yaml jobs.yaml journal.yaml workflow-rules.yaml unfurl-rules.yaml env.example system-prompt.md AGENTS.md cli-help.md templates skills troubleshoot
 var FS embed.FS
 
 // skillsRoot is the embedded directory holding one subdirectory per bundled

@@ -357,7 +357,7 @@ func buildRegistry(cfg config.Config, configPath, version string, recorder journ
 			return configPath
 		}
 		if home, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(home, ".config", "murtaugh", "slack.yaml")
+			return filepath.Join(home, ".config", "murtaugh", "gateway.yaml")
 		}
 		return ""
 	}
@@ -403,7 +403,7 @@ func buildRegistry(cfg config.Config, configPath, version string, recorder journ
 	}))
 
 	// Slack tools share the daemon's bot token (oauth.bot_token in
-	// slack.yaml). The client is built lazily on first Invoke, so an
+	// gateway.yaml). The client is built lazily on first Invoke, so an
 	// unconfigured token only surfaces when a tool is actually called.
 	botToken := cfg.OAuth.BotToken
 	// send-msg can additionally post "as admin" via the admin's user token

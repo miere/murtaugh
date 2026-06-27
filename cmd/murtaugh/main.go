@@ -84,7 +84,7 @@ func run(rawArgs []string) error {
 		return err
 	}
 	// Setup tools are the bootstrap path: they may run before a valid config
-	// has been written, and Validate() would reject the placeholder slack.yaml
+	// has been written, and Validate() would reject the placeholder gateway.yaml
 	// the installer plans to overwrite. Skip Load() and hand the tool an
 	// empty Config — every setup.* tool resolves its target path from the
 	// config dir alone.
@@ -97,7 +97,7 @@ func run(rawArgs []string) error {
 		cfg = loaded
 	}
 
-	logger := newLogger(cfg.Configuration.Debug, mode)
+	logger := newLogger(cfg.Access.Debug, mode)
 
 	// The journal records agent-facing domain events (gateway interactions, job
 	// runs). It is opened here so its drain-on-shutdown is tied to process exit;
@@ -333,7 +333,7 @@ func selectMode(args []string) (app.Mode, []string) {
 
 // defaultConfigWatchPaths returns the on-disk files whose mtime
 // changes should make the gateway suggest a restart. The
-// canonical Murtaugh layout keeps slack.yaml, agents.yaml, and
+// canonical Murtaugh layout keeps gateway.yaml, agents.yaml, and
 // jobs.yaml as siblings under ~/.config/murtaugh, so we derive the
 // list from the main config path's parent dir rather than hard-
 // coding home-relative locations (which would break --config

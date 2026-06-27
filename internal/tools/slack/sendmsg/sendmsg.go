@@ -22,7 +22,7 @@ type Tool struct {
 }
 
 // New constructs a Tool that builds its Slack clients lazily from the given
-// tokens. botToken (oauth.bot_token in slack.yaml) backs the default "as
+// tokens. botToken (oauth.bot_token in gateway.yaml) backs the default "as
 // bot" sends. userToken (oauth.user_token, the admin's xoxp-… token) backs
 // "as admin" sends; when it is empty, requesting as: "admin" returns an
 // error. Warnings about unresolvable mentions are written to os.Stderr.
@@ -108,7 +108,7 @@ func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 	case "", "bot":
 	case "admin":
 		if t.adminClient == nil {
-			return nil, fmt.Errorf("Error: as=admin requires a Slack user token; set oauth.user_token in slack.yaml")
+			return nil, fmt.Errorf("Error: as=admin requires a Slack user token; set oauth.user_token in gateway.yaml")
 		}
 		client = t.adminClient
 	default:

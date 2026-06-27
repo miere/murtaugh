@@ -1,5 +1,5 @@
 // Package bootstrap implements the `setup.bootstrap` tool: seed the config
-// directory with the embedded defaults (slack.yaml, agents.yaml, jobs.yaml,
+// directory with the embedded defaults (gateway.yaml, agents.yaml, jobs.yaml,
 // skills/, optional docs) the first time Murtaugh is installed.
 //
 // The tool wraps config.BootstrapWithReport so the installer (and any MCP
@@ -19,7 +19,7 @@ import (
 	"github.com/miere/murtaugh-dev-toolkit/internal/config"
 )
 
-// PathProvider returns the path of the primary config file (slack.yaml). The
+// PathProvider returns the path of the primary config file (gateway.yaml). The
 // config directory is derived from filepath.Dir of that value, matching the
 // convention used by the rest of the codebase.
 type PathProvider func() string

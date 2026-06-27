@@ -15,7 +15,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const defaultRelativePath = ".config/murtaugh/slack.yaml"
+const defaultRelativePath = ".config/murtaugh/gateway.yaml"
 const defaultAgentsRelativePath = ".config/murtaugh/agents.yaml"
 const defaultJobsRelativePath = ".config/murtaugh/jobs.yaml"
 const defaultJournalRelativePath = ".config/murtaugh/journal.yaml"
@@ -502,7 +502,7 @@ func Load(path string) (Config, error) {
 	if err := LoadDotEnv(cfg.BaseDir); err != nil {
 		return Config{}, err
 	}
-	// Slack tokens are referenced from slack.yaml as ${VAR}; expand them against
+	// Slack tokens are referenced from gateway.yaml as ${VAR}; expand them against
 	// the now-loaded environment. A literal token (no $) expands to itself, so
 	// pre-.env configs keep working.
 	cfg.OAuth.AppToken = os.ExpandEnv(cfg.OAuth.AppToken)

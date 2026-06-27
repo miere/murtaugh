@@ -116,7 +116,7 @@ type Gateway struct {
 	// configWatchPaths lists files whose mtime, when it advances,
 	// triggers a restart suggestion to the admin. Empty (the default)
 	// disables the watcher entirely. The composition root populates
-	// this from the loaded config's sibling files (slack.yaml,
+	// this from the loaded config's sibling files (gateway.yaml,
 	// agents.yaml, jobs.yaml).
 	configWatchPaths []string
 	// scheduledJobs is the job set captured from the loaded config at

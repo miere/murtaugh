@@ -1,8 +1,8 @@
 // Package slack implements the `setup.slack` tool: write the Slack OAuth and
-// runtime config block (slack.yaml) the daemon depends on. The tool replaces
+// runtime config block (gateway.yaml) the daemon depends on. The tool replaces
 // the inline `write_slack_yaml` helper that lived in install.sh.
 //
-// The tool is deliberately narrow: it only touches slack.yaml. Agent and ACP
+// The tool is deliberately narrow: it only touches gateway.yaml. Agent and ACP
 // configuration is owned by `setup.agents`, MCP wiring by `setup.mcp-register`.
 package slack
 
@@ -21,7 +21,7 @@ import (
 	"github.com/miere/murtaugh-dev-toolkit/internal/tools/setup/internal/envfile"
 )
 
-// Env variable names slack.yaml references for the Slack credentials. The actual
+// Env variable names gateway.yaml references for the Slack credentials. The actual
 // tokens live in ~/.config/murtaugh/.env, never in the YAML — so a shared config
 // file (or a troubleshoot bundle) carries only the ${VAR} references.
 const (
@@ -29,7 +29,7 @@ const (
 	botTokenVar = "SLACK_BOT_TOKEN"
 )
 
-// PathProvider returns the absolute path of slack.yaml. A closure over the
+// PathProvider returns the absolute path of gateway.yaml. A closure over the
 // loaded config dir is supplied by the composition root so the same path is
 // observed whether the tool runs via the CLI, MCP, or a direct test.
 type PathProvider func() string
@@ -39,7 +39,7 @@ type Tool struct {
 	path PathProvider
 }
 
-// New constructs a Tool that writes slack.yaml at the file path returned by
+// New constructs a Tool that writes gateway.yaml at the file path returned by
 // path.
 func New(path PathProvider) *Tool {
 	return &Tool{path: path}
@@ -50,7 +50,7 @@ func (t *Tool) Name() string { return "setup.slack" }
 
 // Description returns the human-facing summary used by MCP clients.
 func (t *Tool) Description() string {
-	return "Write slack.yaml with OAuth tokens, admin user, and the /murtaugh slash command."
+	return "Write gateway.yaml with OAuth tokens, admin user"
 }
 
 // InputSchema returns the JSON Schema for the tool's arguments.
@@ -73,7 +73,7 @@ type Result struct {
 	Created    bool   `json:"created"`
 	BackupPath string `json:"backup_path,omitempty"`
 	// EnvPath is the .env the Slack tokens were written to (referenced from
-	// slack.yaml as ${SLACK_APP_TOKEN}/${SLACK_BOT_TOKEN}).
+	// gateway.yaml as ${SLACK_APP_TOKEN}/${SLACK_BOT_TOKEN}).
 	EnvPath string `json:"env_path,omitempty"`
 }
 
@@ -114,7 +114,7 @@ type accessBlock struct {
 	Debug     bool   `yaml:"debug"`
 }
 
-// Invoke validates arguments, builds the slack.yaml document, and writes it
+// Invoke validates arguments, builds the gateway.yaml document, and writes it
 // to disk with 0600 perms. An existing file is backed up before being
 // replaced.
 func (t *Tool) Invoke(_ context.Context, args map[string]any) (any, error) {
@@ -135,13 +135,13 @@ func (t *Tool) Invoke(_ context.Context, args map[string]any) (any, error) {
 
 	path := t.path()
 	if strings.TrimSpace(path) == "" {
-		return nil, errors.New("slack.yaml path is not configured")
+		return nil, errors.New("gateway.yaml path is not configured")
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("ensure config dir: %w", err)
 	}
 
-	// Secrets go to the .env sibling; slack.yaml only references them. This is
+	// Secrets go to the .env sibling; gateway.yaml only references them. This is
 	// what keeps tokens out of a shareable config / troubleshoot bundle.
 	envPath := filepath.Join(filepath.Dir(path), ".env")
 	if _, err := envfile.Merge(envPath, map[string]string{
@@ -164,7 +164,7 @@ func (t *Tool) Invoke(_ context.Context, args map[string]any) (any, error) {
 
 	out, err := yaml.Marshal(doc)
 	if err != nil {
-		return nil, fmt.Errorf("marshal slack.yaml: %w", err)
+		return nil, fmt.Errorf("marshal gateway.yaml: %w", err)
 	}
 
 	backupPath, err := backup.IfExists(path)
