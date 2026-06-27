@@ -24,6 +24,7 @@ import (
 
 	"github.com/miere/murtaugh-dev-toolkit/internal/app"
 	"github.com/miere/murtaugh-dev-toolkit/internal/config"
+	"github.com/miere/murtaugh-dev-toolkit/internal/config/migrate"
 	"github.com/miere/murtaugh-dev-toolkit/internal/help"
 	"github.com/miere/murtaugh-dev-toolkit/internal/journal"
 	"github.com/miere/murtaugh-dev-toolkit/internal/mcpbridge"
@@ -63,6 +64,12 @@ func run(rawArgs []string) error {
 	if err != nil {
 		return err
 	}
+	// `config migrate` runs the schema migration on demand (the same path the
+	// daemon runs automatically at startup), so an operator can convert a config
+	// dir without launching the gateway.
+	if len(args) >= 2 && args[0] == "config" && args[1] == "migrate" {
+		return runConfigMigrate(filepath.Dir(configPath))
+	}
 	// --json is a global, opt-in boolean stripped before help/mode selection
 	// and tool dispatch. The tool flag parser requires every --flag to carry a
 	// value, so a bare --json must not reach it; stripping here lets both
@@ -79,6 +86,15 @@ func run(rawArgs []string) error {
 		return nil
 	}
 	mode, rest := selectMode(args)
+
+	// Convert a legacy config directory to the current schema before bootstrap
+	// seeds a fresh template. Each step is backup/validate/rollback-guarded, so a
+	// failure here leaves the original config intact.
+	if applied, err := migrate.Run(filepath.Dir(configPath)); err != nil {
+		return fmt.Errorf("config migration failed: %w", err)
+	} else if len(applied) > 0 {
+		fmt.Fprintf(os.Stderr, "murtaugh: migrated config to schema v%d\n", applied[len(applied)-1])
+	}
 
 	if err := config.Bootstrap(configPath); err != nil {
 		return err
@@ -310,6 +326,22 @@ func isSetupInvocation(mode app.Mode, rest []string) bool {
 // long-running Socket Mode daemon; `slack <tool>` and every other token are
 // CLI tools resolved by the registry. No subcommand prints usage (ModeCLI
 // with an empty arg list), so the gateway is always launched explicitly.
+// runConfigMigrate converts the config directory to the current schema and
+// prints what it did. It is the manual entrypoint for the same migration the
+// daemon runs at startup; both are backup/validate/rollback-guarded.
+func runConfigMigrate(dir string) error {
+	applied, err := migrate.Run(dir)
+	if err != nil {
+		return err
+	}
+	if len(applied) == 0 {
+		fmt.Fprintln(os.Stdout, "config is already at the current schema; nothing to migrate")
+		return nil
+	}
+	fmt.Fprintf(os.Stdout, "migrated %s to schema v%d\n", dir, applied[len(applied)-1])
+	return nil
+}
+
 func selectMode(args []string) (app.Mode, []string) {
 	if len(args) == 0 {
 		return app.ModeCLI, nil
