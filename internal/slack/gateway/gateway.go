@@ -131,12 +131,6 @@ type Gateway struct {
 	// links); we only want to greet — resume notice or startup ping — once per
 	// process. See notifyConnected.
 	connectHandled bool
-	// configWatchPaths lists files whose mtime, when it advances,
-	// triggers a restart suggestion to the admin. Empty (the default)
-	// disables the watcher entirely. The composition root populates
-	// this from the loaded config's sibling files (gateway.yaml,
-	// agents.yaml, jobs.yaml).
-	configWatchPaths []string
 	// scheduledJobs is the job set captured from the loaded config at
 	// construction. The scheduler registers the entries whose ScheduleKind
 	// is cron/every; manual jobs are ignored. Empty disables scheduling.
@@ -477,22 +471,6 @@ func (a *Gateway) WithUpdateChecker(checker *updates.Checker, install func(ctx c
 	return a
 }
 
-// WithConfigWatchPaths attaches the list of on-disk files whose mtime
-// changes should produce a restart suggestion to the admin. Blank
-// entries are filtered out; an empty list disables the watcher
-// entirely (which is the default, so CLI/MCP modes and tests never
-// pay for the polling goroutine).
-func (a *Gateway) WithConfigWatchPaths(paths []string) *Gateway {
-	cleaned := make([]string, 0, len(paths))
-	for _, p := range paths {
-		if trimmed := strings.TrimSpace(p); trimmed != "" {
-			cleaned = append(cleaned, trimmed)
-		}
-	}
-	a.configWatchPaths = cleaned
-	return a
-}
-
 // WithScheduledRunner attaches the executor used to run cron/every-scheduled
 // jobs and returns the receiver for fluent wiring. When nil (the default) the
 // scheduler is disabled entirely, so CLI/MCP modes and tests never start it.
@@ -531,7 +509,6 @@ func (a *Gateway) Run(ctx context.Context) error {
 	a.logStartupRouting(ctx)
 	a.warmChat(ctx)
 	a.startChannelCache(ctx)
-	a.startConfigWatcher(ctx)
 	a.startJournalSweeper(ctx)
 	stopScheduler := a.startScheduler(ctx)
 	defer stopScheduler()
@@ -576,37 +553,6 @@ func (a *Gateway) warmChat(ctx context.Context) {
 		}
 		a.logger.Info("ACP warmup completed")
 	}()
-}
-
-// startConfigWatcher launches the on-disk config file watcher in a
-// goroutine that lives for the lifetime of the Run context. No-op
-// when no paths are configured so the cost (one ticker, one
-// goroutine) is paid only by the Slack daemon path. The watcher's
-// callback posts a restart suggestion to the admin DM via
-// SuggestRestart, which is itself a best-effort no-op when no
-// messaging surface or admin user is available.
-func (a *Gateway) startConfigWatcher(ctx context.Context) {
-	if len(a.configWatchPaths) == 0 {
-		return
-	}
-	watcher := newConfigWatcher(a.configWatchPaths, defaultConfigWatchInterval, a.onConfigFileChanged, a.logger)
-	a.logger.Info("config watcher started", "paths", a.configWatchPaths, "interval", defaultConfigWatchInterval.String())
-	go watcher.Run(ctx)
-}
-
-// onConfigFileChanged is the watcher's callback. It builds an
-// operator-facing reason that names the changed file and its new
-// mtime, then asks the bot to surface the restart suggestion via
-// the standard Block Kit path. Errors from SuggestRestart are
-// logged and never propagated since the watcher's contract is
-// best-effort: a missed suggestion is preferable to a noisy stall.
-func (a *Gateway) onConfigFileChanged(ctx context.Context, path string, mtime time.Time) {
-	reason := fmt.Sprintf("`%s` changed on disk at %s; restart Murtaugh to pick up the new config.",
-		filepath.Base(path), mtime.UTC().Format(time.RFC3339))
-	a.logger.Info("config file change detected", "path", path, "mtime", mtime)
-	if _, _, err := a.SuggestRestart(ctx, "", reason); err != nil {
-		a.logger.Error("config watcher: restart suggestion failed", "path", path, "error", err)
-	}
 }
 
 // startChannelCache launches the channel-name cache lifecycle in a goroutine
@@ -834,6 +780,21 @@ func (a *Gateway) handleInteractive(event socketmode.Event) {
 	}
 	if isAppHomeUpdateSubmit(interaction) {
 		go a.handleAppHomeUpdateSubmit(interaction)
+		return
+	}
+	// App Home "Restart Murtaugh" button: the admin's on-demand restart. Like
+	// Update, the click opens a confirmation modal and the submit triggers the
+	// coordinator; both are admin-gated and owned by the binary.
+	if isAppHomeRestartClick(interaction) {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			a.handleAppHomeRestartClick(ctx, interaction)
+		}()
+		return
+	}
+	if isAppHomeRestartSubmit(interaction) {
+		go a.handleAppHomeRestartSubmit(interaction)
 		return
 	}
 	// Broker prompts (the `ask` tool, later the approval gate) are routed back to

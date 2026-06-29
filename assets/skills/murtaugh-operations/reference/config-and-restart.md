@@ -12,25 +12,22 @@ run of a new binary — backed up and validated, rolled back on failure — or
 convert it ahead of time with `murtaugh config migrate`; a `.schema_version`
 sidecar tracks the version.)
 
-## The config watcher
+## Picking up a config change
 
-When enabled, a watcher polls those config files every **5 seconds**. On a
-detected change it DMs the admin a Block Kit **restart suggestion** naming the
-changed file, with two buttons:
-
-- **Restart now** (`murtaugh_restart_suggestion_confirm`)
-- **Dismiss** (`murtaugh_restart_suggestion_dismiss`)
-
-The watcher only *suggests*; it never restarts on its own. Dismiss edits the
-message to a dismissed note; confirm goes through the same admin-gated restart
-path as the slash command.
+Config changes are not detected automatically — after editing any of the files
+above, restart the daemon yourself to load them (see below).
 
 ## Triggering a restart
 
-Two ways, both **admin-only**:
+Three ways, all **admin-only**:
 
-- **`/murtaugh restart`** (slash command), or
-- the **Restart now** button on a suggestion.
+- **`/murtaugh restart`** (slash command),
+- the **Restart Murtaugh** button on the **App Home** tab, or
+- the **Restart now** button on a restart-approval card posted by the `restart`
+  tool (`murtaugh_restart_suggestion_confirm`; **Dismiss** is
+  `murtaugh_restart_suggestion_dismiss`). The card is only posted when the
+  `restart` tool is invoked by an agent/MCP/CLI — it asks; it never restarts on
+  its own, and confirm goes through the same admin-gated path as the others.
 
 Guards:
 - Requires `IsAdminUser` — a non-admin gets an ephemeral/edited "only the admin
@@ -50,9 +47,9 @@ it complete:
 1. Before exiting it posts **":hourglass_flowing_sand: Restarting Murtaugh
    now…"** and writes a **resume marker** to disk —
    `$XDG_STATE_HOME/murtaugh/restart.json` (else `~/.local/state/murtaugh/restart.json`).
-   When the restart was approved via a card (the `restart` tool or a restart
-   suggestion), this notice is posted **in a thread under that approval card**, so
-   the whole exchange nests where it was approved.
+   When the restart was approved via the `restart` tool's approval card, this
+   notice is posted **in a thread under that card**, so the whole exchange nests
+   where it was approved.
 2. On reconnect it consumes the marker **once** and edits that same message into
    the **":white_check_mark: Murtaugh is back online."** ping card — the
    back-online confirmation *is* the Test communication card, so there is one

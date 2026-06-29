@@ -144,7 +144,6 @@ func run(rawArgs []string) error {
 		} else {
 			application = application.WithResumeMarkerPath(path)
 		}
-		application = application.WithConfigWatchPaths(defaultConfigWatchPaths(configPath))
 		// The daemon is the single writer, so the retention sweep runs here,
 		// reusing the recorder's store (Prune serializes with the writer on the
 		// one connection). The journal.prune tool is the manual equivalent.
@@ -365,26 +364,6 @@ func selectMode(args []string) (app.Mode, []string) {
 		return app.ModeMCP, args[1:]
 	default:
 		return app.ModeCLI, args
-	}
-}
-
-// defaultConfigWatchPaths returns the on-disk files whose mtime
-// changes should make the gateway suggest a restart. The
-// canonical Murtaugh layout keeps gateway.yaml, agents.yaml, and
-// jobs.yaml as siblings under ~/.config/murtaugh, so we derive the
-// list from the main config path's parent dir rather than hard-
-// coding home-relative locations (which would break --config
-// overrides used in tests and staging deployments).
-func defaultConfigWatchPaths(configPath string) []string {
-	configPath = strings.TrimSpace(configPath)
-	if configPath == "" {
-		return nil
-	}
-	baseDir := filepath.Dir(configPath)
-	return []string{
-		configPath,
-		filepath.Join(baseDir, "agents.yaml"),
-		filepath.Join(baseDir, "jobs.yaml"),
 	}
 }
 

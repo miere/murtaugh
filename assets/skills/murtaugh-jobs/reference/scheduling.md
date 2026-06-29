@@ -79,8 +79,8 @@ Two details worth knowing:
 ## Two things to know
 
 1. **Edits apply on restart.** Schedules are read from `jobs.yaml` once, at
-   gateway startup. After editing, restart the gateway (the config watcher
-   already prompts the admin to). There is no live reload.
+   gateway startup. After editing, restart the gateway (e.g. the **Restart
+   Murtaugh** button on the App Home tab). There is no live reload.
 2. **No missed-run catch-up.** If the gateway is down (or the host asleep) when a
    run was due, that run is simply **skipped** — gocron does not backfill. For
    must-not-miss work, add an external safeguard (e.g. a run-on-startup check, or

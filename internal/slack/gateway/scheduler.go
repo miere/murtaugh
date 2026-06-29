@@ -26,8 +26,8 @@ type ScheduledRunner func(ctx context.Context, name string) error
 // call, including when nothing started.
 //
 // Job definitions are read from the config snapshot captured at construction;
-// edits to jobs.yaml are picked up on the next restart (the config watcher
-// already suggests one), matching how every other config value is applied.
+// edits to jobs.yaml are picked up on the next restart (e.g. via the App Home
+// "Restart Murtaugh" button), matching how every other config value is applied.
 func (a *Gateway) startScheduler(ctx context.Context) func() {
 	if a.runJob == nil || len(a.scheduledJobs) == 0 {
 		return func() {}
