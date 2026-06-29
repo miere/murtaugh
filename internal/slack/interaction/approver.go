@@ -60,13 +60,15 @@ func (g *GateApprover) Approve(ctx context.Context, toolName, summary string) (b
 		return true, ""
 	}
 
-	// The summary (for the terminal tool, the command line) goes in a fenced code
-	// block with the fences on their own lines, so Slack always renders it as a
-	// code block — including multi-line commands — rather than inline.
-	question := fmt.Sprintf("The agent wants to run the `%s` tool:\n```\n%s\n```\nApprove?", toolName, strings.TrimRight(summary, "\n"))
+	// The summary (for the terminal tool, the command line) goes in a language-
+	// hinted fenced code block and is rendered via Slack's markdown block, so it
+	// gets the same syntax highlighting as the agent's own code output rather than
+	// a flat monospace span.
+	question := fmt.Sprintf("The agent wants to run the `%s` tool:\n\n```%s\n%s\n```\n\nApprove?", toolName, codeLang(toolName), strings.TrimRight(summary, "\n"))
 	decision, err := g.broker.Ask(ctx, Destination{ChannelID: loc.ChannelID, ThreadTS: loc.ThreadTS, UserID: loc.UserID}, PromptSpec{
 		Title:    ":lock: Approval needed",
 		Question: question,
+		Markdown: true,
 		Options: []Option{
 			{ID: "approve", Label: "Approve", Style: "primary"},
 			{ID: "approve_always", Label: "Approve & always allow", Style: "primary"},
@@ -109,6 +111,16 @@ func approvalOutcome(toolName string) func(Decision) string {
 			return fmt.Sprintf("✓ Tool `%s` approved%s", toolName, decidedBy(d.UserID))
 		}
 	}
+}
+
+// codeLang picks the fenced-code-block language hint for a tool's summary so
+// Slack's markdown block syntax-highlights it. The terminal tool's summary is a
+// shell command line; other tools get no hint (a plain, un-highlighted block).
+func codeLang(toolName string) string {
+	if toolName == "terminal" {
+		return "bash"
+	}
+	return ""
 }
 
 // decidedBy renders the " by <@user>" suffix, or "" when the user is unknown.
