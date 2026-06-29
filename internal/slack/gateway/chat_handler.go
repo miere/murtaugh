@@ -81,6 +81,13 @@ type ChatHandler struct {
 	// turn's thread. nil disables outbound attachments (tests that do not wire
 	// Slack); the gateway always supplies it in production.
 	uploader attachmentUploader
+	// permissionAsker resolves an ACP agent's EventPermission with a human (Slack
+	// approval buttons). It is consulted on the turn's own event loop so the
+	// approval card is ordered with the reply — the chat handler settles any open
+	// reply text first, exactly as the native loop's inline approval is ordered.
+	// nil denies every ACP permission request (no human wired), which keeps a
+	// headless turn from hanging.
+	permissionAsker agent.PermissionAsker
 }
 
 // threadBackfiller renders a Slack thread into a transcript block for a cold
@@ -181,6 +188,17 @@ func (h *ChatHandler) WithUploader(u attachmentUploader) *ChatHandler {
 		return h
 	}
 	h.uploader = u
+	return h
+}
+
+// WithPermissionAsker wires the gate that resolves an ACP agent's permission
+// requests (EventPermission) with a human. Returns the handler for chaining. nil
+// (the default) leaves the handler denying every ACP permission request.
+func (h *ChatHandler) WithPermissionAsker(a agent.PermissionAsker) *ChatHandler {
+	if a == nil {
+		return h
+	}
+	h.permissionAsker = a
 	return h
 }
 
@@ -527,6 +545,21 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest) (retErr error
 					attachSeen++
 					h.logger.Info("delivered agent attachment", "source", req.Source, "channel", req.ChannelID, "filename", event.Attachment.Filename)
 				}
+			case agent.EventPermission:
+				// An ACP agent is asking the human to approve a tool call. Resolve it
+				// on this event loop — so it is ordered after the reply text/tasks that
+				// preceded it on the stream — and feed the decision back to the agent.
+				// Settling the open reply first means the approval card lands below a
+				// committed message instead of an unfinished, streaming one (the "looks
+				// truncated" symptom); this mirrors the native loop, whose inline
+				// approval is naturally ordered after the tool's task event.
+				if event.Permission == nil {
+					continue
+				}
+				decision := h.askPermission(ctx, req, streamThreadTS, renderer, event.Permission.Request)
+				if event.Permission.Decision != nil {
+					event.Permission.Decision <- decision
+				}
 			case agent.EventError:
 				// A caller interrupt (new message / /stop) surfaces here as a context
 				// cancellation, not an agent failure: return it and let the deferred
@@ -543,6 +576,27 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest) (retErr error
 			}
 		}
 	}
+}
+
+// askPermission resolves an ACP permission request, returning the chosen option's
+// ID ("" denies). It first settles any open reply section through the renderer so
+// the out-of-band approval card posts below a committed message rather than an
+// in-flight stream, then asks the human via the wired gate in the turn's own
+// thread. A nil gate (no human wired) or an ask error denies — the turn must not
+// hang waiting on an answer that can never come.
+func (h *ChatHandler) askPermission(ctx context.Context, req ChatRequest, threadTS string, renderer chatRenderer, pr agent.PermissionRequest) string {
+	renderer.BeginInterjection(ctx)
+	if h.permissionAsker == nil {
+		h.logger.Warn("ACP permission request but no asker wired; denying", "channel", req.ChannelID, "tool_kind", pr.ToolKind)
+		return ""
+	}
+	loc := agent.TurnLocation{ChannelID: req.ChannelID, ThreadTS: threadTS, UserID: req.UserID}
+	optionID, err := h.permissionAsker.AskPermission(ctx, loc, pr)
+	if err != nil {
+		h.logger.Warn("ACP permission ask failed; denying", "channel", req.ChannelID, "error", err)
+		return ""
+	}
+	return optionID
 }
 
 // emptyReplyNote builds the message shown when a turn produced no agent text.

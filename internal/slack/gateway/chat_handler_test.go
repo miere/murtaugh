@@ -115,6 +115,96 @@ func (f *fakeChatSessionsRenamedTask) Prompt(_ context.Context, _ agent.Conversa
 func (f *fakeChatSessionsRenamedTask) Lookup(agent.ConversationKey) (string, bool) { return "", false }
 func (f *fakeChatSessionsRenamedTask) Cancel(context.Context, string) error        { return nil }
 
+// fakePermissionAsker records the request it was asked and returns a fixed
+// decision, standing in for the Slack approval gate.
+type fakePermissionAsker struct {
+	called bool
+	loc    agent.TurnLocation
+	req    agent.PermissionRequest
+	ret    string
+}
+
+func (a *fakePermissionAsker) AskPermission(_ context.Context, loc agent.TurnLocation, req agent.PermissionRequest) (string, error) {
+	a.called = true
+	a.loc = loc
+	a.req = req
+	return a.ret, nil
+}
+
+// fakeChatSessionsWithPermission emits a reply, then an EventPermission, blocks on
+// its decision, and continues — the ACP approval shape. It records the decision it
+// received so the test can assert it flowed back to the agent.
+type fakeChatSessionsWithPermission struct {
+	gotDecision chan string
+}
+
+func (f *fakeChatSessionsWithPermission) Prompt(_ context.Context, _ agent.ConversationKey, _ agent.SessionMetadata, _ agent.PromptRequest) (<-chan agent.Event, error) {
+	ch := make(chan agent.Event)
+	go func() {
+		defer close(ch)
+		ch <- agent.Event{Type: agent.EventText, Text: "I will run a command."}
+		dec := make(chan string, 1)
+		ch <- agent.Event{Type: agent.EventPermission, Permission: &agent.PermissionPrompt{
+			Request: agent.PermissionRequest{
+				ToolKind:  "execute",
+				ToolTitle: "rm -rf /tmp/x",
+				Options:   []agent.PermissionOption{{ID: "a", Name: "Allow", Kind: "allow_once"}},
+			},
+			Decision: dec,
+		}}
+		f.gotDecision <- <-dec
+		ch <- agent.Event{Type: agent.EventText, Text: "Done."}
+		ch <- agent.Event{Type: agent.EventComplete}
+	}()
+	return ch, nil
+}
+
+func (f *fakeChatSessionsWithPermission) Lookup(agent.ConversationKey) (string, bool) {
+	return "", false
+}
+func (f *fakeChatSessionsWithPermission) Cancel(context.Context, string) error { return nil }
+
+func TestChatHandlerResolvesACPPermissionInOrder(t *testing.T) {
+	api := &fakeStreamAPI{}
+	asker := &fakePermissionAsker{ret: "a"}
+	f := &fakeChatSessionsWithPermission{gotDecision: make(chan string, 1)}
+	sessions := map[string]ChatSessionManager{"default": f}
+	handler := NewChatHandler(api, sessions, func(ChatRequest) string { return "default" }, time.Hour, 5, nil).
+		WithPermissionAsker(asker)
+	if err := handler.Handle(context.Background(), ChatRequest{TeamID: "T1", ChannelID: "C1", UserID: "U1", MessageTS: "123.4", Text: "hi", Source: "test"}); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	// The gate was consulted in the turn's own thread, with the request intact.
+	if !asker.called {
+		t.Fatal("permission asker was never consulted")
+	}
+	if asker.loc.ChannelID != "C1" || asker.loc.ThreadTS != "123.4" || asker.loc.UserID != "U1" {
+		t.Fatalf("asker got wrong location: %+v", asker.loc)
+	}
+	if asker.req.ToolTitle != "rm -rf /tmp/x" || asker.req.ToolKind != "execute" {
+		t.Fatalf("asker got wrong request: %+v", asker.req)
+	}
+	// The decision flowed back to the agent so it could proceed.
+	select {
+	case got := <-f.gotDecision:
+		if got != "a" {
+			t.Fatalf("agent received wrong decision: %q", got)
+		}
+	default:
+		t.Fatal("agent never received a permission decision")
+	}
+	// The reply was settled into two separate committed messages around the card:
+	// the prose before the request closes (BeginInterjection) before the gate is
+	// asked, and the prose after opens a fresh message — so the approval card never
+	// lands inside an unfinished stream.
+	if len(api.startOptions) != 2 {
+		t.Fatalf("expected the reply to be split into two messages around the approval, got %d", len(api.startOptions))
+	}
+	if api.stops != 2 {
+		t.Fatalf("expected both reply messages to be committed (stopped), got %d", api.stops)
+	}
+}
+
 func TestChatHandlerFinalisesRenamedTaskOnSuccess(t *testing.T) {
 	api := &fakeStreamAPI{}
 	sessions := map[string]ChatSessionManager{"default": &fakeChatSessionsRenamedTask{}}

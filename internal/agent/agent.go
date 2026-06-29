@@ -93,6 +93,14 @@ type Event struct {
 	// the ACP client when an agent message carries a binary content block. The
 	// chat handler uploads it into the turn's thread.
 	Attachment *AttachmentEvent
+	// Permission carries an agent-initiated permission request (EventPermission)
+	// that must be answered by a human before the agent proceeds. The ACP client
+	// emits it for a session/request_permission so the request rides the SAME
+	// ordered event stream as the reply text and task updates — letting the chat
+	// handler settle any open reply and post the approval card in order, the
+	// coordination the native loop gets for free by gating a tool call inline.
+	// nil except on EventPermission.
+	Permission *PermissionPrompt
 }
 
 type EventType string
@@ -104,6 +112,7 @@ const (
 	EventError      EventType = "error"
 	EventTask       EventType = "task"
 	EventAttachment EventType = "attachment"
+	EventPermission EventType = "permission"
 )
 
 // AttachmentEvent is a file the agent is sending to the user as part of its
@@ -213,4 +222,16 @@ type PermissionRequest struct {
 // outcome. Implemented in internal/slack/interaction; nil on headless/CLI paths.
 type PermissionAsker interface {
 	AskPermission(ctx context.Context, loc TurnLocation, req PermissionRequest) (optionID string, err error)
+}
+
+// PermissionPrompt is the EventPermission payload: a permission request plus the
+// channel the consumer writes its decision back on. The ACP client raises the
+// request on the event stream and blocks on Decision; the chat handler asks the
+// human (after settling any open reply) and sends the chosen option's ID — or ""
+// for a denial/timeout/dismissal, which the client maps to a "cancelled" outcome.
+// Decision is buffered (cap 1) so the consumer's send never blocks; it must be
+// written exactly once.
+type PermissionPrompt struct {
+	Request  PermissionRequest
+	Decision chan string
 }
