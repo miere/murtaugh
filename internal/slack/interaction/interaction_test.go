@@ -3,6 +3,7 @@ package interaction
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -202,6 +203,37 @@ func TestAsk_RejectsBadInput(t *testing.T) {
 	}
 	if _, err := broker.Ask(context.Background(), Destination{ChannelID: "C1"}, PromptSpec{Question: "q"}); err == nil {
 		t.Fatal("expected error for no options")
+	}
+}
+
+// TestBuildPromptBlocks_Markdown verifies that a Markdown prompt renders its
+// title and question as Slack `markdown` blocks (full GFM, syntax-highlighted
+// code) rather than legacy mrkdwn section blocks, while non-Markdown prompts keep
+// the section rendering.
+func TestBuildPromptBlocks_Markdown(t *testing.T) {
+	spec := PromptSpec{
+		Title:    "Approval needed",
+		Question: "Run this:\n```bash\nrm -rf x\n```",
+		Markdown: true,
+		Options:  []Option{{ID: "yes", Label: "Yes"}},
+	}
+	blocks := buildPromptBlocks("c1", spec)
+
+	md, ok := blocks[1].(*slackgo.MarkdownBlock)
+	if !ok {
+		t.Fatalf("question block = %T, want *slackgo.MarkdownBlock", blocks[1])
+	}
+	if !strings.Contains(md.Text, "```bash") {
+		t.Fatalf("markdown block should carry the language-hinted fence, got %q", md.Text)
+	}
+	if _, ok := blocks[0].(*slackgo.MarkdownBlock); !ok {
+		t.Fatalf("title block = %T, want *slackgo.MarkdownBlock", blocks[0])
+	}
+
+	// A non-Markdown prompt keeps section rendering.
+	plain := buildPromptBlocks("c2", PromptSpec{Question: "Proceed?", Options: []Option{{ID: "y", Label: "Y"}}})
+	if _, ok := plain[0].(*slackgo.SectionBlock); !ok {
+		t.Fatalf("non-markdown question block = %T, want *slackgo.SectionBlock", plain[0])
 	}
 }
 

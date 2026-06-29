@@ -76,6 +76,13 @@ type PromptSpec struct {
 	// concise "Tool `x` approved/denied by <@user>" instead of echoing the
 	// (code-laden) question. nil falls back to the default renderer.
 	OutcomeText func(Decision) string
+
+	// Markdown renders the title and question with Slack's `markdown` block
+	// (full GitHub-flavored markdown, including syntax-highlighted fenced code)
+	// rather than a section's legacy mrkdwn. The approval gate sets it so the
+	// command being approved renders like the agent's own code blocks. When set,
+	// the Title/Question must use GFM syntax (**bold**, not *bold*).
+	Markdown bool
 }
 
 // Decision is the outcome of an Ask.
@@ -311,9 +318,17 @@ func ParseClick(ic slackgo.InteractionCallback) (corr string, d Decision, ok boo
 func buildPromptBlocks(corr string, spec PromptSpec) []slackgo.Block {
 	var blocks []slackgo.Block
 	if t := strings.TrimSpace(spec.Title); t != "" {
-		blocks = append(blocks, slackgo.NewSectionBlock(markdown("*"+t+"*"), nil, nil))
+		if spec.Markdown {
+			blocks = append(blocks, slackgo.NewMarkdownBlock("", "**"+t+"**"))
+		} else {
+			blocks = append(blocks, slackgo.NewSectionBlock(markdown("*"+t+"*"), nil, nil))
+		}
 	}
-	blocks = append(blocks, slackgo.NewSectionBlock(markdown(spec.Question), nil, nil))
+	if spec.Markdown {
+		blocks = append(blocks, slackgo.NewMarkdownBlock("", spec.Question))
+	} else {
+		blocks = append(blocks, slackgo.NewSectionBlock(markdown(spec.Question), nil, nil))
+	}
 
 	buttons := make([]slackgo.BlockElement, 0, len(spec.Options))
 	for i, opt := range spec.Options {
