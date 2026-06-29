@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -28,70 +27,6 @@ func suggestionInteraction(user, channel, ts, actionID, reason string) slack.Int
 			ActionID: actionID,
 			Value:    reason,
 		}}},
-	}
-}
-
-func TestSuggestRestartPostsToExplicitChannel(t *testing.T) {
-	msg := &recordingMessaging{postReturnedTS: "1700000000.000200"}
-	app := &Gateway{logger: newSilentLogger(), messaging: msg}
-	channel, ts, err := app.SuggestRestart(context.Background(), "C42", "config drift detected")
-	if err != nil {
-		t.Fatalf("SuggestRestart returned error: %v", err)
-	}
-	if channel != "C42" || ts != "1700000000.000200" {
-		t.Fatalf("unexpected post target: channel=%q ts=%q", channel, ts)
-	}
-	if msg.postCalls != 1 || msg.postChannel != "C42" {
-		t.Fatalf("expected one post to C42, got calls=%d channel=%q", msg.postCalls, msg.postChannel)
-	}
-	if msg.openCalls != 0 {
-		t.Fatalf("expected no admin DM open when channel is provided, got %d", msg.openCalls)
-	}
-}
-
-func TestSuggestRestartFallsBackToAdminDM(t *testing.T) {
-	msg := &recordingMessaging{postReturnedTS: "1700000000.000300", openChannelID: "DADMIN00"}
-	app := &Gateway{
-		logger:    newSilentLogger(),
-		messaging: msg,
-		cfg:       config.AccessConfig{AdminUser: "UADMIN00"},
-	}
-	channel, _, err := app.SuggestRestart(context.Background(), "", "stuck on boot")
-	if err != nil {
-		t.Fatalf("SuggestRestart returned error: %v", err)
-	}
-	if channel != "DADMIN00" {
-		t.Fatalf("expected post into admin DM channel, got %q", channel)
-	}
-	if msg.openCalls != 1 || len(msg.openUsers) != 1 || msg.openUsers[0] != "UADMIN00" {
-		t.Fatalf("expected OpenConversation for UADMIN00, got calls=%d users=%#v", msg.openCalls, msg.openUsers)
-	}
-	if msg.postChannel != "DADMIN00" {
-		t.Fatalf("expected post to opened DM, got %q", msg.postChannel)
-	}
-}
-
-func TestSuggestRestartNoOpWithoutDestination(t *testing.T) {
-	msg := &recordingMessaging{}
-	app := &Gateway{logger: newSilentLogger(), messaging: msg}
-	channel, ts, err := app.SuggestRestart(context.Background(), "", "")
-	if err != nil {
-		t.Fatalf("SuggestRestart should be a no-op when no destination is available, got err=%v", err)
-	}
-	if channel != "" || ts != "" {
-		t.Fatalf("expected empty results when no destination is available, got channel=%q ts=%q", channel, ts)
-	}
-	if msg.postCalls != 0 || msg.openCalls != 0 {
-		t.Fatalf("expected no Slack traffic when locked down, got post=%d open=%d", msg.postCalls, msg.openCalls)
-	}
-}
-
-func TestSuggestRestartSurfacesPostError(t *testing.T) {
-	msg := &recordingMessaging{postReturnedErr: errors.New("rate_limited")}
-	app := &Gateway{logger: newSilentLogger(), messaging: msg}
-	_, _, err := app.SuggestRestart(context.Background(), "C1", "test")
-	if err == nil {
-		t.Fatal("expected SuggestRestart to surface the post error to the caller")
 	}
 }
 

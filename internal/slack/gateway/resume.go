@@ -93,7 +93,7 @@ func (s *FileResumeMarkerStore) Clear() error {
 // slackMessagingAPI is the Slack surface needed by the resume helpers and
 // the restart-suggestion flow. *slack.Client satisfies it. Kept narrow so
 // unit tests can substitute a fake without re-implementing the full
-// client. OpenConversationContext is only used by SuggestRestart's
+// client. OpenConversationContext is only used by resolveSuggestionDestination's
 // admin-DM fallback; resume.go itself never opens a conversation.
 type slackMessagingAPI interface {
 	PostMessageContext(ctx context.Context, channelID string, options ...slack.MsgOption) (string, string, error)

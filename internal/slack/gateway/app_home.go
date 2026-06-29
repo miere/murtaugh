@@ -24,6 +24,18 @@ const (
 	// appHomeUpdateCallbackID tags the confirmation modal so the interaction
 	// router can recognize its view_submission.
 	appHomeUpdateCallbackID = "app_home_update_confirm"
+
+	// appHomeRestartActionID identifies the "Restart Murtaugh" button on the
+	// admin's Home tab. Unlike the Update button it is always offered to the
+	// admin (no precondition), letting them trigger a graceful restart on
+	// demand — the replacement for the old config-file-watch restart suggestion.
+	appHomeRestartActionID = "app_home_restart"
+	// appHomeRestartBlockID tags the actions block holding the restart button;
+	// a stable id keeps the published view diffable.
+	appHomeRestartBlockID = "app_home_restart_actions"
+	// appHomeRestartCallbackID tags the restart confirmation modal so the
+	// interaction router can recognize its view_submission.
+	appHomeRestartCallbackID = "app_home_restart_confirm"
 )
 
 // handleAppHomeOpened publishes the control panel when a user opens the app's
@@ -50,28 +62,37 @@ func (a *Gateway) handleAppHomeOpened(ev *slackevents.AppHomeOpenedEvent) {
 	}
 }
 
-// buildHomeView assembles the Home-surface view. The update check runs only for
-// the admin (non-admins never trigger a GitHub lookup) and is failure-tolerant:
-// a failed check renders the version without the button.
+// buildHomeView assembles the Home-surface view. The admin additionally sees
+// the control buttons (always a "Restart Murtaugh" button, plus an "Update"
+// button when a newer release is available). The update check runs only for the
+// admin (non-admins never trigger a GitHub lookup) and is failure-tolerant: a
+// failed check renders the panel without the update button.
 func (a *Gateway) buildHomeView(ctx context.Context, admin bool) slack.HomeTabViewRequest {
 	version := strings.TrimSpace(a.version)
 	if version == "" {
 		version = "unknown"
 	}
-	if !admin || a.updates == nil {
-		return renderHomeView(version, "", false)
+	if !admin {
+		return renderHomeView(version, "", false, false)
 	}
-	res, err := a.updates.Check(ctx)
-	if err != nil {
-		a.logger.Debug("app home update check failed", "error", err)
+	var latest string
+	var updateAvailable bool
+	if a.updates != nil {
+		res, err := a.updates.Check(ctx)
+		if err != nil {
+			a.logger.Debug("app home update check failed", "error", err)
+		}
+		latest, updateAvailable = res.Latest, res.Available
 	}
-	return renderHomeView(version, res.Latest, res.Available)
+	return renderHomeView(version, latest, updateAvailable, true)
 }
 
 // renderHomeView builds the Block Kit Home view: a "Murtaugh" header and a
 // version line. When updateAvailable is set, the version line carries an
 // "Update to <latest>" accessory button and a note advertising the new release.
-func renderHomeView(version, latest string, updateAvailable bool) slack.HomeTabViewRequest {
+// For the admin (admin set) a "Restart Murtaugh" button is appended so a
+// graceful restart can be triggered on demand.
+func renderHomeView(version, latest string, updateAvailable, admin bool) slack.HomeTabViewRequest {
 	header := slack.NewHeaderBlock(
 		slack.NewTextBlockObject(slack.PlainTextType, "Murtaugh", false, false),
 	)
@@ -96,9 +117,21 @@ func renderHomeView(version, latest string, updateAvailable bool) slack.HomeTabV
 	)
 	versionBlock.BlockID = appHomeVersionBlockID
 
+	blocks := []slack.Block{header, versionBlock}
+	if admin {
+		restart := slack.NewButtonBlockElement(
+			appHomeRestartActionID,
+			"",
+			slack.NewTextBlockObject(slack.PlainTextType, "Restart Murtaugh", false, false),
+		)
+		restart.Style = slack.StyleDanger
+		actions := slack.NewActionBlock(appHomeRestartBlockID, restart)
+		blocks = append(blocks, actions)
+	}
+
 	return slack.HomeTabViewRequest{
 		Type:   slack.VTHomeTab,
-		Blocks: slack.Blocks{BlockSet: []slack.Block{header, versionBlock}},
+		Blocks: slack.Blocks{BlockSet: blocks},
 	}
 }
 
@@ -213,6 +246,107 @@ func (a *Gateway) handleAppHomeUpdateSubmit(interaction slack.InteractionCallbac
 	a.logger.Info("app home update installed; restarting", "version", installed, "user", user)
 	a.notifyAdminDM(ctx, fmt.Sprintf(":arrows_counterclockwise: Updated to %s — restarting now.", installed))
 	a.restart(restartSourceInteractive, user, "", fmt.Sprintf("app home update to %s", installed))
+}
+
+// isAppHomeRestartClick reports whether the interaction is a click on the Home
+// tab's "Restart Murtaugh" button, so the router can open the confirmation
+// modal before the workflow engine sees it.
+func isAppHomeRestartClick(interaction slack.InteractionCallback) bool {
+	if interaction.Type != slack.InteractionTypeBlockActions {
+		return false
+	}
+	for _, action := range interaction.ActionCallback.BlockActions {
+		if action != nil && action.ActionID == appHomeRestartActionID {
+			return true
+		}
+	}
+	return false
+}
+
+// isAppHomeRestartSubmit reports whether the interaction is the submission of
+// the restart-confirmation modal.
+func isAppHomeRestartSubmit(interaction slack.InteractionCallback) bool {
+	return interaction.Type == slack.InteractionTypeViewSubmission &&
+		interaction.View.CallbackID == appHomeRestartCallbackID
+}
+
+// handleAppHomeRestartClick opens the restart confirmation modal. handleInteractive
+// has already verified IsAllowedUser; this re-checks IsAdminUser since restart is
+// admin-only (the button is only ever rendered for the admin, but the action id
+// could be replayed).
+func (a *Gateway) handleAppHomeRestartClick(ctx context.Context, interaction slack.InteractionCallback) {
+	user := interaction.User.ID
+	if !a.cfg.IsAdminUser(user) {
+		a.logger.Info("denied app home restart click from non-admin", "user", user)
+		return
+	}
+	if a.webClient == nil {
+		return
+	}
+	if _, err := a.webClient.OpenViewContext(ctx, interaction.TriggerID, buildRestartModal()); err != nil {
+		a.logger.Error("open app home restart modal failed", "error", err)
+	}
+}
+
+// buildRestartModal renders the confirm-then-restart modal. It carries no
+// payload (a restart has no parameters), so the submit handler keys solely on
+// the callback id.
+func buildRestartModal() slack.ModalViewRequest {
+	body := "Restart Murtaugh now?\n\nThe daemon exits and its supervisor brings it back up; any in-flight conversations are interrupted."
+	return slack.ModalViewRequest{
+		Type:       slack.VTModal,
+		CallbackID: appHomeRestartCallbackID,
+		Title:      slack.NewTextBlockObject(slack.PlainTextType, "Restart Murtaugh", false, false),
+		Submit:     slack.NewTextBlockObject(slack.PlainTextType, "Restart", false, false),
+		Close:      slack.NewTextBlockObject(slack.PlainTextType, "Cancel", false, false),
+		Blocks: slack.Blocks{BlockSet: []slack.Block{
+			slack.NewSectionBlock(
+				slack.NewTextBlockObject(slack.MarkdownType, body, false, false),
+				nil, nil,
+			),
+		}},
+	}
+}
+
+// handleAppHomeRestartSubmit triggers a graceful restart from the Home tab.
+// Slack has already been ack'd (closing the modal) by handleInteractive, so this
+// runs on its own goroutine. Admin-gated. The Home tab cannot host the
+// "restarting…" notice, so — like the slash and suggestion-confirm paths — the
+// notice is posted to the admin's DM and a resume marker is persisted there
+// before the coordinator is signalled, so the message flips to "back online"
+// once the new process reconnects.
+func (a *Gateway) handleAppHomeRestartSubmit(interaction slack.InteractionCallback) {
+	user := interaction.User.ID
+	if !a.cfg.IsAdminUser(user) {
+		a.logger.Info("denied app home restart submit from non-admin", "user", user)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if a.restart == nil {
+		a.logger.Warn("app home restart submit but no coordinator wired", "user", user)
+		a.notifyAdminDM(ctx, restartSuggestionUnavailable)
+		return
+	}
+
+	reason := "user requested restart from App Home"
+	// Resolve the admin DM so the "restarting…" notice and its resume marker
+	// land on a real channel the next startup can edit into the back-online card.
+	dest, err := a.resolveSuggestionDestination(ctx, "")
+	if err != nil || dest == "" {
+		a.logger.Warn("app home restart: no admin DM for restart notice", "error", err)
+	} else {
+		noticeCtx, ncancel := context.WithTimeout(ctx, 10*time.Second)
+		a.postRestartNoticeAndSaveMarker(noticeCtx, dest, "", user, restartSourceInteractive, reason)
+		ncancel()
+	}
+	if !a.restart(restartSourceInteractive, user, dest, reason) {
+		a.notifyAdminDM(ctx, restartSuggestionBusy)
+		return
+	}
+	a.logger.Info("app home restart triggered", "user", user)
 }
 
 // notifyAdminDM posts a best-effort message to the admin's DM, reusing the same

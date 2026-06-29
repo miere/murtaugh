@@ -86,10 +86,6 @@ type Application struct {
 	// marker. Empty disables the resume confirmation flow; the restart
 	// still happens but no "back online" notice is posted.
 	resumeMarkerPath string
-	// configWatchPaths is the list of files whose mtime, when it
-	// advances, makes the gateway suggest a restart to the
-	// admin via Block Kit. Empty disables the watcher entirely.
-	configWatchPaths []string
 	// recorder is the journal recorder shared by the registry tools
 	// (jobs.run) and the gateway domains. Never nil: main passes a no-op
 	// recorder when the journal is disabled or could not be opened.
@@ -156,10 +152,6 @@ func (a *Application) Run(ctx context.Context) error {
 		if path := strings.TrimSpace(a.resumeMarkerPath); path != "" {
 			gw = gw.WithResumeMarkerStore(gateway.NewFileResumeMarkerStore(path))
 			a.logger.Debug("resume marker store wired", "path", path)
-		}
-		if len(a.configWatchPaths) > 0 {
-			gw = gw.WithConfigWatchPaths(a.configWatchPaths)
-			a.logger.Debug("config watcher wired", "paths", a.configWatchPaths)
 		}
 		// Scheduled jobs reuse the jobs.run execution path so a cron/every
 		// run behaves identically to a manual one (same timeout, workdir, and
@@ -319,15 +311,6 @@ func (a *Application) RestartCoordinator() *RestartCoordinator { return a.restar
 // notice flow entirely. Returns the receiver for fluent wiring.
 func (a *Application) WithResumeMarkerPath(path string) *Application {
 	a.resumeMarkerPath = path
-	return a
-}
-
-// WithConfigWatchPaths configures the list of files whose mtime, when
-// it advances, makes the gateway ask the admin to confirm a
-// restart via Block Kit. Empty disables the watcher entirely.
-// Returns the receiver for fluent wiring.
-func (a *Application) WithConfigWatchPaths(paths []string) *Application {
-	a.configWatchPaths = paths
 	return a
 }
 

@@ -97,8 +97,9 @@ Murtaugh connects over **Socket Mode**. In your Slack app settings, enable:
    - `app_home_opened` — the App Home control panel
 5. **App Unfurl Domains** — register each domain you want to unfurl (max 5).
 6. **App Home** — enable the **Home Tab**. This surfaces a control panel showing
-   Murtaugh's version, plus a one-click **Update** button for the `admin_user`
-   when a newer release is available. No extra scope required.
+   Murtaugh's version. For the `admin_user` it also offers a **Restart Murtaugh**
+   button (a graceful, confirmed restart on demand) and a one-click **Update**
+   button when a newer release is available. No extra scope required.
 
 Copy the **app-level token** (`xapp-…`) and the **bot token** (`xoxb-…`); you
 need both next.

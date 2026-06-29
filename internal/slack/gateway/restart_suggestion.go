@@ -24,37 +24,6 @@ const (
 	restartSuggestionBusy         = ":hourglass_flowing_sand: A restart is already in progress (or the cool-down has not elapsed)."
 )
 
-// SuggestRestart posts a restart-suggestion Block Kit message and
-// returns the (channel, timestamp) of the posted message. When channel
-// is empty, the admin user's DM is opened and used instead. Returns
-// an error only when Slack fails; missing surfaces (no messaging
-// client, no channel + no admin) are tolerated as silent no-ops so
-// the caller can treat the suggestion as best-effort.
-func (a *Gateway) SuggestRestart(ctx context.Context, channel, reason string) (string, string, error) {
-	if a.messaging == nil {
-		a.logger.Debug("restart suggestion skipped: no Slack messaging wired")
-		return "", "", nil
-	}
-	destination, err := a.resolveSuggestionDestination(ctx, channel)
-	if err != nil {
-		return "", "", err
-	}
-	if destination == "" {
-		a.logger.Debug("restart suggestion skipped: no destination channel or admin DM available")
-		return "", "", nil
-	}
-	blocks := restartcard.Build(reason)
-	postedChannel, ts, err := a.messaging.PostMessageContext(ctx, destination,
-		slack.MsgOptionText(restartcard.Headline, false),
-		slack.MsgOptionBlocks(blocks...),
-	)
-	if err != nil {
-		return "", "", fmt.Errorf("post restart suggestion: %w", err)
-	}
-	a.logger.Info("posted restart suggestion", "channel", postedChannel, "ts", ts, "reason", reason)
-	return postedChannel, ts, nil
-}
-
 // resolveSuggestionDestination returns the channel ID for the
 // suggestion post. An explicit channel always wins; otherwise the
 // admin user's DM is opened. Returns ("", nil) when neither is

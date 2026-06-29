@@ -13,13 +13,14 @@ What `murtaugh slack gateway` does, in order, when it starts:
    logged, not fatal. Native (in-process) agents have no such probe — there's no
    subprocess to handshake with — so they aren't warmed here. (See the
    `murtaugh-agents` skill.)
-4. **Start the config watcher** (if config-watch paths are set) — polls
-   `gateway.yaml`, `agents.yaml`, `jobs.yaml`, and the rule-file siblings
-   `workflow-rules.yaml` / `unfurl-rules.yaml`. → `reference/config-and-restart.md`
-5. **Start the job scheduler** — registers cron/`every` jobs from `jobs.yaml`
+4. **Start the job scheduler** — registers cron/`every` jobs from `jobs.yaml`
    (manual jobs are ignored here). (See the `murtaugh-jobs` skill.)
-6. **Run the event loop** — dispatch slash commands, interactions, mentions,
+5. **Run the event loop** — dispatch slash commands, interactions, mentions,
    DMs, and `link_shared` until shutdown.
+
+Config files are read **once at startup** — there is no on-disk watcher. After
+editing config, restart the daemon (e.g. the **Restart Murtaugh** button on the
+App Home tab) to load the changes. → `reference/config-and-restart.md`
 
 ## Startup ping
 

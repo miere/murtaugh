@@ -121,7 +121,8 @@ schedule.
   reuse or overwrite a job that serves the same purpose rather than adding a
   parallel one.
 - **Schedule edits apply on the next gateway restart**, not live. After editing
-  `jobs.yaml`, restart the gateway (the config watcher suggests it).
+  `jobs.yaml`, restart the gateway (e.g. the **Restart Murtaugh** button on the
+  App Home tab).
 - **Scheduled runs are best-effort.** A run that would fire while the gateway is
   down is **skipped, not caught up**. Don't rely on a scheduled job for
   must-not-miss accounting without external safeguards.

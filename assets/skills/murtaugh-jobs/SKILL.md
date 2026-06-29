@@ -58,7 +58,8 @@ agent never gets to define-then-auto-run a command without a human OK.
 - **One trigger mode per job.** Never set both `schedule` and `every` — Murtaugh
   rejects that at validation time. Leave both unset for a manual-only job.
 - **Schedule edits apply on the next gateway restart**, not live. After editing
-  `jobs.yaml`, restart the gateway (the config watcher already suggests it).
+  `jobs.yaml`, restart the gateway (e.g. the **Restart Murtaugh** button on the
+  App Home tab).
 - **`jobs_define` requires approval.** Defining a job is never a silent write —
   the tool always prompts a human, showing the rendered command + schedule, and
   stamps the new/updated entry `confirmed: false` so its first scheduled run is
