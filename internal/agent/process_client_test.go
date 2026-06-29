@@ -52,6 +52,75 @@ func TestProcessClientStreamsPromptUpdates(t *testing.T) {
 	}
 }
 
+func TestProcessClientDoesNotDuplicateStreamedReplyInResult(t *testing.T) {
+	client := NewProcessClient(ProcessOptions{Command: os.Args[0], Args: []string{"-test.run", "TestACPHelperProcess", "--", "acp-helper"}})
+	t.Cleanup(func() { _ = client.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.Initialize(ctx); err != nil {
+		t.Fatalf("Initialize returned error: %v", err)
+	}
+	session, err := client.NewSession(ctx, SessionMetadata{TeamID: "T1"})
+	if err != nil {
+		t.Fatalf("NewSession returned error: %v", err)
+	}
+	events, err := client.Prompt(ctx, session.ID, PromptRequest{Text: "dupe:hello world"})
+	if err != nil {
+		t.Fatalf("Prompt returned error: %v", err)
+	}
+	var text strings.Builder
+	for event := range events {
+		if event.Type == EventText {
+			text.WriteString(event.Text)
+		}
+	}
+	// The reply was both streamed and echoed in the result; it must appear once,
+	// not concatenated with itself.
+	if got := text.String(); got != "hello world" {
+		t.Fatalf("streamed reply was duplicated or dropped: got %q", got)
+	}
+}
+
+func TestProcessClientRendersPlanAsTaskEvents(t *testing.T) {
+	client := NewProcessClient(ProcessOptions{Command: os.Args[0], Args: []string{"-test.run", "TestACPHelperProcess", "--", "acp-helper"}})
+	t.Cleanup(func() { _ = client.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.Initialize(ctx); err != nil {
+		t.Fatalf("Initialize returned error: %v", err)
+	}
+	session, err := client.NewSession(ctx, SessionMetadata{TeamID: "T1"})
+	if err != nil {
+		t.Fatalf("NewSession returned error: %v", err)
+	}
+	events, err := client.Prompt(ctx, session.ID, PromptRequest{Text: "plan:Scan=completed,Fix=in_progress,Verify=pending"})
+	if err != nil {
+		t.Fatalf("Prompt returned error: %v", err)
+	}
+	var tasks []*TaskEvent
+	for event := range events {
+		if event.Type == EventTask {
+			tasks = append(tasks, event.Task)
+		}
+	}
+	if len(tasks) != 3 {
+		t.Fatalf("expected three task events from the plan, got %d: %+v", len(tasks), tasks)
+	}
+	want := []struct {
+		id, title string
+		status    TaskStatus
+	}{
+		{"plan-0", "Scan", TaskStatusComplete},
+		{"plan-1", "Fix", TaskStatusInProgress},
+		{"plan-2", "Verify", TaskStatusPending},
+	}
+	for i, w := range want {
+		if tasks[i].ID != w.id || tasks[i].Title != w.title || tasks[i].Status != w.status {
+			t.Fatalf("task %d: got %+v, want id=%s title=%s status=%s", i, tasks[i], w.id, w.title, w.status)
+		}
+	}
+}
+
 func TestProcessClientProcessOutlivesInitializeContext(t *testing.T) {
 	client := NewProcessClient(ProcessOptions{Command: os.Args[0], Args: []string{"-test.run", "TestACPHelperProcess", "--", "acp-helper"}})
 	t.Cleanup(func() { _ = client.Close() })
@@ -229,6 +298,41 @@ func TestExtractTaskFromACPNotification(t *testing.T) {
 	})
 }
 
+func TestExtractPlanTasks(t *testing.T) {
+	t.Run("plan entries become indexed tasks", func(t *testing.T) {
+		raw := json.RawMessage(`{"sessionId":"s1","update":{"sessionUpdate":"plan","entries":[{"content":"Scan","status":"completed"},{"content":"Fix","status":"in_progress"}]}}`)
+		tasks := extractPlanTasks(raw)
+		if len(tasks) != 2 {
+			t.Fatalf("expected 2 tasks, got %d: %+v", len(tasks), tasks)
+		}
+		if tasks[0].ID != "plan-0" || tasks[0].Title != "Scan" || tasks[0].Status != TaskStatusComplete {
+			t.Fatalf("task 0: %+v", tasks[0])
+		}
+		if tasks[1].ID != "plan-1" || tasks[1].Title != "Fix" || tasks[1].Status != TaskStatusInProgress {
+			t.Fatalf("task 1: %+v", tasks[1])
+		}
+	})
+
+	t.Run("non-plan update yields nil", func(t *testing.T) {
+		raw := json.RawMessage(`{"sessionId":"s1","update":{"sessionUpdate":"tool_call","toolCallId":"c1"}}`)
+		if tasks := extractPlanTasks(raw); tasks != nil {
+			t.Fatalf("expected nil for non-plan update, got %+v", tasks)
+		}
+	})
+
+	t.Run("entry with no content is skipped but indexes stay stable", func(t *testing.T) {
+		raw := json.RawMessage(`{"sessionId":"s1","update":{"sessionUpdate":"plan","entries":[{"content":"","status":"pending"},{"content":"Real","status":"pending"}]}}`)
+		tasks := extractPlanTasks(raw)
+		if len(tasks) != 1 {
+			t.Fatalf("expected the empty entry to be skipped, got %+v", tasks)
+		}
+		// The kept entry retains its position-based id (the second entry → plan-1).
+		if tasks[0].ID != "plan-1" || tasks[0].Title != "Real" {
+			t.Fatalf("expected plan-1/Real, got %+v", tasks[0])
+		}
+	})
+}
+
 func TestProcessClientDoesNotDropEventsForSlowConsumer(t *testing.T) {
 	const totalChunks = 200
 	client := NewProcessClient(ProcessOptions{Command: os.Args[0], Args: []string{"-test.run", "TestACPHelperProcess", "--", "acp-helper"}})
@@ -348,6 +452,27 @@ func TestACPHelperProcess(t *testing.T) {
 			}
 			if name, ok := strings.CutPrefix(promptText, "echoenv:"); ok {
 				_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{"sessionId": "session-1", "update": map[string]any{"sessionUpdate": "agent_message", "content": []map[string]string{{"type": "text", "text": os.Getenv(name)}}}}})
+				_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{"stopReason": "end_turn"}})
+				continue
+			}
+			if reply, ok := strings.CutPrefix(promptText, "dupe:"); ok {
+				// Stream the reply as a chunk, then echo the SAME text in the prompt
+				// result — the shape a streaming agent produces (it both streams and
+				// returns the final text). The client must surface it once.
+				_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{"sessionId": "session-1", "update": map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]string{"type": "text", "text": reply}}}})
+				_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{"stopReason": "end_turn", "content": []map[string]string{{"type": "text", "text": reply}}}})
+				continue
+			}
+			if entries, ok := strings.CutPrefix(promptText, "plan:"); ok {
+				// Emit a `plan` update with one entry per comma-separated "title=status"
+				// pair, so the client can be checked for turning the plan into task
+				// events rather than dropping it.
+				var planEntries []map[string]any
+				for _, pair := range strings.Split(entries, ",") {
+					title, status, _ := strings.Cut(pair, "=")
+					planEntries = append(planEntries, map[string]any{"content": title, "status": status})
+				}
+				_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{"sessionId": "session-1", "update": map[string]any{"sessionUpdate": "plan", "entries": planEntries}}})
 				_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{"stopReason": "end_turn"}})
 				continue
 			}

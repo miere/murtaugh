@@ -34,11 +34,6 @@ type Deps struct {
 	// approval. nil disables gating — set only on the interactive chat path,
 	// never for headless/delegated agents. Ignored for ACP agents.
 	Approver native.Approver
-	// ACPPermissionAsker answers an ACP agent's session/request_permission
-	// requests via a human in Slack. nil on headless/delegated paths, where the
-	// agent's acp_permission policy still applies (auto-allow/auto-deny work;
-	// "ask" denies). Ignored for native agents.
-	ACPPermissionAsker agent.PermissionAsker
 	// Bridge is the gateway's shared MCP aggregator server. When set, an ACP
 	// agent is given a per-agent aggregator over it so it can reach Murtaugh's
 	// own tools through `murtaugh mcp-bridge`. nil (CLI/delegate paths) leaves an
@@ -88,7 +83,6 @@ func Client(resolved ResolvedAgent, deps Deps) (agent.Client, error) {
 			Env:              profile.EnvOverrides(),
 			Logger:           logger,
 			PermissionPolicy: profile.ResolvedACPPermission(),
-			PermissionAsker:  deps.ACPPermissionAsker,
 			Aggregator:       aggregator,
 			// Share Murtaugh's persona with the ACP agent (it has no system role of
 			// our making); read from the config/workspace dir where SOUL.md lives.

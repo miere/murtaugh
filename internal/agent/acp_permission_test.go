@@ -12,24 +12,12 @@ import (
 	"time"
 )
 
-type fakeAsker struct {
-	called bool
-	loc    TurnLocation
-	req    PermissionRequest
-	ret    string
-}
-
-func (f *fakeAsker) AskPermission(_ context.Context, loc TurnLocation, req PermissionRequest) (string, error) {
-	f.called = true
-	f.loc = loc
-	f.req = req
-	return f.ret, nil
-}
-
 // runAgentRequest feeds one agent→client request line through readLoop on a client
-// configured with opts (and an optional seeded per-session scope map), then returns
-// the single JSON-RPC response the client writes back to the agent.
-func runAgentRequest(t *testing.T, opts ProcessOptions, dests map[string]promptScope, line string) map[string]any {
+// configured with opts (and optional seeded per-session scopes and subscriber
+// channels), then returns the single JSON-RPC response the client writes back to
+// the agent. A permission request under the "ask" policy raises an EventPermission
+// on the matching subscriber channel; pass that channel in subs and answer it.
+func runAgentRequest(t *testing.T, opts ProcessOptions, dests map[string]promptScope, subs map[string]chan Event, line string) map[string]any {
 	t.Helper()
 	pr, pw := io.Pipe()
 	c := &ProcessClient{
@@ -43,6 +31,9 @@ func runAgentRequest(t *testing.T, opts ProcessOptions, dests map[string]promptS
 	}
 	for k, v := range dests {
 		c.dests[k] = v
+	}
+	for k, v := range subs {
+		c.subscribers[k] = v
 	}
 	go c.readLoop(strings.NewReader(line + "\n"))
 
@@ -87,7 +78,7 @@ const permReqAllowDeny = `{"jsonrpc":"2.0","id":1,"method":"session/request_perm
 	`{"optionId":"d","name":"Reject","kind":"reject_once"}]}}`
 
 func TestACPPermissionAutoAllow(t *testing.T) {
-	resp := runAgentRequest(t, ProcessOptions{PermissionPolicy: "auto-allow"}, nil, permReqAllowDeny)
+	resp := runAgentRequest(t, ProcessOptions{PermissionPolicy: "auto-allow"}, nil, nil, permReqAllowDeny)
 	out := outcomeOf(t, resp)
 	if out["outcome"] != "selected" || out["optionId"] != "a" {
 		t.Fatalf("auto-allow: expected selected a, got %v", out)
@@ -97,25 +88,41 @@ func TestACPPermissionAutoAllow(t *testing.T) {
 func TestACPPermissionAutoDenyCancelsWhenNoRejectOption(t *testing.T) {
 	line := `{"jsonrpc":"2.0","id":2,"method":"session/request_permission",` +
 		`"params":{"sessionId":"S1","options":[{"optionId":"a","name":"Allow","kind":"allow_once"}]}}`
-	resp := runAgentRequest(t, ProcessOptions{PermissionPolicy: "auto-deny"}, nil, line)
+	resp := runAgentRequest(t, ProcessOptions{PermissionPolicy: "auto-deny"}, nil, nil, line)
 	out := outcomeOf(t, resp)
 	if out["outcome"] != "cancelled" {
 		t.Fatalf("auto-deny without a reject option should cancel, got %v", out)
 	}
 }
 
-func TestACPPermissionAskRoutesToAsker(t *testing.T) {
-	asker := &fakeAsker{ret: "a"}
-	dests := map[string]promptScope{"S1": {loc: TurnLocation{ChannelID: "C1", ThreadTS: "T1"}, ctx: context.Background()}}
-	resp := runAgentRequest(t, ProcessOptions{PermissionPolicy: "ask", PermissionAsker: asker}, dests, permReqAllowDeny)
-	if !asker.called {
-		t.Fatal("ask policy did not call the asker")
-	}
-	if asker.loc.ChannelID != "C1" || asker.loc.ThreadTS != "T1" {
-		t.Fatalf("asker got wrong location: %+v", asker.loc)
-	}
-	if asker.req.ToolTitle != "Edit agents.yaml" || len(asker.req.Options) != 2 {
-		t.Fatalf("asker got wrong request: %+v", asker.req)
+// answerPermission drains a subscriber channel and replies to the first
+// EventPermission with optionID, forwarding the request it carried for assertions.
+func answerPermission(events chan Event, optionID string) <-chan PermissionRequest {
+	got := make(chan PermissionRequest, 1)
+	go func() {
+		for ev := range events {
+			if ev.Type == EventPermission && ev.Permission != nil {
+				got <- ev.Permission.Request
+				ev.Permission.Decision <- optionID
+			}
+		}
+	}()
+	return got
+}
+
+func TestACPPermissionAskRaisesEventAndReturnsDecision(t *testing.T) {
+	events := make(chan Event, 4)
+	dests := map[string]promptScope{"S1": {ctx: context.Background()}}
+	subs := map[string]chan Event{"S1": events}
+	got := answerPermission(events, "a")
+	resp := runAgentRequest(t, ProcessOptions{PermissionPolicy: "ask"}, dests, subs, permReqAllowDeny)
+	select {
+	case req := <-got:
+		if req.ToolTitle != "Edit agents.yaml" || len(req.Options) != 2 {
+			t.Fatalf("permission event carried wrong request: %+v", req)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ask policy did not raise an EventPermission")
 	}
 	out := outcomeOf(t, resp)
 	if out["outcome"] != "selected" || out["optionId"] != "a" {
@@ -123,24 +130,24 @@ func TestACPPermissionAskRoutesToAsker(t *testing.T) {
 	}
 }
 
-func TestACPPermissionAskWithoutAskerDenies(t *testing.T) {
-	// ask policy on a headless path (no asker) must deny (cancelled), not hang.
-	resp := runAgentRequest(t, ProcessOptions{PermissionPolicy: "ask"}, nil, permReqAllowDeny)
+func TestACPPermissionAskWithNoLiveTurnDenies(t *testing.T) {
+	// ask policy with no live turn (no subscriber consuming events) must deny
+	// (cancelled), not hang — the headless/CLI fail-safe.
+	resp := runAgentRequest(t, ProcessOptions{PermissionPolicy: "ask"}, nil, nil, permReqAllowDeny)
 	out := outcomeOf(t, resp)
 	if out["outcome"] != "cancelled" {
-		t.Fatalf("ask without an asker should cancel, got %v", out)
+		t.Fatalf("ask with no live turn should cancel, got %v", out)
 	}
 }
 
 func TestACPPermissionEmptyPolicyDefaultsToAsk(t *testing.T) {
-	asker := &fakeAsker{ret: "a"}
-	dests := map[string]promptScope{"S1": {loc: TurnLocation{ChannelID: "C1"}, ctx: context.Background()}}
-	resp := runAgentRequest(t, ProcessOptions{PermissionAsker: asker}, dests, permReqAllowDeny)
-	if !asker.called {
-		t.Fatal("empty policy should default to ask and call the asker")
-	}
+	events := make(chan Event, 4)
+	dests := map[string]promptScope{"S1": {ctx: context.Background()}}
+	subs := map[string]chan Event{"S1": events}
+	_ = answerPermission(events, "a")
+	resp := runAgentRequest(t, ProcessOptions{}, dests, subs, permReqAllowDeny)
 	if out := outcomeOf(t, resp); out["optionId"] != "a" {
-		t.Fatalf("expected selected a, got %v", out)
+		t.Fatalf("empty policy should default to ask; expected selected a, got %v", out)
 	}
 }
 
@@ -149,7 +156,7 @@ func TestACPUnhandledAgentRequestRepliesMethodNotFound(t *testing.T) {
 	// rejected fast so the agent fails instead of blocking on a reply we'd never
 	// send. (fs/* is handled — see the filesystem tests below.)
 	line := `{"jsonrpc":"2.0","id":5,"method":"terminal/create","params":{}}`
-	resp := runAgentRequest(t, ProcessOptions{}, nil, line)
+	resp := runAgentRequest(t, ProcessOptions{}, nil, nil, line)
 	errObj, ok := resp["error"].(map[string]any)
 	if !ok {
 		t.Fatalf("expected an error response, got %v", resp)
@@ -165,7 +172,7 @@ func TestACPReadTextFileWithinWorkDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	line := `{"jsonrpc":"2.0","id":7,"method":"fs/read_text_file","params":{"path":"` + filepath.Join(dir, "a.txt") + `"}}`
-	resp := runAgentRequest(t, ProcessOptions{WorkDir: dir}, nil, line)
+	resp := runAgentRequest(t, ProcessOptions{WorkDir: dir}, nil, nil, line)
 	res, ok := resp["result"].(map[string]any)
 	if !ok {
 		t.Fatalf("expected a result, got %v", resp)
@@ -181,7 +188,7 @@ func TestACPReadTextFileHonoursLineAndLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	line := `{"jsonrpc":"2.0","id":8,"method":"fs/read_text_file","params":{"path":"` + filepath.Join(dir, "a.txt") + `","line":2,"limit":2}}`
-	resp := runAgentRequest(t, ProcessOptions{WorkDir: dir}, nil, line)
+	resp := runAgentRequest(t, ProcessOptions{WorkDir: dir}, nil, nil, line)
 	res := resp["result"].(map[string]any)
 	if res["content"] != "l2\nl3" {
 		t.Fatalf("line/limit window wrong: %q", res["content"])
@@ -193,7 +200,7 @@ func TestACPReadTextFileOutsideWorkDirRejected(t *testing.T) {
 	// Escape the workdir via the parent — must be refused with invalid-params,
 	// not served, so a read can never exfiltrate host files outside the project.
 	line := `{"jsonrpc":"2.0","id":9,"method":"fs/read_text_file","params":{"path":"` + filepath.Join(dir, "..", "secret.txt") + `"}}`
-	resp := runAgentRequest(t, ProcessOptions{WorkDir: dir}, nil, line)
+	resp := runAgentRequest(t, ProcessOptions{WorkDir: dir}, nil, nil, line)
 	errObj, ok := resp["error"].(map[string]any)
 	if !ok {
 		t.Fatalf("expected an error response, got %v", resp)
@@ -207,7 +214,7 @@ func TestACPWriteTextFileWithinWorkDir(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "sub", "out.txt")
 	line := `{"jsonrpc":"2.0","id":10,"method":"fs/write_text_file","params":{"path":"` + target + `","content":"hello"}}`
-	resp := runAgentRequest(t, ProcessOptions{WorkDir: dir}, nil, line)
+	resp := runAgentRequest(t, ProcessOptions{WorkDir: dir}, nil, nil, line)
 	if _, isErr := resp["error"]; isErr {
 		t.Fatalf("write returned an error: %v", resp["error"])
 	}

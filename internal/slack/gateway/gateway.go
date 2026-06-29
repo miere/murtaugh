@@ -248,10 +248,11 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 		var acpPermissionAsker agent.PermissionAsker
 		if broker != nil {
 			approver = askbroker.NewApprover(broker)
-			// ACP agents answer their own permission requests through the same
-			// broker: a session/request_permission is posted as buttons in the
-			// thread. nil (headless) leaves ACP agents to their auto-allow/deny
-			// policy. Set only on this interactive path, like the native approver.
+			// ACP agents' permission requests are resolved through the same broker:
+			// the ACP client raises an EventPermission on the turn's event stream and
+			// the chat handler asks here, posting buttons in the thread (ordered with
+			// the reply, like the native approver). nil (headless) leaves ACP agents
+			// to their auto-allow/deny policy. Set only on this interactive path.
 			acpPermissionAsker = askbroker.NewPermissionGate(broker)
 		}
 		for name, profile := range cfg.Agents {
@@ -284,13 +285,12 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 				}
 			}
 			client, err := agentbuild.Client(resolved, agentbuild.Deps{
-				Registry:           registry,
-				MCPServers:         cfg.MCPServers,
-				WorkspaceDir:       cfg.BaseDir,
-				Logger:             logger.With("agent", name),
-				Approver:           approver,
-				ACPPermissionAsker: acpPermissionAsker,
-				Bridge:             bridge,
+				Registry:     registry,
+				MCPServers:   cfg.MCPServers,
+				WorkspaceDir: cfg.BaseDir,
+				Logger:       logger.With("agent", name),
+				Approver:     approver,
+				Bridge:       bridge,
 			})
 			if err != nil {
 				logger.Error("agent disabled: could not build client", "agent", name, "kind", profile.ResolvedKind(), "error", err)
@@ -359,7 +359,8 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 			WithProgressDisplay(cfg.EffectiveProgressDisplay).WithStatusMessenger(api).
 			WithBackfiller(NewThreadBackfiller(api, botUserID, logger)).
 			WithFileFetcher(api).
-			WithUploader(slackAttachmentUploader{api: api})
+			WithUploader(slackAttachmentUploader{api: api}).
+			WithPermissionAsker(acpPermissionAsker)
 	}
 	// One shared runner backs every delegate-to-agent surface (jobs, workflow
 	// triggers, unfurls). Each delegation spins its own isolated agent process,

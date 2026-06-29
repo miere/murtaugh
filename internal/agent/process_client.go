@@ -32,12 +32,11 @@ type ProcessOptions struct {
 	Logger *slog.Logger
 
 	// PermissionPolicy governs how agent-initiated session/request_permission
-	// requests are answered: "ask" (route to PermissionAsker), "auto-allow", or
-	// "auto-deny". Empty is treated as "ask".
+	// requests are answered: "ask" (raise an EventPermission on the turn's event
+	// stream for the consumer to resolve with a human), "auto-allow", or
+	// "auto-deny". Empty is treated as "ask". "ask" with no live turn consuming
+	// events (headless/CLI) denies — fail-safe and fast, never a hang.
 	PermissionPolicy string
-	// PermissionAsker resolves "ask" permission requests via a human (Slack
-	// buttons). nil on headless/CLI paths, where "ask" falls back to deny.
-	PermissionAsker PermissionAsker
 	// Aggregator, when set, registers each session with Murtaugh's per-agent MCP
 	// aggregator and supplies the stdio bridge server advertised in session/new,
 	// so the agent can reach Murtaugh's own tools. nil leaves mcpServers empty.
@@ -104,10 +103,13 @@ func (c *ProcessClient) Capabilities() AgentCapabilities {
 }
 
 // promptScope is the in-flight context for a session's current prompt: where it
-// is talking (loc) and the context that is cancelled when the turn ends.
+// is talking (loc), the context that is cancelled when the turn ends, and whether
+// any reply text was already streamed this turn (sawText) so the final result
+// payload is not re-emitted on top of the streamed chunks.
 type promptScope struct {
-	loc TurnLocation
-	ctx context.Context
+	loc     TurnLocation
+	ctx     context.Context
+	sawText *atomic.Bool
 }
 
 // rpcOutgoingResponse is a JSON-RPC response Murtaugh writes back to the agent
@@ -353,11 +355,12 @@ func (c *ProcessClient) Prompt(ctx context.Context, sessionID string, request Pr
 		return nil, errors.New("session id is required")
 	}
 	events := make(chan Event, 32)
+	sawText := &atomic.Bool{}
 	c.mu.Lock()
 	c.subscribers[sessionID] = events
 	// Stash where this turn is talking and its context so a permission request
 	// raised mid-turn can be asked in the same thread and cancelled with the turn.
-	c.dests[sessionID] = promptScope{loc: TurnLocation{ChannelID: request.Channel, ThreadTS: request.Thread}, ctx: ctx}
+	c.dests[sessionID] = promptScope{loc: TurnLocation{ChannelID: request.Channel, ThreadTS: request.Thread}, ctx: ctx, sawText: sawText}
 	c.mu.Unlock()
 
 	go func() {
@@ -379,7 +382,13 @@ func (c *ProcessClient) Prompt(ctx context.Context, sessionID string, request Pr
 		// including the cases that produce no reply (max_tokens, refusal): the
 		// single most useful signal when a chat comes back empty.
 		c.log.Info("ACP prompt completed", "session_id", sessionID, "stop_reason", stopReason, "response_text", text != "")
-		if text != "" {
+		// Emit the final result text ONLY when nothing was streamed this turn.
+		// Streaming agents (e.g. Claude Code) deliver the reply incrementally via
+		// agent_message_chunk notifications and echo the same text in the prompt
+		// result; re-emitting it here would duplicate the whole reply as one block
+		// at the end. A non-streaming agent that returns its reply only in the
+		// result still has it surfaced, since nothing set sawText.
+		if text != "" && !sawText.Load() {
 			events <- Event{Type: EventText, Text: text}
 		}
 		events <- Event{Type: EventComplete, StopReason: stopReason}
@@ -799,9 +808,12 @@ func (c *ProcessClient) handlePermissionRequest(id, params json.RawMessage) {
 
 // decidePermission returns the optionId to grant for a permission request, or ""
 // to cancel. auto-allow/auto-deny pick a matching option without a human; ask
-// routes to the PermissionAsker in the session's Slack thread. ask with no asker
-// or no known thread denies (returns "") — fail-safe and fast, unlike the hang it
-// replaces.
+// raises an EventPermission on the turn's event stream and blocks on the
+// consumer's decision, so the request is ordered with the rest of the reply (the
+// chat handler settles any open reply text, posts the approval card, and feeds the
+// decision back) — mirroring how the native loop gates a tool call inline. ask
+// with no live turn (no subscriber) or a cancelled turn denies (returns "") —
+// fail-safe and fast, never a hang.
 func (c *ProcessClient) decidePermission(sessionID, title, kind string, options []PermissionOption) string {
 	// label is for logging only: the title (command/detail) when present, else the
 	// kind, else a placeholder.
@@ -818,27 +830,38 @@ func (c *ProcessClient) decidePermission(sessionID, title, kind string, options 
 	case "auto-deny":
 		return pickOptionByKind(options, "reject")
 	default: // ask
-		if c.opts.PermissionAsker == nil {
-			c.log.Warn("ACP permission request but no human to ask (headless); denying", "tool", label, "session_id", sessionID)
-			return ""
-		}
 		c.mu.Lock()
+		ch := c.subscribers[sessionID]
 		scope, ok := c.dests[sessionID]
 		c.mu.Unlock()
-		if !ok || scope.loc.ChannelID == "" {
-			c.log.Warn("ACP permission request without a Slack location; denying", "tool", label, "session_id", sessionID)
+		if ch == nil {
+			c.log.Warn("ACP permission request with no live turn to ask; denying", "tool", label, "session_id", sessionID)
 			return ""
 		}
-		ctx := scope.ctx
-		if ctx == nil {
-			ctx = context.Background()
+		ctx := context.Background()
+		if ok && scope.ctx != nil {
+			ctx = scope.ctx
 		}
-		optionID, err := c.opts.PermissionAsker.AskPermission(ctx, scope.loc, PermissionRequest{SessionID: sessionID, ToolKind: kind, ToolTitle: title, Options: options})
-		if err != nil {
-			c.log.Warn("ACP permission ask failed; denying", "tool", label, "error", err)
+		// Buffered so the consumer's reply never blocks even if we have already
+		// given up on ctx.Done below.
+		decision := make(chan string, 1)
+		prompt := &PermissionPrompt{
+			Request:  PermissionRequest{SessionID: sessionID, ToolKind: kind, ToolTitle: title, Options: options},
+			Decision: decision,
+		}
+		select {
+		case ch <- Event{Type: EventPermission, Permission: prompt}:
+		case <-ctx.Done():
+			c.log.Warn("ACP permission request abandoned before it could be asked (turn ended); denying", "tool", label, "session_id", sessionID)
 			return ""
 		}
-		return optionID
+		select {
+		case optionID := <-decision:
+			return optionID
+		case <-ctx.Done():
+			c.log.Warn("ACP permission request cancelled while awaiting a decision (turn ended); denying", "tool", label, "session_id", sessionID)
+			return ""
+		}
 	}
 }
 
@@ -936,6 +959,7 @@ func (c *ProcessClient) deliverNotification(notification rpcNotification) {
 	}
 	c.mu.Lock()
 	ch := c.subscribers[sessionID]
+	scope := c.dests[sessionID]
 	c.mu.Unlock()
 	if ch == nil {
 		return
@@ -948,6 +972,18 @@ func (c *ProcessClient) deliverNotification(notification rpcNotification) {
 		// agent response in the consumer (chat handler). The readLoop is back-
 		// pressured by the consumer, which is the intended behaviour.
 		ch <- Event{Type: EventTask, Task: task}
+		return
+	}
+	// An ACP `plan` update is the agent's structured task list. Render each entry
+	// as a task event — the same structured surface native gets from its per-tool
+	// task events — so the plan shows as task cards / a tool block instead of being
+	// dropped and leaking into the reply prose as plain markdown (which the stream
+	// then paginates, splitting the message). Entries carry no id, so each is keyed
+	// by its position: a stable id across the plan's snapshot updates.
+	if tasks := extractPlanTasks(notification.Params); len(tasks) > 0 {
+		for _, task := range tasks {
+			ch <- Event{Type: EventTask, Task: task}
+		}
 		return
 	}
 	// A single agent message can carry binary content blocks (an image, audio, or
@@ -969,6 +1005,11 @@ func (c *ProcessClient) deliverNotification(notification rpcNotification) {
 			c.log.Warn("ACP session/update carried text under an unhandled kind; reply may appear empty", "session_id", sessionID, "update", kind)
 		}
 		return
+	}
+	// Record that this turn streamed reply text, so the prompt goroutine does not
+	// re-emit the final result payload (the same text) as one trailing block.
+	if scope.sawText != nil {
+		scope.sawText.Store(true)
 	}
 	ch <- event
 }
@@ -1235,6 +1276,65 @@ func extractTask(raw json.RawMessage) *TaskEvent {
 		return nil
 	}
 	return taskFromMap(updateMap)
+}
+
+// extractPlanTasks turns an ACP `plan` session/update into one task event per
+// plan entry, or nil when the update is not a plan. A plan is a full snapshot of
+// the agent's task list on each update, and its entries carry no id, so each entry
+// is keyed by its index ("plan-0", "plan-1", …) — stable across the snapshots so
+// the consumer updates the same cards in place rather than stacking duplicates.
+// An entry with no content is skipped (a blank card carries nothing).
+func extractPlanTasks(raw json.RawMessage) []*TaskEvent {
+	var value any
+	if len(raw) == 0 || json.Unmarshal(raw, &value) != nil {
+		return nil
+	}
+	m, ok := value.(map[string]any)
+	if !ok {
+		return nil
+	}
+	updateMap, ok := m["update"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	if su, _ := updateMap["sessionUpdate"].(string); su != "plan" {
+		return nil
+	}
+	entries, ok := updateMap["entries"].([]any)
+	if !ok {
+		return nil
+	}
+	var tasks []*TaskEvent
+	for i, e := range entries {
+		entry, ok := e.(map[string]any)
+		if !ok {
+			continue
+		}
+		title := planEntryTitle(entry)
+		if title == "" {
+			continue
+		}
+		task := &TaskEvent{ID: fmt.Sprintf("plan-%d", i), Title: title}
+		if status, ok := entry["status"].(string); ok {
+			task.Status = normalizeTaskStatus(status)
+		}
+		tasks = append(tasks, task)
+	}
+	return tasks
+}
+
+// planEntryTitle pulls the human-readable label off a plan entry, tolerating the
+// few shapes agents use: a "content" string (ACP's field), or a "title"/"text"
+// fallback.
+func planEntryTitle(entry map[string]any) string {
+	for _, key := range []string{"content", "title", "text"} {
+		if s, ok := entry[key].(string); ok {
+			if s = strings.TrimSpace(s); s != "" {
+				return s
+			}
+		}
+	}
+	return ""
 }
 
 func taskFromMap(taskMap map[string]any) *TaskEvent {

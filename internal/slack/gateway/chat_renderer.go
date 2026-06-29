@@ -34,6 +34,12 @@ type chatRenderer interface {
 	Attachment(ctx context.Context, a *agent.AttachmentEvent) error
 	// Note appends a non-reply notice (idle-timeout marker) to the reply surface.
 	Note(ctx context.Context, text string) error
+	// BeginInterjection settles any open reply text so an out-of-band message
+	// (e.g. an ACP approval card posted by the broker) lands below a committed
+	// message rather than interleaved with an unfinished stream. The next text
+	// event opens a fresh reply section after it. It does not disturb an open tool
+	// block — a tool awaiting approval stays visible, as it does for native.
+	BeginInterjection(ctx context.Context)
 	// Finish finalises a successful turn, closing every open section. emptyNote,
 	// when non-empty, is posted because the turn produced no reply text.
 	Finish(ctx context.Context, emptyNote string) error
@@ -95,6 +101,19 @@ func (r *wovenRenderer) Task(ctx context.Context, ev *agent.TaskEvent) error {
 		r.running[ev.ID] = ev.Status
 	}
 	return nil
+}
+
+// BeginInterjection flushes the single answer-stream message so buffered text is
+// pushed out before an out-of-band card posts. The woven model keeps one
+// continuously-edited message per turn, so the stream is not closed (closing would
+// drop the rest of the reply); the card interleaves with the open stream — the
+// same behaviour native has in tasks mode, so the two stay at parity.
+func (r *wovenRenderer) BeginInterjection(ctx context.Context) {
+	if r.writer.Started() && !r.writer.Stopped() {
+		if err := r.writer.Flush(ctx); err != nil {
+			r.logger.Debug("failed to flush stream before interjection", "error", err)
+		}
+	}
 }
 
 func (r *wovenRenderer) Note(ctx context.Context, text string) error {
@@ -246,6 +265,15 @@ func (r *sectionRenderer) Task(ctx context.Context, ev *agent.TaskEvent) error {
 // Note appends a notice to the reply surface — same routing as Text.
 func (r *sectionRenderer) Note(ctx context.Context, text string) error {
 	return r.Text(ctx, text)
+}
+
+// BeginInterjection closes the open reply-text section so an out-of-band card
+// posts below a committed message; the next text event opens a fresh section after
+// it. An open tool block is left untouched so a tool awaiting approval keeps its
+// live state, matching native (whose approval fires with the tool's task in
+// progress).
+func (r *sectionRenderer) BeginInterjection(ctx context.Context) {
+	r.closeText(ctx)
 }
 
 func (r *sectionRenderer) Finish(ctx context.Context, emptyNote string) error {
