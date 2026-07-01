@@ -8,11 +8,11 @@ import (
 	"github.com/miere/murtaugh/internal/agent"
 )
 
-// TestGateApprover_EphemeralOutcome verifies the full approval experience: with a
-// triggering user on the turn, the prompt is posted ephemerally to that user, and
-// the decision rewrites it (via the click's response_url) to a concise outcome
-// line — approved with a check, denied struck through, both naming the decider.
-func TestGateApprover_EphemeralOutcome(t *testing.T) {
+// TestGateApprover_Outcome verifies the full approval experience: the prompt is
+// posted as a normal threaded message in the turn's thread, and the decision
+// rewrites it (chat.update) to a concise outcome line — approved with a check,
+// denied struck through, both naming the decider.
+func TestGateApprover_Outcome(t *testing.T) {
 	cases := []struct {
 		name     string
 		optionID string
@@ -25,6 +25,7 @@ func TestGateApprover_EphemeralOutcome(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			broker, sig := newSignalingBroker(t)
+			broker.outcomeTTL = 0 // assert on the single outcome write; skip the async delete
 			ctx := agent.WithTurnLocation(context.Background(), agent.TurnLocation{ChannelID: "C1", ThreadTS: "t1", UserID: "U1"})
 
 			done := make(chan struct{})
@@ -34,22 +35,22 @@ func TestGateApprover_EphemeralOutcome(t *testing.T) {
 			}()
 
 			posted := <-sig.posted
-			if len(sig.Ephemeral) != 1 || sig.Ephemeral[0].UserID != "U1" {
-				t.Fatalf("approval prompt should be ephemeral to the triggering user, got %+v", sig.Ephemeral)
+			if len(sig.Posted) != 1 || posted.ThreadTS != "t1" {
+				t.Fatalf("approval prompt should be a single message in the turn's thread, got %+v", sig.Posted)
 			}
-			broker.Resolve(corrFromPosted(t, posted), Decision{OptionID: tc.optionID, Label: tc.label, UserID: "U1", ResponseURL: "https://hooks.slack/x"})
+			broker.Resolve(corrFromPosted(t, posted), Decision{OptionID: tc.optionID, Label: tc.label, UserID: "U1"})
 			<-done
 
-			if len(sig.Webhooks) != 1 {
-				t.Fatalf("expected the outcome written once via response_url, got %d", len(sig.Webhooks))
+			if len(sig.Updated) != 1 {
+				t.Fatalf("expected the outcome written once via chat.update, got %d", len(sig.Updated))
 			}
-			if got := sig.Webhooks[0].Params.Text; got != tc.want {
+			if got := sig.Updated[0].Text; got != tc.want {
 				t.Fatalf("outcome text = %q, want %q", got, tc.want)
 			}
 			// Blocks carry the same outcome line (modulo JSON's <,> escaping), so
 			// the rewritten message is button-less and self-describing.
-			if !strings.Contains(string(sig.Webhooks[0].Params.Blocks), "Tool `terminal`") {
-				t.Fatalf("outcome blocks should carry the outcome line, got %s", sig.Webhooks[0].Params.Blocks)
+			if !strings.Contains(string(sig.Updated[0].Blocks), "Tool `terminal`") {
+				t.Fatalf("outcome blocks should carry the outcome line, got %s", sig.Updated[0].Blocks)
 			}
 		})
 	}

@@ -44,14 +44,13 @@ const (
 // the watchdog — is the governing bound; on expiry the Decision reports TimedOut.
 const DefaultTimeout = 10 * time.Minute
 
-// Destination is the Slack conversation a prompt is posted to. When UserID is
-// set the prompt is posted ephemerally — visible only to that user — instead of
-// to the whole conversation; the outcome is then written back through the click's
-// response_url (an ephemeral message cannot be edited any other way).
+// Destination is the Slack conversation a prompt is posted to. A prompt is always
+// a normal message posted with chat.postMessage (threaded when ThreadTS is set),
+// so it lands reliably in the thread the turn is running in — the same transport
+// the streamed reply and task cards use.
 type Destination struct {
 	ChannelID string
 	ThreadTS  string
-	UserID    string
 }
 
 // Option is a single selectable answer, rendered as a button.
@@ -83,6 +82,14 @@ type PromptSpec struct {
 	// command being approved renders like the agent's own code blocks. When set,
 	// the Title/Question must use GFM syntax (**bold**, not *bold*).
 	Markdown bool
+
+	// AutoDismiss marks a transient prompt whose resolved outcome should not linger:
+	// after the prompt is rewritten to its outcome line, the message is deleted
+	// (chat.delete) once the broker's outcomeTTL elapses. The approval and
+	// permission gates set it so an approved/denied card acknowledges the decision
+	// briefly and then clears itself; the generic ask/plan flows leave it false so
+	// their answers stay in the conversation.
+	AutoDismiss bool
 }
 
 // Decision is the outcome of an Ask.
@@ -92,10 +99,6 @@ type Decision struct {
 	UserID    string // who clicked
 	TimedOut  bool   // no response within the timeout
 	Cancelled bool   // the turn was cancelled (interrupt / idle) before a response
-	// ResponseURL is the click's Slack response_url, carried so an ephemeral
-	// prompt can be rewritten to its outcome (chat.update cannot touch it). Empty
-	// on the timeout/cancel paths, where no click ever arrived.
-	ResponseURL string
 }
 
 // Answered reports whether the user actually picked an option.
@@ -113,6 +116,12 @@ type clickValue struct {
 // gateway (which calls Resolve); the pending registry is the rendezvous.
 type Broker struct {
 	client *slacklib.LazyClient
+
+	// outcomeTTL is how long an AutoDismiss prompt's resolved outcome lingers
+	// before it is deleted (chat.delete) so the confirmation doesn't sit in the
+	// conversation forever. Defaults to defaultOutcomeTTL; 0 disables the
+	// auto-delete (tests set it to keep the outcome).
+	outcomeTTL time.Duration
 
 	mu      sync.Mutex
 	pending map[string]chan Decision
@@ -136,11 +145,17 @@ func NewWith(client *slacklib.LazyClient) *Broker {
 func newBroker(client *slacklib.LazyClient) *Broker {
 	return &Broker{
 		client:      client,
+		outcomeTTL:  defaultOutcomeTTL,
 		pending:     make(map[string]chan Decision),
 		forms:       make(map[string]FormSpec),
 		formPending: make(map[string]chan FormResponse),
 	}
 }
+
+// defaultOutcomeTTL is how long a resolved AutoDismiss prompt's outcome line stays
+// before it is auto-deleted. Long enough for the user to register the
+// approve/deny confirmation, short enough not to clutter the conversation.
+const defaultOutcomeTTL = 10 * time.Second
 
 // Ask posts the prompt to dest and blocks until the user clicks an option, the
 // wait times out, or ctx is cancelled (the turn was interrupted). It always edits
@@ -176,34 +191,22 @@ func (b *Broker) Ask(ctx context.Context, dest Destination, spec PromptSpec) (De
 		b.mu.Unlock()
 	}()
 
-	var postedChannel, postedTS string
-	if dest.UserID != "" {
-		// Ephemeral: visible only to the triggering user. Slack returns a
-		// timestamp but it is not addressable by chat.update, so the outcome is
-		// written back via the click's response_url (see editOutcome).
-		if postedTS, err = api.PostEphemeral(ctx, slacklib.PostEphemeralParams{
-			ChannelID: dest.ChannelID,
-			UserID:    dest.UserID,
-			Text:      promptFallback(spec),
-			ThreadTS:  dest.ThreadTS,
-			Blocks:    blocks,
-		}); err != nil {
-			b.notePromptUndeliverable(api, dest)
-			return Decision{}, fmt.Errorf("interaction: post prompt: %w", err)
-		}
-	} else {
-		posted, err := api.PostMessage(ctx, slacklib.PostMessageParams{
-			ChannelID: dest.ChannelID,
-			Text:      promptFallback(spec),
-			ThreadTS:  dest.ThreadTS,
-			Blocks:    blocks,
-		})
-		if err != nil {
-			b.notePromptUndeliverable(api, dest)
-			return Decision{}, fmt.Errorf("interaction: post prompt: %w", err)
-		}
-		postedChannel, postedTS = posted.Channel, posted.TS
+	// Post as a normal threaded message — the same transport the streamed reply
+	// and task cards use, so the prompt lands reliably in the turn's thread (a
+	// threaded chat.postMessage has no "thread must already be active" caveat that
+	// an ephemeral post would). chat.update then addresses it by channel+ts to
+	// rewrite it to its outcome, and (for AutoDismiss prompts) chat.delete clears it.
+	posted, err := api.PostMessage(ctx, slacklib.PostMessageParams{
+		ChannelID: dest.ChannelID,
+		Text:      promptFallback(spec),
+		ThreadTS:  dest.ThreadTS,
+		Blocks:    blocks,
+	})
+	if err != nil {
+		b.notePromptUndeliverable(api, dest)
+		return Decision{}, fmt.Errorf("interaction: post prompt: %w", err)
 	}
+	postedChannel, postedTS := posted.Channel, posted.TS
 
 	timeout := spec.Timeout
 	if timeout <= 0 {
@@ -221,7 +224,7 @@ func (b *Broker) Ask(ctx context.Context, dest Destination, spec PromptSpec) (De
 		decision = Decision{Cancelled: true}
 	}
 
-	b.editOutcome(api, dest, postedChannel, postedTS, spec, decision)
+	b.editOutcome(api, postedChannel, postedTS, spec, decision)
 	return decision, nil
 }
 
@@ -246,15 +249,16 @@ func (b *Broker) Resolve(corr string, d Decision) bool {
 	return true
 }
 
-// editOutcome rewrites the posted prompt to a terminal, button-less state so the
-// thread shows what happened. Best-effort and on a fresh context: the ctx that
-// drove Ask may already be cancelled on the interrupt path.
-//
-// For an ephemeral prompt (dest.UserID set) the rewrite must go through the
-// click's response_url — chat.update cannot address an ephemeral message. When no
-// click arrived (timeout/cancel) there is no response_url, so the prompt is left
-// as-is; an ephemeral message vanishes on the next reload anyway.
-func (b *Broker) editOutcome(api slacklib.SlackAPI, dest Destination, channel, ts string, spec PromptSpec, d Decision) {
+// editOutcome rewrites the posted prompt (by channel+ts, via chat.update) to a
+// terminal, button-less state so the thread shows what happened. Best-effort and
+// on a fresh context: the ctx that drove Ask may already be cancelled on the
+// interrupt path. For an AutoDismiss prompt it then schedules the outcome to be
+// deleted after outcomeTTL, so a transient card (approval/permission) clears
+// itself once the decision has been acknowledged.
+func (b *Broker) editOutcome(api slacklib.SlackAPI, channel, ts string, spec PromptSpec, d Decision) {
+	if channel == "" || ts == "" {
+		return
+	}
 	blocks, err := json.Marshal(slackgo.Blocks{BlockSet: buildOutcomeBlocks(spec, d)})
 	if err != nil {
 		return
@@ -262,27 +266,35 @@ func (b *Broker) editOutcome(api slacklib.SlackAPI, dest Destination, channel, t
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if dest.UserID != "" {
-		if d.ResponseURL == "" {
-			return
-		}
-		_ = api.RespondURL(ctx, d.ResponseURL, slacklib.WebhookParams{
-			Text:            renderOutcomeText(spec, d),
-			Blocks:          blocks,
-			ReplaceOriginal: true,
-		})
-		return
-	}
-
-	if channel == "" || ts == "" {
-		return
-	}
 	_, _ = api.UpdateMessage(ctx, slacklib.UpdateMessageParams{
 		ChannelID: channel,
 		TS:        ts,
 		Text:      renderOutcomeText(spec, d),
 		Blocks:    blocks,
 	})
+	if spec.AutoDismiss {
+		b.scheduleOutcomeDelete(api, channel, ts)
+	}
+}
+
+// scheduleOutcomeDelete removes a resolved prompt after outcomeTTL so a transient
+// confirmation (an approved/denied card) doesn't linger in the conversation. It
+// runs in a detached goroutine on a fresh context: the Ask that posted the
+// outcome returns immediately, and its ctx may already be cancelled. A
+// zero/negative TTL disables the auto-delete (the outcome stays put).
+func (b *Broker) scheduleOutcomeDelete(api slacklib.SlackAPI, channel, ts string) {
+	if b.outcomeTTL <= 0 || channel == "" || ts == "" {
+		return
+	}
+	ttl := b.outcomeTTL
+	go func() {
+		timer := time.NewTimer(ttl)
+		defer timer.Stop()
+		<-timer.C
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = api.DeleteMessage(ctx, slacklib.DeleteMessageParams{ChannelID: channel, TS: ts})
+	}()
 }
 
 // IsInteraction reports whether ic is a click on a broker prompt. The gateway
@@ -312,7 +324,7 @@ func ParseClick(ic slackgo.InteractionCallback) (corr string, d Decision, ok boo
 		corr = correlationFromActionID(a.ActionID)
 		var cv clickValue
 		_ = json.Unmarshal([]byte(a.Value), &cv)
-		return corr, Decision{OptionID: cv.ID, Label: cv.Label, UserID: ic.User.ID, ResponseURL: ic.ResponseURL}, true
+		return corr, Decision{OptionID: cv.ID, Label: cv.Label, UserID: ic.User.ID}, true
 	}
 	return "", Decision{}, false
 }
@@ -386,30 +398,18 @@ func clampButtonLabel(label string) string { return clampText(label, slackButton
 
 // undeliverableNotice is the plain-text message posted when a prompt could not be
 // delivered. It is deliberately generic — naming no command or path — so it is safe
-// to fall back to a public channel post without leaking what the (possibly private)
-// prompt was about.
+// to post in the thread without leaking what the prompt was about.
 const undeliverableNotice = "⚠️ Couldn't show an approval prompt here, so the action was not run. This is a display issue on our side, not your request — please ask again."
 
 // notePromptUndeliverable makes a posting failure visible instead of letting it
 // become a silent denial: when the prompt itself can't be delivered, the caller
 // still returns "not run", but without this the thread shows nothing and the agent
 // appears to stall. It posts a plain-text notice (no Block Kit — so it can't hit
-// the same rejection that sank the prompt), preferring an ephemeral notice when the
-// prompt was meant to be private and falling back to a channel message otherwise.
-// Best-effort and on a fresh context: the ctx that drove Ask may be the failed one.
+// the same rejection that sank the prompt) into the turn's thread. Best-effort and
+// on a fresh context: the ctx that drove Ask may be the failed one.
 func (b *Broker) notePromptUndeliverable(api slacklib.SlackAPI, dest Destination) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if dest.UserID != "" {
-		if _, err := api.PostEphemeral(ctx, slacklib.PostEphemeralParams{
-			ChannelID: dest.ChannelID,
-			UserID:    dest.UserID,
-			ThreadTS:  dest.ThreadTS,
-			Text:      undeliverableNotice,
-		}); err == nil {
-			return
-		}
-	}
 	_, _ = api.PostMessage(ctx, slacklib.PostMessageParams{
 		ChannelID: dest.ChannelID,
 		ThreadTS:  dest.ThreadTS,

@@ -55,12 +55,13 @@ func (g *PermissionGate) AskPermission(ctx context.Context, loc agent.TurnLocati
 	if detail != "" {
 		question = fmt.Sprintf("The agent wants to use the `%s` tool:\n\n```%s\n%s\n```\n\nAllow?", name, codeLang(name), detail)
 	}
-	decision, err := g.broker.Ask(ctx, Destination{ChannelID: loc.ChannelID, ThreadTS: loc.ThreadTS, UserID: loc.UserID}, PromptSpec{
+	decision, err := g.broker.Ask(ctx, Destination{ChannelID: loc.ChannelID, ThreadTS: loc.ThreadTS}, PromptSpec{
 		Title:       ":lock: Permission needed",
 		Question:    question,
 		Markdown:    true,
 		Options:     options,
 		OutcomeText: permissionOutcome(name, kindByID),
+		AutoDismiss: true,
 	})
 	if err != nil {
 		return "", err
