@@ -147,7 +147,13 @@ type SessionDefaults struct {
 	// that keeps making progress is never killed mid-flight. Only an agent that
 	// goes silent for this long is treated as stalled.
 	RequestTimeout string `yaml:"request_timeout"`
-	MaxConcurrent  int    `yaml:"max_concurrent"`
+	// LongRunningToolTimeout bounds how long a SINGLE tool call may hold a turn
+	// before the turn is failed. Unlike RequestTimeout this is a total-duration
+	// cap, not an inactivity one: while a tool runs a heartbeat keeps the turn
+	// alive (so request_timeout never trips), and this is what stops a wedged tool.
+	// Empty takes a 20m default. Applies to ACP agents (native tools are in-process).
+	LongRunningToolTimeout string `yaml:"long_running_tool_timeout"`
+	MaxConcurrent          int    `yaml:"max_concurrent"`
 }
 
 // RenderingDefaults tune how a streaming turn renders in Slack (both backends).
@@ -877,11 +883,12 @@ func looksLikeSlackUserID(value string) bool {
 func (c RuntimeDefaults) Validate() error {
 	var errs []error
 	for field, value := range map[string]string{
-		"defaults.acp.startup_timeout":              c.ACP.StartupTimeout,
-		"defaults.session.request_timeout":          c.Session.RequestTimeout,
-		"defaults.session.idle_timeout":             c.Session.IdleTimeout,
-		"defaults.rendering.stream_append_interval": c.Rendering.StreamAppendInterval,
-		"defaults.acp.cancel_grace_period":          c.ACP.CancelGracePeriod,
+		"defaults.acp.startup_timeout":               c.ACP.StartupTimeout,
+		"defaults.session.request_timeout":           c.Session.RequestTimeout,
+		"defaults.session.idle_timeout":              c.Session.IdleTimeout,
+		"defaults.session.long_running_tool_timeout": c.Session.LongRunningToolTimeout,
+		"defaults.rendering.stream_append_interval":  c.Rendering.StreamAppendInterval,
+		"defaults.acp.cancel_grace_period":           c.ACP.CancelGracePeriod,
 	} {
 		if strings.TrimSpace(value) == "" {
 			continue
@@ -1018,6 +1025,14 @@ func (c RuntimeDefaults) EffectiveRequestTimeout() time.Duration {
 
 func (c RuntimeDefaults) EffectiveSessionIdleTimeout() time.Duration {
 	return durationOrDefault(c.Session.IdleTimeout, 30*time.Minute)
+}
+
+// EffectiveLongRunningToolTimeout is the per-tool ceiling: the longest a single
+// tool call may hold a turn before it is failed. It is a total-duration cap (a
+// heartbeat keeps the turn alive while the tool runs), so it bounds a wedged tool
+// rather than inactivity.
+func (c RuntimeDefaults) EffectiveLongRunningToolTimeout() time.Duration {
+	return durationOrDefault(c.Session.LongRunningToolTimeout, 20*time.Minute)
 }
 
 func (c RuntimeDefaults) EffectiveStreamAppendInterval() time.Duration {

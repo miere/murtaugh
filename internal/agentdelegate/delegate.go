@@ -42,11 +42,12 @@ type ClientFactory func(profile config.AgentProfile, logger *slog.Logger) agent.
 
 // Runner resolves agent profiles by name and drives isolated one-shot sessions.
 type Runner struct {
-	agents      map[string]config.AgentProfile
-	baseDir     string
-	idleTimeout time.Duration
-	newClient   ClientFactory
-	logger      *slog.Logger
+	agents                 map[string]config.AgentProfile
+	baseDir                string
+	idleTimeout            time.Duration
+	longRunningToolTimeout time.Duration
+	newClient              ClientFactory
+	logger                 *slog.Logger
 	// registry and mcpServers are consulted only when building a native agent:
 	// the registry backs its `tools:` allowlist and mcpServers
 	// resolves its MCP references. Wired by the composition root via
@@ -66,10 +67,11 @@ func NewRunner(agents map[string]config.AgentProfile, defaults config.RuntimeDef
 		logger = slog.Default()
 	}
 	r := &Runner{
-		agents:      agents,
-		baseDir:     baseDir,
-		idleTimeout: defaults.EffectiveRequestTimeout(),
-		logger:      logger,
+		agents:                 agents,
+		baseDir:                baseDir,
+		idleTimeout:            defaults.EffectiveRequestTimeout(),
+		longRunningToolTimeout: defaults.EffectiveLongRunningToolTimeout(),
+		logger:                 logger,
 	}
 	r.newClient = r.defaultClient
 	return r
@@ -108,10 +110,11 @@ func (r *Runner) defaultClient(profile config.AgentProfile, logger *slog.Logger)
 		logger.Warn("agent tool disabled", "tool", p.Group, "reason", p.Reason)
 	}
 	client, err := agentbuild.Client(resolved, agentbuild.Deps{
-		Registry:     r.registry,
-		MCPServers:   r.mcpServers,
-		WorkspaceDir: r.baseDir,
-		Logger:       logger,
+		Registry:               r.registry,
+		MCPServers:             r.mcpServers,
+		WorkspaceDir:           r.baseDir,
+		Logger:                 logger,
+		LongRunningToolTimeout: r.longRunningToolTimeout,
 	})
 	if err != nil {
 		return agentbuild.ErrorClient(err)
