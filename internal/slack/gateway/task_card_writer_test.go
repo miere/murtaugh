@@ -69,6 +69,48 @@ func TestTaskCardWriterOpensPlanOnlyOnce(t *testing.T) {
 	}
 }
 
+// TestTaskCardWriterRollsOverFinalizedStream proves a long tool run survives Slack
+// finalizing its message: the rejected task update rolls the stream over to a
+// fresh message and re-opens the Plan block there, so the cards keep grouping
+// instead of freezing.
+func TestTaskCardWriterRollsOverFinalizedStream(t *testing.T) {
+	api := &fakeStreamAPI{}
+	streamer := NewStreamWriter(api, "C1", StreamWriterOptions{Interval: time.Hour, MinChars: 5})
+	writer := NewTaskCardWriter(api, streamer, time.Hour, nil)
+	ctx := context.Background()
+	if err := writer.Update(ctx, "task-1", "Step 1", slack.TaskCardStatusInProgress); err != nil {
+		t.Fatalf("first update: %v", err)
+	}
+	// Slack finalizes the message mid-run; the next update must roll over.
+	api.finalizeUntilStart = true
+	api.nextStreamTS = "stream-ts-2"
+	if err := writer.Update(ctx, "task-2", "Step 2", slack.TaskCardStatusInProgress); err != nil {
+		t.Fatalf("update after finalize should roll over, got: %v", err)
+	}
+	if api.starts != 2 {
+		t.Fatalf("expected a rollover (2 StartStream calls), got %d", api.starts)
+	}
+	if streamer.StreamTS() != "stream-ts-2" {
+		t.Fatalf("streamer should track the rolled-over ts, got %q", streamer.StreamTS())
+	}
+	// The resent update is the only successful append, and it re-opens the Plan
+	// block so the continued card groups under a fresh title on the new message.
+	if len(api.appendOptions) != 1 {
+		t.Fatalf("expected exactly one successful append (the resend), got %d", len(api.appendOptions))
+	}
+	chunks, err := extractChunksFromOptions(api.appendOptions[0]...)
+	if err != nil {
+		t.Fatalf("extract chunks: %v", err)
+	}
+	if got := planChunks(chunks); len(got) != 1 {
+		t.Fatalf("expected the Plan block re-opened on the new message, got plans %+v", got)
+	}
+	tasks := taskChunks(chunks)
+	if len(tasks) != 1 || tasks[0].ID != "task-2" {
+		t.Fatalf("expected task-2 resent on the new message, got %+v", tasks)
+	}
+}
+
 func TestTaskCardWriterRateLimitsSameTask(t *testing.T) {
 	api := &fakeStreamAPI{}
 	streamer := NewStreamWriter(api, "C1", StreamWriterOptions{Interval: time.Hour, MinChars: 5})
