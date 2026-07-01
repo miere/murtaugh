@@ -148,12 +148,30 @@ const (
 	TaskStatusCancelled  TaskStatus = "cancelled"
 )
 
+// TaskKind distinguishes a real tool invocation from an entry in the agent's
+// plan (its structured to-do list). The Slack renderer uses it to decide
+// sealing: a new tool run ends the open reply-text message and opens a tool
+// block, but a plan update never chops the reply. An ACP `plan` is re-sent as a
+// full snapshot many times per turn, so treating its entries as tool runs would
+// shred the streaming prose (the mid-word/confetti split this guards against).
+// The zero value is a tool, so every existing producer — native tool events and
+// ACP tool_call/tool_call_update — stays a tool with no change.
+type TaskKind string
+
+const (
+	TaskKindTool TaskKind = ""     // a tool invocation (default)
+	TaskKindPlan TaskKind = "plan" // an entry in the agent's plan snapshot
+)
+
 type TaskEvent struct {
 	ID          string
 	Title       string
 	Status      TaskStatus
 	Description string
 	Output      string
+	// Kind separates a tool invocation (default) from a plan-snapshot entry; see
+	// TaskKind. Only the ACP plan extractor sets it to TaskKindPlan.
+	Kind TaskKind
 }
 
 type ConversationKey struct {
