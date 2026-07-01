@@ -135,22 +135,64 @@ func (w *StreamWriter) Flush(ctx context.Context) error {
 }
 
 // emit paints the first n bytes of the buffer to Slack and retains the rest for
-// the next flush. n == 0 (or an unstarted/stopped stream) is a no-op.
+// the next flush. n == 0 (or an unstarted/stopped stream) is a no-op. The buffer
+// is consumed only once the paint lands, so a failed append never drops text.
 func (w *StreamWriter) emit(ctx context.Context, n int) error {
 	if !w.started || w.stopped || n == 0 {
 		return nil
 	}
 	text := w.pending[:n]
-	w.pending = w.pending[n:]
 	startedAt := time.Now()
-	_, _, err := w.api.AppendStreamContext(ctx, w.streamChannel, w.streamTS, slack.MsgOptionChunks(slack.NewMarkdownTextChunk(text)))
-	if err != nil {
-		return fmt.Errorf("append Slack stream: %w", err)
+	if err := w.append(ctx, text); err != nil {
+		return err
 	}
+	w.pending = w.pending[n:]
 	w.flushes++
 	w.bytesFlushed += len(text)
 	w.logger.Info("appended Slack stream chunk", "channel", w.streamChannel, "bytes", len(text), "duration", time.Since(startedAt), "flushes", w.flushes)
 	w.lastFlush = time.Now()
+	return nil
+}
+
+// append paints text onto the live streaming message, transparently rolling over
+// to a fresh message when Slack has finalized the current one. Slack caps how
+// long a streaming message stays open; a long turn (a coding agent reading,
+// planning, and writing for several minutes) routinely outlives that window, and
+// the next append is rejected with message_not_in_streaming_state. Rather than
+// fail the turn — leaving the user with a half-sentence and no error — we continue
+// in a new message. The text carries across, so the reply simply spans two
+// messages instead of being lost.
+func (w *StreamWriter) append(ctx context.Context, text string) error {
+	_, _, err := w.api.AppendStreamContext(ctx, w.streamChannel, w.streamTS, slack.MsgOptionChunks(slack.NewMarkdownTextChunk(text)))
+	if !isStreamFinalized(err) {
+		if err != nil {
+			return fmt.Errorf("append Slack stream: %w", err)
+		}
+		return nil
+	}
+	if rerr := w.rollover(ctx); rerr != nil {
+		return rerr
+	}
+	if _, _, err := w.api.AppendStreamContext(ctx, w.streamChannel, w.streamTS, slack.MsgOptionChunks(slack.NewMarkdownTextChunk(text))); err != nil {
+		return fmt.Errorf("append Slack stream: %w", err)
+	}
+	return nil
+}
+
+// rollover abandons a streaming message Slack has finalized and opens a fresh one
+// in its place, so a turn that outlives Slack's streaming window keeps rendering
+// rather than dying. Callers are responsible for re-emitting whatever content the
+// finalized message rejected (see append and TaskCardWriter.Update).
+func (w *StreamWriter) rollover(ctx context.Context) error {
+	prev := w.streamTS
+	w.started = false
+	w.stopped = false
+	w.streamChannel = ""
+	w.streamTS = ""
+	if err := w.Start(ctx); err != nil {
+		return err
+	}
+	w.logger.Info("rolled over finalized Slack stream", "prev_ts", prev, "new_ts", w.streamTS)
 	return nil
 }
 
@@ -175,11 +217,31 @@ func (w *StreamWriter) Stop(ctx context.Context) error {
 	startedAt := time.Now()
 	_, _, err := w.api.StopStreamContext(ctx, w.streamChannel, w.streamTS)
 	if err != nil {
+		if isStreamFinalized(err) {
+			// Slack already closed the message (its streaming window elapsed while
+			// the turn ran on). There is nothing left to stop, so this is a clean
+			// finish, not a failure — surfacing it would abort the turn on teardown.
+			w.stopped = true
+			return nil
+		}
 		return fmt.Errorf("stop Slack stream: %w", err)
 	}
 	w.stopped = true
 	w.logger.Info("stopped Slack stream", "channel", w.streamChannel, "flushes", w.flushes, "bytes", w.bytesFlushed, "duration", time.Since(startedAt))
 	return nil
+}
+
+// streamFinalizedError is the Slack API error returned when we append to or stop
+// a streaming message it has already closed — typically because the message hit
+// Slack's maximum streaming lifetime while a long turn was still in flight.
+const streamFinalizedError = "message_not_in_streaming_state"
+
+// isStreamFinalized reports whether err is Slack rejecting a stream operation
+// because the message is no longer in streaming state. This is an expected,
+// recoverable condition on long turns (roll over to a fresh message), never a
+// reason to fail the turn.
+func isStreamFinalized(err error) bool {
+	return err != nil && strings.Contains(err.Error(), streamFinalizedError)
 }
 
 func sanitizeSlackInline(text string) string {

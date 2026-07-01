@@ -13,10 +13,20 @@ import (
 
 type fakeStreamAPI struct {
 	startedChannel string
+	starts         int
 	appends        int
 	stops          int
 	startOptions   [][]slack.MsgOption
 	appendOptions  [][]slack.MsgOption
+
+	// finalizeUntilStart makes append/stop fail with Slack's
+	// message_not_in_streaming_state until the next StartStreamContext opens a
+	// fresh message — mirroring Slack finalizing a stream that outlived its
+	// window. Cleared by StartStreamContext so a rollover recovers.
+	finalizeUntilStart bool
+	// nextStreamTS, when non-empty, is handed out (and cleared) by the next
+	// StartStreamContext so a test can tell the rolled-over message apart.
+	nextStreamTS string
 
 	// rejectCanceledStatus makes SetAssistantThreadsStatusContext fail when
 	// invoked with an already-cancelled context, mirroring Slack rejecting a
@@ -31,17 +41,29 @@ type fakeStreamAPI struct {
 
 func (f *fakeStreamAPI) StartStreamContext(_ context.Context, channelID string, options ...slack.MsgOption) (string, string, error) {
 	f.startedChannel = channelID
+	f.starts++
 	f.startOptions = append(f.startOptions, options)
-	return channelID, "stream-ts", nil
+	f.finalizeUntilStart = false
+	ts := "stream-ts"
+	if f.nextStreamTS != "" {
+		ts, f.nextStreamTS = f.nextStreamTS, ""
+	}
+	return channelID, ts, nil
 }
 
 func (f *fakeStreamAPI) AppendStreamContext(_ context.Context, _ string, _ string, options ...slack.MsgOption) (string, string, error) {
+	if f.finalizeUntilStart {
+		return "", "", slack.SlackErrorResponse{Err: streamFinalizedError}
+	}
 	f.appends++
 	f.appendOptions = append(f.appendOptions, options)
 	return "C1", "stream-ts", nil
 }
 
 func (f *fakeStreamAPI) StopStreamContext(_ context.Context, _ string, _ string, _ ...slack.MsgOption) (string, string, error) {
+	if f.finalizeUntilStart {
+		return "", "", slack.SlackErrorResponse{Err: streamFinalizedError}
+	}
 	f.stops++
 	return "C1", "stream-ts", nil
 }
@@ -225,6 +247,66 @@ func TestStreamWriterTrimsToWordBoundary(t *testing.T) {
 	joined := got[0] + got[1] + got[2]
 	if joined != "Hello world foobar" {
 		t.Fatalf("reconstructed = %q, want %q", joined, "Hello world foobar")
+	}
+}
+
+// TestStreamWriterRollsOverFinalizedStream proves a turn that outlives Slack's
+// streaming window does not die: when an append is rejected with
+// message_not_in_streaming_state, the writer opens a fresh message and re-emits
+// the rejected text there, so the reply continues rather than being lost.
+func TestStreamWriterRollsOverFinalizedStream(t *testing.T) {
+	api := &fakeStreamAPI{}
+	writer := NewStreamWriter(api, "C1", StreamWriterOptions{Interval: time.Hour, MinChars: 1})
+	ctx := context.Background()
+	if err := writer.Append(ctx, "before\n"); err != nil {
+		t.Fatalf("first append: %v", err)
+	}
+	// Slack finalizes the message out from under us; the next append must recover
+	// by rolling over to the new message identified by nextStreamTS.
+	api.finalizeUntilStart = true
+	api.nextStreamTS = "stream-ts-2"
+	if err := writer.Append(ctx, "after\n"); err != nil {
+		t.Fatalf("append after finalize should roll over, got: %v", err)
+	}
+	if api.starts != 2 {
+		t.Fatalf("expected a rollover (2 StartStream calls), got %d", api.starts)
+	}
+	if writer.StreamTS() != "stream-ts-2" {
+		t.Fatalf("writer should track the rolled-over stream ts, got %q", writer.StreamTS())
+	}
+	got := api.appendedText(t)
+	want := []string{"before\n", "after\n"}
+	if len(got) != len(want) {
+		t.Fatalf("paint count = %d (%q), want %d", len(got), got, len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("paint %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+	if err := writer.Stop(ctx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+}
+
+// TestStreamWriterStopToleratesFinalizedStream proves teardown of an
+// already-finalized message is a clean finish, not an error — so a turn is never
+// aborted on cleanup (and the Fail path's warning still reaches the user).
+func TestStreamWriterStopToleratesFinalizedStream(t *testing.T) {
+	api := &fakeStreamAPI{}
+	writer := NewStreamWriter(api, "C1", StreamWriterOptions{Interval: time.Hour, MinChars: 1})
+	ctx := context.Background()
+	if err := writer.Append(ctx, "hi"); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	// Buffer already drained and Slack has closed the message: Stop has nothing to
+	// flush and must treat the finalized stream as done rather than erroring.
+	api.finalizeUntilStart = true
+	if err := writer.Stop(ctx); err != nil {
+		t.Fatalf("Stop on finalized stream should succeed, got: %v", err)
+	}
+	if !writer.Stopped() {
+		t.Fatalf("writer should be marked stopped after tolerating a finalized stream")
 	}
 }
 

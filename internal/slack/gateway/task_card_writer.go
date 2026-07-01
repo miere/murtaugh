@@ -98,6 +98,17 @@ func (w *TaskCardWriter) Update(ctx context.Context, taskID, title string, statu
 		return nil
 	}
 	_, _, err := w.api.AppendStreamContext(ctx, w.streamer.StreamChannel(), w.streamer.StreamTS(), slack.MsgOptionChunks(chunks...))
+	if isStreamFinalized(err) {
+		// Slack closed the stream mid tool-run (its streaming window elapsed). Roll
+		// over to a fresh message, re-open the Plan block so the cards keep grouping,
+		// and resend this update there rather than freezing the tool block.
+		if rerr := w.streamer.rollover(ctx); rerr != nil {
+			return rerr
+		}
+		w.reopenPlan()
+		chunks = append(w.planPrefix(), chunk)
+		_, _, err = w.api.AppendStreamContext(ctx, w.streamer.StreamChannel(), w.streamer.StreamTS(), slack.MsgOptionChunks(chunks...))
+	}
 	if err != nil {
 		return fmt.Errorf("append task update chunk: %w", err)
 	}
@@ -117,6 +128,15 @@ func (w *TaskCardWriter) planPrefix() []slack.StreamChunk {
 	}
 	w.planOpen = true
 	return []slack.StreamChunk{slack.NewPlanUpdateChunk(w.planTitle)}
+}
+
+// reopenPlan clears the plan-opened flag so the next planPrefix re-emits the
+// plan_update chunk. Used after a stream rollover, where the fresh message needs
+// its own Plan block to keep grouping the cards that continue on it.
+func (w *TaskCardWriter) reopenPlan() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.planOpen = false
 }
 
 // Fail marks a task as failed, reusing the task's previously-seen title when
