@@ -14,11 +14,13 @@ import (
 // There is a single implementation — sectionRenderer — which renders the turn as
 // an ordered SEQUENCE of separate Slack messages: contiguous tool activity
 // becomes a tool-block message (updated in place), and reply text becomes its own
-// streamed message. A switch between the two seals the open section and opens a
-// new one, so tool execution is always separated from the reply and never mixed
-// into it, regardless of how the model interleaves text and tool calls. This is
-// the coherence guarantee: ordering is decided here, by event boundaries — never
-// by the delivery layer's wall-clock timers.
+// streamed message. The reply is sealed only by a genuinely NEW tool run (a tool
+// id not yet seen this turn); a status tick for a tool already on screen, and any
+// plan-snapshot update, never chop it. This keeps tool execution separated from
+// the reply without shredding streaming prose when an ACP agent re-sends its plan
+// (a full snapshot) many times mid-reply. This is the coherence guarantee:
+// ordering is decided here, by event boundaries — never by the delivery layer's
+// wall-clock timers.
 //
 // The tool-block cosmetics are the only per-agent choice (the toolBlock seam): a
 // compact status line (simplified) or grouped task cards (tasks). Both ride the
@@ -154,13 +156,29 @@ type sectionRenderer struct {
 	text   *StreamWriter
 	block  toolBlock
 	titles []string // distinct tool titles in the current block, for its summary
+
+	// seenTools records tool ids shown this turn, so a tool_call_update tick for a
+	// tool already on screen is not mistaken for a new run and made to re-seal the
+	// reply. Only an unseen id is a genuine text→tools transition.
+	seenTools map[string]bool
+	// plan holds the latest snapshot of the agent's plan entries (insertion order,
+	// deduped by id via planIndex). A plan never seals the reply; it is folded into
+	// a tool block instead — see planUpdate/ensureBlock. planRendered guards against
+	// folding it into more than one block.
+	plan         []*agent.TaskEvent
+	planIndex    map[string]int
+	planRendered bool
 }
 
 func newSectionRenderer(newText func() *StreamWriter, newBlock func() toolBlock, uploader attachmentUploader, channelID, threadTS string, logger *slog.Logger) *sectionRenderer {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &sectionRenderer{newText: newText, newBlock: newBlock, uploader: uploader, channelID: channelID, threadTS: threadTS, logger: logger}
+	return &sectionRenderer{
+		newText: newText, newBlock: newBlock, uploader: uploader,
+		channelID: channelID, threadTS: threadTS, logger: logger,
+		seenTools: map[string]bool{}, planIndex: map[string]int{},
+	}
 }
 
 // Attachment finalises the open text section first — so prose written before the
@@ -189,13 +207,28 @@ func (r *sectionRenderer) Task(ctx context.Context, ev *agent.TaskEvent) error {
 	if ev == nil {
 		return nil
 	}
+	// A plan snapshot is the agent's to-do list, re-sent in full on every update —
+	// it must never seal the reply text (doing so shreds the streaming prose). It
+	// rides a tool block instead.
+	if ev.Kind == agent.TaskKindPlan {
+		return r.planUpdate(ctx, ev)
+	}
+	// A tool task. Only a genuinely NEW tool run — an id not yet shown this turn —
+	// is a text→tools transition worth sealing the reply for. A repeat of an id we
+	// already painted (a tool_call_update / status tick) must not re-chop the prose.
+	newRun := ev.ID == "" || !r.seenTools[ev.ID]
+	if ev.ID != "" {
+		r.seenTools[ev.ID] = true
+	}
 	if r.mode == sectionText {
+		if !newRun {
+			// A late update to a tool whose block already sealed (its cards resolved
+			// on close). Nothing to repaint — drop it rather than seal the live reply.
+			return nil
+		}
 		r.closeText(ctx)
 	}
-	if r.mode != sectionTools || r.block == nil {
-		r.block = r.newBlock()
-		r.mode = sectionTools
-	}
+	r.ensureBlock(ctx)
 	if ev.Title != "" && !containsString(r.titles, ev.Title) {
 		r.titles = append(r.titles, ev.Title)
 	}
@@ -203,6 +236,55 @@ func (r *sectionRenderer) Task(ctx context.Context, ev *agent.TaskEvent) error {
 		r.logger.Warn("failed to send task update", "error", err, "task_id", ev.ID)
 	}
 	return nil
+}
+
+// ensureBlock opens a tool block if none is live and folds the current plan
+// snapshot into it (once), so the agent's to-do list rides the first tool run
+// rather than sealing the reply on its own. mode becomes sectionTools.
+func (r *sectionRenderer) ensureBlock(ctx context.Context) {
+	if r.mode == sectionTools && r.block != nil {
+		return
+	}
+	r.block = r.newBlock()
+	r.mode = sectionTools
+	if !r.planRendered && len(r.plan) > 0 {
+		for _, p := range r.plan {
+			if err := r.block.UpdateFromEvent(ctx, p); err != nil {
+				r.logger.Debug("failed to fold plan into tool block", "error", err, "task_id", p.ID)
+			}
+		}
+		r.planRendered = true
+	}
+}
+
+// planUpdate records a plan-snapshot entry (latest per id, insertion order). It
+// never seals the reply. When a tool block is already live the entry paints into
+// it immediately; otherwise it stays buffered for the next block to fold in (or a
+// trailing block at Finish, so a plan-only turn is not dropped).
+func (r *sectionRenderer) planUpdate(ctx context.Context, ev *agent.TaskEvent) error {
+	if i, ok := r.planIndex[ev.ID]; ok {
+		r.plan[i] = ev
+	} else {
+		r.planIndex[ev.ID] = len(r.plan)
+		r.plan = append(r.plan, ev)
+	}
+	if r.mode == sectionTools && r.block != nil {
+		r.planRendered = true
+		if err := r.block.UpdateFromEvent(ctx, ev); err != nil {
+			r.logger.Debug("failed to paint plan entry", "error", err, "task_id", ev.ID)
+		}
+	}
+	return nil
+}
+
+// flushUnrenderedPlan renders a plan that never rode a tool block (a turn that
+// planned but ran no tools) as its own trailing block, so the to-do list is not
+// silently dropped. A no-op once the plan has been folded elsewhere.
+func (r *sectionRenderer) flushUnrenderedPlan(ctx context.Context) {
+	if r.planRendered || len(r.plan) == 0 {
+		return
+	}
+	r.ensureBlock(ctx) // folds the buffered plan and marks it rendered
 }
 
 // Note appends a notice to the reply surface — same routing as Text.
@@ -226,6 +308,7 @@ func (r *sectionRenderer) Finish(ctx context.Context, emptyNote string) error {
 		}
 	}
 	r.closeText(ctx)
+	r.flushUnrenderedPlan(ctx)
 	r.closeBlock(ctx)
 	return nil
 }
@@ -250,6 +333,7 @@ func (r *sectionRenderer) Interrupted(ctx context.Context) {
 
 func (r *sectionRenderer) EnsureStopped(ctx context.Context) {
 	r.closeText(ctx)
+	r.flushUnrenderedPlan(ctx)
 	r.closeBlock(ctx)
 }
 

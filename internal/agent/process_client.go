@@ -1371,7 +1371,7 @@ func extractPlanTasks(raw json.RawMessage) []*TaskEvent {
 		if title == "" {
 			continue
 		}
-		task := &TaskEvent{ID: fmt.Sprintf("plan-%d", i), Title: title}
+		task := &TaskEvent{ID: fmt.Sprintf("plan-%d", i), Title: title, Kind: TaskKindPlan}
 		if status, ok := entry["status"].(string); ok {
 			task.Status = normalizeTaskStatus(status)
 		}
