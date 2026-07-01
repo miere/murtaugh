@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/miere/murtaugh/internal/agent"
 	"github.com/miere/murtaugh/internal/agent/native"
@@ -40,6 +41,10 @@ type Deps struct {
 	// ACP agent with no Murtaugh tools, as before. Ignored for native agents,
 	// which hold their toolset in-process.
 	Bridge *mcpbridge.Server
+	// LongRunningToolTimeout is the per-tool ceiling passed to an ACP agent (see
+	// SessionDefaults.LongRunningToolTimeout). Zero leaves the ProcessClient
+	// default. Ignored for native agents.
+	LongRunningToolTimeout time.Duration
 }
 
 // Client builds the backend for a resolved agent. It does no network/process I/O
@@ -86,7 +91,8 @@ func Client(resolved ResolvedAgent, deps Deps) (agent.Client, error) {
 			Aggregator:       aggregator,
 			// Share Murtaugh's persona with the ACP agent (it has no system role of
 			// our making); read from the config/workspace dir where SOUL.md lives.
-			Persona: native.ReadSoul(deps.WorkspaceDir),
+			Persona:     native.ReadSoul(deps.WorkspaceDir),
+			ToolCeiling: deps.LongRunningToolTimeout,
 		}), nil
 	default:
 		return nil, fmt.Errorf("agentbuild: unknown agent kind %q", resolved.Kind)

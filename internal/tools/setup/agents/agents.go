@@ -99,7 +99,7 @@ func (r Result) String() string {
 // agents.yaml, split by the concern each knob serves. The chat-surface gate
 // (chat.enabled) lives in gateway.yaml, written by setup.slack.
 var runtimeDefaults = defaultsBlock{
-	Session:   sessionBlock{IdleTimeout: "30m", RequestTimeout: "10m", MaxConcurrent: 100},
+	Session:   sessionBlock{IdleTimeout: "30m", RequestTimeout: "10m", LongRunningToolTimeout: "20m", MaxConcurrent: 100},
 	Rendering: renderingBlock{ProgressDisplay: "simplified", StreamMinChunkChars: 96, StreamAppendInterval: "750ms"},
 	ACP:       acpDefaultsBlock{StartupTimeout: "10s", CancelGracePeriod: "2s"},
 }
@@ -116,9 +116,10 @@ type defaultsBlock struct {
 }
 
 type sessionBlock struct {
-	IdleTimeout    string `yaml:"idle_timeout"`
-	RequestTimeout string `yaml:"request_timeout"`
-	MaxConcurrent  int    `yaml:"max_concurrent"`
+	IdleTimeout            string `yaml:"idle_timeout"`
+	RequestTimeout         string `yaml:"request_timeout"`
+	LongRunningToolTimeout string `yaml:"long_running_tool_timeout"`
+	MaxConcurrent          int    `yaml:"max_concurrent"`
 }
 
 type renderingBlock struct {

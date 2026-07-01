@@ -285,12 +285,13 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 				}
 			}
 			client, err := agentbuild.Client(resolved, agentbuild.Deps{
-				Registry:     registry,
-				MCPServers:   cfg.MCPServers,
-				WorkspaceDir: cfg.BaseDir,
-				Logger:       logger.With("agent", name),
-				Approver:     approver,
-				Bridge:       bridge,
+				Registry:               registry,
+				MCPServers:             cfg.MCPServers,
+				WorkspaceDir:           cfg.BaseDir,
+				Logger:                 logger.With("agent", name),
+				Approver:               approver,
+				Bridge:                 bridge,
+				LongRunningToolTimeout: cfg.Defaults.EffectiveLongRunningToolTimeout(),
 			})
 			if err != nil {
 				logger.Error("agent disabled: could not build client", "agent", name, "kind", profile.ResolvedKind(), "error", err)

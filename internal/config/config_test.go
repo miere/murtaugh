@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/miere/murtaugh/assets"
 )
@@ -142,6 +143,29 @@ func TestParseACPValidatesDurations(t *testing.T) {
 	cfg.Defaults.Session.RequestTimeout = "nope"
 	err = cfg.Validate()
 	if err == nil || !strings.Contains(err.Error(), "defaults.session.request_timeout") {
+		t.Fatalf("expected duration validation error, got: %v", err)
+	}
+}
+
+func TestLongRunningToolTimeout(t *testing.T) {
+	var d RuntimeDefaults
+	if got := d.EffectiveLongRunningToolTimeout(); got != 20*time.Minute {
+		t.Fatalf("default = %s, want 20m", got)
+	}
+	d.Session.LongRunningToolTimeout = "1h"
+	if got := d.EffectiveLongRunningToolTimeout(); got != time.Hour {
+		t.Fatalf("override = %s, want 1h", got)
+	}
+}
+
+func TestValidateRejectsBadLongRunningToolTimeout(t *testing.T) {
+	cfg, err := Parse(testConfig(""))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	cfg.Defaults.Session.LongRunningToolTimeout = "nope"
+	err = cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "defaults.session.long_running_tool_timeout") {
 		t.Fatalf("expected duration validation error, got: %v", err)
 	}
 }
