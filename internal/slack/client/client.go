@@ -52,25 +52,11 @@ type UpdateMessageParams struct {
 	Blocks    []byte // raw JSON of Block Kit blocks; nil if absent
 }
 
-// PostEphemeralParams collects the inputs PostEphemeral accepts. The message is
-// visible only to UserID in ChannelID (optionally within ThreadTS). Blocks is the
-// raw JSON of Block Kit blocks; nil/empty means text-only.
-type PostEphemeralParams struct {
+// DeleteMessageParams collects the inputs DeleteMessage accepts: the channel and
+// the timestamp of the message to remove via chat.delete.
+type DeleteMessageParams struct {
 	ChannelID string
-	UserID    string
-	Text      string
-	ThreadTS  string
-	Blocks    []byte
-}
-
-// WebhookParams collects the inputs RespondURL accepts. It targets a Slack
-// interaction response_url rather than a channel; ReplaceOriginal rewrites the
-// message the clicked button belonged to (the only way to edit an ephemeral
-// prompt). Blocks is the raw JSON of Block Kit blocks; nil/empty means text-only.
-type WebhookParams struct {
-	Text            string
-	Blocks          []byte
-	ReplaceOriginal bool
+	TS        string
 }
 
 // CreateChannelParams collects the inputs CreateChannel accepts. Name is the
@@ -113,15 +99,9 @@ type SlackAPI interface {
 	PostMessage(ctx context.Context, p PostMessageParams) (PostMessageResult, error)
 	UploadFile(ctx context.Context, p UploadFileParams) (PostMessageResult, error)
 	UpdateMessage(ctx context.Context, p UpdateMessageParams) (PostMessageResult, error)
-	// PostEphemeral posts a message visible only to one user via
-	// chat.postEphemeral and returns the message timestamp. Ephemeral messages
-	// cannot be edited with chat.update; callers rewrite them through the
-	// interaction's response_url (RespondURL) instead.
-	PostEphemeral(ctx context.Context, p PostEphemeralParams) (string, error)
-	// RespondURL POSTs to a Slack interaction response_url (an unauthenticated,
-	// short-lived webhook delivered with a button click). It is the only way to
-	// edit or replace an ephemeral prompt after the user responds.
-	RespondURL(ctx context.Context, responseURL string, p WebhookParams) error
+	// DeleteMessage removes a message via chat.delete. Used to clear a transient
+	// prompt (e.g. an approval card) once it has served its purpose.
+	DeleteMessage(ctx context.Context, p DeleteMessageParams) error
 	GetHistory(ctx context.Context, channelID string, oldestTS string, limit int) ([]Message, error)
 	GetReplies(ctx context.Context, channelID, threadTS, oldestTS string) ([]Message, error)
 	ListChannels(ctx context.Context) ([]Channel, error)

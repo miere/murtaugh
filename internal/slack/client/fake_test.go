@@ -38,11 +38,7 @@ func (f *fakeAPI) PostMessage(_ context.Context, p PostMessageParams) (PostMessa
 	return f.postResult, f.postErr
 }
 
-func (f *fakeAPI) PostEphemeral(_ context.Context, _ PostEphemeralParams) (string, error) {
-	return "", nil
-}
-
-func (f *fakeAPI) RespondURL(_ context.Context, _ string, _ WebhookParams) error {
+func (f *fakeAPI) DeleteMessage(_ context.Context, _ DeleteMessageParams) error {
 	return nil
 }
 

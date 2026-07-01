@@ -65,7 +65,7 @@ func (g *GateApprover) Approve(ctx context.Context, toolName, summary string) (b
 	// gets the same syntax highlighting as the agent's own code output rather than
 	// a flat monospace span.
 	question := fmt.Sprintf("The agent wants to run the `%s` tool:\n\n```%s\n%s\n```\n\nApprove?", toolName, codeLang(toolName), strings.TrimRight(summary, "\n"))
-	decision, err := g.broker.Ask(ctx, Destination{ChannelID: loc.ChannelID, ThreadTS: loc.ThreadTS, UserID: loc.UserID}, PromptSpec{
+	decision, err := g.broker.Ask(ctx, Destination{ChannelID: loc.ChannelID, ThreadTS: loc.ThreadTS}, PromptSpec{
 		Title:    ":lock: Approval needed",
 		Question: question,
 		Markdown: true,
@@ -75,6 +75,7 @@ func (g *GateApprover) Approve(ctx context.Context, toolName, summary string) (b
 			{ID: "deny", Label: "Deny", Style: "danger"},
 		},
 		OutcomeText: approvalOutcome(toolName),
+		AutoDismiss: true,
 	})
 	if err != nil {
 		return false, fmt.Sprintf("Skipped: couldn't ask for approval (%v). Not run.", err)

@@ -20,6 +20,10 @@ import (
 type signalingAPI struct {
 	*slacktest.FakeAPI
 	posted chan slacklib.PostMessageParams
+	// deleted, when non-nil, receives each DeleteMessage call's params so a test
+	// can await the async outcome-delete (which fires from its own goroutine)
+	// without racing on the fake's slices.
+	deleted chan slacklib.DeleteMessageParams
 }
 
 func (s *signalingAPI) PostMessage(ctx context.Context, p slacklib.PostMessageParams) (slacklib.PostMessageResult, error) {
@@ -28,13 +32,14 @@ func (s *signalingAPI) PostMessage(ctx context.Context, p slacklib.PostMessagePa
 	return res, err
 }
 
-// PostEphemeral records the ephemeral post and signals on the same channel
-// (as an equivalent PostMessageParams) so a test can read the correlation id
-// regardless of which transport the broker chose.
-func (s *signalingAPI) PostEphemeral(ctx context.Context, p slacklib.PostEphemeralParams) (string, error) {
-	ts, err := s.FakeAPI.PostEphemeral(ctx, p)
-	s.posted <- slacklib.PostMessageParams{ChannelID: p.ChannelID, ThreadTS: p.ThreadTS, Blocks: p.Blocks}
-	return ts, err
+// DeleteMessage records the call and, when deleted is set, announces its params so
+// a test can await the async outcome-delete (which fires from its own goroutine).
+func (s *signalingAPI) DeleteMessage(ctx context.Context, p slacklib.DeleteMessageParams) error {
+	err := s.FakeAPI.DeleteMessage(ctx, p)
+	if s.deleted != nil {
+		s.deleted <- p
+	}
+	return err
 }
 
 func newSignalingBroker(t *testing.T) (*Broker, *signalingAPI) {
@@ -102,16 +107,53 @@ func TestAsk_ResolvedByClick(t *testing.T) {
 	}
 }
 
-// TestAsk_EphemeralUsesResponseURL verifies that a Destination with a UserID
-// posts the prompt ephemerally and writes the outcome back through the click's
-// response_url (chat.update cannot touch an ephemeral message).
-func TestAsk_EphemeralUsesResponseURL(t *testing.T) {
+// TestAsk_AutoDismissDeletesOutcome verifies that an AutoDismiss prompt, once
+// resolved, is rewritten to its outcome (chat.update) and then deleted
+// (chat.delete) after outcomeTTL so a transient approval card clears itself.
+func TestAsk_AutoDismissDeletesOutcome(t *testing.T) {
 	broker, sig := newSignalingBroker(t)
+	sig.deleted = make(chan slacklib.DeleteMessageParams, 1)
+	broker.outcomeTTL = 10 * time.Millisecond
+	spec := PromptSpec{Question: "Proceed?", Options: []Option{{ID: "yes", Label: "Yes"}}, AutoDismiss: true}
+
+	go func() {
+		if _, err := broker.Ask(context.Background(), Destination{ChannelID: "C1", ThreadTS: "t1"}, spec); err != nil {
+			t.Errorf("Ask error: %v", err)
+		}
+	}()
+
+	posted := <-sig.posted
+	if posted.ThreadTS != "t1" {
+		t.Fatalf("prompt must be posted in-thread, got thread_ts=%q", posted.ThreadTS)
+	}
+	broker.Resolve(corrFromPosted(t, posted), Decision{OptionID: "yes", Label: "Yes", UserID: "U7"})
+
+	// The outcome is deleted after the TTL, addressed by the posted channel+ts.
+	select {
+	case del := <-sig.deleted:
+		if del.ChannelID != "C1" || del.TS != "1700.0001" {
+			t.Fatalf("delete targeted the wrong message: %+v", del)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("AutoDismiss outcome was never deleted")
+	}
+	// It was first rewritten in place to its outcome (chat.update), not just deleted.
+	if len(sig.Updated) != 1 {
+		t.Fatalf("expected the prompt edited to its outcome once, got %d updates", len(sig.Updated))
+	}
+}
+
+// TestAsk_NoAutoDismissKeepsOutcome verifies that without AutoDismiss (the generic
+// ask/plan flows) the resolved outcome is left in place — never auto-deleted.
+func TestAsk_NoAutoDismissKeepsOutcome(t *testing.T) {
+	broker, sig := newSignalingBroker(t)
+	sig.deleted = make(chan slacklib.DeleteMessageParams, 1)
+	broker.outcomeTTL = 10 * time.Millisecond
 	spec := PromptSpec{Question: "Proceed?", Options: []Option{{ID: "yes", Label: "Yes"}}}
 
 	resultCh := make(chan Decision, 1)
 	go func() {
-		d, err := broker.Ask(context.Background(), Destination{ChannelID: "C1", ThreadTS: "t1", UserID: "U7"}, spec)
+		d, err := broker.Ask(context.Background(), Destination{ChannelID: "C1", ThreadTS: "t1"}, spec)
 		if err != nil {
 			t.Errorf("Ask error: %v", err)
 		}
@@ -119,46 +161,14 @@ func TestAsk_EphemeralUsesResponseURL(t *testing.T) {
 	}()
 
 	posted := <-sig.posted
-	if len(sig.Ephemeral) != 1 || sig.Ephemeral[0].UserID != "U7" {
-		t.Fatalf("expected one ephemeral post to U7, got %+v", sig.Ephemeral)
-	}
-	if len(sig.Posted) != 0 {
-		t.Fatalf("ephemeral prompt must not post a channel message, got %d", len(sig.Posted))
-	}
-	corr := corrFromPosted(t, posted)
-	broker.Resolve(corr, Decision{OptionID: "yes", Label: "Yes", UserID: "U7", ResponseURL: "https://hooks.slack/x"})
+	broker.Resolve(corrFromPosted(t, posted), Decision{OptionID: "yes", Label: "Yes", UserID: "U7"})
 	<-resultCh
 
-	if len(sig.Webhooks) != 1 {
-		t.Fatalf("expected outcome written via response_url once, got %d", len(sig.Webhooks))
-	}
-	if sig.Webhooks[0].ResponseURL != "https://hooks.slack/x" || !sig.Webhooks[0].Params.ReplaceOriginal {
-		t.Fatalf("outcome should replace the original via the click's response_url, got %+v", sig.Webhooks[0])
-	}
-	if len(sig.Updated) != 0 {
-		t.Fatalf("ephemeral outcome must not use chat.update, got %d", len(sig.Updated))
-	}
-}
-
-// TestAsk_EphemeralTimeoutLeavesPrompt verifies that when an ephemeral prompt
-// times out there is no response_url to write back through, so nothing is edited.
-func TestAsk_EphemeralTimeoutLeavesPrompt(t *testing.T) {
-	fake := &slacktest.FakeAPI{}
-	broker := NewWith(fake.LazyClient())
-
-	d, err := broker.Ask(context.Background(), Destination{ChannelID: "C1", UserID: "U7"}, PromptSpec{
-		Question: "Proceed?",
-		Options:  []Option{{Label: "Yes"}},
-		Timeout:  20 * time.Millisecond,
-	})
-	if err != nil {
-		t.Fatalf("Ask error: %v", err)
-	}
-	if !d.TimedOut {
-		t.Fatalf("expected a timed-out decision, got %+v", d)
-	}
-	if len(fake.Webhooks) != 0 || len(fake.Updated) != 0 {
-		t.Fatalf("a timed-out ephemeral prompt has no response_url to edit through, got webhooks=%d updates=%d", len(fake.Webhooks), len(fake.Updated))
+	select {
+	case del := <-sig.deleted:
+		t.Fatalf("a non-AutoDismiss outcome must not be deleted, got %+v", del)
+	case <-time.After(50 * time.Millisecond):
+		// No delete within several TTLs — correct.
 	}
 }
 
