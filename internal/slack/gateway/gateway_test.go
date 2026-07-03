@@ -465,3 +465,74 @@ func TestLinkUnfurlHandlerSkipsNonJSONDelegate(t *testing.T) {
 		t.Fatalf("expected no unfurl when delegate output is non-JSON, got %d", api.calls)
 	}
 }
+
+// blockText flattens a header/section block list to the text it carries, so a
+// test can assert on the copy without reaching into block-kit internals.
+func blockText(blocks []slack.Block) string {
+	var b strings.Builder
+	for _, blk := range blocks {
+		switch v := blk.(type) {
+		case *slack.HeaderBlock:
+			b.WriteString(v.Text.Text)
+			b.WriteString("\n")
+		case *slack.SectionBlock:
+			if v.Text != nil {
+				b.WriteString(v.Text.Text)
+				b.WriteString("\n")
+			}
+		}
+	}
+	return b.String()
+}
+
+func TestTroubleshootBlocksNoNoteGrumbles(t *testing.T) {
+	blocks := troubleshootBlocks("U123", "", nil)
+	// Header + no-context grumble + redaction caveat.
+	if len(blocks) != 3 {
+		t.Fatalf("expected 3 blocks (header, no-context, redaction), got %d", len(blocks))
+	}
+	if _, ok := blocks[0].(*slack.HeaderBlock); !ok {
+		t.Fatalf("expected first block to be a header, got %T", blocks[0])
+	}
+	text := blockText(blocks)
+	if !strings.Contains(text, troubleshootHeader) {
+		t.Fatalf("missing header title in: %q", text)
+	}
+	if !strings.Contains(text, "Nobody told me") {
+		t.Fatalf("expected the no-context grumble, got: %q", text)
+	}
+	if !strings.Contains(text, "<@U123>") {
+		t.Fatalf("expected a mention of the requester, got: %q", text)
+	}
+	if !strings.Contains(text, "Nobody scrubbed those") {
+		t.Fatalf("expected the redaction caveat, got: %q", text)
+	}
+}
+
+func TestTroubleshootBlocksWithNoteQuotesIt(t *testing.T) {
+	blocks := troubleshootBlocks("U123", "the thread hung\nagain", nil)
+	if len(blocks) != 3 {
+		t.Fatalf("expected 3 blocks (header, context, redaction), got %d", len(blocks))
+	}
+	text := blockText(blocks)
+	if strings.Contains(text, "Nobody told me") {
+		t.Fatalf("no-context grumble must not appear when a note is present: %q", text)
+	}
+	if !strings.Contains(text, "Here's what <@U123> said about this") {
+		t.Fatalf("expected the context lead-in with a mention, got: %q", text)
+	}
+	// Every line of a multi-line note is quoted, not just the first.
+	if !strings.Contains(text, "> the thread hung") || !strings.Contains(text, "> again") {
+		t.Fatalf("expected each note line block-quoted, got: %q", text)
+	}
+}
+
+func TestTroubleshootBlocksAppendsWarnings(t *testing.T) {
+	blocks := troubleshootBlocks("U123", "boom", []string{"goose logs missing"})
+	if len(blocks) != 4 {
+		t.Fatalf("expected 4 blocks with a warnings block, got %d", len(blocks))
+	}
+	if !strings.Contains(blockText(blocks), "goose logs missing") {
+		t.Fatalf("expected the collection warning to be carried, got: %q", blockText(blocks))
+	}
+}
