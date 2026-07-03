@@ -1062,12 +1062,24 @@ func (a *Gateway) handleTroubleshootSlashCommand(ctx context.Context, event sock
 		}
 		defer os.Remove(zipPath)
 
+		// The narrative (header, symptom-or-not, redaction caveat) is a Block Kit
+		// message; a file's initial_comment is text-only, so it must be its own post.
+		// A failed post is logged but never blocks the upload — the zip is the point.
+		if blocks, merr := json.Marshal(slack.Blocks{BlockSet: troubleshootBlocks(command.UserID, note, warnings)}); merr != nil {
+			a.logger.Error("troubleshoot: marshal bundle message failed", "error", merr)
+		} else if _, perr := api.PostMessage(bgCtx, slackclient.PostMessageParams{
+			ChannelID: dm,
+			Text:      troubleshootFallback(command.UserID, note),
+			Blocks:    blocks,
+		}); perr != nil {
+			a.logger.Error("troubleshoot: post bundle message failed", "error", perr)
+		}
+
 		if _, err := api.UploadFile(bgCtx, slackclient.UploadFileParams{
-			ChannelID:      dm,
-			FilePath:       zipPath,
-			Filename:       filepath.Base(zipPath),
-			Title:          "Murtaugh troubleshooting bundle",
-			InitialComment: troubleshootComment(command, note, warnings),
+			ChannelID: dm,
+			FilePath:  zipPath,
+			Filename:  filepath.Base(zipPath),
+			Title:     "Murtaugh troubleshooting bundle",
 		}); err != nil {
 			a.logger.Error("troubleshoot: upload bundle failed", "error", err)
 			_, _ = api.PostMessage(bgCtx, slackclient.PostMessageParams{
@@ -1080,26 +1092,67 @@ func (a *Gateway) handleTroubleshootSlashCommand(ctx context.Context, event sock
 	}()
 }
 
-// troubleshootComment builds the message that accompanies the uploaded bundle,
-// carrying who asked, their symptom description, the redaction caveat, and any
-// non-fatal collection warnings.
-func troubleshootComment(command slack.SlashCommand, note string, warnings []string) string {
-	var b strings.Builder
-	b.WriteString(":card_file_box: *Murtaugh troubleshooting bundle*\n")
-	fmt.Fprintf(&b, "Requested by <@%s>.\n", command.UserID)
-	if strings.TrimSpace(note) != "" {
-		fmt.Fprintf(&b, "*Symptoms:* %s\n", strings.TrimSpace(note))
+const (
+	// troubleshootHeader titles the bundle message.
+	troubleshootHeader = "Troubleshooting Bundle"
+	// troubleshootNoContext is the middle block when the requester filed the
+	// bundle with no symptom note — Murtaugh grumbling about working blind. The
+	// %s is a mention of the requester so the admin knows who to ping.
+	troubleshootNoContext = "Great! Nobody told me what's actually wrong with it. :unamused: Love workin' blind. Ping %s, they buzzed me about this."
+	// troubleshootRedaction is the fixed redaction caveat, in Murtaugh's voice.
+	troubleshootRedaction = "> :warning: I patted it down for the obvious stuff — Slack tokens, config secrets, the usual suspects. But the transcripts and them .db files? Nobody scrubbed those. Handle 'em like they're loaded."
+)
+
+// troubleshootBlocks builds the Block Kit message that accompanies an uploaded
+// diagnostics bundle in the admin's DM. The header and redaction caveat are
+// fixed; the middle block depends on whether the requester attached a symptom
+// note. Non-fatal collection warnings, when present, are appended as their own
+// block so nothing the plain-text comment used to carry is lost.
+func troubleshootBlocks(userID, note string, warnings []string) []slack.Block {
+	requester := fmt.Sprintf("<@%s>", userID)
+	blocks := []slack.Block{
+		slack.NewHeaderBlock(slack.NewTextBlockObject(slack.PlainTextType, troubleshootHeader, true, false)),
+	}
+	if strings.TrimSpace(note) == "" {
+		blocks = append(blocks, mrkdwnSection(fmt.Sprintf(troubleshootNoContext, requester)))
 	} else {
-		b.WriteString("_No symptom description provided._\n")
+		blocks = append(blocks, mrkdwnSection(fmt.Sprintf("Here's what %s said about this:\n%s", requester, blockquote(strings.TrimSpace(note)))))
 	}
-	b.WriteString(":warning: Secrets are redacted best-effort (Slack tokens + obvious config secrets). Transcripts and `*.db` files are NOT scrubbed — treat as sensitive.\n")
+	blocks = append(blocks, mrkdwnSection(troubleshootRedaction))
 	if len(warnings) > 0 {
-		b.WriteString("\n*Collection notes:*\n")
+		var b strings.Builder
+		b.WriteString("*Collection notes:*")
 		for _, w := range warnings {
-			fmt.Fprintf(&b, "• %s\n", w)
+			fmt.Fprintf(&b, "\n• %s", w)
 		}
+		blocks = append(blocks, mrkdwnSection(b.String()))
 	}
-	return b.String()
+	return blocks
+}
+
+// troubleshootFallback is the plain-text notification/accessibility fallback for
+// the Block Kit bundle message (Slack shows it in notifications and to clients
+// that cannot render blocks).
+func troubleshootFallback(userID, note string) string {
+	if strings.TrimSpace(note) == "" {
+		return fmt.Sprintf("Troubleshooting bundle requested by <@%s> (no symptom description).", userID)
+	}
+	return fmt.Sprintf("Troubleshooting bundle requested by <@%s>: %s", userID, strings.TrimSpace(note))
+}
+
+// mrkdwnSection wraps markdown text in a section block.
+func mrkdwnSection(md string) slack.Block {
+	return slack.NewSectionBlock(slack.NewTextBlockObject(slack.MarkdownType, md, false, false), nil, nil)
+}
+
+// blockquote prefixes every line of s with Slack's "> " quote marker, so a
+// multi-line note is quoted whole rather than only its first line.
+func blockquote(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		lines[i] = "> " + l
+	}
+	return strings.Join(lines, "\n")
 }
 
 // handleStopSlashCommand cancels the in-flight chat for the
