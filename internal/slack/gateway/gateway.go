@@ -1344,9 +1344,10 @@ func (a *Gateway) agentInterruptible(agent string) bool {
 	return checker.Interruptible()
 }
 
-// followUpDeferredText is the thread note posted when a follow-up is held back
-// because the agent cannot be interrupted.
-const followUpDeferredText = ":hourglass_flowing_sand: Still working on your previous message — this agent can't be interrupted, so I'll finish that first before picking this up."
+// followUpDeferredText is the context-block aside posted when a follow-up is held
+// back because the agent cannot be interrupted. Plain_text (emoji-enabled), in
+// Murtaugh's voice — a light nudge, not an alarm.
+const followUpDeferredText = ":unamused: Still wrestlin' with your last message. Can't stop mid-job — you'll have to wait your turn."
 
 // notifyFollowUpDeferred posts a brief, best-effort thread note so a user whose
 // follow-up was dropped (non-interruptible agent, response in flight) is not
@@ -1361,7 +1362,7 @@ func (a *Gateway) notifyFollowUpDeferred(parent context.Context, req ChatRequest
 	defer cancel()
 	// In channel-reply mode threadTS is empty: post the note at the channel root
 	// (no MsgOptionTS) so it still lands where the conversation is happening.
-	options := []slack.MsgOption{slack.MsgOptionText(followUpDeferredText, false)}
+	options := statusMsgOptions(followUpDeferredText)
 	if threadTS != "" {
 		options = append(options, slack.MsgOptionTS(threadTS))
 	}
