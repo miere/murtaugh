@@ -813,10 +813,11 @@ func (f *stallingChatSessions) Cancel(_ context.Context, sessionID string) error
 
 func TestChatHandlerIdleTimeoutStopsAgentAndPostsNotice(t *testing.T) {
 	api := &fakeStreamAPI{}
+	msgr := &fakeStatusMessenger{}
 	fake := &stallingChatSessions{sessionID: "sess-1"}
 	sessions := map[string]ChatSessionManager{"default": fake}
 	resolver := func(req ChatRequest) ChatRoute { return ChatRoute{Agent: "default", ReplyOnThread: true} }
-	handler := NewChatHandler(api, sessions, resolver, time.Hour, 1, nil).WithIdleTimeout(50 * time.Millisecond)
+	handler := NewChatHandler(api, sessions, resolver, time.Hour, 1, nil).WithIdleTimeout(50 * time.Millisecond).WithStatusMessenger(msgr)
 
 	err := handler.Handle(context.Background(), ChatRequest{TeamID: "T1", ChannelID: "C1", UserID: "U1", MessageTS: "123.4", Text: "hi", Source: "test"})
 	if err != nil {
@@ -826,15 +827,11 @@ func TestChatHandlerIdleTimeoutStopsAgentAndPostsNotice(t *testing.T) {
 	if len(fake.cancelled) != 1 || fake.cancelled[0] != "sess-1" {
 		t.Fatalf("expected one session/cancel for sess-1, got %v", fake.cancelled)
 	}
-	// A real, honest notice was posted rather than a silent dead UI.
-	var posted strings.Builder
-	for _, opts := range append(api.startOptions, api.appendOptions...) {
-		if text, err := extractMarkdownTextFromOptions(opts...); err == nil {
-			posted.WriteString(text)
-		}
-	}
-	if !strings.Contains(posted.String(), "asked it to stop") {
-		t.Fatalf("expected an idle-timeout notice, got markdown: %q", posted.String())
+	// The notice landed as its own discrete context-block message (not folded into
+	// the reply stream), so a stall reads as a light aside rather than a dead UI.
+	// The aside is the last thing posted, after the reply and progress line settle.
+	if got := optionValue(msgr.postOptions, "text"); !strings.Contains(got, "nudge it") {
+		t.Fatalf("expected the idle-timeout aside to be posted as a context block, got text: %q", got)
 	}
 	// The stalled task card is never repainted red: the agent did not fail.
 	for _, opts := range append(api.startOptions, api.appendOptions...) {
@@ -880,12 +877,13 @@ func (f *steadyChatSessions) Cancel(context.Context, string) error        { f.ca
 
 func TestChatHandlerIdleTimerResetsOnActivity(t *testing.T) {
 	api := &fakeStreamAPI{}
+	msgr := &fakeStatusMessenger{}
 	// 10 events, 10ms apart (~100ms of steady activity) under a 60ms idle window:
 	// no single gap approaches the window, so the turn must finish, not time out.
 	fake := &steadyChatSessions{gap: 10 * time.Millisecond, events: 10}
 	sessions := map[string]ChatSessionManager{"default": fake}
 	resolver := func(req ChatRequest) ChatRoute { return ChatRoute{Agent: "default", ReplyOnThread: true} }
-	handler := NewChatHandler(api, sessions, resolver, time.Hour, 1, nil).WithIdleTimeout(60 * time.Millisecond)
+	handler := NewChatHandler(api, sessions, resolver, time.Hour, 1, nil).WithIdleTimeout(60 * time.Millisecond).WithStatusMessenger(msgr)
 
 	err := handler.Handle(context.Background(), ChatRequest{TeamID: "T1", ChannelID: "C1", UserID: "U1", MessageTS: "123.4", Text: "hi", Source: "test"})
 	if err != nil {
@@ -894,13 +892,7 @@ func TestChatHandlerIdleTimerResetsOnActivity(t *testing.T) {
 	if fake.cancelled != 0 {
 		t.Fatalf("a progressing turn must not be cancelled as idle, got %d cancels", fake.cancelled)
 	}
-	var posted strings.Builder
-	for _, opts := range append(api.startOptions, api.appendOptions...) {
-		if text, err := extractMarkdownTextFromOptions(opts...); err == nil {
-			posted.WriteString(text)
-		}
-	}
-	if strings.Contains(posted.String(), "asked it to stop") {
-		t.Fatalf("a progressing turn must not post an idle-timeout notice, got: %q", posted.String())
+	if got := optionValue(msgr.postOptions, "text"); strings.Contains(got, "nudge it") {
+		t.Fatalf("a progressing turn must not post an idle-timeout aside, got text: %q", got)
 	}
 }
