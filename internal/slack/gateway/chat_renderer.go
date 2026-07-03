@@ -37,8 +37,6 @@ type chatRenderer interface {
 	// Attachment delivers a file the agent produced into the turn's thread, as a
 	// separate Slack upload alongside the streamed reply.
 	Attachment(ctx context.Context, a *agent.AttachmentEvent) error
-	// Note appends a non-reply notice (idle-timeout marker) to the reply surface.
-	Note(ctx context.Context, text string) error
 	// BeginInterjection settles any open reply text so an out-of-band message
 	// (e.g. an ACP approval card posted by the broker) lands below a committed
 	// message rather than interleaved with an unfinished stream. The next text
@@ -285,11 +283,6 @@ func (r *sectionRenderer) flushUnrenderedPlan(ctx context.Context) {
 		return
 	}
 	r.ensureBlock(ctx) // folds the buffered plan and marks it rendered
-}
-
-// Note appends a notice to the reply surface — same routing as Text.
-func (r *sectionRenderer) Note(ctx context.Context, text string) error {
-	return r.Text(ctx, text)
 }
 
 // BeginInterjection closes the open reply-text section so an out-of-band card

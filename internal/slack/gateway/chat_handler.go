@@ -26,11 +26,12 @@ const defaultStatusRefreshInterval = 2 * time.Second
 // an agent that goes completely silent for this long is treated as stalled.
 const defaultIdleTimeout = 10 * time.Minute
 
-// idleTimeoutNotice is appended to the partial response when a turn is abandoned
-// for inactivity. It is deliberately honest — the agent was asked to stop, it
-// did not fail — and invites the user to continue rather than leaving a silent,
-// dead message behind.
-const idleTimeoutNotice = "\n\n:hourglass_flowing_sand: _The agent went quiet for %s, so I asked it to stop. It may have stalled — send another message to pick things back up._"
+// idleTimeoutAside is posted as its own discrete context-block message when a
+// turn is abandoned for inactivity. A stall is almost always the agent leaving
+// its own turn open (not a Murtaugh fault), so the copy is a light nudge rather
+// than an alarm appended to the reply — and Murtaugh gets his line in. It lands
+// below the settled reply as a low-key aside, inviting the user to continue.
+const idleTimeoutAside = "Agent's taking a nap like it's earned one. Feel free to nudge it. I'm too old for this!"
 
 // ChatSessionManager is the narrow surface the gateway uses to talk to
 // the ACP layer. Prompt drives the streaming response, while Lookup and
@@ -145,6 +146,23 @@ func (h *ChatHandler) effectiveIdleTimeout() time.Duration {
 		return h.idleTimeout
 	}
 	return defaultIdleTimeout
+}
+
+// postIdleAside posts the idle-timeout notice as its own context-block message —
+// the same low-key surface the progress line uses — threaded below the settled
+// reply. A nil messenger (tests without Slack, or a headless deploy) no-ops, so a
+// missing surface never turns a stall into a crash.
+func (h *ChatHandler) postIdleAside(ctx context.Context, channelID, threadTS string) {
+	if h.statusMessenger == nil {
+		return
+	}
+	options := statusMsgOptions(idleTimeoutAside)
+	if threadTS != "" {
+		options = append(options, slack.MsgOptionTS(threadTS))
+	}
+	if _, _, err := h.statusMessenger.PostMessageContext(ctx, channelID, options...); err != nil {
+		h.logger.Warn("failed to post idle-timeout aside", "error", err)
+	}
 }
 
 // WithSessionLogger attaches the acp_session turn recorder and returns the
@@ -518,10 +536,11 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest) (retErr error
 				// shared agent process keeps running; only this binding is reset.
 				discardSession(sessions, key)
 			}
-			if nerr := renderer.Note(ctx, fmt.Sprintf(idleTimeoutNotice, h.effectiveIdleTimeout().Round(time.Second))); nerr != nil {
-				h.logger.Warn("failed to post idle-timeout notice", "error", nerr)
-			}
+			// Settle the reply into its own committed message first, then post the
+			// notice as a discrete context-block aside below it — a light grey nudge
+			// rather than an error card wedged into the reply stream.
 			renderer.EnsureStopped(ctx)
+			h.postIdleAside(ctx, req.ChannelID, streamThreadTS)
 			cancelPrompt()
 			// Drain until the agent layer closes the channel. The prompt goroutine
 			// and the shared readLoop block on their sends; abandoning the channel
