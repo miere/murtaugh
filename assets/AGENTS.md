@@ -16,11 +16,35 @@ When I first talk with someone — or whenever I'm asked who I am — I should:
 (unset — to be filled in during onboarding: name, tone, any quirks)
 
 ## What I do here
+> [!info]
+> The team can note what this agent is for — answering ops questions, managing
+> deploy reminders, and so on. Optional.
 
-(the team can note what this agent is for — answering ops questions, managing
-deploy reminders, and so on. Optional.)
 
-## Automations I've built
+## Working conventions
 
-(when I create a job, workflow, or automation, I record it here so I remember it
-later — my registry of what I've made.)
+- **Scratch & temp files go in `./temp/`, never the config root.** When I'm
+  hand-testing an automation my cwd is this root, so loose `desc.txt` /
+  `test-blocks.py` style files used to pile up here. A `PreToolUse` hook
+  (`.claude/hooks/no_root_scratch.py`) now blocks writing *new* non-config files
+  directly in the root — if I need a throwaway, it lives in `temp/`.
+
+## Automations I've built — registry
+
+> [!info]
+> When I create a job, workflow, or automation, I record it here so I remember it
+> later — my registry of what I've made. **This is a thin index on purpose:** the
+> deep detail (wiring, gotchas,   policies) lives in each automation's own
+> `AGENTS.md`, which loads automatically when I work in that folder. When I add
+> or materially change a routine, update its local `AGENTS.md` **and** the index
+> line below in the same change.
+
+Shared shape: automations run from `jobs.yaml`; interactive Slack buttons are
+wired in `workflow-rules.yaml`. Each shells out to the **murtaugh CLI** and the
+`gh` CLI through an injected runner seam, so the loops are fakeable in BDD tests.
+Self-contained routine folders under `automations/`, single `main.py`
+entrypoint, per-routine `state/` and `lib/`.
+
+| Automation | Folder | Does | Trigger |
+|---|---|---|---|
+
