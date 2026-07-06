@@ -57,6 +57,18 @@ type ProcessOptions struct {
 	ToolCeiling time.Duration
 }
 
+// subscription is a single prompt turn's event stream plus a drain barrier. The
+// readLoop is a long-lived, session-shared sender (session/update notifications
+// and agent-initiated permission asks) that cannot be stopped per-turn the way
+// the heartbeat can; wg counts its in-flight sends into events so teardown can
+// wait for them to drain before closing the channel. Without it, a trailing
+// notification arriving as a turn tears down sends on a closed channel and the
+// process panics.
+type subscription struct {
+	events chan Event
+	wg     sync.WaitGroup
+}
+
 type ProcessClient struct {
 	opts ProcessOptions
 	log  *slog.Logger
@@ -71,7 +83,7 @@ type ProcessClient struct {
 	closed      bool
 	nextID      atomic.Int64
 	pending     map[int64]chan rpcResponse
-	subscribers map[string]chan Event
+	subscribers map[string]*subscription
 	// dests records, per active session, the Slack conversation and the prompt's
 	// context so an agent-initiated session/request_permission can be routed to a
 	// human in the right thread and cancelled when that turn is interrupted.
@@ -205,7 +217,7 @@ func NewProcessClient(opts ProcessOptions) *ProcessClient {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &ProcessClient{opts: opts, log: logger, now: time.Now, pending: make(map[int64]chan rpcResponse), subscribers: make(map[string]chan Event), dests: make(map[string]promptScope), toolWatch: make(map[string]*toolWatcher)}
+	return &ProcessClient{opts: opts, log: logger, now: time.Now, pending: make(map[int64]chan rpcResponse), subscribers: make(map[string]*subscription), dests: make(map[string]promptScope), toolWatch: make(map[string]*toolWatcher)}
 }
 
 func (c *ProcessClient) Initialize(ctx context.Context) error {
@@ -367,11 +379,12 @@ func (c *ProcessClient) Prompt(ctx context.Context, sessionID string, request Pr
 	if strings.TrimSpace(sessionID) == "" {
 		return nil, errors.New("session id is required")
 	}
-	events := make(chan Event, 32)
+	sub := &subscription{events: make(chan Event, 32)}
+	events := sub.events
 	sawText := &atomic.Bool{}
 	watcher := newToolWatcher(c.now)
 	c.mu.Lock()
-	c.subscribers[sessionID] = events
+	c.subscribers[sessionID] = sub
 	// Stash where this turn is talking and its context so a permission request
 	// raised mid-turn can be asked in the same thread and cancelled with the turn.
 	c.dests[sessionID] = promptScope{loc: TurnLocation{ChannelID: request.Channel, ThreadTS: request.Thread}, ctx: ctx, sawText: sawText}
@@ -394,8 +407,7 @@ func (c *ProcessClient) Prompt(ctx context.Context, sessionID string, request Pr
 			close(stopHB)
 			<-hbDone
 			c.clearToolWatch(sessionID, watcher)
-			c.unsubscribe(sessionID, events)
-			close(events)
+			c.closeSubscription(sessionID, sub)
 		}()
 		result, err := c.call(promptCtx, "session/prompt", map[string]any{
 			"sessionId": sessionID,
@@ -500,13 +512,31 @@ func (c *ProcessClient) renderTurnContext() string {
 // immediately followed by a follow-up that reuses the session), the second
 // prompt overwrites subscribers[sessionID]; an unconditional delete here would
 // tear down the live prompt's subscription and silently drop its events.
-func (c *ProcessClient) unsubscribe(sessionID string, events chan Event) {
+func (c *ProcessClient) unsubscribe(sessionID string, sub *subscription) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.subscribers[sessionID] == events {
+	if c.subscribers[sessionID] == sub {
 		delete(c.subscribers, sessionID)
 		delete(c.dests, sessionID)
 	}
+}
+
+// closeSubscription retracts a prompt's subscription and closes its event
+// channel — but only after every readLoop-originated send that already captured
+// this subscription has drained. The readLoop looks up the subscription under
+// the lock and sends without it (the send is deliberately blocking, for
+// back-pressure); retracting the map entry under the lock stops NEW sends, and
+// wg.Wait then waits out the ones already past the lookup. Closing before that
+// drain is what let a trailing notification panic on a closed channel. The
+// heartbeat, the other sender, is already stopped and awaited by the caller.
+//
+// wg is bound to sub, not to sessionID, so an interrupt-then-followup that
+// overwrote subscribers[sessionID] still drains and closes THIS turn's channel
+// rather than the live one's.
+func (c *ProcessClient) closeSubscription(sessionID string, sub *subscription) {
+	c.unsubscribe(sessionID, sub)
+	sub.wg.Wait()
+	close(sub.events)
 }
 
 // clearToolWatch retracts a prompt's tool watcher, but only if it is still the
@@ -878,13 +908,20 @@ func (c *ProcessClient) decidePermission(sessionID, title, kind string, options 
 		return pickOptionByKind(options, "reject")
 	default: // ask
 		c.mu.Lock()
-		ch := c.subscribers[sessionID]
+		sub := c.subscribers[sessionID]
 		scope, ok := c.dests[sessionID]
+		if sub != nil {
+			sub.wg.Add(1)
+		}
 		c.mu.Unlock()
-		if ch == nil {
+		if sub == nil {
 			c.log.Warn("ACP permission request with no live turn to ask; denying", "tool", label, "session_id", sessionID)
 			return ""
 		}
+		// Hold the drain barrier only around the send of the permission event, not
+		// the human-decision wait below: teardown must be able to close the channel
+		// once the ask has landed, without blocking on the operator's click.
+		ch := sub.events
 		ctx := context.Background()
 		if ok && scope.ctx != nil {
 			ctx = scope.ctx
@@ -898,7 +935,9 @@ func (c *ProcessClient) decidePermission(sessionID, title, kind string, options 
 		}
 		select {
 		case ch <- Event{Type: EventPermission, Permission: prompt}:
+			sub.wg.Done()
 		case <-ctx.Done():
+			sub.wg.Done()
 			c.log.Warn("ACP permission request abandoned before it could be asked (turn ended); denying", "tool", label, "session_id", sessionID)
 			return ""
 		}
@@ -1005,12 +1044,21 @@ func (c *ProcessClient) deliverNotification(notification rpcNotification) {
 		return
 	}
 	c.mu.Lock()
-	ch := c.subscribers[sessionID]
+	sub := c.subscribers[sessionID]
 	scope := c.dests[sessionID]
+	if sub != nil {
+		// Register as an in-flight sender while still holding the lock that guards
+		// the map, so teardown either sees us here (and waits) or has already
+		// retracted the subscription (and we bail below). Balanced by Done once all
+		// the sends in this call have landed.
+		sub.wg.Add(1)
+	}
 	c.mu.Unlock()
-	if ch == nil {
+	if sub == nil {
 		return
 	}
+	defer sub.wg.Done()
+	ch := sub.events
 	kind := sessionUpdateKind(notification.Params)
 	c.log.Debug("ACP session/update", "session_id", sessionID, "update", kind)
 
@@ -1079,9 +1127,9 @@ func (c *ProcessClient) failAll(err error) {
 		close(ch)
 		delete(c.pending, id)
 	}
-	for _, ch := range c.subscribers {
+	for _, sub := range c.subscribers {
 		select {
-		case ch <- Event{Type: EventError, Error: err}:
+		case sub.events <- Event{Type: EventError, Error: err}:
 		default:
 		}
 	}
