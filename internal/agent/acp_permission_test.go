@@ -24,7 +24,7 @@ func runAgentRequest(t *testing.T, opts ProcessOptions, dests map[string]promptS
 		opts:        opts,
 		log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
 		pending:     make(map[int64]chan rpcResponse),
-		subscribers: make(map[string]chan Event),
+		subscribers: make(map[string]*subscription),
 		dests:       make(map[string]promptScope),
 		stdin:       pw,
 		started:     true,
@@ -33,7 +33,7 @@ func runAgentRequest(t *testing.T, opts ProcessOptions, dests map[string]promptS
 		c.dests[k] = v
 	}
 	for k, v := range subs {
-		c.subscribers[k] = v
+		c.subscribers[k] = &subscription{events: v}
 	}
 	go c.readLoop(strings.NewReader(line + "\n"))
 
