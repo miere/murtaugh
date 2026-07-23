@@ -96,3 +96,64 @@ func TestLiveHandshakeAndTurn(t *testing.T) {
 		t.Fatalf("expected reply to contain 'pong', got %q", text)
 	}
 }
+
+// TestLivePermissionAskRoundTrip drives the full permission path against the real
+// binary: `--permission-prompt-tool stdio` makes claude ASK, our client raises an
+// EventPermission, the test answers "allow", and the Write tool then runs — proving
+// enablement + control-protocol answer + tool execution end to end.
+func TestLivePermissionAskRoundTrip(t *testing.T) {
+	work := t.TempDir()
+	c := New(Options{
+		Command:          liveBinary(t),
+		Args:             liveArgs(),
+		WorkDir:          work,
+		PermissionPolicy: "ask",
+	})
+	t.Cleanup(func() { _ = c.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	if err := c.Initialize(ctx); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	// A unique thread id so we create a fresh session rather than resume an old one.
+	meta := agent.SessionMetadata{TeamID: "TLIVE", ChannelID: "CLIVE", ThreadTS: "perm-" + work}
+	if _, err := c.NewSession(ctx, meta); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	ch, err := c.Prompt(ctx, "", agent.PromptRequest{Text: "Create a file named probe.txt containing the word hi, using the Write tool. Then say done."})
+	if err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	var asked bool
+	deadline := time.After(80 * time.Second)
+	for done := false; !done; {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				done = true
+				break
+			}
+			switch ev.Type {
+			case agent.EventPermission:
+				asked = true
+				t.Logf("permission asked: kind=%q title=%q", ev.Permission.Request.ToolKind, ev.Permission.Request.ToolTitle)
+				ev.Permission.Decision <- "allow"
+			case agent.EventComplete:
+				done = true
+			case agent.EventError:
+				t.Fatalf("turn errored: %v", ev.Error)
+			}
+		case <-deadline:
+			t.Fatal("live permission turn timed out")
+		}
+	}
+
+	if !asked {
+		t.Fatal("real claude never asked for permission — enablement (--permission-prompt-tool stdio) may have regressed")
+	}
+	if _, err := os.Stat(work + "/probe.txt"); err != nil {
+		t.Fatalf("expected the Write tool to have run after allow, but probe.txt is missing: %v", err)
+	}
+}
