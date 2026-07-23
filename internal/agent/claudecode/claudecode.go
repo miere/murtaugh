@@ -19,11 +19,18 @@ import (
 // defaultArgs launches `claude` in headless bidirectional stream-json mode: a
 // long-lived process that reads NDJSON user turns on stdin and streams NDJSON
 // events on stdout. --verbose is required with --output-format=stream-json.
+//
+// `--permission-prompt-tool stdio` is the enabler for the control-protocol
+// permission route: it is a reserved sentinel (not an MCP tool name) that tells
+// the CLI to ask the controlling process for tool permission via a can_use_tool
+// control_request instead of auto-denying. Verified against 2.1.216 — without it
+// a headless turn silently denies every gated tool (spec 019 §6).
 var defaultArgs = []string{
 	"-p",
 	"--input-format", "stream-json",
 	"--output-format", "stream-json",
 	"--verbose",
+	"--permission-prompt-tool", "stdio",
 }
 
 // Options configures a Client. Command is required. Args defaults to defaultArgs
