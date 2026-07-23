@@ -71,6 +71,38 @@ func TestInitializeHandshakeAndBasicTurn(t *testing.T) {
 	}
 }
 
+// TestConcurrentSessionsAreIndependent proves the multiplex: one Client serving
+// two conversations (as the gateway does per agent) runs a separate process per
+// session, so they don't clobber each other.
+func TestConcurrentSessionsAreIndependent(t *testing.T) {
+	c := newHelperClient(t, "basic", Options{})
+	ctx := context.Background()
+	if err := c.Initialize(ctx); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	a, err := c.NewSession(ctx, agent.SessionMetadata{TeamID: "T", ChannelID: "C", ThreadTS: "1"})
+	if err != nil {
+		t.Fatalf("NewSession a: %v", err)
+	}
+	b, err := c.NewSession(ctx, agent.SessionMetadata{TeamID: "T", ChannelID: "C", ThreadTS: "2"})
+	if err != nil {
+		t.Fatalf("NewSession b: %v", err)
+	}
+	if a.ID == b.ID {
+		t.Fatalf("distinct threads collided on session id %q", a.ID)
+	}
+	for _, id := range []string{a.ID, b.ID} {
+		ch, err := c.Prompt(ctx, id, agent.PromptRequest{Text: "hi"})
+		if err != nil {
+			t.Fatalf("Prompt %s: %v", id, err)
+		}
+		got := drain(t, ch, 5*time.Second)
+		if len(got) == 0 || got[0].Type != agent.EventText || got[0].Text != "hello from fake" {
+			t.Fatalf("session %s: unexpected events %+v", id, got)
+		}
+	}
+}
+
 // TestPermissionAskRoutesToHuman drives the "ask" policy: the client raises an
 // EventPermission (the Slack approval card) and the human's chosen option decides
 // allow/deny — the same mechanism the chat handler already serves for ACP.
@@ -91,10 +123,11 @@ func TestPermissionAskRoutesToHuman(t *testing.T) {
 			if err := c.Initialize(ctx); err != nil {
 				t.Fatalf("Initialize: %v", err)
 			}
-			if _, err := c.NewSession(ctx, agent.SessionMetadata{}); err != nil {
+			sess, err := c.NewSession(ctx, agent.SessionMetadata{})
+			if err != nil {
 				t.Fatalf("NewSession: %v", err)
 			}
-			ch, err := c.Prompt(ctx, "", agent.PromptRequest{Text: "please write a file"})
+			ch, err := c.Prompt(ctx, sess.ID, agent.PromptRequest{Text: "please write a file"})
 			if err != nil {
 				t.Fatalf("Prompt: %v", err)
 			}
@@ -152,10 +185,11 @@ func TestPermissionAutoPolicies(t *testing.T) {
 			if err := c.Initialize(ctx); err != nil {
 				t.Fatalf("Initialize: %v", err)
 			}
-			if _, err := c.NewSession(ctx, agent.SessionMetadata{}); err != nil {
+			sess, err := c.NewSession(ctx, agent.SessionMetadata{})
+			if err != nil {
 				t.Fatalf("NewSession: %v", err)
 			}
-			ch, err := c.Prompt(ctx, "", agent.PromptRequest{Text: "write a file"})
+			ch, err := c.Prompt(ctx, sess.ID, agent.PromptRequest{Text: "write a file"})
 			if err != nil {
 				t.Fatalf("Prompt: %v", err)
 			}
@@ -181,17 +215,18 @@ func TestCancelInterruptsTurn(t *testing.T) {
 	if err := c.Initialize(ctx); err != nil {
 		t.Fatalf("Initialize: %v", err)
 	}
-	if _, err := c.NewSession(ctx, agent.SessionMetadata{}); err != nil {
+	sess, err := c.NewSession(ctx, agent.SessionMetadata{})
+	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
-	ch, err := c.Prompt(ctx, "", agent.PromptRequest{Text: "long task"})
+	ch, err := c.Prompt(ctx, sess.ID, agent.PromptRequest{Text: "long task"})
 	if err != nil {
 		t.Fatalf("Prompt: %v", err)
 	}
 	// The hang helper never completes on its own; Cancel must interrupt it.
 	go func() {
 		time.Sleep(100 * time.Millisecond)
-		_ = c.Cancel(ctx, "")
+		_ = c.Cancel(ctx, sess.ID)
 	}()
 	got := drain(t, ch, 5*time.Second)
 	last := got[len(got)-1]
