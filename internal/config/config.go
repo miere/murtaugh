@@ -195,6 +195,10 @@ const (
 	// AgentKindACP is the external-process backend driven over ACP (selected by
 	// an `acp:` block). Requires a command.
 	AgentKindACP AgentKind = "acp"
+	// AgentKindClaudeCode drives Claude Code directly over its stream-json
+	// protocol (selected by a `claude_code:` block), bypassing the ACP adapter.
+	// Requires a command. Experimental; see Obsidian spec 019.
+	AgentKindClaudeCode AgentKind = "claude_code"
 )
 
 // ApprovalConfig holds how an agent's tool-call approvals are handled. It spans
@@ -259,6 +263,9 @@ type AgentProfile struct {
 	Native *NativeProfile `yaml:"native"`
 	// ACP carries the external-process backend config; non-nil selects kind acp.
 	ACP *ACPProfile `yaml:"acp"`
+	// ClaudeCode carries the direct Claude Code stream-json backend config;
+	// non-nil selects kind claude_code. Experimental (spec 019).
+	ClaudeCode *ClaudeCodeProfile `yaml:"claude_code"`
 }
 
 // NativeProfile is the in-process LLM backend config (the `native:` sub-block).
@@ -315,16 +322,41 @@ type ACPProfile struct {
 	Env map[string]string `yaml:"env"`
 }
 
-// EnvOverrides renders the ACP profile's Env map into the KEY=VALUE slice exec
-// expects, expanding each value against the host environment. It returns nil
-// when no variables are configured (or the profile is not ACP) so callers can
-// leave cmd.Env unset and keep the plain inherited environment. Blank keys are
-// skipped; keys are emitted in sorted order so the result is deterministic.
+// ClaudeCodeProfile is the direct Claude Code stream-json backend config (the
+// `claude_code:` sub-block). Command launches the `claude` binary; Murtaugh
+// speaks its stream-json protocol directly rather than through an ACP adapter
+// (spec 019).
+type ClaudeCodeProfile struct {
+	// Command is the `claude` binary to launch. Required.
+	Command string `yaml:"command"`
+	// Args overrides the default stream-json launch flags. Empty uses the
+	// backend's built-in defaults (headless bidirectional stream-json).
+	Args []string `yaml:"args"`
+	// Model, when set, is passed as --model. Empty uses whatever the binary
+	// resolves (e.g. via an ANTHROPIC_MODEL entry in Env).
+	Model string `yaml:"model"`
+	// Env injects environment variables into the process, expanded and layered
+	// exactly like acp.env.
+	Env map[string]string `yaml:"env"`
+}
+
+// EnvOverrides renders the active backend's Env map into the KEY=VALUE slice
+// exec expects, expanding each value against the host environment. It returns
+// nil when no variables are configured (or the profile has no process backend)
+// so callers can leave cmd.Env unset and keep the plain inherited environment.
+// Blank keys are skipped; keys are emitted in sorted order so the result is
+// deterministic.
 func (p AgentProfile) EnvOverrides() []string {
-	if p.ACP == nil || len(p.ACP.Env) == 0 {
+	var env map[string]string
+	switch {
+	case p.ACP != nil:
+		env = p.ACP.Env
+	case p.ClaudeCode != nil:
+		env = p.ClaudeCode.Env
+	}
+	if len(env) == 0 {
 		return nil
 	}
-	env := p.ACP.Env
 	keys := make([]string, 0, len(env))
 	for key := range env {
 		if strings.TrimSpace(key) == "" {
@@ -696,16 +728,20 @@ func (c Config) Validate() error {
 		// Exactly one backend sub-block must be present; a clear error beats a
 		// silent backend flip or a half-configured agent.
 		switch {
-		case profile.Native != nil && profile.ACP != nil:
-			errs = append(errs, fmt.Errorf("agents[%s] sets both native and acp; use exactly one", name))
+		case backendBlockCount(profile) > 1:
+			errs = append(errs, fmt.Errorf("agents[%s] sets more than one of native/acp/claude_code; use exactly one", name))
 		case profile.Native != nil:
 			errs = append(errs, validateNativeAgent(name, profile, c.MCPServers)...)
 		case profile.ACP != nil:
 			if err := profile.Validate(); err != nil {
 				errs = append(errs, fmt.Errorf("agents[%s]: %w", name, err))
 			}
+		case profile.ClaudeCode != nil:
+			if strings.TrimSpace(profile.ClaudeCode.Command) == "" {
+				errs = append(errs, fmt.Errorf("agents[%s] claude_code.command is required", name))
+			}
 		default:
-			errs = append(errs, fmt.Errorf("agents[%s] needs a native or acp block", name))
+			errs = append(errs, fmt.Errorf("agents[%s] needs a native, acp, or claude_code block", name))
 		}
 		errs = append(errs, validateMCPRefs(name, profile.MCPServers, c.MCPServers)...)
 	}
@@ -937,14 +973,35 @@ func (p AgentProfile) ResolvedACPPermission() string {
 	return "ask"
 }
 
-// ResolvedKind reports the backend selected by the present sub-block: an `acp:`
-// block is ACP, otherwise native. (Validate enforces exactly one sub-block, so
-// the native default only applies to an already-validated native profile.)
+// ResolvedKind reports the backend selected by the present sub-block: a
+// `claude_code:` block is claude_code, an `acp:` block is ACP, otherwise native.
+// (Validate enforces exactly one sub-block, so the native default only applies to
+// an already-validated native profile.)
 func (p AgentProfile) ResolvedKind() AgentKind {
-	if p.ACP != nil {
+	switch {
+	case p.ClaudeCode != nil:
+		return AgentKindClaudeCode
+	case p.ACP != nil:
 		return AgentKindACP
+	default:
+		return AgentKindNative
 	}
-	return AgentKindNative
+}
+
+// backendBlockCount counts how many backend sub-blocks a profile sets. Validate
+// requires exactly one; more than one is a configuration error.
+func backendBlockCount(p AgentProfile) int {
+	n := 0
+	if p.Native != nil {
+		n++
+	}
+	if p.ACP != nil {
+		n++
+	}
+	if p.ClaudeCode != nil {
+		n++
+	}
+	return n
 }
 
 // MCPServerConfig describes one external MCP server the native agent can attach

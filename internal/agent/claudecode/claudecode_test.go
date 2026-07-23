@@ -54,8 +54,8 @@ func TestInitializeHandshakeAndBasicTurn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
-	if sess.ID != "sess-1" {
-		t.Fatalf("expected session id from system/init, got %q", sess.ID)
+	if want := deriveSessionID(agent.SessionMetadata{}); sess.ID != want {
+		t.Fatalf("expected derived session id %q, got %q", want, sess.ID)
 	}
 	ch, err := c.Prompt(ctx, sess.ID, agent.PromptRequest{Text: "hi"})
 	if err != nil {
@@ -94,6 +94,9 @@ func TestPermissionRoundTrip(t *testing.T) {
 			if err := c.Initialize(ctx); err != nil {
 				t.Fatalf("Initialize: %v", err)
 			}
+			if _, err := c.NewSession(ctx, agent.SessionMetadata{}); err != nil {
+				t.Fatalf("NewSession: %v", err)
+			}
 			ch, err := c.Prompt(ctx, "", agent.PromptRequest{Text: "please write a file"})
 			if err != nil {
 				t.Fatalf("Prompt: %v", err)
@@ -117,6 +120,9 @@ func TestCancelInterruptsTurn(t *testing.T) {
 	ctx := context.Background()
 	if err := c.Initialize(ctx); err != nil {
 		t.Fatalf("Initialize: %v", err)
+	}
+	if _, err := c.NewSession(ctx, agent.SessionMetadata{}); err != nil {
+		t.Fatalf("NewSession: %v", err)
 	}
 	ch, err := c.Prompt(ctx, "", agent.PromptRequest{Text: "long task"})
 	if err != nil {

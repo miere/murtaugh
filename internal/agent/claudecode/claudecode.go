@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -37,8 +38,10 @@ type Approver interface {
 // Options configures a Client. Command is required. Args defaults to defaultArgs
 // (the stream-json launch) when nil; tests inject a fake process via Command/Args.
 type Options struct {
-	Command  string
-	Args     []string
+	Command string
+	Args    []string
+	// Model, when set, is appended as `--model <Model>` to the launch args.
+	Model    string
 	Env      []string
 	WorkDir  string
 	Logger   *slog.Logger
@@ -53,15 +56,22 @@ type Options struct {
 // agent.Client. One Client == one `claude` process == one conversation, held open
 // across turns (so a background subagent completing after a turn's `result` still
 // reaches us). SessionManager caches one per ConversationKey.
+//
+// The process is started lazily in NewSession (not Initialize): only there is the
+// Slack conversation metadata known, and the deterministic --session-id is derived
+// from it. Start prefers --resume (an existing on-disk session) and falls back to
+// --session-id (a fresh one) — restart resilience with no persisted mapping.
 type Client struct {
 	opts Options
 	log  *slog.Logger
 
-	mu      sync.Mutex
-	cmd     *exec.Cmd
-	stdin   io.WriteCloser
-	closed  bool
-	session string // session_id reported in system/init
+	mu       sync.Mutex
+	cmd      *exec.Cmd
+	stdin    io.WriteCloser
+	stderr   *cappedBuffer
+	procDone chan struct{} // closed when the current process's read loop ends
+	closed   bool
+	session  string
 
 	// active is the subscription for the in-flight turn; nil between turns.
 	active *subscription
@@ -76,7 +86,8 @@ type subscription struct {
 	events chan agent.Event
 }
 
-// New builds a Client. It does not start the process; call Initialize.
+// New builds a Client. It does not start the process; call Initialize then
+// NewSession (which starts it).
 func New(opts Options) *Client {
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
@@ -84,25 +95,85 @@ func New(opts Options) *Client {
 	if opts.Args == nil {
 		opts.Args = defaultArgs
 	}
+	if opts.Model != "" {
+		opts.Args = append(append([]string{}, opts.Args...), "--model", opts.Model)
+	}
 	return &Client{opts: opts, log: opts.Logger, pending: make(map[string]chan *streamMessage)}
 }
 
-// Initialize starts the `claude` process, begins reading its stream, and
-// performs the control-protocol `initialize` handshake — which the CLI requires
-// before it will honour any other control request (permissions, interrupt).
-func (c *Client) Initialize(ctx context.Context) error {
-	if err := c.start(); err != nil {
-		return err
+// Initialize validates the client is ready. The process is started lazily in
+// NewSession, where the conversation metadata (and thus the --session-id) is known.
+func (c *Client) Initialize(_ context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return errors.New("claudecode: client is closed")
 	}
-	return c.handshake(ctx)
+	if strings.TrimSpace(c.opts.Command) == "" {
+		return errors.New("claudecode: command is required")
+	}
+	return nil
 }
 
-func (c *Client) start() error {
-	cmd := exec.Command(c.opts.Command, c.opts.Args...)
+// NewSession derives the deterministic session id from the Slack conversation and
+// starts the process bound to it (resume-preferred, create-fallback). The returned
+// id is authoritative — it is the one we passed via --session-id/--resume.
+func (c *Client) NewSession(ctx context.Context, meta agent.SessionMetadata) (agent.Session, error) {
+	c.mu.Lock()
+	closed := c.closed
+	c.mu.Unlock()
+	if closed {
+		return agent.Session{}, errors.New("claudecode: client is closed")
+	}
+	sessionID := deriveSessionID(meta)
+	if err := c.startSession(ctx, sessionID); err != nil {
+		return agent.Session{}, err
+	}
+	c.mu.Lock()
+	c.session = sessionID
+	c.mu.Unlock()
+	return agent.Session{ID: sessionID}, nil
+}
+
+// startSession brings up the process for sessionID, preferring to resume an
+// existing on-disk session and falling back to creating a fresh one. `claude`
+// makes --session-id create-only ("already in use" on an existing id), so resume
+// must be a distinct attempt.
+func (c *Client) startSession(ctx context.Context, sessionID string) error {
+	if err := c.spawnAndHandshake(ctx, []string{"--resume", sessionID}); err == nil {
+		return nil
+	} else {
+		c.log.Debug("claudecode: resume failed; creating fresh session", "session", sessionID, "error", err)
+		resumeErr := err
+		c.teardownProc()
+		if createErr := c.spawnAndHandshake(ctx, []string{"--session-id", sessionID}); createErr != nil {
+			return fmt.Errorf("claudecode: start session %s: resume=%v; create=%w", sessionID, resumeErr, createErr)
+		}
+		return nil
+	}
+}
+
+func (c *Client) spawnAndHandshake(ctx context.Context, sessionArgs []string) error {
+	if err := c.start(sessionArgs); err != nil {
+		return err
+	}
+	if err := c.handshake(ctx); err != nil {
+		return fmt.Errorf("%w%s", err, c.stderrSuffix())
+	}
+	return nil
+}
+
+// start spawns the process with the base args plus session-selection args, wires
+// stdio, and launches the read loop. It replaces any prior process handle.
+func (c *Client) start(sessionArgs []string) error {
+	args := append(append([]string{}, c.opts.Args...), sessionArgs...)
+	cmd := exec.Command(c.opts.Command, args...)
 	cmd.Dir = c.opts.WorkDir
 	if len(c.opts.Env) > 0 {
 		cmd.Env = append(cmd.Environ(), c.opts.Env...)
 	}
+	stderr := &cappedBuffer{limit: 8 << 10}
+	cmd.Stderr = stderr
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return fmt.Errorf("claudecode: open stdin: %w", err)
@@ -114,38 +185,48 @@ func (c *Client) start() error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("claudecode: start %q: %w", c.opts.Command, err)
 	}
+	done := make(chan struct{})
 	c.mu.Lock()
 	c.cmd = cmd
 	c.stdin = stdin
+	c.stderr = stderr
+	c.procDone = done
 	c.mu.Unlock()
-	go c.readLoop(stdout)
+	go func() {
+		c.readLoop(stdout)
+		_ = cmd.Wait()
+		close(done)
+	}()
 	return nil
 }
 
-// handshake sends the initialize control_request and waits for its success
-// response (or ctx cancellation). It unblocks the CLI's control channel.
+// handshake sends the initialize control_request and waits for its response —
+// the CLI requires it before honouring any other control request (permissions,
+// interrupt). It fails fast if the process exits first (e.g. a failed --resume).
 func (c *Client) handshake(ctx context.Context) error {
 	resp, err := c.sendControl(ctx, map[string]any{"subtype": "initialize"})
 	if err != nil {
 		return fmt.Errorf("claudecode: initialize handshake: %w", err)
 	}
-	if sub := controlResponseSubtype(resp); sub == "error" {
+	if controlResponseSubtype(resp) == "error" {
 		return fmt.Errorf("claudecode: initialize rejected: %s", controlResponseError(resp))
 	}
 	return nil
 }
 
-// NewSession returns the session bound to this process. Claude Code assigns the
-// id (surfaced in system/init); until it arrives we fall back to meta-derived
-// emptiness — the id is only used for logging/resume, and one process is one
-// session regardless.
-func (c *Client) NewSession(_ context.Context, _ agent.SessionMetadata) (agent.Session, error) {
+// teardownProc kills the current process without closing the Client, so a failed
+// resume attempt can be replaced by a create attempt.
+func (c *Client) teardownProc() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.closed {
-		return agent.Session{}, errors.New("claudecode: client is closed")
+	stdin, cmd := c.stdin, c.cmd
+	c.stdin, c.cmd = nil, nil
+	c.mu.Unlock()
+	if stdin != nil {
+		_ = stdin.Close()
 	}
-	return agent.Session{ID: c.session}, nil
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
 }
 
 // Prompt sends one user turn and returns the event stream for it. The channel
@@ -172,7 +253,7 @@ func (c *Client) Prompt(_ context.Context, _ string, req agent.PromptRequest) (<
 }
 
 // Cancel interrupts the in-flight turn via the control channel. The session
-// survives; any background subagents keep running (stop those with stopTask).
+// survives; any background subagents keep running (stop those with stop_task).
 func (c *Client) Cancel(ctx context.Context, _ string) error {
 	_, err := c.sendControl(ctx, map[string]any{"subtype": "interrupt"})
 	return err
@@ -215,13 +296,6 @@ func (c *Client) readLoop(stdout io.Reader) {
 }
 
 func (c *Client) dispatch(msg *streamMessage) {
-	// Capture the session id the first time the CLI reports it.
-	if msg.Type == "system" && msg.Subtype == "init" && msg.SessionID != "" {
-		c.mu.Lock()
-		c.session = msg.SessionID
-		c.mu.Unlock()
-	}
-
 	switch {
 	case msg.Type == "control_response":
 		c.deliverControlResponse(msg)
@@ -283,7 +357,8 @@ func (c *Client) failActive(err error) {
 
 // --- control protocol -----------------------------------------------------
 
-// sendControl writes a control_request and waits for the matching control_response.
+// sendControl writes a control_request and waits for the matching control_response,
+// unblocking early if the process exits or ctx is cancelled.
 func (c *Client) sendControl(ctx context.Context, request map[string]any) (*streamMessage, error) {
 	id := fmt.Sprintf("req-%d", c.reqSeq.Add(1))
 	ch := make(chan *streamMessage, 1)
@@ -292,26 +367,35 @@ func (c *Client) sendControl(ctx context.Context, request map[string]any) (*stre
 		c.mu.Unlock()
 		return nil, errors.New("claudecode: client is closed")
 	}
+	done := c.procDone
 	c.pending[id] = ch
 	c.mu.Unlock()
+	if done == nil {
+		done = make(chan struct{}) // never closes: no process yet, rely on ctx
+	}
 
 	frame := map[string]any{"type": "control_request", "request_id": id, "request": request}
 	if err := c.writeJSON(frame); err != nil {
-		c.mu.Lock()
-		delete(c.pending, id)
-		c.mu.Unlock()
+		c.dropPending(id)
 		return nil, err
 	}
 
 	select {
 	case resp := <-ch:
 		return resp, nil
+	case <-done:
+		c.dropPending(id)
+		return nil, errors.New("claudecode: process exited before control response")
 	case <-ctx.Done():
-		c.mu.Lock()
-		delete(c.pending, id)
-		c.mu.Unlock()
+		c.dropPending(id)
 		return nil, ctx.Err()
 	}
+}
+
+func (c *Client) dropPending(id string) {
+	c.mu.Lock()
+	delete(c.pending, id)
+	c.mu.Unlock()
 }
 
 func (c *Client) deliverControlResponse(msg *streamMessage) {
@@ -401,4 +485,45 @@ func (c *Client) writeJSON(v any) error {
 		return fmt.Errorf("claudecode: write frame: %w", err)
 	}
 	return nil
+}
+
+func (c *Client) stderrSuffix() string {
+	c.mu.Lock()
+	sb := c.stderr
+	c.mu.Unlock()
+	if sb == nil {
+		return ""
+	}
+	s := strings.TrimSpace(sb.String())
+	if s == "" {
+		return ""
+	}
+	return " [stderr: " + s + "]"
+}
+
+// cappedBuffer is a bounded, concurrency-safe io.Writer used to capture a
+// process's stderr for diagnostics without growing without limit over a
+// long-lived session.
+type cappedBuffer struct {
+	mu    sync.Mutex
+	buf   []byte
+	limit int
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if room := b.limit - len(b.buf); room > 0 {
+		if room > len(p) {
+			room = len(p)
+		}
+		b.buf = append(b.buf, p[:room]...)
+	}
+	return len(p), nil
+}
+
+func (b *cappedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return string(b.buf)
 }
