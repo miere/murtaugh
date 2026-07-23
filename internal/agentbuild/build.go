@@ -97,16 +97,18 @@ func Client(resolved ResolvedAgent, deps Deps) (agent.Client, error) {
 			ToolCeiling: deps.LongRunningToolTimeout,
 		}), nil
 	case config.AgentKindClaudeCode:
-		// Direct Claude Code stream-json backend (spec 019). The Approver and the
-		// background-completion route (OnUnsolicited) are wired in a later phase;
-		// until then permissions fail safe (deny) and background completions log.
+		// Direct Claude Code stream-json backend (spec 019). Tool permissions route
+		// to a human in Slack via EventPermission (same approval.requests policy as
+		// ACP). The background-completion route (OnUnsolicited) is wired in a later
+		// phase; until then background completions log.
 		return claudecode.New(claudecode.Options{
-			Command: profile.ClaudeCode.Command,
-			Args:    profile.ClaudeCode.Args,
-			Model:   profile.ClaudeCode.Model,
-			Env:     profile.EnvOverrides(),
-			WorkDir: resolved.Dir(),
-			Logger:  logger,
+			Command:          profile.ClaudeCode.Command,
+			Args:             profile.ClaudeCode.Args,
+			Model:            profile.ClaudeCode.Model,
+			Env:              profile.EnvOverrides(),
+			WorkDir:          resolved.Dir(),
+			Logger:           logger,
+			PermissionPolicy: profile.ResolvedACPPermission(),
 		}), nil
 	default:
 		return nil, fmt.Errorf("agentbuild: unknown agent kind %q", resolved.Kind)

@@ -26,26 +26,21 @@ var defaultArgs = []string{
 	"--verbose",
 }
 
-// Approver decides a Claude Code tool-permission request (control_request
-// subtype "can_use_tool"). It stands in — for now — for the interaction.Broker /
-// PermissionGate wiring the gateway does for the ACP path; a nil Approver denies
-// every gated call (fail-safe). allow=false feeds a "deny" behavior back to the
-// model; updatedInput (when non-nil and allow) replaces the tool input.
-type Approver interface {
-	Approve(ctx context.Context, toolName string, input json.RawMessage) (allow bool, updatedInput json.RawMessage)
-}
-
 // Options configures a Client. Command is required. Args defaults to defaultArgs
 // (the stream-json launch) when nil; tests inject a fake process via Command/Args.
 type Options struct {
 	Command string
 	Args    []string
 	// Model, when set, is appended as `--model <Model>` to the launch args.
-	Model    string
-	Env      []string
-	WorkDir  string
-	Logger   *slog.Logger
-	Approver Approver
+	Model   string
+	Env     []string
+	WorkDir string
+	Logger  *slog.Logger
+	// PermissionPolicy governs a can_use_tool request: "ask" (default — route to a
+	// human in Slack by raising an EventPermission on the turn, exactly like the
+	// ACP path), "auto-allow", or "auto-deny". Headless turns (no active
+	// subscriber) always deny under "ask" — fail-safe, never a hang.
+	PermissionPolicy string
 	// OnUnsolicited receives events that arrive with no active turn — chiefly a
 	// background subagent's post-`result` completion. Phase 1 logs them; Phase 2
 	// routes them back into the originating Slack thread (spec 019 §5). nil drops.
@@ -428,18 +423,14 @@ func (c *Client) handleControlRequest(msg *streamMessage) {
 
 func (c *Client) answerPermission(reqID string, msg *streamMessage) {
 	toolName, input := parseCanUseTool(msg.Request)
-	allow := false
-	updated := input
-	if c.opts.Approver != nil {
-		allow, updated = c.opts.Approver.Approve(context.Background(), toolName, input)
-	}
+	allow := c.decidePermission(toolName, input)
 	behavior := "deny"
 	if allow {
 		behavior = "allow"
 	}
 	inner := map[string]any{"behavior": behavior}
-	if allow && len(updated) > 0 {
-		inner["updatedInput"] = json.RawMessage(updated)
+	if allow && len(input) > 0 {
+		inner["updatedInput"] = json.RawMessage(input)
 	}
 	c.writeJSON(map[string]any{
 		"type": "control_response",
@@ -449,6 +440,79 @@ func (c *Client) answerPermission(reqID string, msg *streamMessage) {
 			"response":   inner,
 		},
 	})
+}
+
+// decidePermission resolves a can_use_tool request. auto-allow/auto-deny answer
+// without a human; the default ("ask") raises an EventPermission on the active
+// turn — reusing the chat handler's approval card exactly like the ACP path — and
+// blocks on the human's decision. No active turn (headless) or a dead process
+// denies, so a turn never hangs on an answer that cannot come.
+func (c *Client) decidePermission(toolName string, input json.RawMessage) bool {
+	switch strings.ToLower(strings.TrimSpace(c.opts.PermissionPolicy)) {
+	case "auto-allow":
+		return true
+	case "auto-deny":
+		return false
+	default: // ask
+		c.mu.Lock()
+		sub := c.active
+		done := c.procDone
+		c.mu.Unlock()
+		if sub == nil {
+			c.log.Warn("claudecode: permission request with no active turn; denying", "tool", toolName)
+			return false
+		}
+		decision := make(chan string, 1)
+		prompt := &agent.PermissionPrompt{
+			Request: agent.PermissionRequest{
+				ToolKind:  toolName,
+				ToolTitle: permissionTitle(input),
+				Options: []agent.PermissionOption{
+					{ID: "allow", Name: "Allow", Kind: "allow_once"},
+					{ID: "deny", Name: "Deny", Kind: "reject_once"},
+				},
+			},
+			Decision: decision,
+		}
+		if !sendEvent(sub, agent.Event{Type: agent.EventPermission, Permission: prompt}) {
+			return false // turn ended underneath us
+		}
+		select {
+		case optionID := <-decision:
+			return optionID == "allow"
+		case <-done:
+			return false
+		}
+	}
+}
+
+// permissionTitle renders a can_use_tool input into a concise human title — the
+// command for a shell call, the path for a file op, else the compact JSON.
+func permissionTitle(input json.RawMessage) string {
+	if len(input) == 0 {
+		return ""
+	}
+	var m map[string]any
+	if json.Unmarshal(input, &m) == nil {
+		for _, k := range []string{"command", "file_path", "path", "pattern", "url"} {
+			if v, ok := m[k].(string); ok && strings.TrimSpace(v) != "" {
+				return v
+			}
+		}
+	}
+	return string(input)
+}
+
+// sendEvent delivers on a turn's channel, recovering from the race where the turn
+// ended and closed it (a permission ask can outlive its turn on a dying process).
+func sendEvent(sub *subscription, ev agent.Event) (ok bool) {
+	defer func() {
+		if recover() != nil {
+			ok = false
+		}
+	}()
+	sub.events <- ev
+	return true
 }
 
 func (c *Client) writeControlResponseError(reqID, message string) {
