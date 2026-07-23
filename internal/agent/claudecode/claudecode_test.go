@@ -71,25 +71,22 @@ func TestInitializeHandshakeAndBasicTurn(t *testing.T) {
 	}
 }
 
-type allowApprover struct{ allow bool }
-
-func (a allowApprover) Approve(context.Context, string, json.RawMessage) (bool, json.RawMessage) {
-	return a.allow, nil
-}
-
-func TestPermissionRoundTrip(t *testing.T) {
+// TestPermissionAskRoutesToHuman drives the "ask" policy: the client raises an
+// EventPermission (the Slack approval card) and the human's chosen option decides
+// allow/deny — the same mechanism the chat handler already serves for ACP.
+func TestPermissionAskRoutesToHuman(t *testing.T) {
 	cases := []struct {
 		name     string
-		approver Approver
+		decision string // the option id a "human" picks
 		want     string
 	}{
-		{"allow", allowApprover{true}, "permitted:allow"},
-		{"deny", allowApprover{false}, "permitted:deny"},
-		{"nil-approver-denies", nil, "permitted:deny"},
+		{"allow", "allow", "permitted:allow"},
+		{"deny", "deny", "permitted:deny"},
+		{"dismiss-denies", "", "permitted:deny"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c := newHelperClient(t, "perm", Options{Approver: tc.approver})
+			c := newHelperClient(t, "perm", Options{}) // default policy = ask
 			ctx := context.Background()
 			if err := c.Initialize(ctx); err != nil {
 				t.Fatalf("Initialize: %v", err)
@@ -101,15 +98,78 @@ func TestPermissionRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Prompt: %v", err)
 			}
-			got := drain(t, ch, 5*time.Second)
+
 			var text string
-			for _, ev := range got {
+			var sawPermission bool
+			deadline := time.After(5 * time.Second)
+			for done := false; !done; {
+				select {
+				case ev, ok := <-ch:
+					if !ok {
+						done = true
+						break
+					}
+					switch ev.Type {
+					case agent.EventPermission:
+						sawPermission = true
+						if ev.Permission.Request.ToolKind != "Write" {
+							t.Errorf("expected tool kind Write, got %q", ev.Permission.Request.ToolKind)
+						}
+						ev.Permission.Decision <- tc.decision // stand in for the human
+					case agent.EventText:
+						text += ev.Text
+					case agent.EventComplete:
+						done = true
+					}
+				case <-deadline:
+					t.Fatalf("timed out; text so far %q", text)
+				}
+			}
+			if !sawPermission {
+				t.Fatal("expected an EventPermission to be raised")
+			}
+			if text != tc.want {
+				t.Fatalf("expected reply %q, got %q", tc.want, text)
+			}
+		})
+	}
+}
+
+// TestPermissionAutoPolicies covers the non-interactive policies, which answer
+// can_use_tool without raising an EventPermission.
+func TestPermissionAutoPolicies(t *testing.T) {
+	cases := []struct {
+		policy string
+		want   string
+	}{
+		{"auto-allow", "permitted:allow"},
+		{"auto-deny", "permitted:deny"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.policy, func(t *testing.T) {
+			c := newHelperClient(t, "perm", Options{PermissionPolicy: tc.policy})
+			ctx := context.Background()
+			if err := c.Initialize(ctx); err != nil {
+				t.Fatalf("Initialize: %v", err)
+			}
+			if _, err := c.NewSession(ctx, agent.SessionMetadata{}); err != nil {
+				t.Fatalf("NewSession: %v", err)
+			}
+			ch, err := c.Prompt(ctx, "", agent.PromptRequest{Text: "write a file"})
+			if err != nil {
+				t.Fatalf("Prompt: %v", err)
+			}
+			var text string
+			for _, ev := range drain(t, ch, 5*time.Second) {
+				if ev.Type == agent.EventPermission {
+					t.Fatal("auto policy must not raise EventPermission")
+				}
 				if ev.Type == agent.EventText {
 					text += ev.Text
 				}
 			}
 			if text != tc.want {
-				t.Fatalf("expected reply %q, got %q (events %+v)", tc.want, text, got)
+				t.Fatalf("expected %q, got %q", tc.want, text)
 			}
 		})
 	}
