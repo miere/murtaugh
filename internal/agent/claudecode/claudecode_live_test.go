@@ -118,10 +118,11 @@ func TestLivePermissionAskRoundTrip(t *testing.T) {
 	}
 	// A unique thread id so we create a fresh session rather than resume an old one.
 	meta := agent.SessionMetadata{TeamID: "TLIVE", ChannelID: "CLIVE", ThreadTS: "perm-" + work}
-	if _, err := c.NewSession(ctx, meta); err != nil {
+	sess, err := c.NewSession(ctx, meta)
+	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
-	ch, err := c.Prompt(ctx, "", agent.PromptRequest{Text: "Create a file named probe.txt containing the word hi, using the Write tool. Then say done."})
+	ch, err := c.Prompt(ctx, sess.ID, agent.PromptRequest{Text: "Create a file named probe.txt containing the word hi, using the Write tool. Then say done."})
 	if err != nil {
 		t.Fatalf("Prompt: %v", err)
 	}

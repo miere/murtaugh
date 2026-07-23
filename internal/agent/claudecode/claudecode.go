@@ -48,48 +48,33 @@ type Options struct {
 	// ACP path), "auto-allow", or "auto-deny". Headless turns (no active
 	// subscriber) always deny under "ask" — fail-safe, never a hang.
 	PermissionPolicy string
-	// OnUnsolicited receives events that arrive with no active turn — chiefly a
-	// background subagent's post-`result` completion. Phase 1 logs them; Phase 2
-	// routes them back into the originating Slack thread (spec 019 §5). nil drops.
-	OnUnsolicited func(agent.Event)
+	// OnBackground receives events a session emits with no active turn — chiefly a
+	// background subagent's post-`result` completion and the model's auto-continue.
+	// It is keyed by session id so the gateway can render them into the bound Slack
+	// thread (spec 019 §5). nil drops them (with a debug log).
+	OnBackground func(sessionID string, ev agent.Event)
 }
 
-// Client is a single long-lived Claude Code stream-json session, implementing
-// agent.Client. One Client == one `claude` process == one conversation, held open
-// across turns (so a background subagent completing after a turn's `result` still
-// reaches us). SessionManager caches one per ConversationKey.
+// Client is a Claude Code stream-json backend implementing agent.Client. Because
+// a `claude` stream-json process is bound to a single session (--session-id is a
+// launch arg), the client multiplexes conversations by running ONE process per
+// session, keyed by the deterministic session id. The gateway shares one Client
+// across every thread routed to an agent, so this multiplexing is what lets
+// concurrent Slack conversations coexist.
 //
-// The process is started lazily in NewSession (not Initialize): only there is the
-// Slack conversation metadata known, and the deterministic --session-id is derived
-// from it. Start prefers --resume (an existing on-disk session) and falls back to
-// --session-id (a fresh one) — restart resilience with no persisted mapping.
+// Each session process is held open across turns, so a background subagent
+// completing after a turn's `result` still reaches us — routed via OnBackground.
 type Client struct {
 	opts Options
 	log  *slog.Logger
 
 	mu       sync.Mutex
-	cmd      *exec.Cmd
-	stdin    io.WriteCloser
-	stderr   *cappedBuffer
-	procDone chan struct{} // closed when the current process's read loop ends
 	closed   bool
-	session  string
-
-	// active is the subscription for the in-flight turn; nil between turns.
-	active *subscription
-
-	// pending correlates a control_request we sent (by request_id) with its
-	// control_response.
-	pending map[string]chan *streamMessage
-	reqSeq  atomic.Int64
+	sessions map[string]*procSession
 }
 
-type subscription struct {
-	events chan agent.Event
-}
-
-// New builds a Client. It does not start the process; call Initialize then
-// NewSession (which starts it).
+// New builds a Client. It does not start any process; call Initialize then
+// NewSession (which starts a per-session process).
 func New(opts Options) *Client {
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
@@ -100,11 +85,12 @@ func New(opts Options) *Client {
 	if opts.Model != "" {
 		opts.Args = append(append([]string{}, opts.Args...), "--model", opts.Model)
 	}
-	return &Client{opts: opts, log: opts.Logger, pending: make(map[string]chan *streamMessage)}
+	return &Client{opts: opts, log: opts.Logger, sessions: make(map[string]*procSession)}
 }
 
-// Initialize validates the client is ready. The process is started lazily in
-// NewSession, where the conversation metadata (and thus the --session-id) is known.
+// Initialize validates the client is ready. Per-session processes are started
+// lazily in NewSession, where the conversation metadata (and thus the derived
+// --session-id) is known.
 func (c *Client) Initialize(_ context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -118,61 +104,156 @@ func (c *Client) Initialize(_ context.Context) error {
 }
 
 // NewSession derives the deterministic session id from the Slack conversation and
-// starts the process bound to it (resume-preferred, create-fallback). The returned
-// id is authoritative — it is the one we passed via --session-id/--resume.
+// starts (or reuses) the process bound to it. The returned id is authoritative.
 func (c *Client) NewSession(ctx context.Context, meta agent.SessionMetadata) (agent.Session, error) {
+	sessionID := deriveSessionID(meta)
 	c.mu.Lock()
-	closed := c.closed
-	c.mu.Unlock()
-	if closed {
+	if c.closed {
+		c.mu.Unlock()
 		return agent.Session{}, errors.New("claudecode: client is closed")
 	}
-	sessionID := deriveSessionID(meta)
-	if err := c.startSession(ctx, sessionID); err != nil {
+	if sess, ok := c.sessions[sessionID]; ok {
+		c.mu.Unlock()
+		return agent.Session{ID: sess.id}, nil
+	}
+	c.mu.Unlock()
+
+	sess := newProcSession(sessionID, c.opts)
+	if err := sess.startSession(ctx); err != nil {
 		return agent.Session{}, err
 	}
 	c.mu.Lock()
-	c.session = sessionID
+	// A concurrent NewSession may have won the race; prefer the stored one.
+	if existing, ok := c.sessions[sessionID]; ok {
+		c.mu.Unlock()
+		_ = sess.close()
+		return agent.Session{ID: existing.id}, nil
+	}
+	c.sessions[sessionID] = sess
 	c.mu.Unlock()
 	return agent.Session{ID: sessionID}, nil
 }
 
-// startSession brings up the process for sessionID, preferring to resume an
-// existing on-disk session and falling back to creating a fresh one. `claude`
-// makes --session-id create-only ("already in use" on an existing id), so resume
-// must be a distinct attempt.
-func (c *Client) startSession(ctx context.Context, sessionID string) error {
-	if err := c.spawnAndHandshake(ctx, []string{"--resume", sessionID}); err == nil {
+// Prompt sends one user turn to the identified session and returns its event
+// stream. The channel closes when the turn's `result` arrives; the process stays
+// alive for the next turn and for any background completion.
+func (c *Client) Prompt(_ context.Context, sessionID string, req agent.PromptRequest) (<-chan agent.Event, error) {
+	c.mu.Lock()
+	sess, ok := c.sessions[sessionID]
+	c.mu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("claudecode: no session %q", sessionID)
+	}
+	return sess.prompt(req)
+}
+
+// Cancel interrupts the identified session's in-flight turn via the control
+// channel. The session survives; background subagents keep running.
+func (c *Client) Cancel(ctx context.Context, sessionID string) error {
+	c.mu.Lock()
+	sess, ok := c.sessions[sessionID]
+	c.mu.Unlock()
+	if !ok {
+		return nil // nothing in flight
+	}
+	return sess.cancel(ctx)
+}
+
+// CloseSession tears down one session's process, e.g. when the gateway evicts an
+// idle conversation. Unknown ids are ignored.
+func (c *Client) CloseSession(sessionID string) {
+	c.mu.Lock()
+	sess := c.sessions[sessionID]
+	delete(c.sessions, sessionID)
+	c.mu.Unlock()
+	if sess != nil {
+		_ = sess.close()
+	}
+}
+
+// Close terminates every session process. Safe to call more than once.
+func (c *Client) Close() error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil
+	}
+	c.closed = true
+	sessions := c.sessions
+	c.sessions = make(map[string]*procSession)
+	c.mu.Unlock()
+	for _, sess := range sessions {
+		_ = sess.close()
+	}
+	return nil
+}
+
+// --- procSession: one process == one session ------------------------------
+
+type subscription struct {
+	events chan agent.Event
+}
+
+type procSession struct {
+	id     string
+	log    *slog.Logger
+	opts   Options // shared launch config + policy + OnBackground
+	policy string
+
+	mu       sync.Mutex
+	cmd      *exec.Cmd
+	stdin    io.WriteCloser
+	stderr   *cappedBuffer
+	procDone chan struct{}
+	closed   bool
+
+	active  *subscription
+	pending map[string]chan *streamMessage
+	reqSeq  atomic.Int64
+}
+
+func newProcSession(id string, opts Options) *procSession {
+	return &procSession{
+		id:      id,
+		log:     opts.Logger.With("session", id),
+		opts:    opts,
+		policy:  strings.ToLower(strings.TrimSpace(opts.PermissionPolicy)),
+		pending: make(map[string]chan *streamMessage),
+	}
+}
+
+// startSession brings up the process, preferring to resume an existing on-disk
+// session and falling back to creating a fresh one (--session-id is create-only).
+func (s *procSession) startSession(ctx context.Context) error {
+	if err := s.spawnAndHandshake(ctx, []string{"--resume", s.id}); err == nil {
 		return nil
 	} else {
-		c.log.Debug("claudecode: resume failed; creating fresh session", "session", sessionID, "error", err)
+		s.log.Debug("claudecode: resume failed; creating fresh session", "error", err)
 		resumeErr := err
-		c.teardownProc()
-		if createErr := c.spawnAndHandshake(ctx, []string{"--session-id", sessionID}); createErr != nil {
-			return fmt.Errorf("claudecode: start session %s: resume=%v; create=%w", sessionID, resumeErr, createErr)
+		s.teardownProc()
+		if createErr := s.spawnAndHandshake(ctx, []string{"--session-id", s.id}); createErr != nil {
+			return fmt.Errorf("claudecode: start session %s: resume=%v; create=%w", s.id, resumeErr, createErr)
 		}
 		return nil
 	}
 }
 
-func (c *Client) spawnAndHandshake(ctx context.Context, sessionArgs []string) error {
-	if err := c.start(sessionArgs); err != nil {
+func (s *procSession) spawnAndHandshake(ctx context.Context, sessionArgs []string) error {
+	if err := s.start(sessionArgs); err != nil {
 		return err
 	}
-	if err := c.handshake(ctx); err != nil {
-		return fmt.Errorf("%w%s", err, c.stderrSuffix())
+	if err := s.handshake(ctx); err != nil {
+		return fmt.Errorf("%w%s", err, s.stderrSuffix())
 	}
 	return nil
 }
 
-// start spawns the process with the base args plus session-selection args, wires
-// stdio, and launches the read loop. It replaces any prior process handle.
-func (c *Client) start(sessionArgs []string) error {
-	args := append(append([]string{}, c.opts.Args...), sessionArgs...)
-	cmd := exec.Command(c.opts.Command, args...)
-	cmd.Dir = c.opts.WorkDir
-	if len(c.opts.Env) > 0 {
-		cmd.Env = append(cmd.Environ(), c.opts.Env...)
+func (s *procSession) start(sessionArgs []string) error {
+	args := append(append([]string{}, s.opts.Args...), sessionArgs...)
+	cmd := exec.Command(s.opts.Command, args...)
+	cmd.Dir = s.opts.WorkDir
+	if len(s.opts.Env) > 0 {
+		cmd.Env = append(cmd.Environ(), s.opts.Env...)
 	}
 	stderr := &cappedBuffer{limit: 8 << 10}
 	cmd.Stderr = stderr
@@ -185,28 +266,25 @@ func (c *Client) start(sessionArgs []string) error {
 		return fmt.Errorf("claudecode: open stdout: %w", err)
 	}
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("claudecode: start %q: %w", c.opts.Command, err)
+		return fmt.Errorf("claudecode: start %q: %w", s.opts.Command, err)
 	}
 	done := make(chan struct{})
-	c.mu.Lock()
-	c.cmd = cmd
-	c.stdin = stdin
-	c.stderr = stderr
-	c.procDone = done
-	c.mu.Unlock()
+	s.mu.Lock()
+	s.cmd = cmd
+	s.stdin = stdin
+	s.stderr = stderr
+	s.procDone = done
+	s.mu.Unlock()
 	go func() {
-		c.readLoop(stdout)
+		s.readLoop(stdout)
 		_ = cmd.Wait()
 		close(done)
 	}()
 	return nil
 }
 
-// handshake sends the initialize control_request and waits for its response —
-// the CLI requires it before honouring any other control request (permissions,
-// interrupt). It fails fast if the process exits first (e.g. a failed --resume).
-func (c *Client) handshake(ctx context.Context) error {
-	resp, err := c.sendControl(ctx, map[string]any{"subtype": "initialize"})
+func (s *procSession) handshake(ctx context.Context) error {
+	resp, err := s.sendControl(ctx, map[string]any{"subtype": "initialize"})
 	if err != nil {
 		return fmt.Errorf("claudecode: initialize handshake: %w", err)
 	}
@@ -216,13 +294,11 @@ func (c *Client) handshake(ctx context.Context) error {
 	return nil
 }
 
-// teardownProc kills the current process without closing the Client, so a failed
-// resume attempt can be replaced by a create attempt.
-func (c *Client) teardownProc() {
-	c.mu.Lock()
-	stdin, cmd := c.stdin, c.cmd
-	c.stdin, c.cmd = nil, nil
-	c.mu.Unlock()
+func (s *procSession) teardownProc() {
+	s.mu.Lock()
+	stdin, cmd := s.stdin, s.cmd
+	s.stdin, s.cmd = nil, nil
+	s.mu.Unlock()
 	if stdin != nil {
 		_ = stdin.Close()
 	}
@@ -231,125 +307,126 @@ func (c *Client) teardownProc() {
 	}
 }
 
-// Prompt sends one user turn and returns the event stream for it. The channel
-// closes when the turn's `result` arrives; the process stays alive for the next
-// turn and for any background completion.
-func (c *Client) Prompt(_ context.Context, _ string, req agent.PromptRequest) (<-chan agent.Event, error) {
+func (s *procSession) prompt(req agent.PromptRequest) (<-chan agent.Event, error) {
 	sub := &subscription{events: make(chan agent.Event, 64)}
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		return nil, errors.New("claudecode: client is closed")
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil, errors.New("claudecode: session is closed")
 	}
-	c.active = sub
-	c.mu.Unlock()
+	s.active = sub
+	s.mu.Unlock()
 
-	if err := c.writeUser(req.Text); err != nil {
-		c.mu.Lock()
-		c.active = nil
-		c.mu.Unlock()
+	if err := s.writeUser(req.Text); err != nil {
+		s.mu.Lock()
+		s.active = nil
+		s.mu.Unlock()
 		close(sub.events)
 		return nil, err
 	}
 	return sub.events, nil
 }
 
-// Cancel interrupts the in-flight turn via the control channel. The session
-// survives; any background subagents keep running (stop those with stop_task).
-func (c *Client) Cancel(ctx context.Context, _ string) error {
-	_, err := c.sendControl(ctx, map[string]any{"subtype": "interrupt"})
+func (s *procSession) cancel(ctx context.Context) error {
+	_, err := s.sendControl(ctx, map[string]any{"subtype": "interrupt"})
 	return err
 }
 
-// Close terminates the process. It is safe to call more than once.
-func (c *Client) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.closed {
+func (s *procSession) close() error {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
 		return nil
 	}
-	c.closed = true
-	if c.stdin != nil {
-		_ = c.stdin.Close()
+	s.closed = true
+	stdin, cmd := s.stdin, s.cmd
+	s.mu.Unlock()
+	if stdin != nil {
+		_ = stdin.Close()
 	}
-	if c.cmd != nil && c.cmd.Process != nil {
-		_ = c.cmd.Process.Kill()
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
 	}
 	return nil
 }
 
 // --- stream reading -------------------------------------------------------
 
-func (c *Client) readLoop(stdout io.Reader) {
+func (s *procSession) readLoop(stdout io.Reader) {
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
 	for scanner.Scan() {
 		msg, err := decodeMessage(scanner.Bytes())
 		if err != nil {
-			c.log.Warn("claudecode: undecodable stream line", "error", err)
+			s.log.Warn("claudecode: undecodable stream line", "error", err)
 			continue
 		}
 		if msg == nil {
 			continue
 		}
-		c.dispatch(msg)
+		s.dispatch(msg)
 	}
-	c.failActive(errors.New("claudecode: stream closed"))
+	s.failActive(errors.New("claudecode: stream closed"))
 }
 
-func (c *Client) dispatch(msg *streamMessage) {
+func (s *procSession) dispatch(msg *streamMessage) {
 	switch {
 	case msg.Type == "control_response":
-		c.deliverControlResponse(msg)
+		s.deliverControlResponse(msg)
 	case msg.Type == "control_request":
-		go c.handleControlRequest(msg)
+		go s.handleControlRequest(msg)
 	case msg.isResult():
 		stop := msg.StopReason
 		if stop == "" {
 			stop = "end_turn"
 		}
-		c.completeActive(stop)
+		s.completeActive(stop)
 	default:
 		for _, ev := range msg.toEvents() {
-			c.emit(ev)
+			s.emit(ev)
 		}
 	}
 }
 
-// emit delivers an event to the active turn, or to OnUnsolicited when a turn is
-// not open (a background completion arriving after `result`).
-func (c *Client) emit(ev agent.Event) {
-	c.mu.Lock()
-	sub := c.active
-	c.mu.Unlock()
+// emit delivers to the active turn, or — when a turn is not open — to the
+// background sink (a subagent completion arriving after `result`).
+func (s *procSession) emit(ev agent.Event) {
+	s.mu.Lock()
+	sub := s.active
+	s.mu.Unlock()
 	if sub != nil {
 		sub.events <- ev
 		return
 	}
-	if c.opts.OnUnsolicited != nil {
-		c.opts.OnUnsolicited(ev)
+	if s.opts.OnBackground != nil {
+		s.opts.OnBackground(s.id, ev)
 		return
 	}
-	c.log.Debug("claudecode: dropping unsolicited event (no active turn)", "type", string(ev.Type))
+	s.log.Debug("claudecode: dropping background event (no active turn, no sink)", "type", string(ev.Type))
 }
 
-func (c *Client) completeActive(stopReason string) {
-	c.mu.Lock()
-	sub := c.active
-	c.active = nil
-	c.mu.Unlock()
+func (s *procSession) completeActive(stopReason string) {
+	s.mu.Lock()
+	sub := s.active
+	s.active = nil
+	s.mu.Unlock()
 	if sub == nil {
+		// A `result` with no active turn closes a background auto-continue: signal
+		// it to the sink so the gateway can finalise the thread message.
+		if s.opts.OnBackground != nil {
+			s.opts.OnBackground(s.id, agent.Event{Type: agent.EventComplete, StopReason: stopReason})
+		}
 		return
 	}
 	sub.events <- agent.Event{Type: agent.EventComplete, StopReason: stopReason}
 	close(sub.events)
 }
 
-func (c *Client) failActive(err error) {
-	c.mu.Lock()
-	sub := c.active
-	c.active = nil
-	c.mu.Unlock()
+func (s *procSession) failActive(err error) {
+	s.mu.Lock()
+	sub := s.active
+	s.active = nil
+	s.mu.Unlock()
 	if sub == nil {
 		return
 	}
@@ -359,26 +436,24 @@ func (c *Client) failActive(err error) {
 
 // --- control protocol -----------------------------------------------------
 
-// sendControl writes a control_request and waits for the matching control_response,
-// unblocking early if the process exits or ctx is cancelled.
-func (c *Client) sendControl(ctx context.Context, request map[string]any) (*streamMessage, error) {
-	id := fmt.Sprintf("req-%d", c.reqSeq.Add(1))
+func (s *procSession) sendControl(ctx context.Context, request map[string]any) (*streamMessage, error) {
+	id := fmt.Sprintf("req-%d", s.reqSeq.Add(1))
 	ch := make(chan *streamMessage, 1)
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		return nil, errors.New("claudecode: client is closed")
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil, errors.New("claudecode: session is closed")
 	}
-	done := c.procDone
-	c.pending[id] = ch
-	c.mu.Unlock()
+	done := s.procDone
+	s.pending[id] = ch
+	s.mu.Unlock()
 	if done == nil {
-		done = make(chan struct{}) // never closes: no process yet, rely on ctx
+		done = make(chan struct{})
 	}
 
 	frame := map[string]any{"type": "control_request", "request_id": id, "request": request}
-	if err := c.writeJSON(frame); err != nil {
-		c.dropPending(id)
+	if err := s.writeJSON(frame); err != nil {
+		s.dropPending(id)
 		return nil, err
 	}
 
@@ -386,51 +461,48 @@ func (c *Client) sendControl(ctx context.Context, request map[string]any) (*stre
 	case resp := <-ch:
 		return resp, nil
 	case <-done:
-		c.dropPending(id)
+		s.dropPending(id)
 		return nil, errors.New("claudecode: process exited before control response")
 	case <-ctx.Done():
-		c.dropPending(id)
+		s.dropPending(id)
 		return nil, ctx.Err()
 	}
 }
 
-func (c *Client) dropPending(id string) {
-	c.mu.Lock()
-	delete(c.pending, id)
-	c.mu.Unlock()
+func (s *procSession) dropPending(id string) {
+	s.mu.Lock()
+	delete(s.pending, id)
+	s.mu.Unlock()
 }
 
-func (c *Client) deliverControlResponse(msg *streamMessage) {
+func (s *procSession) deliverControlResponse(msg *streamMessage) {
 	id := controlResponseRequestID(msg)
 	if id == "" {
 		return
 	}
-	c.mu.Lock()
-	ch := c.pending[id]
-	delete(c.pending, id)
-	c.mu.Unlock()
+	s.mu.Lock()
+	ch := s.pending[id]
+	delete(s.pending, id)
+	s.mu.Unlock()
 	if ch != nil {
 		ch <- msg
 	}
 }
 
-// handleControlRequest serves a control_request the CLI sends us. The only one we
-// implement is can_use_tool (a tool-permission decision); anything else is
-// acknowledged with an error so the CLI fails fast rather than hanging.
-func (c *Client) handleControlRequest(msg *streamMessage) {
+func (s *procSession) handleControlRequest(msg *streamMessage) {
 	sub := controlRequestSubtype(msg)
 	reqID := rawString(msg.RequestID)
 	switch sub {
 	case "can_use_tool":
-		c.answerPermission(reqID, msg)
+		s.answerPermission(reqID, msg)
 	default:
-		c.writeControlResponseError(reqID, fmt.Sprintf("claudecode: unsupported control request %q", sub))
+		s.writeControlResponseError(reqID, fmt.Sprintf("claudecode: unsupported control request %q", sub))
 	}
 }
 
-func (c *Client) answerPermission(reqID string, msg *streamMessage) {
+func (s *procSession) answerPermission(reqID string, msg *streamMessage) {
 	toolName, input := parseCanUseTool(msg.Request)
-	allow := c.decidePermission(toolName, input)
+	allow := s.decidePermission(toolName, input)
 	behavior := "deny"
 	if allow {
 		behavior = "allow"
@@ -439,7 +511,7 @@ func (c *Client) answerPermission(reqID string, msg *streamMessage) {
 	if allow && len(input) > 0 {
 		inner["updatedInput"] = json.RawMessage(input)
 	}
-	c.writeJSON(map[string]any{
+	s.writeJSON(map[string]any{
 		"type": "control_response",
 		"response": map[string]any{
 			"subtype":    "success",
@@ -452,21 +524,20 @@ func (c *Client) answerPermission(reqID string, msg *streamMessage) {
 // decidePermission resolves a can_use_tool request. auto-allow/auto-deny answer
 // without a human; the default ("ask") raises an EventPermission on the active
 // turn — reusing the chat handler's approval card exactly like the ACP path — and
-// blocks on the human's decision. No active turn (headless) or a dead process
-// denies, so a turn never hangs on an answer that cannot come.
-func (c *Client) decidePermission(toolName string, input json.RawMessage) bool {
-	switch strings.ToLower(strings.TrimSpace(c.opts.PermissionPolicy)) {
+// blocks on the human's decision. No active turn or a dead process denies.
+func (s *procSession) decidePermission(toolName string, input json.RawMessage) bool {
+	switch s.policy {
 	case "auto-allow":
 		return true
 	case "auto-deny":
 		return false
 	default: // ask
-		c.mu.Lock()
-		sub := c.active
-		done := c.procDone
-		c.mu.Unlock()
+		s.mu.Lock()
+		sub := s.active
+		done := s.procDone
+		s.mu.Unlock()
 		if sub == nil {
-			c.log.Warn("claudecode: permission request with no active turn; denying", "tool", toolName)
+			s.log.Warn("claudecode: permission request with no active turn; denying", "tool", toolName)
 			return false
 		}
 		decision := make(chan string, 1)
@@ -482,7 +553,7 @@ func (c *Client) decidePermission(toolName string, input json.RawMessage) bool {
 			Decision: decision,
 		}
 		if !sendEvent(sub, agent.Event{Type: agent.EventPermission, Permission: prompt}) {
-			return false // turn ended underneath us
+			return false
 		}
 		select {
 		case optionID := <-decision:
@@ -492,6 +563,58 @@ func (c *Client) decidePermission(toolName string, input json.RawMessage) bool {
 		}
 	}
 }
+
+func (s *procSession) writeControlResponseError(reqID, message string) {
+	s.writeJSON(map[string]any{
+		"type": "control_response",
+		"response": map[string]any{
+			"subtype":    "error",
+			"request_id": reqID,
+			"error":      message,
+		},
+	})
+}
+
+// --- stdin writing --------------------------------------------------------
+
+func (s *procSession) writeUser(text string) error {
+	return s.writeJSON(map[string]any{
+		"type":    "user",
+		"message": map[string]any{"role": "user", "content": text},
+	})
+}
+
+func (s *procSession) writeJSON(v any) error {
+	encoded, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Errorf("claudecode: encode frame: %w", err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.stdin == nil {
+		return errors.New("claudecode: stdin unavailable")
+	}
+	if _, err := s.stdin.Write(append(encoded, '\n')); err != nil {
+		return fmt.Errorf("claudecode: write frame: %w", err)
+	}
+	return nil
+}
+
+func (s *procSession) stderrSuffix() string {
+	s.mu.Lock()
+	sb := s.stderr
+	s.mu.Unlock()
+	if sb == nil {
+		return ""
+	}
+	str := strings.TrimSpace(sb.String())
+	if str == "" {
+		return ""
+	}
+	return " [stderr: " + str + "]"
+}
+
+// --- shared helpers -------------------------------------------------------
 
 // permissionTitle renders a can_use_tool input into a concise human title — the
 // command for a shell call, the path for a file op, else the compact JSON.
@@ -522,59 +645,8 @@ func sendEvent(sub *subscription, ev agent.Event) (ok bool) {
 	return true
 }
 
-func (c *Client) writeControlResponseError(reqID, message string) {
-	c.writeJSON(map[string]any{
-		"type": "control_response",
-		"response": map[string]any{
-			"subtype":    "error",
-			"request_id": reqID,
-			"error":      message,
-		},
-	})
-}
-
-// --- stdin writing --------------------------------------------------------
-
-func (c *Client) writeUser(text string) error {
-	return c.writeJSON(map[string]any{
-		"type":    "user",
-		"message": map[string]any{"role": "user", "content": text},
-	})
-}
-
-func (c *Client) writeJSON(v any) error {
-	encoded, err := json.Marshal(v)
-	if err != nil {
-		return fmt.Errorf("claudecode: encode frame: %w", err)
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.closed || c.stdin == nil {
-		return errors.New("claudecode: stdin unavailable")
-	}
-	if _, err := c.stdin.Write(append(encoded, '\n')); err != nil {
-		return fmt.Errorf("claudecode: write frame: %w", err)
-	}
-	return nil
-}
-
-func (c *Client) stderrSuffix() string {
-	c.mu.Lock()
-	sb := c.stderr
-	c.mu.Unlock()
-	if sb == nil {
-		return ""
-	}
-	s := strings.TrimSpace(sb.String())
-	if s == "" {
-		return ""
-	}
-	return " [stderr: " + s + "]"
-}
-
 // cappedBuffer is a bounded, concurrency-safe io.Writer used to capture a
-// process's stderr for diagnostics without growing without limit over a
-// long-lived session.
+// process's stderr for diagnostics without growing without limit.
 type cappedBuffer struct {
 	mu    sync.Mutex
 	buf   []byte
