@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/miere/murtaugh/internal/agent"
+	"github.com/miere/murtaugh/internal/agent/acp"
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/slack-go/slack"
 )
@@ -622,7 +623,7 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest) (retErr error
 					return event.Error
 				}
 				turnErr = event.Error
-				if errors.Is(event.Error, agent.ErrToolCeiling) {
+				if errors.Is(event.Error, acp.ErrToolCeiling) {
 					// A tool blew past its ceiling. The ACP agent may still be running it
 					// and (lacking session/cancel) cannot be stopped, so drop the session
 					// binding like the idle path — the next message opens a fresh session.

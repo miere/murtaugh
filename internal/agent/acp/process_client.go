@@ -1,4 +1,4 @@
-package agent
+package acp
 
 import (
 	"bufio"
@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/miere/murtaugh/internal/agent"
 	"io"
 	"log/slog"
 	"mime"
@@ -32,7 +33,7 @@ type ProcessOptions struct {
 	Logger *slog.Logger
 
 	// PermissionPolicy governs how agent-initiated session/request_permission
-	// requests are answered: "ask" (raise an EventPermission on the turn's event
+	// requests are answered: "ask" (raise an agent.EventPermission on the turn's event
 	// stream for the consumer to resolve with a human), "auto-allow", or
 	// "auto-deny". Empty is treated as "ask". "ask" with no live turn consuming
 	// events (headless/CLI) denies — fail-safe and fast, never a hang.
@@ -40,7 +41,7 @@ type ProcessOptions struct {
 	// Aggregator, when set, registers each session with Murtaugh's per-agent MCP
 	// aggregator and supplies the stdio bridge server advertised in session/new,
 	// so the agent can reach Murtaugh's own tools. nil leaves mcpServers empty.
-	Aggregator Aggregator
+	Aggregator agent.Aggregator
 	// Persona is Murtaugh's shared persona (SOUL.md). ACP exposes no system role,
 	// so when set it is injected as a leading <persona> block on every prompt,
 	// keeping an ACP agent's voice aligned with native — even when the agent runs
@@ -65,7 +66,7 @@ type ProcessOptions struct {
 // notification arriving as a turn tears down sends on a closed channel and the
 // process panics.
 type subscription struct {
-	events chan Event
+	events chan agent.Event
 	wg     sync.WaitGroup
 }
 
@@ -132,7 +133,7 @@ func (c *ProcessClient) Capabilities() AgentCapabilities {
 // any reply text was already streamed this turn (sawText) so the final result
 // payload is not re-emitted on top of the streamed chunks.
 type promptScope struct {
-	loc     TurnLocation
+	loc     agent.TurnLocation
 	ctx     context.Context
 	sawText *atomic.Bool
 }
@@ -289,7 +290,7 @@ func parseAgentCapabilities(result json.RawMessage) AgentCapabilities {
 	}
 }
 
-func (c *ProcessClient) NewSession(ctx context.Context, meta SessionMetadata) (Session, error) {
+func (c *ProcessClient) NewSession(ctx context.Context, meta agent.SessionMetadata) (agent.Session, error) {
 	mcpServers, release := c.aggregatorServers(meta)
 	result, err := c.call(ctx, "session/new", map[string]any{
 		"cwd":        c.sessionCWD(),
@@ -299,7 +300,7 @@ func (c *ProcessClient) NewSession(ctx context.Context, meta SessionMetadata) (S
 		if release != nil {
 			release()
 		}
-		return Session{}, err
+		return agent.Session{}, err
 	}
 	var decoded struct {
 		SessionID string `json:"sessionId"`
@@ -310,7 +311,7 @@ func (c *ProcessClient) NewSession(ctx context.Context, meta SessionMetadata) (S
 			if release != nil {
 				release()
 			}
-			return Session{}, fmt.Errorf("decode session/new response: %w", err)
+			return agent.Session{}, fmt.Errorf("decode session/new response: %w", err)
 		}
 	}
 	id := decoded.SessionID
@@ -321,14 +322,14 @@ func (c *ProcessClient) NewSession(ctx context.Context, meta SessionMetadata) (S
 		if release != nil {
 			release()
 		}
-		return Session{}, errors.New("session/new response did not include sessionId")
+		return agent.Session{}, errors.New("session/new response did not include sessionId")
 	}
 	if release != nil {
 		c.mu.Lock()
 		c.releases = append(c.releases, release)
 		c.mu.Unlock()
 	}
-	return Session{ID: id}, nil
+	return agent.Session{ID: id}, nil
 }
 
 // aggregatorServers asks the aggregator (if any) to register this session and
@@ -336,7 +337,7 @@ func (c *ProcessClient) NewSession(ctx context.Context, meta SessionMetadata) (S
 // session fails to open. An empty list (and nil release) when no aggregator is
 // configured or registration fails — the agent then simply gets no Murtaugh
 // tools, which is logged loudly rather than failing the session.
-func (c *ProcessClient) aggregatorServers(meta SessionMetadata) ([]any, func()) {
+func (c *ProcessClient) aggregatorServers(meta agent.SessionMetadata) ([]any, func()) {
 	if c.opts.Aggregator == nil {
 		return []any{}, nil
 	}
@@ -375,11 +376,11 @@ func (c *ProcessClient) sessionCWD() string {
 	return wd
 }
 
-func (c *ProcessClient) Prompt(ctx context.Context, sessionID string, request PromptRequest) (<-chan Event, error) {
+func (c *ProcessClient) Prompt(ctx context.Context, sessionID string, request agent.PromptRequest) (<-chan agent.Event, error) {
 	if strings.TrimSpace(sessionID) == "" {
 		return nil, errors.New("session id is required")
 	}
-	sub := &subscription{events: make(chan Event, 32)}
+	sub := &subscription{events: make(chan agent.Event, 32)}
 	events := sub.events
 	sawText := &atomic.Bool{}
 	watcher := newToolWatcher(c.now)
@@ -387,7 +388,7 @@ func (c *ProcessClient) Prompt(ctx context.Context, sessionID string, request Pr
 	c.subscribers[sessionID] = sub
 	// Stash where this turn is talking and its context so a permission request
 	// raised mid-turn can be asked in the same thread and cancelled with the turn.
-	c.dests[sessionID] = promptScope{loc: TurnLocation{ChannelID: request.Channel, ThreadTS: request.Thread}, ctx: ctx, sawText: sawText}
+	c.dests[sessionID] = promptScope{loc: agent.TurnLocation{ChannelID: request.Channel, ThreadTS: request.Thread}, ctx: ctx, sawText: sawText}
 	c.toolWatch[sessionID] = watcher
 	c.mu.Unlock()
 
@@ -418,10 +419,10 @@ func (c *ProcessClient) Prompt(ctx context.Context, sessionID string, request Pr
 			// surface that specific cause rather than the bare context cancellation, so
 			// the consumer can render why the turn stopped and drop the session.
 			if cause := context.Cause(promptCtx); errors.Is(cause, ErrToolCeiling) {
-				events <- Event{Type: EventError, Error: cause}
+				events <- agent.Event{Type: agent.EventError, Error: cause}
 				return
 			}
-			events <- Event{Type: EventError, Error: err}
+			events <- agent.Event{Type: agent.EventError, Error: err}
 			return
 		}
 		text := extractText(result)
@@ -437,14 +438,14 @@ func (c *ProcessClient) Prompt(ctx context.Context, sessionID string, request Pr
 		// at the end. A non-streaming agent that returns its reply only in the
 		// result still has it surfaced, since nothing set sawText.
 		if text != "" && !sawText.Load() {
-			events <- Event{Type: EventText, Text: text}
+			events <- agent.Event{Type: agent.EventText, Text: text}
 		}
-		events <- Event{Type: EventComplete, StopReason: stopReason}
+		events <- agent.Event{Type: agent.EventComplete, StopReason: stopReason}
 	}()
 	return events, nil
 }
 
-// promptBlocks renders a PromptRequest into ACP `session/prompt` content
+// promptBlocks renders a agent.PromptRequest into ACP `session/prompt` content
 // blocks. ACP exposes no system role, so leading delimited blocks are the
 // closest stand-in for a system note. Order:
 //  0. a <persona> block (only when a shared persona is configured) carrying
@@ -462,7 +463,7 @@ func (c *ProcessClient) Prompt(ctx context.Context, sessionID string, request Pr
 //  3. the thread transcript, when History is set (a freshly opened session
 //     backfilling an existing thread).
 //  4. the user's text.
-func (c *ProcessClient) promptBlocks(request PromptRequest) []map[string]string {
+func (c *ProcessClient) promptBlocks(request agent.PromptRequest) []map[string]string {
 	blocks := make([]map[string]string, 0, 5)
 	if persona := strings.TrimSpace(c.opts.Persona); persona != "" {
 		blocks = append(blocks, map[string]string{"type": "text", "text": "<persona>\n" + persona + "\n</persona>"})
@@ -885,13 +886,13 @@ func (c *ProcessClient) handlePermissionRequest(id, params json.RawMessage) {
 
 // decidePermission returns the optionId to grant for a permission request, or ""
 // to cancel. auto-allow/auto-deny pick a matching option without a human; ask
-// raises an EventPermission on the turn's event stream and blocks on the
+// raises an agent.EventPermission on the turn's event stream and blocks on the
 // consumer's decision, so the request is ordered with the rest of the reply (the
 // chat handler settles any open reply text, posts the approval card, and feeds the
 // decision back) — mirroring how the native loop gates a tool call inline. ask
 // with no live turn (no subscriber) or a cancelled turn denies (returns "") —
 // fail-safe and fast, never a hang.
-func (c *ProcessClient) decidePermission(sessionID, title, kind string, options []PermissionOption) string {
+func (c *ProcessClient) decidePermission(sessionID, title, kind string, options []agent.PermissionOption) string {
 	// label is for logging only: the title (command/detail) when present, else the
 	// kind, else a placeholder.
 	label := title
@@ -929,12 +930,12 @@ func (c *ProcessClient) decidePermission(sessionID, title, kind string, options 
 		// Buffered so the consumer's reply never blocks even if we have already
 		// given up on ctx.Done below.
 		decision := make(chan string, 1)
-		prompt := &PermissionPrompt{
-			Request:  PermissionRequest{SessionID: sessionID, ToolKind: kind, ToolTitle: title, Options: options},
+		prompt := &agent.PermissionPrompt{
+			Request:  agent.PermissionRequest{SessionID: sessionID, ToolKind: kind, ToolTitle: title, Options: options},
 			Decision: decision,
 		}
 		select {
-		case ch <- Event{Type: EventPermission, Permission: prompt}:
+		case ch <- agent.Event{Type: agent.EventPermission, Permission: prompt}:
 			sub.wg.Done()
 		case <-ctx.Done():
 			sub.wg.Done()
@@ -954,7 +955,7 @@ func (c *ProcessClient) decidePermission(sessionID, title, kind string, options 
 // pickOptionByKind returns the optionId of the first option whose kind matches the
 // wanted action ("allow" or "reject"), preferring the _once variant over _always,
 // then any kind with the wanted prefix. Returns "" when none match.
-func pickOptionByKind(options []PermissionOption, want string) string {
+func pickOptionByKind(options []agent.PermissionOption, want string) string {
 	for _, kind := range []string{want + "_once", want + "_always"} {
 		for _, o := range options {
 			if o.Kind == kind {
@@ -975,7 +976,7 @@ func pickOptionByKind(options []PermissionOption, want string) string {
 // is the agent's human-readable title (for an execute call, the command line);
 // kind is the ACP toolCall.kind. They are kept separate so the prompt can show a
 // concise label and render the command as its own fenced code block.
-func parsePermissionRequest(raw json.RawMessage) (sessionID, title, kind string, options []PermissionOption) {
+func parsePermissionRequest(raw json.RawMessage) (sessionID, title, kind string, options []agent.PermissionOption) {
 	var p struct {
 		SessionID string `json:"sessionId"`
 		ToolCall  struct {
@@ -993,7 +994,7 @@ func parsePermissionRequest(raw json.RawMessage) (sessionID, title, kind string,
 	title = p.ToolCall.Title
 	kind = p.ToolCall.Kind
 	for _, o := range p.Options {
-		options = append(options, PermissionOption{ID: o.OptionID, Name: o.Name, Kind: o.Kind})
+		options = append(options, agent.PermissionOption{ID: o.OptionID, Name: o.Name, Kind: o.Kind})
 	}
 	return sessionID, title, kind, options
 }
@@ -1076,7 +1077,7 @@ func (c *ProcessClient) deliverNotification(notification rpcNotification) {
 		// Block on the send: dropping task or text notifications truncates the
 		// agent response in the consumer (chat handler). The readLoop is back-
 		// pressured by the consumer, which is the intended behaviour.
-		ch <- Event{Type: EventTask, Task: task}
+		ch <- agent.Event{Type: agent.EventTask, Task: task}
 		return
 	}
 	// An ACP `plan` update is the agent's structured task list. Render each entry
@@ -1087,7 +1088,7 @@ func (c *ProcessClient) deliverNotification(notification rpcNotification) {
 	// by its position: a stable id across the plan's snapshot updates.
 	if tasks := extractPlanTasks(notification.Params); len(tasks) > 0 {
 		for _, task := range tasks {
-			ch <- Event{Type: EventTask, Task: task}
+			ch <- agent.Event{Type: agent.EventTask, Task: task}
 		}
 		return
 	}
@@ -1097,9 +1098,9 @@ func (c *ProcessClient) deliverNotification(notification rpcNotification) {
 	// lands before the prose that introduces it. Block on the send for the same
 	// back-pressure reason as text/task above.
 	for _, a := range extractAttachments(notification.Params) {
-		ch <- Event{Type: EventAttachment, Attachment: a}
+		ch <- agent.Event{Type: agent.EventAttachment, Attachment: a}
 	}
-	event := Event{Type: EventText, Text: extractNotificationText(notification.Params)}
+	event := agent.Event{Type: agent.EventText, Text: extractNotificationText(notification.Params)}
 	if event.Text == "" {
 		// An update we neither rendered as a task nor recognised as agent text.
 		// Thought chunks etc. are expected and silent; but if an *unrecognised*
@@ -1129,7 +1130,7 @@ func (c *ProcessClient) failAll(err error) {
 	}
 	for _, sub := range c.subscribers {
 		select {
-		case sub.events <- Event{Type: EventError, Error: err}:
+		case sub.events <- agent.Event{Type: agent.EventError, Error: err}:
 		default:
 		}
 	}
@@ -1177,7 +1178,7 @@ func extractNotificationText(raw json.RawMessage) string {
 // resource_link block carries only a URI (no bytes) and is left to the text path
 // to mention. Anything malformed (bad base64, missing data) is skipped rather
 // than failing the turn.
-func extractAttachments(raw json.RawMessage) []*AttachmentEvent {
+func extractAttachments(raw json.RawMessage) []*agent.AttachmentEvent {
 	var value any
 	if len(raw) == 0 || json.Unmarshal(raw, &value) != nil {
 		return nil
@@ -1197,7 +1198,7 @@ func extractAttachments(raw json.RawMessage) []*AttachmentEvent {
 	if !ok {
 		return nil
 	}
-	var out []*AttachmentEvent
+	var out []*agent.AttachmentEvent
 	for _, block := range contentBlocks(content) {
 		if a := attachmentFromBlock(block); a != nil {
 			out = append(out, a)
@@ -1224,9 +1225,9 @@ func contentBlocks(content any) []map[string]any {
 	return nil
 }
 
-// attachmentFromBlock decodes one content block into an AttachmentEvent, or nil
+// attachmentFromBlock decodes one content block into an agent.AttachmentEvent, or nil
 // when the block is text, a bare link, or otherwise carries no embedded bytes.
-func attachmentFromBlock(block map[string]any) *AttachmentEvent {
+func attachmentFromBlock(block map[string]any) *agent.AttachmentEvent {
 	switch t, _ := block["type"].(string); t {
 	case "image", "audio":
 		data, _ := block["data"].(string)
@@ -1249,10 +1250,10 @@ func attachmentFromBlock(block map[string]any) *AttachmentEvent {
 	}
 }
 
-// decodeAttachment base64-decodes an embedded blob and builds an AttachmentEvent
+// decodeAttachment base64-decodes an embedded blob and builds an agent.AttachmentEvent
 // with a best-effort filename derived from the resource URI or the mimetype.
 // Returns nil when the payload is empty or not valid base64.
-func decodeAttachment(b64, mimeType, uri, kind string) *AttachmentEvent {
+func decodeAttachment(b64, mimeType, uri, kind string) *agent.AttachmentEvent {
 	b64 = strings.TrimSpace(b64)
 	if b64 == "" {
 		return nil
@@ -1261,7 +1262,7 @@ func decodeAttachment(b64, mimeType, uri, kind string) *AttachmentEvent {
 	if err != nil || len(data) == 0 {
 		return nil
 	}
-	return &AttachmentEvent{
+	return &agent.AttachmentEvent{
 		Filename: attachmentFilename(uri, mimeType, kind),
 		Mimetype: mimeType,
 		Data:     data,
@@ -1360,7 +1361,7 @@ func carriesText(raw json.RawMessage) bool {
 	return strings.TrimSpace(strings.Join(extractStrings(content), "")) != ""
 }
 
-func extractTask(raw json.RawMessage) *TaskEvent {
+func extractTask(raw json.RawMessage) *agent.TaskEvent {
 	var value any
 	if len(raw) == 0 || json.Unmarshal(raw, &value) != nil {
 		return nil
@@ -1389,7 +1390,7 @@ func extractTask(raw json.RawMessage) *TaskEvent {
 // is keyed by its index ("plan-0", "plan-1", …) — stable across the snapshots so
 // the consumer updates the same cards in place rather than stacking duplicates.
 // An entry with no content is skipped (a blank card carries nothing).
-func extractPlanTasks(raw json.RawMessage) []*TaskEvent {
+func extractPlanTasks(raw json.RawMessage) []*agent.TaskEvent {
 	var value any
 	if len(raw) == 0 || json.Unmarshal(raw, &value) != nil {
 		return nil
@@ -1409,7 +1410,7 @@ func extractPlanTasks(raw json.RawMessage) []*TaskEvent {
 	if !ok {
 		return nil
 	}
-	var tasks []*TaskEvent
+	var tasks []*agent.TaskEvent
 	for i, e := range entries {
 		entry, ok := e.(map[string]any)
 		if !ok {
@@ -1419,7 +1420,7 @@ func extractPlanTasks(raw json.RawMessage) []*TaskEvent {
 		if title == "" {
 			continue
 		}
-		task := &TaskEvent{ID: fmt.Sprintf("plan-%d", i), Title: title, Kind: TaskKindPlan}
+		task := &agent.TaskEvent{ID: fmt.Sprintf("plan-%d", i), Title: title, Kind: agent.TaskKindPlan}
 		if status, ok := entry["status"].(string); ok {
 			task.Status = normalizeTaskStatus(status)
 		}
@@ -1442,7 +1443,7 @@ func planEntryTitle(entry map[string]any) string {
 	return ""
 }
 
-func taskFromMap(taskMap map[string]any) *TaskEvent {
+func taskFromMap(taskMap map[string]any) *agent.TaskEvent {
 	id, _ := taskMap["id"].(string)
 	if id == "" {
 		id, _ = taskMap["taskId"].(string)
@@ -1456,7 +1457,7 @@ func taskFromMap(taskMap map[string]any) *TaskEvent {
 	if id == "" {
 		return nil
 	}
-	task := &TaskEvent{ID: id}
+	task := &agent.TaskEvent{ID: id}
 	if title, ok := taskMap["title"].(string); ok {
 		task.Title = title
 	}
@@ -1477,20 +1478,20 @@ func taskFromMap(taskMap map[string]any) *TaskEvent {
 	return task
 }
 
-func normalizeTaskStatus(status string) TaskStatus {
-	switch TaskStatus(status) {
-	case TaskStatusComplete, "completed":
-		return TaskStatusComplete
-	case TaskStatusFailed:
-		return TaskStatusFailed
-	case TaskStatusCancelled:
-		return TaskStatusCancelled
-	case TaskStatusPending:
-		return TaskStatusPending
-	case TaskStatusInProgress:
-		return TaskStatusInProgress
+func normalizeTaskStatus(status string) agent.TaskStatus {
+	switch agent.TaskStatus(status) {
+	case agent.TaskStatusComplete, "completed":
+		return agent.TaskStatusComplete
+	case agent.TaskStatusFailed:
+		return agent.TaskStatusFailed
+	case agent.TaskStatusCancelled:
+		return agent.TaskStatusCancelled
+	case agent.TaskStatusPending:
+		return agent.TaskStatusPending
+	case agent.TaskStatusInProgress:
+		return agent.TaskStatusInProgress
 	default:
-		return TaskStatus(status)
+		return agent.TaskStatus(status)
 	}
 }
 

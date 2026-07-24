@@ -1,6 +1,7 @@
-package agent
+package acp
 
 import (
+	"github.com/miere/murtaugh/internal/agent"
 	"strings"
 	"testing"
 	"time"
@@ -21,7 +22,7 @@ func clockClient(now time.Time, workDir string) *ProcessClient {
 
 func TestPromptBlocksRendersVolatileContext(t *testing.T) {
 	now := time.Date(2026, 6, 26, 14, 30, 0, 0, time.UTC)
-	blocks := clockClient(now, "/work").promptBlocks(PromptRequest{Text: "hello"})
+	blocks := clockClient(now, "/work").promptBlocks(agent.PromptRequest{Text: "hello"})
 	if len(blocks) != 2 {
 		t.Fatalf("expected a leading <context> block plus the user text, got %d", len(blocks))
 	}
@@ -40,7 +41,7 @@ func TestPromptBlocksRendersVolatileContext(t *testing.T) {
 func TestPromptBlocksInjectsPersona(t *testing.T) {
 	c := zeroContextClient()
 	c.opts.Persona = "You are Murtaugh."
-	blocks := c.promptBlocks(PromptRequest{Text: "hi"})
+	blocks := c.promptBlocks(agent.PromptRequest{Text: "hi"})
 	if len(blocks) != 2 {
 		t.Fatalf("expected a leading persona block plus the user text, got %d", len(blocks))
 	}
@@ -56,7 +57,7 @@ func TestPromptBlocksPersonaLeadsContext(t *testing.T) {
 	now := time.Date(2026, 6, 26, 14, 30, 0, 0, time.UTC)
 	c := clockClient(now, "/work")
 	c.opts.Persona = "Be Murtaugh."
-	blocks := c.promptBlocks(PromptRequest{Text: "go", Channel: "C1"})
+	blocks := c.promptBlocks(agent.PromptRequest{Text: "go", Channel: "C1"})
 	// persona, context, conversation-context, text
 	if len(blocks) != 4 {
 		t.Fatalf("expected persona, context, conversation-context, text, got %d", len(blocks))
@@ -70,7 +71,7 @@ func TestPromptBlocksPersonaLeadsContext(t *testing.T) {
 }
 
 func TestPromptBlocksWithoutVolatileContext(t *testing.T) {
-	blocks := zeroContextClient().promptBlocks(PromptRequest{Text: "hello"})
+	blocks := zeroContextClient().promptBlocks(agent.PromptRequest{Text: "hello"})
 	if len(blocks) != 1 {
 		t.Fatalf("expected a single text block when nothing volatile to render, got %d", len(blocks))
 	}
@@ -80,7 +81,7 @@ func TestPromptBlocksWithoutVolatileContext(t *testing.T) {
 }
 
 func TestPromptBlocksPrependsConversationContext(t *testing.T) {
-	blocks := zeroContextClient().promptBlocks(PromptRequest{Text: "please restart", Channel: "C123", Thread: "1699999999.000001"})
+	blocks := zeroContextClient().promptBlocks(agent.PromptRequest{Text: "please restart", Channel: "C123", Thread: "1699999999.000001"})
 	if len(blocks) != 2 {
 		t.Fatalf("expected a leading conversation-context block plus the user text, got %d", len(blocks))
 	}
@@ -98,14 +99,14 @@ func TestPromptBlocksPrependsConversationContext(t *testing.T) {
 
 func TestPromptBlocksThreadOptional(t *testing.T) {
 	// A channel without a thread (e.g. a channel-root chat) still injects context.
-	blocks := zeroContextClient().promptBlocks(PromptRequest{Text: "hi", Channel: "C123"})
+	blocks := zeroContextClient().promptBlocks(agent.PromptRequest{Text: "hi", Channel: "C123"})
 	if len(blocks) != 2 {
 		t.Fatalf("expected context block even without a thread, got %d", len(blocks))
 	}
 }
 
 func TestPromptBlocksInsertsHistoryBetweenContextAndText(t *testing.T) {
-	blocks := zeroContextClient().promptBlocks(PromptRequest{
+	blocks := zeroContextClient().promptBlocks(agent.PromptRequest{
 		Text:    "what's next?",
 		Channel: "C123",
 		Thread:  "1699999999.000001",
@@ -128,7 +129,7 @@ func TestPromptBlocksInsertsHistoryBetweenContextAndText(t *testing.T) {
 func TestPromptBlocksHistoryWithoutChannel(t *testing.T) {
 	// History without conversation context (defensive: not produced in practice)
 	// still emits ahead of the user text rather than being dropped.
-	blocks := zeroContextClient().promptBlocks(PromptRequest{Text: "hi", History: "earlier"})
+	blocks := zeroContextClient().promptBlocks(agent.PromptRequest{Text: "hi", History: "earlier"})
 	if len(blocks) != 2 {
 		t.Fatalf("expected history plus user text, got %d", len(blocks))
 	}
@@ -139,7 +140,7 @@ func TestPromptBlocksHistoryWithoutChannel(t *testing.T) {
 
 func TestPromptBlocksFullOrdering(t *testing.T) {
 	now := time.Date(2026, 6, 26, 14, 30, 0, 0, time.UTC)
-	blocks := clockClient(now, "/work").promptBlocks(PromptRequest{
+	blocks := clockClient(now, "/work").promptBlocks(agent.PromptRequest{
 		Text:    "go",
 		Channel: "C123",
 		Thread:  "1699999999.000001",

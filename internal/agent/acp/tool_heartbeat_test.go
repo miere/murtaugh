@@ -1,8 +1,9 @@
-package agent
+package acp
 
 import (
 	"context"
 	"errors"
+	"github.com/miere/murtaugh/internal/agent"
 	"sync"
 	"testing"
 	"time"
@@ -35,9 +36,9 @@ func TestToolWatcherTracksInFlightTools(t *testing.T) {
 		t.Fatalf("empty watcher: active = %d, want 0", active)
 	}
 
-	w.observe("t1", "go test", TaskStatusInProgress)
+	w.observe("t1", "go test", agent.TaskStatusInProgress)
 	clk.advance(90 * time.Second)
-	w.observe("t2", "grep", TaskStatusInProgress)
+	w.observe("t2", "grep", agent.TaskStatusInProgress)
 
 	active, title, oldest := w.snapshot()
 	if active != 2 {
@@ -48,7 +49,7 @@ func TestToolWatcherTracksInFlightTools(t *testing.T) {
 	}
 
 	// A terminal status retires the tool.
-	w.observe("t1", "", TaskStatusComplete)
+	w.observe("t1", "", agent.TaskStatusComplete)
 	if active, title, _ = w.snapshot(); active != 1 || title != "grep" {
 		t.Fatalf("after complete: active=%d title=%q, want 1/grep", active, title)
 	}
@@ -63,8 +64,8 @@ func TestToolWatcherTracksInFlightTools(t *testing.T) {
 
 // runHeartbeat starts c.heartbeat and returns its cancel cause func and channels so
 // a test can assert its emissions and shut it down.
-func runHeartbeat(c *ProcessClient, w *toolWatcher) (chan Event, context.Context, context.CancelCauseFunc, chan struct{}, chan struct{}) {
-	events := make(chan Event, 8)
+func runHeartbeat(c *ProcessClient, w *toolWatcher) (chan agent.Event, context.Context, context.CancelCauseFunc, chan struct{}, chan struct{}) {
+	events := make(chan agent.Event, 8)
 	ctx, cancel := context.WithCancelCause(context.Background())
 	stop := make(chan struct{})
 	done := make(chan struct{})
@@ -75,7 +76,7 @@ func runHeartbeat(c *ProcessClient, w *toolWatcher) (chan Event, context.Context
 func TestHeartbeatEmitsKeepAliveWhileToolRuns(t *testing.T) {
 	clk := &fakeClock{t: time.Unix(0, 0)}
 	w := newToolWatcher(clk.now)
-	w.observe("t1", "go test", TaskStatusInProgress)
+	w.observe("t1", "go test", agent.TaskStatusInProgress)
 
 	c := NewProcessClient(ProcessOptions{ToolHeartbeatInterval: time.Millisecond, ToolCeiling: time.Hour})
 	events, _, cancel, stop, done := runHeartbeat(c, w)
@@ -83,7 +84,7 @@ func TestHeartbeatEmitsKeepAliveWhileToolRuns(t *testing.T) {
 
 	select {
 	case ev := <-events:
-		if ev.Type != EventStatus {
+		if ev.Type != agent.EventStatus {
 			t.Fatalf("event type = %q, want status", ev.Type)
 		}
 	case <-time.After(2 * time.Second):
@@ -96,7 +97,7 @@ func TestHeartbeatEmitsKeepAliveWhileToolRuns(t *testing.T) {
 func TestHeartbeatCeilingCancelsTurn(t *testing.T) {
 	clk := &fakeClock{t: time.Unix(0, 0)}
 	w := newToolWatcher(clk.now)
-	w.observe("t1", "go test", TaskStatusInProgress)
+	w.observe("t1", "go test", agent.TaskStatusInProgress)
 	clk.advance(20 * time.Minute) // past the ceiling
 
 	c := NewProcessClient(ProcessOptions{ToolHeartbeatInterval: time.Millisecond, ToolCeiling: 10 * time.Minute})
