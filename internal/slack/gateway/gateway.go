@@ -90,6 +90,10 @@ type Gateway struct {
 	// ACPConfig.EffectiveCancelGracePeriod.
 	cancelGrace time.Duration
 	inFlight    *InFlightRegistry
+	// coalescer serialises a conversation's turns and merges rapid-fire or
+	// mid-turn follow-ups into a single coalesced turn (replaces the older
+	// interrupt-and-replace path). Wired in New once the Gateway exists.
+	coalescer *coalescer
 	// recentEvents suppresses duplicate Slack event deliveries so a
 	// redelivered message does not spawn a second chat that interrupts the
 	// first. nil disables de-duplication (CLI/MCP and most tests).
@@ -449,6 +453,17 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 		noMentionPerChannel: cfg.Chat.NoMention.ByChannel,
 		noMentionEverywhere: cfg.Chat.NoMention.Everywhere,
 	}
+	// The coalescer needs g's dispatch/interrupt hooks, so it is wired after the
+	// struct exists. It owns the decision of when and what to dispatch per
+	// conversation; startChat merely submits each message to it.
+	g.coalescer = newCoalescer(
+		defaultCoalesceWindow,
+		nil, // production timer (time.AfterFunc)
+		g.agentInterruptible,
+		g.inFlight.Cancel,
+		g.dispatchTurn,
+		logger,
+	)
 	// A top-level delegate-to-agent trigger starts a real chat turn through the
 	// gateway itself. Only wire it when chat is live; left unset, such a trigger
 	// reports that chat is required rather than dereferencing a nil pipeline.
@@ -1184,6 +1199,9 @@ func (a *Gateway) handleStopSlashCommand(event socketmode.Event, command slack.S
 		ThreadTS:  threadTS,
 		DM:        strings.HasPrefix(command.ChannelID, "D"),
 	}
+	// Drop any messages queued behind the current turn first, so /stop does not
+	// leave a coalesced follow-up to fire after the user asked to stop.
+	a.coalescer.clear(key)
 	if a.inFlight.Cancel(key) {
 		a.logger.Info("stop slash command cancelled in-flight chat", "user", command.UserID, "channel", command.ChannelID, "thread_ts", threadTS)
 		a.ack(event, ephemeralText("Stopped."))
@@ -1354,81 +1372,68 @@ func (a *Gateway) agentInterruptible(agent string) bool {
 	return checker.Interruptible()
 }
 
-// followUpDeferredText is the context-block aside posted when a follow-up is held
-// back because the agent cannot be interrupted. Plain_text (emoji-enabled), in
-// Murtaugh's voice — a light nudge, not an alarm.
-const followUpDeferredText = ":unamused: Still wrestlin' with your last message. Can't stop mid-job — you'll have to wait your turn."
-
-// notifyFollowUpDeferred posts a brief, best-effort thread note so a user whose
-// follow-up was dropped (non-interruptible agent, response in flight) is not
-// left wondering why nothing happened. Failures are logged, never propagated;
-// a missing messaging surface (CLI/MCP, some tests) makes this a no-op.
-func (a *Gateway) notifyFollowUpDeferred(parent context.Context, req ChatRequest, replyOnThread bool) {
-	if a.messaging == nil {
-		return
-	}
-	threadTS := replyThreadTS(req, replyOnThread)
-	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
-	defer cancel()
-	// In channel-reply mode threadTS is empty: post the note at the channel root
-	// (no MsgOptionTS) so it still lands where the conversation is happening.
-	options := statusMsgOptions(followUpDeferredText)
-	if threadTS != "" {
-		options = append(options, slack.MsgOptionTS(threadTS))
-	}
-	if _, _, err := a.messaging.PostMessageContext(ctx, req.ChannelID, options...); err != nil {
-		a.logger.Warn("failed to post follow-up deferred note", "channel", req.ChannelID, "thread_ts", threadTS, "error", err)
-	}
-}
-
-// startChat launches a chat goroutine for the request and wires it into
-// the in-flight registry so subsequent messages on the same
-// conversation interrupt the previous response, and so the /stop slash
-// command can cancel it. The cancellation closure stored in the
-// registry runs a two-step graceful-then-hard sequence: ask the ACP
-// agent to cancel its prompt (best-effort, non-blocking) and, after
-// cancelGrace, hard-cancel the chat goroutine's context. The grace
-// window lets trailing chunks already on the wire flush as
-// "_interrupted_" rather than vanish, which is what ChatHandler.Handle
-// renders when it sees context.Canceled (vs DeadlineExceeded).
+// startChat resolves the route and submits the message to the coalescer, which
+// batches rapid-fire and mid-turn follow-ups into a single coalesced turn per
+// conversation and calls back into dispatchTurn when a turn should start. It
+// replaces the older interrupt-and-replace / drop-the-follow-up behaviour. The
+// grace window (in dispatchTurn's cancel closure) still lets trailing chunks
+// already on the wire flush as "_interrupted_" rather than vanish, which is what
+// ChatHandler.Handle renders when it sees context.Canceled (vs DeadlineExceeded).
 func (a *Gateway) startChat(parent context.Context, req ChatRequest) {
-	// Resolve the route once so session binding, interrupt bookkeeping, and any
-	// deferred-follow-up note all agree on the agent and reply strategy. A nil
-	// resolver (chat disabled / some tests) defaults to threaded, matching the
-	// historical behaviour.
+	// Resolve the route once so session binding and dispatch agree on the agent
+	// and reply strategy. A nil resolver (chat disabled / some tests) defaults to
+	// threaded, matching the historical behaviour.
 	route := ChatRoute{ReplyOnThread: true}
 	if a.chat != nil && a.chat.resolver != nil {
 		route = a.chat.resolver(req)
 	}
-	agent := route.Agent
 	key := conversationKey(req, route.ReplyOnThread)
-	// When the agent cannot be interrupted (session/cancel unsupported), a
-	// follow-up must neither cancel the in-flight response (the cancel is a
-	// no-op at the agent and only yields a misleading "_interrupted_") nor run
-	// concurrently against the same ACP session. Let the first finish; log and
-	// drop the follow-up.
-	if !a.agentInterruptible(agent) && a.inFlight.Active(key) {
-		a.logger.Info("ignoring follow-up while a response is in flight; agent is not interruptible", "channel", req.ChannelID, "thread_ts", key.ThreadTS, "agent", agent)
-		a.notifyFollowUpDeferred(parent, req, route.ReplyOnThread)
+	// Hand the message to the coalescer instead of dispatching (or interrupting)
+	// directly: it batches rapid-fire and mid-turn follow-ups into a single
+	// coalesced turn per conversation. It calls back into dispatchTurn when a
+	// turn should actually start. No message is dropped.
+	if a.coalescer == nil {
+		// No coalescer wired (a Gateway built outside New, e.g. in unit tests):
+		// dispatch immediately, preserving one-message-one-turn behaviour.
+		a.dispatchTurn(parent, key, route.Agent, route, req)
 		return
 	}
-	// No total wall-clock deadline here: a turn is bounded by inactivity inside
+	a.coalescer.submit(parent, key, route.Agent, route, req)
+}
+
+// dispatchTurn launches one chat goroutine for an (already-coalesced) request
+// and wires it into the in-flight registry so /stop can cancel it and the
+// coalescer can interrupt it for the next batch. On completion it notifies the
+// coalescer, which drains any messages that queued during the turn.
+//
+// The cancellation closure stored in the registry runs a two-step
+// graceful-then-hard sequence: ask the agent to cancel its prompt (best-effort,
+// non-blocking) and, after cancelGrace, hard-cancel the goroutine's context. The
+// grace window lets trailing chunks already on the wire flush as "_interrupted_"
+// rather than vanish.
+func (a *Gateway) dispatchTurn(parent context.Context, key agent.ConversationKey, agentName string, route ChatRoute, req ChatRequest) {
+	// No total wall-clock deadline: a turn is bounded by inactivity inside
 	// ChatHandler (WithIdleTimeout), so a long-but-progressing response is never
 	// killed mid-flight. This context stays cancellable purely for the interrupt
 	// and /stop paths.
 	ctx, cancelCtx := context.WithCancel(parent)
-	cancelFunc := a.buildInterruptCancel(key, agent, cancelCtx)
-	_, previous := a.inFlight.Register(key, cancelFunc, agent)
-	if previous != nil {
-		a.logger.Info("interrupting previous in-flight chat", "channel", req.ChannelID, "thread_ts", key.ThreadTS, "agent", agent)
+	cancelFunc := a.buildInterruptCancel(key, agentName, cancelCtx)
+	if _, previous := a.inFlight.Register(key, cancelFunc, agentName); previous != nil {
+		// The coalescer serialises dispatch per conversation, so a live previous
+		// entry is unexpected; cancel it defensively rather than leak its
+		// goroutine.
+		a.logger.Warn("unexpected in-flight chat at dispatch; cancelling it", "channel", req.ChannelID, "thread_ts", key.ThreadTS, "agent", agentName)
 		previous()
 	}
 	go func() {
 		defer cancelCtx()
 		err := a.chat.Handle(ctx, req)
-		a.inFlight.Cancel(key) // best-effort self-unregister; no-op if already replaced
+		a.inFlight.Cancel(key) // self-unregister; no-op if /stop already removed it
+		if a.coalescer != nil {
+			a.coalescer.onComplete(key) // drain any messages queued during this turn
+		}
 		if err != nil {
-			a.logger.Error("ACP chat failed", "source", req.Source, "channel", req.ChannelID, "error", err)
+			a.logger.Error("agent chat failed", "source", req.Source, "channel", req.ChannelID, "error", err)
 		}
 	}()
 }
