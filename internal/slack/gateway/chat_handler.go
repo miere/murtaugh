@@ -269,7 +269,10 @@ func (h *ChatHandler) resolveProgressDisplay(agent string) config.ProgressDispla
 func (h *ChatHandler) newChatRenderer(mode config.ProgressDisplay, channelID, threadTS string, opts StreamWriterOptions) chatRenderer {
 	newBlock := func() toolBlock {
 		if mode == config.ProgressDisplayTasks {
-			return newCardToolBlock(h.api, channelID, opts, h.logger)
+			// Task cards stream, and downgrade to buffered PlanBlock posting on a
+			// canvas surface — keeping the real cards rather than regressing to a
+			// status line (spec 021, issue #87).
+			return newDefaultCardBlock(h.api, h.statusMessenger, channelID, threadTS, opts, h.logger)
 		}
 		return NewStatusLineWriter(h.statusMessenger, channelID, threadTS, 0, h.logger)
 	}
