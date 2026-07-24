@@ -274,7 +274,10 @@ func (h *ChatHandler) newChatRenderer(mode config.ProgressDisplay, channelID, th
 		return NewStatusLineWriter(h.statusMessenger, channelID, threadTS, 0, h.logger)
 	}
 	return newSectionRenderer(
-		func() *StreamWriter { return NewStreamWriter(h.api, channelID, opts) },
+		// The reply-text transport negotiates streaming vs buffered posting: a
+		// canvas surface (which cannot stream) downgrades to chat.postMessage
+		// instead of erroring the whole turn (spec 021, issue #87).
+		func() SlackSink { return newDefaultSlackSink(h.api, h.statusMessenger, channelID, opts, h.logger) },
 		newBlock,
 		h.uploader,
 		channelID,

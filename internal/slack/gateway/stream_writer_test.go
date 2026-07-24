@@ -27,6 +27,9 @@ type fakeStreamAPI struct {
 	// nextStreamTS, when non-empty, is handed out (and cleared) by the next
 	// StartStreamContext so a test can tell the rolled-over message apart.
 	nextStreamTS string
+	// startErr, when set, makes StartStreamContext fail with it — used to simulate
+	// a surface that cannot stream (e.g. a canvas → channel_type_not_supported).
+	startErr error
 
 	// rejectCanceledStatus makes SetAssistantThreadsStatusContext fail when
 	// invoked with an already-cancelled context, mirroring Slack rejecting a
@@ -43,6 +46,9 @@ func (f *fakeStreamAPI) StartStreamContext(_ context.Context, channelID string, 
 	f.startedChannel = channelID
 	f.starts++
 	f.startOptions = append(f.startOptions, options)
+	if f.startErr != nil {
+		return "", "", f.startErr
+	}
 	f.finalizeUntilStart = false
 	ts := "stream-ts"
 	if f.nextStreamTS != "" {
