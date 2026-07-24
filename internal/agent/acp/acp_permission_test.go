@@ -14,28 +14,27 @@ import (
 	"github.com/miere/murtaugh/internal/agent"
 )
 
-// runAgentRequest feeds one agent→client request line through readLoop on a client
-// configured with opts (and optional seeded per-session scopes and subscriber
-// channels), then returns the single JSON-RPC response the client writes back to
-// the agent. A permission request under the "ask" policy raises an agent.EventPermission
-// on the matching subscriber channel; pass that channel in subs and answer it.
-func runAgentRequest(t *testing.T, opts ProcessOptions, dests map[string]promptScope, subs map[string]chan agent.Event, line string) map[string]any {
+// runAgentRequest feeds one agent→client request line through readLoop on a
+// session configured with opts (and, when the turn is live, its scope and
+// subscriber channel), then returns the single JSON-RPC response the session
+// writes back to the agent. A permission request under the "ask" policy raises an
+// agent.EventPermission on sub; pass that channel and answer it. A nil sub models
+// no live turn.
+func runAgentRequest(t *testing.T, opts ProcessOptions, scope *promptScope, sub chan agent.Event, line string) map[string]any {
 	t.Helper()
 	pr, pw := io.Pipe()
-	c := &ProcessClient{
-		opts:        opts,
-		log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		pending:     make(map[int64]chan rpcResponse),
-		subscribers: make(map[string]*subscription),
-		dests:       make(map[string]promptScope),
-		stdin:       pw,
-		started:     true,
+	c := &acpSession{
+		opts:    opts,
+		log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		pending: make(map[int64]chan rpcResponse),
+		stdin:   pw,
+		started: true,
 	}
-	for k, v := range dests {
-		c.dests[k] = v
+	if sub != nil {
+		c.active = &subscription{events: sub}
 	}
-	for k, v := range subs {
-		c.subscribers[k] = &subscription{events: v}
+	if scope != nil {
+		c.scope = *scope
 	}
 	go c.readLoop(strings.NewReader(line + "\n"))
 
@@ -114,10 +113,9 @@ func answerPermission(events chan agent.Event, optionID string) <-chan agent.Per
 
 func TestACPPermissionAskRaisesEventAndReturnsDecision(t *testing.T) {
 	events := make(chan agent.Event, 4)
-	dests := map[string]promptScope{"S1": {ctx: context.Background()}}
-	subs := map[string]chan agent.Event{"S1": events}
+	scope := &promptScope{ctx: context.Background()}
 	got := answerPermission(events, "a")
-	resp := runAgentRequest(t, ProcessOptions{PermissionPolicy: "ask"}, dests, subs, permReqAllowDeny)
+	resp := runAgentRequest(t, ProcessOptions{PermissionPolicy: "ask"}, scope, events, permReqAllowDeny)
 	select {
 	case req := <-got:
 		if req.ToolTitle != "Edit agents.yaml" || len(req.Options) != 2 {
@@ -144,10 +142,9 @@ func TestACPPermissionAskWithNoLiveTurnDenies(t *testing.T) {
 
 func TestACPPermissionEmptyPolicyDefaultsToAsk(t *testing.T) {
 	events := make(chan agent.Event, 4)
-	dests := map[string]promptScope{"S1": {ctx: context.Background()}}
-	subs := map[string]chan agent.Event{"S1": events}
+	scope := &promptScope{ctx: context.Background()}
 	_ = answerPermission(events, "a")
-	resp := runAgentRequest(t, ProcessOptions{}, dests, subs, permReqAllowDeny)
+	resp := runAgentRequest(t, ProcessOptions{}, scope, events, permReqAllowDeny)
 	if out := outcomeOf(t, resp); out["optionId"] != "a" {
 		t.Fatalf("empty policy should default to ask; expected selected a, got %v", out)
 	}

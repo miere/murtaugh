@@ -11,7 +11,7 @@ import (
 // handlePermissionRequest resolves a session/request_permission per the configured
 // policy and writes the ACP RequestPermissionResponse. An empty chosen option (no
 // human decision, or no allow/reject option to auto-pick) maps to "cancelled".
-func (c *ProcessClient) handlePermissionRequest(id, params json.RawMessage) {
+func (c *acpSession) handlePermissionRequest(id, params json.RawMessage) {
 	sessionID, title, kind, options := parsePermissionRequest(params)
 	optionID := c.decidePermission(sessionID, title, kind, options)
 	var outcome map[string]any
@@ -31,7 +31,7 @@ func (c *ProcessClient) handlePermissionRequest(id, params json.RawMessage) {
 // decision back) — mirroring how the native loop gates a tool call inline. ask
 // with no live turn (no subscriber) or a cancelled turn denies (returns "") —
 // fail-safe and fast, never a hang.
-func (c *ProcessClient) decidePermission(sessionID, title, kind string, options []agent.PermissionOption) string {
+func (c *acpSession) decidePermission(sessionID, title, kind string, options []agent.PermissionOption) string {
 	// label is for logging only: the title (command/detail) when present, else the
 	// kind, else a placeholder.
 	label := title
@@ -48,8 +48,8 @@ func (c *ProcessClient) decidePermission(sessionID, title, kind string, options 
 		return pickOptionByKind(options, "reject")
 	default: // ask
 		c.mu.Lock()
-		sub := c.subscribers[sessionID]
-		scope, ok := c.dests[sessionID]
+		sub := c.active
+		scope := c.scope
 		if sub != nil {
 			sub.wg.Add(1)
 		}
@@ -63,7 +63,7 @@ func (c *ProcessClient) decidePermission(sessionID, title, kind string, options 
 		// once the ask has landed, without blocking on the operator's click.
 		ch := sub.events
 		ctx := context.Background()
-		if ok && scope.ctx != nil {
+		if scope.ctx != nil {
 			ctx = scope.ctx
 		}
 		// Buffered so the consumer's reply never blocks even if we have already

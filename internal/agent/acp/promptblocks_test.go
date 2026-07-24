@@ -11,14 +11,14 @@ import (
 // zeroContextClient returns a ProcessClient whose volatile <context> block is
 // empty (zero clock, cwd "."), so the conversation-context/history/text
 // behaviour can be asserted without the leading context block shifting counts.
-func zeroContextClient() *ProcessClient {
-	return &ProcessClient{now: func() time.Time { return time.Time{} }, opts: ProcessOptions{WorkDir: "."}}
+func zeroContextClient() *acpSession {
+	return &acpSession{now: func() time.Time { return time.Time{} }, opts: ProcessOptions{WorkDir: "."}}
 }
 
 // clockClient returns a ProcessClient with a fixed clock and working directory,
 // so the volatile <context> block renders deterministically.
-func clockClient(now time.Time, workDir string) *ProcessClient {
-	return &ProcessClient{now: func() time.Time { return now }, opts: ProcessOptions{WorkDir: workDir}}
+func clockClient(now time.Time, workDir string) *acpSession {
+	return &acpSession{now: func() time.Time { return now }, opts: ProcessOptions{WorkDir: workDir}}
 }
 
 func TestPromptBlocksRendersVolatileContext(t *testing.T) {

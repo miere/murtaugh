@@ -112,7 +112,7 @@ func isTerminalToolStatus(status agent.TaskStatus) bool {
 // turn with ErrToolCeiling. When no tool is in flight it emits nothing, so a
 // genuinely idle turn (e.g. a wedged provider call with no tool running) still
 // trips the idle watchdog exactly as before — the ceiling only governs tools.
-func (c *ProcessClient) heartbeat(ctx context.Context, w *toolWatcher, events chan<- agent.Event, cancel context.CancelCauseFunc, stop <-chan struct{}, done chan<- struct{}) {
+func (c *acpSession) heartbeat(ctx context.Context, w *toolWatcher, events chan<- agent.Event, cancel context.CancelCauseFunc, stop <-chan struct{}, done chan<- struct{}) {
 	defer close(done)
 	interval := c.opts.ToolHeartbeatInterval
 	if interval <= 0 {

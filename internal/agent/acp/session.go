@@ -5,15 +5,32 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
+	"os/exec"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/miere/murtaugh/internal/agent"
 )
 
-// promptScope is the in-flight context for a session's current prompt: where it
+// subscription is a single prompt turn's event stream plus a drain barrier. The
+// readLoop is a long-lived sender (session/update notifications and
+// agent-initiated permission asks) that cannot be stopped per-turn the way the
+// heartbeat can; wg counts its in-flight sends into events so teardown can wait
+// for them to drain before closing the channel. Without it, a trailing
+// notification arriving as a turn tears down sends on a closed channel and the
+// process panics.
+type subscription struct {
+	events chan agent.Event
+	wg     sync.WaitGroup
+}
+
+// promptScope is the in-flight context for the session's current prompt: where it
 // is talking (loc), the context that is cancelled when the turn ends, and whether
 // any reply text was already streamed this turn (sawText) so the final result
 // payload is not re-emitted on top of the streamed chunks.
@@ -23,7 +40,139 @@ type promptScope struct {
 	sawText *atomic.Bool
 }
 
-func (c *ProcessClient) NewSession(ctx context.Context, meta agent.SessionMetadata) (agent.Session, error) {
+// acpSession is one ACP agent process bound to a single conversation: it owns the
+// child process, the JSON-RPC transport, and exactly one ACP session (session/new).
+// The manager (Client) runs one of these per Slack conversation, which is what
+// gives each conversation an isolated process — no cross-conversation taint, no
+// shared-process concurrency. Because there is only ever one turn in flight per
+// session, the former per-session maps collapse to the single active/scope/watcher
+// fields here.
+type acpSession struct {
+	opts ProcessOptions
+	log  *slog.Logger
+	// now sources the current time for the per-turn <context> block. Injectable
+	// so tests can assert a fixed timestamp; defaults to time.Now.
+	now func() time.Time
+
+	mu      sync.Mutex
+	cmd     *exec.Cmd
+	stdin   io.WriteCloser
+	started bool
+	closed  bool
+	nextID  atomic.Int64
+	pending map[int64]chan rpcResponse
+	// active is the current turn's subscription; nil between turns.
+	active *subscription
+	// scope is where the current turn is talking and its cancellable context;
+	// zero between turns. Written under mu by prompt, read by deliverNotification
+	// and the permission handler.
+	scope promptScope
+	// watcher feeds the current turn's heartbeat/ceiling; nil between turns.
+	watcher *toolWatcher
+	// sessionID is the agent-assigned id from session/new.
+	sessionID string
+	// release drops this session's aggregator registration; nil when there is no
+	// aggregator. Run once on close.
+	release func()
+}
+
+func newACPSession(opts ProcessOptions) *acpSession {
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &acpSession{opts: opts, log: logger, now: time.Now, pending: make(map[int64]chan rpcResponse)}
+}
+
+// bringUp starts the process and performs the ACP initialize handshake, returning
+// the agent's advertised capabilities. It does NOT open a session — the manager
+// calls openSession next (or, for the startup probe, skips it).
+func (c *acpSession) bringUp(ctx context.Context) (AgentCapabilities, error) {
+	if err := c.start(ctx); err != nil {
+		return AgentCapabilities{}, err
+	}
+	result, err := c.call(ctx, "initialize", map[string]any{
+		"protocolVersion": 1,
+		"clientInfo": map[string]any{
+			"name":    "murtaugh",
+			"title":   "Murtaugh Slack ACP Client",
+			"version": "0.1.0",
+		},
+		// We service the agent-initiated filesystem methods (fs.go), so advertise
+		// them. Without this, claude-agent-acp's built-in Read/Write tools route
+		// fs/read_text_file to us and block forever when we don't answer — the
+		// agent goes silent mid-turn and trips the idle watchdog.
+		"clientCapabilities": map[string]any{
+			"fs": map[string]any{"readTextFile": true, "writeTextFile": true},
+		},
+	})
+	if err != nil {
+		return AgentCapabilities{}, err
+	}
+	return parseAgentCapabilities(result), nil
+}
+
+func (c *acpSession) start(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.started {
+		return nil
+	}
+	if strings.TrimSpace(c.opts.Command) == "" {
+		return errors.New("ACP command is required")
+	}
+	cmd := exec.Command(c.opts.Command, c.opts.Args...)
+	cmd.Dir = c.opts.WorkDir
+	if len(c.opts.Env) > 0 {
+		// Inherit Murtaugh's environment, then append the profile's overrides so a
+		// duplicate key resolves to the override (exec takes the last entry).
+		cmd.Env = append(os.Environ(), c.opts.Env...)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("open ACP stdout: %w", err)
+	}
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("open ACP stdin: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("open ACP stderr: %w", err)
+	}
+	c.log.Info("starting ACP process", "command", c.opts.Command, "workdir", c.opts.WorkDir)
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start ACP process: %w", err)
+	}
+	c.cmd = cmd
+	c.stdin = stdin
+	c.started = true
+	go c.readLoop(stdout)
+	go c.drainStderr(stderr)
+	go func() {
+		err := cmd.Wait()
+		c.markProcessExited(cmd)
+		c.log.Info("ACP process exited", "error", err)
+		c.failAll(errors.New("ACP process exited"))
+	}()
+	return nil
+}
+
+func (c *acpSession) markProcessExited(cmd *exec.Cmd) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cmd != cmd {
+		return
+	}
+	c.started = false
+	c.stdin = nil
+	c.cmd = nil
+}
+
+// openSession issues session/new (advertising the aggregator's MCP server, if
+// any) and binds the returned id to this session. It records the aggregator
+// release so close can drop the registration.
+func (c *acpSession) openSession(ctx context.Context, meta agent.SessionMetadata) (string, error) {
 	mcpServers, release := c.aggregatorServers(meta)
 	result, err := c.call(ctx, "session/new", map[string]any{
 		"cwd":        c.sessionCWD(),
@@ -33,7 +182,7 @@ func (c *ProcessClient) NewSession(ctx context.Context, meta agent.SessionMetada
 		if release != nil {
 			release()
 		}
-		return agent.Session{}, err
+		return "", err
 	}
 	var decoded struct {
 		SessionID string `json:"sessionId"`
@@ -44,7 +193,7 @@ func (c *ProcessClient) NewSession(ctx context.Context, meta agent.SessionMetada
 			if release != nil {
 				release()
 			}
-			return agent.Session{}, fmt.Errorf("decode session/new response: %w", err)
+			return "", fmt.Errorf("decode session/new response: %w", err)
 		}
 	}
 	id := decoded.SessionID
@@ -55,22 +204,21 @@ func (c *ProcessClient) NewSession(ctx context.Context, meta agent.SessionMetada
 		if release != nil {
 			release()
 		}
-		return agent.Session{}, errors.New("session/new response did not include sessionId")
+		return "", errors.New("session/new response did not include sessionId")
 	}
-	if release != nil {
-		c.mu.Lock()
-		c.releases = append(c.releases, release)
-		c.mu.Unlock()
-	}
-	return agent.Session{ID: id}, nil
+	c.mu.Lock()
+	c.sessionID = id
+	c.release = release
+	c.mu.Unlock()
+	return id, nil
 }
 
 // aggregatorServers asks the aggregator (if any) to register this session and
 // returns the mcpServers value for session/new plus a release to run if the
 // session fails to open. An empty list (and nil release) when no aggregator is
 // configured or registration fails — the agent then simply gets no Murtaugh
-// tools, which is logged loudly rather than failing the session.
-func (c *ProcessClient) aggregatorServers(meta agent.SessionMetadata) ([]any, func()) {
+// tools, logged loudly rather than failing the session.
+func (c *acpSession) aggregatorServers(meta agent.SessionMetadata) ([]any, func()) {
 	if c.opts.Aggregator == nil {
 		return []any{}, nil
 	}
@@ -79,7 +227,6 @@ func (c *ProcessClient) aggregatorServers(meta agent.SessionMetadata) ([]any, fu
 		c.log.Warn("aggregator registration failed; ACP agent will have no Murtaugh tools", "error", err)
 		return []any{}, nil
 	}
-	// ACP's env shape is an array of {name,value}; emit in stable key order.
 	keys := make([]string, 0, len(spec.Env))
 	for k := range spec.Env {
 		keys = append(keys, k)
@@ -98,7 +245,7 @@ func (c *ProcessClient) aggregatorServers(meta agent.SessionMetadata) ([]any, fu
 	return []any{server}, release
 }
 
-func (c *ProcessClient) sessionCWD() string {
+func (c *acpSession) sessionCWD() string {
 	if strings.TrimSpace(c.opts.WorkDir) != "" {
 		return c.opts.WorkDir
 	}
@@ -109,71 +256,39 @@ func (c *ProcessClient) sessionCWD() string {
 	return wd
 }
 
-func (c *ProcessClient) Prompt(ctx context.Context, sessionID string, request agent.PromptRequest) (<-chan agent.Event, error) {
-	if strings.TrimSpace(sessionID) == "" {
-		return nil, errors.New("session id is required")
-	}
-	sub := &subscription{events: make(chan agent.Event, 32)}
-	events := sub.events
-	sawText := &atomic.Bool{}
-	watcher := newToolWatcher(c.now)
-	c.mu.Lock()
-	c.subscribers[sessionID] = sub
-	// Stash where this turn is talking and its context so a permission request
-	// raised mid-turn can be asked in the same thread and cancelled with the turn.
-	c.dests[sessionID] = promptScope{loc: agent.TurnLocation{ChannelID: request.Channel, ThreadTS: request.Thread}, ctx: ctx, sawText: sawText}
-	c.toolWatch[sessionID] = watcher
-	c.mu.Unlock()
+// cancelTurn asks the agent to abort this session's in-flight prompt.
+func (c *acpSession) cancelTurn(ctx context.Context) error {
+	_, err := c.call(ctx, "session/cancel", map[string]any{"sessionId": c.sessionID})
+	return err
+}
 
-	go func() {
-		// The tool heartbeat keeps this turn alive while a tool legitimately runs and
-		// fails it if one runs past its ceiling. It rides an inner cancellable context
-		// so the ceiling can unblock the in-flight session/prompt (the ACP agent may
-		// still be executing the tool) without disturbing the caller's ctx.
-		promptCtx, cancelPrompt := context.WithCancelCause(ctx)
-		defer cancelPrompt(nil)
-		stopHB := make(chan struct{})
-		hbDone := make(chan struct{})
-		go c.heartbeat(promptCtx, watcher, events, cancelPrompt, stopHB, hbDone)
-		defer func() {
-			// Stop the heartbeat and wait for it to exit before closing events, so a
-			// keep-alive send can never race the close.
-			close(stopHB)
-			<-hbDone
-			c.clearToolWatch(sessionID, watcher)
-			c.closeSubscription(sessionID, sub)
-		}()
-		result, err := c.call(promptCtx, "session/prompt", map[string]any{
-			"sessionId": sessionID,
-			"prompt":    c.promptBlocks(request),
-		})
-		if err != nil {
-			// A tool that blew past its ceiling cancels promptCtx with ErrToolCeiling;
-			// surface that specific cause rather than the bare context cancellation, so
-			// the consumer can render why the turn stopped and drop the session.
-			if cause := context.Cause(promptCtx); errors.Is(cause, ErrToolCeiling) {
-				events <- agent.Event{Type: agent.EventError, Error: cause}
-				return
-			}
-			events <- agent.Event{Type: agent.EventError, Error: err}
-			return
-		}
-		text := extractText(result)
-		stopReason := extractStopReason(result)
-		// stop_reason is logged at INFO because it explains why a turn ended,
-		// including the cases that produce no reply (max_tokens, refusal): the
-		// single most useful signal when a chat comes back empty.
-		c.log.Info("ACP prompt completed", "session_id", sessionID, "stop_reason", stopReason, "response_text", text != "")
-		// Emit the final result text ONLY when nothing was streamed this turn.
-		// Streaming agents (e.g. Claude Code) deliver the reply incrementally via
-		// agent_message_chunk notifications and echo the same text in the prompt
-		// result; re-emitting it here would duplicate the whole reply as one block
-		// at the end. A non-streaming agent that returns its reply only in the
-		// result still has it surfaced, since nothing set sawText.
-		if text != "" && !sawText.Load() {
-			events <- agent.Event{Type: agent.EventText, Text: text}
-		}
-		events <- agent.Event{Type: agent.EventComplete, StopReason: stopReason}
-	}()
-	return events, nil
+// supportsCancel probes whether the agent implements session/cancel by issuing
+// the call for a synthetic session id and inspecting the outcome. A method-not-
+// found error means the agent cannot be interrupted; any other result means the
+// method exists. A transient failure conservatively reports true so a flaky probe
+// never silently disables interrupts.
+func (c *acpSession) supportsCancel(ctx context.Context) bool {
+	_, err := c.call(ctx, "session/cancel", map[string]any{"sessionId": cancelProbeSessionID})
+	return !IsMethodNotFound(err)
+}
+
+// close tears down the process and drops this session's aggregator registration.
+// It does NOT close the shared aggregator's proxied connections — the manager
+// owns that (there is one aggregator across all of an agent's sessions).
+func (c *acpSession) close() {
+	c.mu.Lock()
+	c.closed = true
+	if c.stdin != nil {
+		_ = c.stdin.Close()
+	}
+	if c.cmd != nil && c.cmd.Process != nil {
+		_ = c.cmd.Process.Kill()
+	}
+	release := c.release
+	c.release = nil
+	c.mu.Unlock()
+	if release != nil {
+		release()
+	}
+	c.failAll(errors.New("ACP session closed"))
 }
