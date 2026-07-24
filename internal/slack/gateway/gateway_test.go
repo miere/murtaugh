@@ -180,9 +180,11 @@ func (f *nonInterruptibleSessions) count() int {
 	return f.prompts
 }
 
-func TestNonInterruptibleAgentDropsFollowUpWhileInFlight(t *testing.T) {
+// A follow-up to a non-interruptible agent is no longer dropped: the coalescer
+// holds it until the running turn finishes, then dispatches it as one coalesced
+// follow-up. It must never run concurrently against the same session.
+func TestNonInterruptibleFollowUpIsCoalescedNotDropped(t *testing.T) {
 	api := &fakeStreamAPI{}
-	msg := &recordingMessaging{}
 	fake := &nonInterruptibleSessions{release: make(chan struct{})}
 	sessions := map[string]ChatSessionManager{"default": fake}
 	resolver := func(req ChatRequest) ChatRoute { return ChatRoute{Agent: "default", ReplyOnThread: true} }
@@ -191,41 +193,34 @@ func TestNonInterruptibleAgentDropsFollowUpWhileInFlight(t *testing.T) {
 		chatSessions: sessions,
 		inFlight:     NewInFlightRegistry(),
 		recentEvents: newEventDedup(time.Minute),
-		messaging:    msg,
 		logger:       discardLogger(),
 		cfg:          config.AccessConfig{AllowedUsers: []string{"U1"}},
 	}
-	defer close(fake.release)
+	// A Gateway built outside New has no coalescer; wire one with a controllable
+	// timer so this test drives the debounce deterministically.
+	timers := &fakeTimerFactory{}
+	app.coalescer = newCoalescer(time.Hour, timers.after, app.agentInterruptible, app.inFlight.Cancel, app.dispatchTurn, discardLogger())
 
 	first := ChatRequest{TeamID: "T1", ChannelID: "C1", UserID: "U1", ThreadTS: "100.0", MessageTS: "1.1", Text: "first", Source: "test"}
 	app.startChat(context.Background(), first)
+	timers.fireLast() // debounce elapses -> dispatch the first turn
 
 	// Wait until the first prompt is in flight. first carries a ThreadTS, so the
 	// key is the same regardless of the reply mode.
 	key := conversationKey(first, true)
-	deadline := time.After(time.Second)
-	for !(fake.count() == 1 && app.inFlight.Active(key)) {
-		select {
-		case <-deadline:
-			t.Fatalf("first chat never became active (prompts=%d)", fake.count())
-		default:
-			time.Sleep(time.Millisecond)
-		}
-	}
+	waitUntil(t, time.Second, func() bool { return fake.count() == 1 && app.inFlight.Active(key) })
 
-	// A follow-up in the same thread must be dropped, not started.
+	// A follow-up in the same thread while the turn runs is held, not started.
 	app.startChat(context.Background(), ChatRequest{TeamID: "T1", ChannelID: "C1", UserID: "U1", ThreadTS: "100.0", MessageTS: "2.2", Text: "second", Source: "test"})
+	timers.fireLast() // debounce -> non-interruptible + running -> wait
 	time.Sleep(20 * time.Millisecond)
 	if got := fake.count(); got != 1 {
-		t.Fatalf("expected follow-up to be dropped (1 prompt), got %d", got)
+		t.Fatalf("follow-up must not run concurrently against the same session; got %d prompts", got)
 	}
-	// The dropped follow-up gets a thread note so the user is not left guessing.
-	if msg.postCalls != 1 {
-		t.Fatalf("expected one thread note for the deferred follow-up, got %d", msg.postCalls)
-	}
-	if msg.postChannel != "C1" {
-		t.Fatalf("expected the note in channel C1, got %q", msg.postChannel)
-	}
+
+	// The first turn finishes -> its completion drains the coalesced follow-up.
+	close(fake.release)
+	waitUntil(t, time.Second, func() bool { return fake.count() == 2 })
 }
 
 func TestAgentInterruptibleGate(t *testing.T) {
