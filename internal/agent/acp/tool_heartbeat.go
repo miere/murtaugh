@@ -4,9 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/miere/murtaugh/internal/agent"
 	"sync"
 	"time"
+
+	"github.com/miere/murtaugh/internal/agent"
 )
 
 const (

@@ -1,10 +1,11 @@
 package acp
 
 import (
-	"github.com/miere/murtaugh/internal/agent"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/miere/murtaugh/internal/agent"
 )
 
 // zeroContextClient returns a ProcessClient whose volatile <context> block is
