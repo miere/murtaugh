@@ -238,8 +238,13 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 		logger.Warn("chat disabled: set chat.enabled: true to enable DM and app_mention replies (delegation still runs)")
 	}
 	var bridge *mcpbridge.Server
+	var bgSink *backgroundSink
 	if cfg.Chat.Enabled {
 		sessions = make(map[string]ChatSessionManager)
+		// Renders claude_code background completions (subagents finishing after a
+		// turn ends) into their thread; shared across agents, bound to the chat
+		// handler's renderer below.
+		bgSink = newBackgroundSink(logger)
 		// The aggregator lets ACP agents reach Murtaugh's own tools over a private
 		// socket; built here, bound and torn down in Run. ACP agents that fail to
 		// reach it simply get no Murtaugh tools.
@@ -295,6 +300,7 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 				Approver:               approver,
 				Bridge:                 bridge,
 				LongRunningToolTimeout: cfg.Defaults.EffectiveLongRunningToolTimeout(),
+				BackgroundSink:         bgSink.Handle,
 			})
 			if err != nil {
 				logger.Error("agent disabled: could not build client", "agent", name, "kind", profile.ResolvedKind(), "error", err)
@@ -382,7 +388,11 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 			WithBackfiller(NewThreadBackfiller(api, botUserID, logger)).
 			WithFileFetcher(api).
 			WithUploader(slackAttachmentUploader{api: api}).
-			WithPermissionAsker(acpPermissionAsker)
+			WithPermissionAsker(acpPermissionAsker).
+			WithBackgroundSink(bgSink)
+		// The sink renders background turns through the chat handler's own renderer,
+		// so a background reply looks exactly like a foreground one.
+		bgSink.bind(chat.newChatRenderer)
 	}
 	// One shared runner backs every delegate-to-agent surface (jobs, workflow
 	// triggers, unfurls). Each delegation spins its own isolated agent process,
