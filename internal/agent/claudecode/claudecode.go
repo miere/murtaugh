@@ -106,7 +106,7 @@ func (c *Client) Initialize(_ context.Context) error {
 // NewSession derives the deterministic session id from the Slack conversation and
 // starts (or reuses) the process bound to it. The returned id is authoritative.
 func (c *Client) NewSession(ctx context.Context, meta agent.SessionMetadata) (agent.Session, error) {
-	sessionID := deriveSessionID(meta)
+	sessionID := agent.DeriveSessionID(meta)
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
