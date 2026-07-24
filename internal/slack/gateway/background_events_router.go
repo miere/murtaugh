@@ -19,17 +19,17 @@ type bgTarget struct {
 	streamOpts StreamWriterOptions
 }
 
-// backgroundSink renders a claude_code background turn — a subagent completing
+// backgroundEventsRouter routes a claude_code background turn — a subagent completing
 // after its turn ended, then the model auto-continuing — into the Slack thread it
 // belongs to, driving the SAME chatRenderer a foreground turn uses. So a
 // background reply looks identical: streamed text, task cards, attachments,
 // finalisation. This is the delivery that closes the silent-treatment loop
 // (spec 019 §5): work that finishes after the turn returns still reaches the human.
 //
-// One sink is shared across every claude_code agent; conversations are keyed by
+// One router is shared across every claude_code agent; conversations are keyed by
 // their deterministic session id (agent.DeriveSessionID), which is exactly the id
 // the client's OnBackground fires with, so registration and delivery line up.
-type backgroundSink struct {
+type backgroundEventsRouter struct {
 	logger *slog.Logger
 
 	// newRenderer builds a renderer for a thread — bound to ChatHandler.newChatRenderer
@@ -41,16 +41,16 @@ type backgroundSink struct {
 	active  map[string]chatRenderer // sessionID -> the in-progress background turn
 }
 
-func newBackgroundSink(logger *slog.Logger) *backgroundSink {
+func newBackgroundEventsRouter(logger *slog.Logger) *backgroundEventsRouter {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &backgroundSink{logger: logger, targets: map[string]bgTarget{}, active: map[string]chatRenderer{}}
+	return &backgroundEventsRouter{logger: logger, targets: map[string]bgTarget{}, active: map[string]chatRenderer{}}
 }
 
 // bind supplies the renderer factory once the ChatHandler exists. Safe to call
 // before any background event fires (which only happens once a real turn runs).
-func (b *backgroundSink) bind(newRenderer func(config.ProgressDisplay, string, string, StreamWriterOptions) chatRenderer) {
+func (b *backgroundEventsRouter) bind(newRenderer func(config.ProgressDisplay, string, string, StreamWriterOptions) chatRenderer) {
 	b.mu.Lock()
 	b.newRenderer = newRenderer
 	b.mu.Unlock()
@@ -60,7 +60,7 @@ func (b *backgroundSink) bind(newRenderer func(config.ProgressDisplay, string, s
 // Called by Handle each turn so the target (thread + rendering options) stays
 // current. Without a registered target, a background event is dropped — there is
 // nowhere to post it.
-func (b *backgroundSink) Register(sessionID string, t bgTarget) {
+func (b *backgroundEventsRouter) Register(sessionID string, t bgTarget) {
 	b.mu.Lock()
 	b.targets[sessionID] = t
 	b.mu.Unlock()
@@ -70,7 +70,7 @@ func (b *backgroundSink) Register(sessionID string, t bgTarget) {
 // active foreground turn. Events for one session arrive serialised (the client's
 // per-session read loop), so a session's renderer is only ever driven by one
 // goroutine; the mutex guards the maps across sessions.
-func (b *backgroundSink) Handle(sessionID string, ev agent.Event) {
+func (b *backgroundEventsRouter) Handle(sessionID string, ev agent.Event) {
 	ctx := context.Background()
 	switch ev.Type {
 	case agent.EventText:
@@ -107,7 +107,7 @@ func (b *backgroundSink) Handle(sessionID string, ev agent.Event) {
 // rendererFor returns the session's in-progress background renderer, lazily
 // creating one (bound to its registered thread) on the first event of a turn.
 // Returns nil when nothing is registered or the factory is not bound.
-func (b *backgroundSink) rendererFor(sessionID string) chatRenderer {
+func (b *backgroundEventsRouter) rendererFor(sessionID string) chatRenderer {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if r, ok := b.active[sessionID]; ok {
@@ -125,7 +125,7 @@ func (b *backgroundSink) rendererFor(sessionID string) chatRenderer {
 }
 
 // take removes and returns the session's in-progress renderer, if any.
-func (b *backgroundSink) take(sessionID string) chatRenderer {
+func (b *backgroundEventsRouter) take(sessionID string) chatRenderer {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	r := b.active[sessionID]

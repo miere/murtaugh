@@ -29,7 +29,7 @@ func (r *recordingRenderer) Interrupted(context.Context)                        
 func (r *recordingRenderer) EnsureStopped(context.Context)                            { r.stopped = true }
 
 func TestBackgroundSinkRendersRegisteredSession(t *testing.T) {
-	sink := newBackgroundSink(nil)
+	sink := newBackgroundEventsRouter(nil)
 	var made []*recordingRenderer
 	sink.bind(func(config.ProgressDisplay, string, string, StreamWriterOptions) chatRenderer {
 		r := &recordingRenderer{}
@@ -55,7 +55,7 @@ func TestBackgroundSinkRendersRegisteredSession(t *testing.T) {
 }
 
 func TestBackgroundSinkDropsUnregisteredSession(t *testing.T) {
-	sink := newBackgroundSink(nil)
+	sink := newBackgroundEventsRouter(nil)
 	built := false
 	sink.bind(func(config.ProgressDisplay, string, string, StreamWriterOptions) chatRenderer {
 		built = true
@@ -69,7 +69,7 @@ func TestBackgroundSinkDropsUnregisteredSession(t *testing.T) {
 }
 
 func TestBackgroundSinkFreshRendererPerTurn(t *testing.T) {
-	sink := newBackgroundSink(nil)
+	sink := newBackgroundEventsRouter(nil)
 	built := 0
 	sink.bind(func(config.ProgressDisplay, string, string, StreamWriterOptions) chatRenderer {
 		built++

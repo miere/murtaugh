@@ -90,11 +90,11 @@ type ChatHandler struct {
 	// nil denies every ACP permission request (no human wired), which keeps a
 	// headless turn from hanging.
 	permissionAsker agent.PermissionAsker
-	// backgroundSink renders a claude_code background completion (a subagent
+	// backgroundEventsRouter renders a claude_code background completion (a subagent
 	// finishing after its turn ended) into the conversation's thread. Handle
-	// registers each turn's thread with it so the sink knows where to post. nil
+	// registers each turn's thread with it so the router knows where to post. nil
 	// disables background rendering (tests, non-claude_code deploys).
-	backgroundSink *backgroundSink
+	backgroundEventsRouter *backgroundEventsRouter
 }
 
 // threadBackfiller renders a Slack thread into a transcript block for a cold
@@ -239,11 +239,11 @@ func (h *ChatHandler) WithPermissionAsker(a agent.PermissionAsker) *ChatHandler 
 	return h
 }
 
-// WithBackgroundSink wires the sink that renders claude_code background
+// WithBackgroundEventsRouter wires the router that renders claude_code background
 // completions into their thread. nil leaves background rendering off. Returns the
 // handler for chaining.
-func (h *ChatHandler) WithBackgroundSink(s *backgroundSink) *ChatHandler {
-	h.backgroundSink = s
+func (h *ChatHandler) WithBackgroundEventsRouter(s *backgroundEventsRouter) *ChatHandler {
+	h.backgroundEventsRouter = s
 	return h
 }
 
@@ -428,11 +428,11 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest) (retErr error
 	progressMode := h.resolveProgressDisplay(agentName)
 	streamOpts := StreamWriterOptions{ThreadTS: streamThreadTS, TeamID: teamID, UserID: userID, Interval: h.interval, MinChars: h.minChars, Logger: h.logger}
 	renderer := h.newChatRenderer(progressMode, req.ChannelID, streamThreadTS, streamOpts)
-	// Tell the background sink where this conversation renders, so a subagent that
+	// Tell the background events router where this conversation renders, so a subagent that
 	// finishes after this turn ends is posted into the same thread. Keyed by the
 	// deterministic session id — the same id claude_code fires OnBackground with.
-	if h.backgroundSink != nil {
-		h.backgroundSink.Register(agent.DeriveSessionID(metadata), bgTarget{
+	if h.backgroundEventsRouter != nil {
+		h.backgroundEventsRouter.Register(agent.DeriveSessionID(metadata), bgTarget{
 			channelID:  req.ChannelID,
 			threadTS:   streamThreadTS,
 			mode:       progressMode,
