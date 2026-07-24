@@ -123,11 +123,10 @@ func (c *acpSession) start(ctx context.Context) error {
 	}
 	cmd := exec.Command(c.opts.Command, c.opts.Args...)
 	cmd.Dir = c.opts.WorkDir
-	if len(c.opts.Env) > 0 {
-		// Inherit Murtaugh's environment, then append the profile's overrides so a
-		// duplicate key resolves to the override (exec takes the last entry).
-		cmd.Env = append(os.Environ(), c.opts.Env...)
-	}
+	// Inherit Murtaugh's environment (minus the nested-Claude-Code marker — see
+	// agentEnv) plus the profile's overrides. Always set, so the marker is stripped
+	// whether or not the profile adds env of its own.
+	cmd.Env = agentEnv(c.opts.Env)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("open ACP stdout: %w", err)
