@@ -3,8 +3,11 @@ package agents
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/config/store"
@@ -42,7 +45,7 @@ func getAgent(t *testing.T, s config.Store, name string) (config.AgentProfile, b
 
 func TestTool_Metadata(t *testing.T) {
 	_, prov := newStore(t)
-	tl := New(prov)
+	tl := New(prov, nil)
 	if tl.Name() != "setup.agents" {
 		t.Fatalf("Name() = %q, want setup.agents", tl.Name())
 	}
@@ -53,7 +56,7 @@ func TestTool_Metadata(t *testing.T) {
 
 func TestInvoke_NoCommandSetsDefaultsOnly(t *testing.T) {
 	s, prov := newStore(t)
-	tl := New(prov)
+	tl := New(prov, nil)
 
 	res, err := tl.Invoke(context.Background(), map[string]any{})
 	if err != nil {
@@ -82,7 +85,7 @@ func TestInvoke_NoCommandSetsDefaultsOnly(t *testing.T) {
 
 func TestInvoke_WithCommandRegistersACPAgent(t *testing.T) {
 	s, prov := newStore(t)
-	tl := New(prov)
+	tl := New(prov, nil)
 
 	res, err := tl.Invoke(context.Background(), map[string]any{
 		"command": "/usr/local/bin/auggie",
@@ -108,7 +111,7 @@ func TestInvoke_WithCommandRegistersACPAgent(t *testing.T) {
 
 func TestInvoke_CustomAgentNameIsHonoured(t *testing.T) {
 	s, prov := newStore(t)
-	tl := New(prov)
+	tl := New(prov, nil)
 
 	if _, err := tl.Invoke(context.Background(), map[string]any{
 		"agent_name": "ccode",
@@ -128,7 +131,7 @@ func TestInvoke_PreservesCustomisedDefaults(t *testing.T) {
 	if err := s.PutSingleton(context.Background(), config.SingletonDefaults, custom); err != nil {
 		t.Fatal(err)
 	}
-	tl := New(prov)
+	tl := New(prov, nil)
 	if _, err := tl.Invoke(context.Background(), map[string]any{"command": "/bin/x"}); err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
@@ -142,7 +145,7 @@ func TestInvoke_PreservesCustomisedDefaults(t *testing.T) {
 
 func TestInvoke_NativeAgent(t *testing.T) {
 	s, prov := newStore(t)
-	tl := New(prov)
+	tl := New(prov, nil)
 
 	res, err := tl.Invoke(context.Background(), map[string]any{
 		"agent_name":      "emily",
@@ -182,7 +185,7 @@ func TestInvoke_NativeAgent(t *testing.T) {
 
 func TestInvoke_NativeValidation(t *testing.T) {
 	_, prov := newStore(t)
-	tl := New(prov)
+	tl := New(prov, nil)
 	cases := []map[string]any{
 		{"provider": "gemini", "model": "m"},
 		{"provider": "gemini", "api_key_env": "K"},
@@ -200,8 +203,106 @@ func TestInvoke_NativeValidation(t *testing.T) {
 
 func TestInvoke_RejectsArgsWithoutCommand(t *testing.T) {
 	_, prov := newStore(t)
-	tl := New(prov)
+	tl := New(prov, nil)
 	if _, err := tl.Invoke(context.Background(), map[string]any{"args": []any{"--foo"}}); err == nil {
 		t.Fatal("Invoke should reject args without command")
+	}
+}
+
+// loadedTroubleshoot reads the providers list from a troubleshoot.yaml.
+type loadedTroubleshoot struct {
+	Troubleshoot struct {
+		Providers []string `yaml:"providers"`
+	} `yaml:"troubleshoot"`
+}
+
+func TestInvoke_ClaudeCodeAgentRecordsTroubleshootProvider(t *testing.T) {
+	s, prov := newStore(t)
+	tsPath := filepath.Join(t.TempDir(), "troubleshoot.yaml")
+	tl := New(prov, func() string { return tsPath })
+
+	res, err := tl.Invoke(context.Background(), map[string]any{
+		"agent_name": "carmen",
+		"kind":       "claude_code",
+		"command":    "/Users/x/.local/bin/claude",
+		"model":      "claude-opus-4-8",
+	})
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	r := res.(Result)
+	if !r.Enabled || r.Kind != "claude_code" {
+		t.Fatalf("unexpected result: %+v", r)
+	}
+	if !r.ProviderRecorded {
+		t.Fatal("ProviderRecorded must be true on first claude_code write")
+	}
+	if r.Warning != "" {
+		t.Fatalf("unexpected warning: %s", r.Warning)
+	}
+
+	agent, ok := getAgent(t, s, "carmen")
+	if !ok {
+		t.Fatal("claude_code agent missing")
+	}
+	if agent.ClaudeCode == nil || agent.ClaudeCode.Command != "/Users/x/.local/bin/claude" || agent.ClaudeCode.Model != "claude-opus-4-8" {
+		t.Fatalf("claude_code fields wrong: %+v", agent.ClaudeCode)
+	}
+	if agent.ACP != nil || agent.Native != nil {
+		t.Errorf("claude_code profile must not carry acp/native blocks: %+v", agent)
+	}
+
+	// The provider must be recorded so troubleshoot bundles pick up ~/.claude.
+	tsData, err := os.ReadFile(tsPath)
+	if err != nil {
+		t.Fatalf("read troubleshoot.yaml: %v", err)
+	}
+	var ts loadedTroubleshoot
+	if err := yaml.Unmarshal(tsData, &ts); err != nil {
+		t.Fatalf("parse troubleshoot.yaml: %v", err)
+	}
+	found := false
+	for _, p := range ts.Troubleshoot.Providers {
+		if p == "claude-code" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("claude-code not recorded in troubleshoot providers: %v", ts.Troubleshoot.Providers)
+	}
+
+	// A second claude_code write must not duplicate the provider entry.
+	res2, err := tl.Invoke(context.Background(), map[string]any{
+		"agent_name": "carmen", "kind": "claude_code", "command": "/Users/x/.local/bin/claude",
+	})
+	if err != nil {
+		t.Fatalf("second Invoke: %v", err)
+	}
+	if res2.(Result).ProviderRecorded {
+		t.Error("ProviderRecorded must be false when the provider was already listed")
+	}
+}
+
+func TestInvoke_ClaudeCodeRequiresCommand(t *testing.T) {
+	_, prov := newStore(t)
+	tl := New(prov, nil)
+	if _, err := tl.Invoke(context.Background(), map[string]any{"kind": "claude_code"}); err == nil {
+		t.Fatal("kind claude_code without --command must error")
+	}
+}
+
+// A bare --command still means acp: claude_code is opt-in via --kind only.
+func TestInvoke_ClaudeCodeIsNotInferredFromCommand(t *testing.T) {
+	s, prov := newStore(t)
+	tl := New(prov, nil)
+	if _, err := tl.Invoke(context.Background(), map[string]any{"command": "/usr/local/bin/claude"}); err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	agent, ok := getAgent(t, s, "default")
+	if !ok {
+		t.Fatal("default agent missing")
+	}
+	if agent.ACP == nil || agent.ClaudeCode != nil {
+		t.Fatalf("a bare --command must infer acp, not claude_code: %+v", agent)
 	}
 }

@@ -1,9 +1,13 @@
 // Package agents implements the `setup.agents` tool: register the runtime
-// defaults and a single named agent in the configuration store. It supports both
-// backends — a native LLM agent (a `native:` block, the default) and an external
-// ACP agent (an `acp:` block) — so the installer can configure either from one
+// defaults and a single named agent in the configuration store. It supports every
+// backend — a native LLM agent (a `native:` block, the default), an external ACP
+// agent (an `acp:` block), and the direct Claude Code stream-json agent (a
+// `claude_code:` block) — so the installer can configure any of them from one
 // tool. It is a thin installer convenience over the same store the richer
 // `cfg agent create` / `cfg defaults set` tools write to.
+//
+// Choosing claude_code also records the "claude-code" diagnostics provider into
+// troubleshoot.yaml, so bundles auto-include Claude Code's config and logs.
 //
 // Secrets are never written here: a native profile only records api_key_env (the
 // .env variable name); the key value goes to .env via setup.env.
@@ -18,19 +22,29 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 
 	"github.com/miere/murtaugh/internal/config"
+	"github.com/miere/murtaugh/internal/tools/setup/internal/troubleshootcfg"
 )
 
 // StoreProvider yields the open configuration store.
 type StoreProvider func() (config.Store, error)
 
+// PathProvider resolves a config-relative file path at call time.
+type PathProvider func() string
+
 // Tool is the `setup.agents` capability.
 type Tool struct {
 	store StoreProvider
+	// troubleshootPath returns Murtaugh's machine-managed troubleshoot.yaml.
+	// When a claude_code agent is configured the tool records the "claude-code"
+	// diagnostics provider there so bundles include it. nil disables recording.
+	troubleshootPath PathProvider
 }
 
 // New constructs a Tool that writes into the store returned by provider.
-func New(provider StoreProvider) *Tool {
-	return &Tool{store: provider}
+// troubleshootPath points at troubleshoot.yaml for auto-recording the
+// claude-code provider; pass nil to disable that.
+func New(provider StoreProvider, troubleshootPath PathProvider) *Tool {
+	return &Tool{store: provider, troubleshootPath: troubleshootPath}
 }
 
 // Name returns the registry key.
@@ -38,7 +52,7 @@ func (t *Tool) Name() string { return "setup.agents" }
 
 // Description returns the human-facing summary used by MCP clients.
 func (t *Tool) Description() string {
-	return "Register the runtime defaults and a native (default) or ACP agent in the config store."
+	return "Register the runtime defaults and a native (default), ACP, or Claude Code agent in the config store."
 }
 
 // InputSchema returns the JSON Schema for the tool's arguments.
@@ -47,13 +61,13 @@ func (t *Tool) InputSchema() *jsonschema.Schema {
 		Type: "object",
 		Properties: map[string]*jsonschema.Schema{
 			"agent_name": {Type: "string", Description: "Key under which the agent is registered. Defaults to \"default\"."},
-			"kind":       {Type: "string", Description: "Backend: \"native\" (default) or \"acp\". Inferred from the flags when omitted."},
-			// ACP backend.
-			"command": {Type: "string", Description: "ACP only: absolute path to the ACP-speaking binary."},
-			"args":    {Type: "array", Items: &jsonschema.Schema{Type: "string"}, Description: "ACP only: arguments passed to command."},
+			"kind":       {Type: "string", Description: "Backend: \"native\" (default), \"acp\", or \"claude_code\". Inferred from the flags when omitted; claude_code must be named explicitly."},
+			// ACP and Claude Code backends both take a command.
+			"command": {Type: "string", Description: "ACP/Claude Code: absolute path to the backend binary (the `claude` CLI for claude_code)."},
+			"args":    {Type: "array", Items: &jsonschema.Schema{Type: "string"}, Description: "ACP/Claude Code: arguments passed to command."},
 			// Native backend.
 			"provider":           {Type: "string", Description: "Native: provider family — gemini, anthropic, or openai."},
-			"model":              {Type: "string", Description: "Native: provider model id (e.g. gemini-2.5-pro)."},
+			"model":              {Type: "string", Description: "Native: provider model id (e.g. gemini-2.5-pro). Claude Code: optional model override."},
 			"base_url":           {Type: "string", Description: "Native: endpoint override for compat providers (Z.ai/DeepSeek/Kimi)."},
 			"api_key_env":        {Type: "string", Description: "Native: name of the .env variable holding the API key."},
 			"tools":              {Type: "array", Items: &jsonschema.Schema{Type: "string"}, Description: "Native: tool allowlist (files, terminal, skills, attach, and registry namespaces)."},
@@ -74,6 +88,12 @@ type Result struct {
 	Enabled   bool   `json:"enabled"`
 	AgentName string `json:"agent_name,omitempty"`
 	Kind      string `json:"kind,omitempty"`
+	// ProviderRecorded is true when a claude_code agent caused the "claude-code"
+	// diagnostics provider to be newly recorded into troubleshoot.yaml.
+	ProviderRecorded bool `json:"provider_recorded,omitempty"`
+	// Warning carries a non-fatal note (e.g. the agent was registered but the
+	// troubleshoot-provider recording failed). Empty when everything succeeded.
+	Warning string `json:"warning,omitempty"`
 }
 
 // String renders a one-line CLI confirmation.
@@ -85,7 +105,14 @@ func (r Result) String() string {
 	if !r.Enabled {
 		return "runtime defaults set (no agent configured)"
 	}
-	return fmt.Sprintf("%s agent %q (%s) in the config store", verb, r.AgentName, r.Kind)
+	line := fmt.Sprintf("%s agent %q (%s) in the config store", verb, r.AgentName, r.Kind)
+	if r.ProviderRecorded {
+		line += ", troubleshoot: +claude-code"
+	}
+	if r.Warning != "" {
+		line += "\nwarning: " + r.Warning
+	}
+	return line
 }
 
 // runtimeDefaults is the runtime tuning the installer establishes on first run,
@@ -112,7 +139,9 @@ func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 		return nil, fmt.Errorf("args: %w", err)
 	}
 
-	// Infer the kind when not given: provider ⇒ native, command ⇒ acp.
+	// Infer the kind when not given: provider ⇒ native, command ⇒ acp. A bare
+	// command can't disambiguate acp from claude_code (both take one), so
+	// claude_code must always be named explicitly via --kind.
 	if kind == "" {
 		switch {
 		case provider != "":
@@ -137,13 +166,23 @@ func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 		}
 		profile = config.AgentProfile{ACP: &config.ACPProfile{Command: command, Args: agentArgs}}
 		resultKind = "acp"
+	case "claude_code":
+		if command == "" {
+			return nil, errors.New("kind claude_code requires --command (path to the `claude` CLI)")
+		}
+		profile = config.AgentProfile{ClaudeCode: &config.ClaudeCodeProfile{
+			Command: command,
+			Args:    agentArgs,
+			Model:   strings.TrimSpace(stringArg(args, "model")),
+		}}
+		resultKind = "claude_code"
 	case "":
 		// No agent configured. Stray agent flags are a mistake, not a silent skip.
 		if hasNativeArgs(args) || command != "" || len(agentArgs) > 0 {
 			return nil, errors.New("agent flags supplied but kind could not be determined; pass --kind, --command, or --provider")
 		}
 	default:
-		return nil, fmt.Errorf("unknown kind %q (want native or acp)", kind)
+		return nil, fmt.Errorf("unknown kind %q (want native, acp, or claude_code)", kind)
 	}
 
 	s, err := t.store()
@@ -170,12 +209,29 @@ func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 		}
 	}
 
-	return Result{
+	result := Result{
 		Created:   created,
 		Enabled:   resultKind != "",
 		AgentName: agentName,
 		Kind:      resultKind,
-	}, nil
+	}
+
+	// A claude_code agent's config and logs live under ~/.claude; record the
+	// "claude-code" diagnostics provider so troubleshoot bundles collect them by
+	// default. Best-effort: the agent is already registered, so a failure here
+	// only attaches a warning rather than failing the whole call.
+	if resultKind == "claude_code" && t.troubleshootPath != nil {
+		if tp := strings.TrimSpace(t.troubleshootPath()); tp != "" {
+			recorded, recErr := troubleshootcfg.RecordProvider(tp, "claude-code")
+			switch {
+			case recErr != nil:
+				result.Warning = fmt.Sprintf("configured %s, but could not record claude-code for troubleshoot bundles: %v", agentName, recErr)
+			case recorded:
+				result.ProviderRecorded = true
+			}
+		}
+	}
+	return result, nil
 }
 
 // buildNative assembles and validates a native profile. provider is passed in

@@ -19,6 +19,8 @@ import (
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
+
+	"github.com/miere/murtaugh/internal/tools/setup/internal/troubleshootcfg"
 )
 
 // HomeResolver returns the user home directory. The composition root supplies
@@ -131,7 +133,7 @@ func (t *Tool) Invoke(_ context.Context, args map[string]any) (any, error) {
 	// only attaches a warning rather than failing the whole call.
 	if t.isKnownProvider(client) && t.troubleshootPath != nil {
 		if path := strings.TrimSpace(t.troubleshootPath()); path != "" {
-			recorded, recErr := recordTroubleshootProvider(path, client)
+			recorded, recErr := troubleshootcfg.RecordProvider(path, client)
 			switch {
 			case recErr != nil:
 				res.Warning = fmt.Sprintf("registered %s, but could not record it for troubleshoot bundles: %v", client, recErr)

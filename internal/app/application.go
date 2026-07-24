@@ -379,7 +379,13 @@ func buildRegistry(cfg config.Config, cfgStore config.Store, configPath, version
 	reg.Register(setupbootstrap.New(bootstrapPath))
 	reg.Register(setupslack.New(bootstrapPath, storeProvider))
 
-	reg.Register(setupagents.New(storeProvider))
+	troubleshootConfigPath := func() string {
+		if base := baseDirFor(cfg, configPath); base != "" {
+			return filepath.Join(base, "troubleshoot.yaml")
+		}
+		return ""
+	}
+	reg.Register(setupagents.New(storeProvider, troubleshootConfigPath))
 	envPath := func() string {
 		if base := baseDirFor(cfg, configPath); base != "" {
 			return filepath.Join(base, ".env")
@@ -387,12 +393,6 @@ func buildRegistry(cfg config.Config, cfgStore config.Store, configPath, version
 		return ""
 	}
 	reg.Register(setupenv.New(envPath))
-	troubleshootConfigPath := func() string {
-		if base := baseDirFor(cfg, configPath); base != "" {
-			return filepath.Join(base, "troubleshoot.yaml")
-		}
-		return ""
-	}
 	reg.Register(setupmcpregister.New(os.UserHomeDir, troubleshootConfigPath, troubleshoot.KnownProviders()))
 	reg.Register(setuplaunchd.New(setuplaunchd.Deps{
 		Home:      os.UserHomeDir,
