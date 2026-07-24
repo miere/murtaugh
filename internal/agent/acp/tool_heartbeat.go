@@ -1,9 +1,10 @@
-package agent
+package acp
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/miere/murtaugh/internal/agent"
 	"sync"
 	"time"
 )
@@ -54,7 +55,7 @@ func newToolWatcher(now func() time.Time) *toolWatcher {
 // the tool, any other status (in_progress, pending, or a title-only refinement)
 // starts or keeps tracking it. The start time is stamped once, on first sighting,
 // so the ceiling measures a tool's true age across its later refinements.
-func (w *toolWatcher) observe(id, title string, status TaskStatus) {
+func (w *toolWatcher) observe(id, title string, status agent.TaskStatus) {
 	if id == "" {
 		return
 	}
@@ -94,9 +95,9 @@ func (w *toolWatcher) snapshot() (active int, oldestTitle string, oldest time.Du
 	return active, oldestTitle, oldest
 }
 
-func isTerminalToolStatus(status TaskStatus) bool {
+func isTerminalToolStatus(status agent.TaskStatus) bool {
 	switch status {
-	case TaskStatusComplete, TaskStatusFailed, TaskStatusCancelled:
+	case agent.TaskStatusComplete, agent.TaskStatusFailed, agent.TaskStatusCancelled:
 		return true
 	default:
 		return false
@@ -110,7 +111,7 @@ func isTerminalToolStatus(status TaskStatus) bool {
 // turn with ErrToolCeiling. When no tool is in flight it emits nothing, so a
 // genuinely idle turn (e.g. a wedged provider call with no tool running) still
 // trips the idle watchdog exactly as before — the ceiling only governs tools.
-func (c *ProcessClient) heartbeat(ctx context.Context, w *toolWatcher, events chan<- Event, cancel context.CancelCauseFunc, stop <-chan struct{}, done chan<- struct{}) {
+func (c *ProcessClient) heartbeat(ctx context.Context, w *toolWatcher, events chan<- agent.Event, cancel context.CancelCauseFunc, stop <-chan struct{}, done chan<- struct{}) {
 	defer close(done)
 	interval := c.opts.ToolHeartbeatInterval
 	if interval <= 0 {
@@ -142,7 +143,7 @@ func (c *ProcessClient) heartbeat(ctx context.Context, w *toolWatcher, events ch
 				return
 			}
 			select {
-			case events <- Event{Type: EventStatus, Text: "still working…"}:
+			case events <- agent.Event{Type: agent.EventStatus, Text: "still working…"}:
 			case <-stop:
 				return
 			case <-ctx.Done():

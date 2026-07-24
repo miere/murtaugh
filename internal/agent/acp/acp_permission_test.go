@@ -1,8 +1,9 @@
-package agent
+package acp
 
 import (
 	"context"
 	"encoding/json"
+	"github.com/miere/murtaugh/internal/agent"
 	"io"
 	"log/slog"
 	"os"
@@ -15,9 +16,9 @@ import (
 // runAgentRequest feeds one agent→client request line through readLoop on a client
 // configured with opts (and optional seeded per-session scopes and subscriber
 // channels), then returns the single JSON-RPC response the client writes back to
-// the agent. A permission request under the "ask" policy raises an EventPermission
+// the agent. A permission request under the "ask" policy raises an agent.EventPermission
 // on the matching subscriber channel; pass that channel in subs and answer it.
-func runAgentRequest(t *testing.T, opts ProcessOptions, dests map[string]promptScope, subs map[string]chan Event, line string) map[string]any {
+func runAgentRequest(t *testing.T, opts ProcessOptions, dests map[string]promptScope, subs map[string]chan agent.Event, line string) map[string]any {
 	t.Helper()
 	pr, pw := io.Pipe()
 	c := &ProcessClient{
@@ -97,11 +98,11 @@ func TestACPPermissionAutoDenyCancelsWhenNoRejectOption(t *testing.T) {
 
 // answerPermission drains a subscriber channel and replies to the first
 // EventPermission with optionID, forwarding the request it carried for assertions.
-func answerPermission(events chan Event, optionID string) <-chan PermissionRequest {
-	got := make(chan PermissionRequest, 1)
+func answerPermission(events chan agent.Event, optionID string) <-chan agent.PermissionRequest {
+	got := make(chan agent.PermissionRequest, 1)
 	go func() {
 		for ev := range events {
-			if ev.Type == EventPermission && ev.Permission != nil {
+			if ev.Type == agent.EventPermission && ev.Permission != nil {
 				got <- ev.Permission.Request
 				ev.Permission.Decision <- optionID
 			}
@@ -111,9 +112,9 @@ func answerPermission(events chan Event, optionID string) <-chan PermissionReque
 }
 
 func TestACPPermissionAskRaisesEventAndReturnsDecision(t *testing.T) {
-	events := make(chan Event, 4)
+	events := make(chan agent.Event, 4)
 	dests := map[string]promptScope{"S1": {ctx: context.Background()}}
-	subs := map[string]chan Event{"S1": events}
+	subs := map[string]chan agent.Event{"S1": events}
 	got := answerPermission(events, "a")
 	resp := runAgentRequest(t, ProcessOptions{PermissionPolicy: "ask"}, dests, subs, permReqAllowDeny)
 	select {
@@ -122,7 +123,7 @@ func TestACPPermissionAskRaisesEventAndReturnsDecision(t *testing.T) {
 			t.Fatalf("permission event carried wrong request: %+v", req)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("ask policy did not raise an EventPermission")
+		t.Fatal("ask policy did not raise an agent.EventPermission")
 	}
 	out := outcomeOf(t, resp)
 	if out["outcome"] != "selected" || out["optionId"] != "a" {
@@ -141,9 +142,9 @@ func TestACPPermissionAskWithNoLiveTurnDenies(t *testing.T) {
 }
 
 func TestACPPermissionEmptyPolicyDefaultsToAsk(t *testing.T) {
-	events := make(chan Event, 4)
+	events := make(chan agent.Event, 4)
 	dests := map[string]promptScope{"S1": {ctx: context.Background()}}
-	subs := map[string]chan Event{"S1": events}
+	subs := map[string]chan agent.Event{"S1": events}
 	_ = answerPermission(events, "a")
 	resp := runAgentRequest(t, ProcessOptions{}, dests, subs, permReqAllowDeny)
 	if out := outcomeOf(t, resp); out["optionId"] != "a" {
@@ -228,7 +229,7 @@ func TestACPWriteTextFileWithinWorkDir(t *testing.T) {
 }
 
 func TestPickOptionByKind(t *testing.T) {
-	opts := []PermissionOption{
+	opts := []agent.PermissionOption{
 		{ID: "ao", Kind: "allow_once"},
 		{ID: "aa", Kind: "allow_always"},
 		{ID: "ro", Kind: "reject_once"},
@@ -239,7 +240,7 @@ func TestPickOptionByKind(t *testing.T) {
 	if got := pickOptionByKind(opts, "reject"); got != "ro" {
 		t.Fatalf("reject should pick reject_once, got %q", got)
 	}
-	if got := pickOptionByKind([]PermissionOption{{ID: "x", Kind: "allow_once"}}, "reject"); got != "" {
+	if got := pickOptionByKind([]agent.PermissionOption{{ID: "x", Kind: "allow_once"}}, "reject"); got != "" {
 		t.Fatalf("no reject option should yield \"\", got %q", got)
 	}
 }

@@ -1,4 +1,4 @@
-package agent
+package acp
 
 import (
 	"bufio"
@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/miere/murtaugh/internal/agent"
 	"os"
 	"strings"
 	"sync"
@@ -21,21 +22,21 @@ func TestProcessClientStreamsPromptUpdates(t *testing.T) {
 	if err := client.Initialize(ctx); err != nil {
 		t.Fatalf("Initialize returned error: %v", err)
 	}
-	session, err := client.NewSession(ctx, SessionMetadata{TeamID: "T1"})
+	session, err := client.NewSession(ctx, agent.SessionMetadata{TeamID: "T1"})
 	if err != nil {
 		t.Fatalf("NewSession returned error: %v", err)
 	}
-	events, err := client.Prompt(ctx, session.ID, PromptRequest{Text: "hello"})
+	events, err := client.Prompt(ctx, session.ID, agent.PromptRequest{Text: "hello"})
 	if err != nil {
 		t.Fatalf("Prompt returned error: %v", err)
 	}
 	var text strings.Builder
-	var taskEvents []*TaskEvent
+	var taskEvents []*agent.TaskEvent
 	for event := range events {
 		switch event.Type {
-		case EventText:
+		case agent.EventText:
 			text.WriteString(event.Text)
-		case EventTask:
+		case agent.EventTask:
 			taskEvents = append(taskEvents, event.Task)
 		}
 	}
@@ -48,7 +49,7 @@ func TestProcessClientStreamsPromptUpdates(t *testing.T) {
 	if taskEvents[0].ID != "task-1" || taskEvents[1].ID != "task-1" {
 		t.Fatalf("unexpected task ids: %+v", taskEvents)
 	}
-	if taskEvents[0].Status != TaskStatusInProgress || taskEvents[1].Status != TaskStatusComplete {
+	if taskEvents[0].Status != agent.TaskStatusInProgress || taskEvents[1].Status != agent.TaskStatusComplete {
 		t.Fatalf("unexpected task statuses: %+v", taskEvents)
 	}
 }
@@ -61,17 +62,17 @@ func TestProcessClientDoesNotDuplicateStreamedReplyInResult(t *testing.T) {
 	if err := client.Initialize(ctx); err != nil {
 		t.Fatalf("Initialize returned error: %v", err)
 	}
-	session, err := client.NewSession(ctx, SessionMetadata{TeamID: "T1"})
+	session, err := client.NewSession(ctx, agent.SessionMetadata{TeamID: "T1"})
 	if err != nil {
 		t.Fatalf("NewSession returned error: %v", err)
 	}
-	events, err := client.Prompt(ctx, session.ID, PromptRequest{Text: "dupe:hello world"})
+	events, err := client.Prompt(ctx, session.ID, agent.PromptRequest{Text: "dupe:hello world"})
 	if err != nil {
 		t.Fatalf("Prompt returned error: %v", err)
 	}
 	var text strings.Builder
 	for event := range events {
-		if event.Type == EventText {
+		if event.Type == agent.EventText {
 			text.WriteString(event.Text)
 		}
 	}
@@ -90,17 +91,17 @@ func TestProcessClientRendersPlanAsTaskEvents(t *testing.T) {
 	if err := client.Initialize(ctx); err != nil {
 		t.Fatalf("Initialize returned error: %v", err)
 	}
-	session, err := client.NewSession(ctx, SessionMetadata{TeamID: "T1"})
+	session, err := client.NewSession(ctx, agent.SessionMetadata{TeamID: "T1"})
 	if err != nil {
 		t.Fatalf("NewSession returned error: %v", err)
 	}
-	events, err := client.Prompt(ctx, session.ID, PromptRequest{Text: "plan:Scan=completed,Fix=in_progress,Verify=pending"})
+	events, err := client.Prompt(ctx, session.ID, agent.PromptRequest{Text: "plan:Scan=completed,Fix=in_progress,Verify=pending"})
 	if err != nil {
 		t.Fatalf("Prompt returned error: %v", err)
 	}
-	var tasks []*TaskEvent
+	var tasks []*agent.TaskEvent
 	for event := range events {
-		if event.Type == EventTask {
+		if event.Type == agent.EventTask {
 			tasks = append(tasks, event.Task)
 		}
 	}
@@ -109,11 +110,11 @@ func TestProcessClientRendersPlanAsTaskEvents(t *testing.T) {
 	}
 	want := []struct {
 		id, title string
-		status    TaskStatus
+		status    agent.TaskStatus
 	}{
-		{"plan-0", "Scan", TaskStatusComplete},
-		{"plan-1", "Fix", TaskStatusInProgress},
-		{"plan-2", "Verify", TaskStatusPending},
+		{"plan-0", "Scan", agent.TaskStatusComplete},
+		{"plan-1", "Fix", agent.TaskStatusInProgress},
+		{"plan-2", "Verify", agent.TaskStatusPending},
 	}
 	for i, w := range want {
 		if tasks[i].ID != w.id || tasks[i].Title != w.title || tasks[i].Status != w.status {
@@ -130,7 +131,7 @@ func TestProcessClientProcessOutlivesInitializeContext(t *testing.T) {
 		t.Fatalf("Initialize returned error: %v", err)
 	}
 	cancel()
-	session, err := client.NewSession(context.Background(), SessionMetadata{TeamID: "T1"})
+	session, err := client.NewSession(context.Background(), agent.SessionMetadata{TeamID: "T1"})
 	if err != nil {
 		t.Fatalf("NewSession returned error after initialize context cancellation: %v", err)
 	}
@@ -182,8 +183,8 @@ func TestIsMethodNotFound(t *testing.T) {
 
 func TestProcessClientUnsubscribeOnlyRetractsOwnSubscription(t *testing.T) {
 	c := NewProcessClient(ProcessOptions{Command: "true"})
-	first := &subscription{events: make(chan Event, 1)}
-	second := &subscription{events: make(chan Event, 1)}
+	first := &subscription{events: make(chan agent.Event, 1)}
+	second := &subscription{events: make(chan agent.Event, 1)}
 
 	c.subscribers["s"] = first
 	// A second prompt reuses the session and overwrites the subscriber.
@@ -213,7 +214,7 @@ func TestProcessClientUnsubscribeOnlyRetractsOwnSubscription(t *testing.T) {
 // its drain barrier until the send completes, then closes.
 func TestCloseSubscriptionWaitsForInFlightSend(t *testing.T) {
 	c := NewProcessClient(ProcessOptions{Command: "true"})
-	sub := &subscription{events: make(chan Event)} // unbuffered: the send blocks until drained
+	sub := &subscription{events: make(chan agent.Event)} // unbuffered: the send blocks until drained
 	c.subscribers["s"] = sub
 
 	// A readLoop-path send that has already passed the lock (wg.Add under it) and
@@ -222,7 +223,7 @@ func TestCloseSubscriptionWaitsForInFlightSend(t *testing.T) {
 	sub.wg.Add(1)
 	sent := make(chan struct{})
 	go func() {
-		sub.events <- Event{Type: EventText, Text: "trailing"}
+		sub.events <- agent.Event{Type: agent.EventText, Text: "trailing"}
 		sub.wg.Done()
 		close(sent)
 	}()
@@ -267,7 +268,7 @@ func TestDeliverNotificationDoesNotRaceTeardown(t *testing.T) {
 	const chunk = `{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"x"}}}`
 	for i := 0; i < 200; i++ {
 		c := NewProcessClient(ProcessOptions{Command: "true"})
-		sub := &subscription{events: make(chan Event, 32)}
+		sub := &subscription{events: make(chan agent.Event, 32)}
 		c.subscribers["s"] = sub
 		c.dests["s"] = promptScope{}
 
@@ -323,7 +324,7 @@ func TestExtractTaskFromACPNotification(t *testing.T) {
 		if task.Title != "Searching codebase" {
 			t.Fatalf("expected title 'Searching codebase', got %q", task.Title)
 		}
-		if task.Status != TaskStatusInProgress {
+		if task.Status != agent.TaskStatusInProgress {
 			t.Fatalf("expected status in_progress, got %q", task.Status)
 		}
 		if task.Description != "looking for references" {
@@ -354,7 +355,7 @@ func TestExtractTaskFromACPNotification(t *testing.T) {
 		if task.ID != "t-2" {
 			t.Fatalf("expected id t-2, got %q", task.ID)
 		}
-		if task.Status != TaskStatusComplete {
+		if task.Status != agent.TaskStatusComplete {
 			t.Fatalf("expected status complete, got %q", task.Status)
 		}
 	})
@@ -365,7 +366,7 @@ func TestExtractTaskFromACPNotification(t *testing.T) {
 		if task == nil {
 			t.Fatal("expected non-nil task")
 		}
-		if task.ID != "call-1" || task.Title != "List files" || task.Status != TaskStatusPending {
+		if task.ID != "call-1" || task.Title != "List files" || task.Status != agent.TaskStatusPending {
 			t.Fatalf("unexpected ACP tool task: %+v", task)
 		}
 		if task.Description != "read" {
@@ -379,7 +380,7 @@ func TestExtractTaskFromACPNotification(t *testing.T) {
 		if task == nil {
 			t.Fatal("expected non-nil task")
 		}
-		if task.ID != "call-1" || task.Status != TaskStatusComplete || task.Output != "done" {
+		if task.ID != "call-1" || task.Status != agent.TaskStatusComplete || task.Output != "done" {
 			t.Fatalf("unexpected ACP tool update: %+v", task)
 		}
 	})
@@ -392,10 +393,10 @@ func TestExtractPlanTasks(t *testing.T) {
 		if len(tasks) != 2 {
 			t.Fatalf("expected 2 tasks, got %d: %+v", len(tasks), tasks)
 		}
-		if tasks[0].ID != "plan-0" || tasks[0].Title != "Scan" || tasks[0].Status != TaskStatusComplete {
+		if tasks[0].ID != "plan-0" || tasks[0].Title != "Scan" || tasks[0].Status != agent.TaskStatusComplete {
 			t.Fatalf("task 0: %+v", tasks[0])
 		}
-		if tasks[1].ID != "plan-1" || tasks[1].Title != "Fix" || tasks[1].Status != TaskStatusInProgress {
+		if tasks[1].ID != "plan-1" || tasks[1].Title != "Fix" || tasks[1].Status != agent.TaskStatusInProgress {
 			t.Fatalf("task 1: %+v", tasks[1])
 		}
 	})
@@ -429,11 +430,11 @@ func TestProcessClientDoesNotDropEventsForSlowConsumer(t *testing.T) {
 	if err := client.Initialize(ctx); err != nil {
 		t.Fatalf("Initialize returned error: %v", err)
 	}
-	session, err := client.NewSession(ctx, SessionMetadata{TeamID: "T1"})
+	session, err := client.NewSession(ctx, agent.SessionMetadata{TeamID: "T1"})
 	if err != nil {
 		t.Fatalf("NewSession returned error: %v", err)
 	}
-	events, err := client.Prompt(ctx, session.ID, PromptRequest{Text: fmt.Sprintf("burst:%d", totalChunks)})
+	events, err := client.Prompt(ctx, session.ID, agent.PromptRequest{Text: fmt.Sprintf("burst:%d", totalChunks)})
 	if err != nil {
 		t.Fatalf("Prompt returned error: %v", err)
 	}
@@ -443,7 +444,7 @@ func TestProcessClientDoesNotDropEventsForSlowConsumer(t *testing.T) {
 	// dropped and the assembled text would be truncated.
 	var text strings.Builder
 	for event := range events {
-		if event.Type == EventText {
+		if event.Type == agent.EventText {
 			text.WriteString(event.Text)
 			time.Sleep(2 * time.Millisecond)
 		}
@@ -466,17 +467,17 @@ func TestProcessClientPassesEnvToAgent(t *testing.T) {
 	if err := client.Initialize(ctx); err != nil {
 		t.Fatalf("Initialize returned error: %v", err)
 	}
-	session, err := client.NewSession(ctx, SessionMetadata{TeamID: "T1"})
+	session, err := client.NewSession(ctx, agent.SessionMetadata{TeamID: "T1"})
 	if err != nil {
 		t.Fatalf("NewSession returned error: %v", err)
 	}
-	events, err := client.Prompt(ctx, session.ID, PromptRequest{Text: "echoenv:MURTAUGH_TEST_ENV"})
+	events, err := client.Prompt(ctx, session.ID, agent.PromptRequest{Text: "echoenv:MURTAUGH_TEST_ENV"})
 	if err != nil {
 		t.Fatalf("Prompt returned error: %v", err)
 	}
 	var text strings.Builder
 	for event := range events {
-		if event.Type == EventText {
+		if event.Type == agent.EventText {
 			text.WriteString(event.Text)
 		}
 	}

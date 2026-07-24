@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/miere/murtaugh/internal/agent"
+	"github.com/miere/murtaugh/internal/agent/acp"
 	"github.com/miere/murtaugh/internal/agent/native"
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/frontends/mcp"
@@ -81,7 +82,7 @@ func Client(resolved ResolvedAgent, deps Deps) (agent.Client, error) {
 			}
 			aggregator = aggr
 		}
-		return agent.NewProcessClient(agent.ProcessOptions{
+		return acp.NewProcessClient(acp.ProcessOptions{
 			Command:          profile.ACP.Command,
 			Args:             profile.ACP.Args,
 			WorkDir:          resolved.Dir(),
