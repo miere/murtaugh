@@ -47,6 +47,11 @@ type Deps struct {
 	// SessionDefaults.LongRunningToolTimeout). Zero leaves the ProcessClient
 	// default. Ignored for native agents.
 	LongRunningToolTimeout time.Duration
+	// BackgroundSink receives events a claude_code session emits with no active
+	// turn — a background subagent completing after its turn ended, then the model
+	// auto-continuing. The gateway renders them into the originating Slack thread.
+	// nil (CLI/delegate paths, other backends) drops them. Ignored by acp/native.
+	BackgroundSink func(sessionID string, ev agent.Event)
 }
 
 // Client builds the backend for a resolved agent. It does no network/process I/O
@@ -109,6 +114,7 @@ func Client(resolved ResolvedAgent, deps Deps) (agent.Client, error) {
 			WorkDir:          resolved.Dir(),
 			Logger:           logger,
 			PermissionPolicy: profile.ResolvedACPPermission(),
+			OnBackground:     deps.BackgroundSink,
 		}), nil
 	default:
 		return nil, fmt.Errorf("agentbuild: unknown agent kind %q", resolved.Kind)
