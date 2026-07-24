@@ -2,10 +2,11 @@ package acp
 
 import (
 	"context"
-	"github.com/miere/murtaugh/internal/agent"
 	"os"
 	"testing"
 	"time"
+
+	"github.com/miere/murtaugh/internal/agent"
 )
 
 type fakeAggregator struct {

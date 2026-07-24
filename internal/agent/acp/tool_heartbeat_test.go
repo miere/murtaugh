@@ -3,10 +3,11 @@ package acp
 import (
 	"context"
 	"errors"
-	"github.com/miere/murtaugh/internal/agent"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/miere/murtaugh/internal/agent"
 )
 
 // fakeClock is a manually-advanced clock so tool-age assertions are deterministic

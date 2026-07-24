@@ -3,7 +3,6 @@ package acp
 import (
 	"context"
 	"encoding/json"
-	"github.com/miere/murtaugh/internal/agent"
 	"io"
 	"log/slog"
 	"os"
@@ -11,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/miere/murtaugh/internal/agent"
 )
 
 // runAgentRequest feeds one agent→client request line through readLoop on a client
