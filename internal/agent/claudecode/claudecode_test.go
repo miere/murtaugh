@@ -54,7 +54,7 @@ func TestInitializeHandshakeAndBasicTurn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
-	if want := deriveSessionID(agent.SessionMetadata{}); sess.ID != want {
+	if want := agent.DeriveSessionID(agent.SessionMetadata{}); sess.ID != want {
 		t.Fatalf("expected derived session id %q, got %q", want, sess.ID)
 	}
 	ch, err := c.Prompt(ctx, sess.ID, agent.PromptRequest{Text: "hi"})
