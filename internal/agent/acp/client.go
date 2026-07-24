@@ -108,7 +108,12 @@ func (c *Client) Initialize(ctx context.Context) error {
 }
 
 // NewSession starts a fresh process for this conversation, performs the ACP
-// handshake and session/new, and registers the resulting session under its id.
+// handshake and session/new, and registers it under the deterministic
+// conversation id (agent.DeriveSessionID). It is NOT keyed by the agent-returned
+// session id: that is only unique within one agent process, and every
+// conversation now has its own process, so two conversations could be handed the
+// same agent id and collide. The agent's id is used only for this session's own
+// ACP calls (held on acpSession.sessionID).
 func (c *Client) NewSession(ctx context.Context, meta agent.SessionMetadata) (agent.Session, error) {
 	c.mu.Lock()
 	if c.closed {
@@ -122,20 +127,22 @@ func (c *Client) NewSession(ctx context.Context, meta agent.SessionMetadata) (ag
 		s.close()
 		return agent.Session{}, err
 	}
-	id, err := s.openSession(ctx, meta)
-	if err != nil {
+	if _, err := s.openSession(ctx, meta); err != nil {
 		s.close()
 		return agent.Session{}, fmt.Errorf("create ACP session: %w", err)
 	}
+	// Route by the deterministic conversation id — unique per conversation, so it
+	// never collides on the agent's (per-process) session id.
+	key := agent.DeriveSessionID(meta)
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
 		s.close()
 		return agent.Session{}, errors.New("ACP client is closed")
 	}
-	c.sessions[id] = s
+	c.sessions[key] = s
 	c.mu.Unlock()
-	return agent.Session{ID: id}, nil
+	return agent.Session{ID: key}, nil
 }
 
 // Prompt routes a turn to the identified conversation's process.
