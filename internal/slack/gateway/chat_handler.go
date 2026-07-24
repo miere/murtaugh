@@ -368,7 +368,7 @@ func (h *ChatHandler) backfillHistory(ctx context.Context, req ChatRequest, sess
 		return "", nil
 	}
 	if history != "" {
-		h.logger.Info("seeding new ACP session with thread history", "channel", req.ChannelID, "thread", req.ThreadTS)
+		h.logger.Info("seeding new agent session with thread history", "channel", req.ChannelID, "thread", req.ThreadTS)
 	}
 	return history, canvas
 }
@@ -397,7 +397,7 @@ func prependCanvasNote(history, canvasID string) string {
 func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest, route ChatRoute) (retErr error) {
 	startedAt := time.Now()
 	if h == nil || len(h.sessions) == 0 {
-		return fmt.Errorf("ACP chat is not enabled")
+		return fmt.Errorf("chat is not enabled")
 	}
 
 	agentName := route.Agent
@@ -730,7 +730,7 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest, route ChatRou
 					// and (lacking session/cancel) cannot be stopped, so drop the session
 					// binding like the idle path — the next message opens a fresh session.
 					discardSession(sessions, key)
-					h.logger.Warn("dropped ACP session after tool ceiling", "source", req.Source, "channel", req.ChannelID, "session_id", sessionID)
+					h.logger.Warn("dropped agent session after tool ceiling", "source", req.Source, "channel", req.ChannelID, "session_id", sessionID)
 				}
 				return renderer.Fail(ctx, event.Error)
 			case agent.EventComplete:
@@ -750,13 +750,13 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest, route ChatRou
 func (h *ChatHandler) askPermission(ctx context.Context, req ChatRequest, threadTS string, renderer chatRenderer, pr agent.PermissionRequest) string {
 	renderer.BeginInterjection(ctx)
 	if h.permissionAsker == nil {
-		h.logger.Warn("ACP permission request but no asker wired; denying", "channel", req.ChannelID, "tool_kind", pr.ToolKind)
+		h.logger.Warn("agent permission request but no asker wired; denying", "channel", req.ChannelID, "tool_kind", pr.ToolKind)
 		return ""
 	}
 	loc := agent.TurnLocation{ChannelID: req.ChannelID, ThreadTS: threadTS, UserID: req.UserID}
 	optionID, err := h.permissionAsker.AskPermission(ctx, loc, pr)
 	if err != nil {
-		h.logger.Warn("ACP permission ask failed; denying", "channel", req.ChannelID, "error", err)
+		h.logger.Warn("agent permission ask failed; denying", "channel", req.ChannelID, "error", err)
 		return ""
 	}
 	return optionID

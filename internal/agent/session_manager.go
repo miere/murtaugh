@@ -15,6 +15,13 @@ type SessionManager struct {
 	now         func() time.Time
 	logger      *slog.Logger
 
+	// kind and approval describe the backend this manager drives, for logging
+	// only. They keep the start/session lines backend-accurate (this manager is
+	// generic — it drives native, acp, and claude_code alike). Empty until set
+	// via WithDescriptor; the alias travels on the logger as the `agent` attr.
+	kind     string
+	approval string
+
 	// cancelOverride, when non-nil, forces the interruptible verdict and
 	// skips the startup probe. It is populated from the agent's
 	// `interruptible:` config flag.
@@ -84,6 +91,15 @@ func (m *SessionManager) WithCancelOverride(override *bool) *SessionManager {
 	return m
 }
 
+// WithDescriptor records the backend kind and approval posture so the manager's
+// log lines name the actual backend instead of a hard-coded "ACP". Purely for
+// diagnostics; behaviour is unaffected.
+func (m *SessionManager) WithDescriptor(kind, approval string) *SessionManager {
+	m.kind = kind
+	m.approval = approval
+	return m
+}
+
 // Interruptible reports whether the agent can have an in-flight prompt
 // cancelled via session/cancel. Until Warm has resolved the capability it
 // returns true so behaviour is unchanged when detection has not (yet) run.
@@ -115,10 +131,10 @@ func (m *SessionManager) resolveInterruptible(ctx context.Context) {
 	m.interruptibleKnown = true
 	m.mu.Unlock()
 	if interruptible {
-		m.logger.Info("ACP agent is interruptible", "source", source)
+		m.logger.Info("agent is interruptible", "type", m.kind, "source", source)
 		return
 	}
-	m.logger.Warn("ACP agent does not support session/cancel; new messages will not interrupt an in-flight response", "source", source)
+	m.logger.Warn("agent does not support cancellation; new messages will not interrupt an in-flight response", "type", m.kind, "source", source)
 }
 
 func (m *SessionManager) Warm(ctx context.Context) error {
@@ -130,11 +146,13 @@ func (m *SessionManager) Warm(ctx context.Context) error {
 	startedAt := m.now()
 	if err := m.client.Initialize(ctx); err != nil {
 		m.mu.Unlock()
-		return fmt.Errorf("initialize ACP client: %w", err)
+		return fmt.Errorf("initialize agent client: %w", err)
 	}
 	m.initialized = true
 	m.mu.Unlock()
-	m.logger.Info("warmed ACP client", "duration", m.now().Sub(startedAt))
+	// The one line that names the backend at startup, so the maintainer can tell
+	// native/acp/claude_code apart at a glance (the alias rides as `agent`).
+	m.logger.Info("agent started", "type", m.kind, "approval", m.approval, "duration", m.now().Sub(startedAt))
 	// Resolve interruptibility after releasing the lock: the probe performs a
 	// round-trip to the agent and resolveInterruptible takes the lock itself.
 	m.resolveInterruptible(ctx)
@@ -206,7 +224,7 @@ func (m *SessionManager) session(ctx context.Context, key ConversationKey, metad
 		session.lastUsed = m.now()
 		m.sessions[key] = session
 		m.mu.Unlock()
-		m.logger.Info("reusing ACP session", "team", key.TeamID, "channel", key.ChannelID, "thread", key.ThreadTS, "dm", key.DM)
+		m.logger.Info("reusing agent session", "type", m.kind, "team", key.TeamID, "channel", key.ChannelID, "thread", key.ThreadTS, "dm", key.DM)
 		return session.session, nil
 	}
 	m.mu.Unlock()
@@ -216,12 +234,12 @@ func (m *SessionManager) session(ctx context.Context, key ConversationKey, metad
 	if session, ok := m.sessions[key]; ok {
 		session.lastUsed = m.now()
 		m.sessions[key] = session
-		m.logger.Info("reusing ACP session", "team", key.TeamID, "channel", key.ChannelID, "thread", key.ThreadTS, "dm", key.DM)
+		m.logger.Info("reusing agent session", "type", m.kind, "team", key.TeamID, "channel", key.ChannelID, "thread", key.ThreadTS, "dm", key.DM)
 		return session.session, nil
 	}
 	if !m.initialized {
 		if err := m.client.Initialize(ctx); err != nil {
-			return Session{}, fmt.Errorf("initialize ACP client: %w", err)
+			return Session{}, fmt.Errorf("initialize agent client: %w", err)
 		}
 		m.initialized = true
 	}
@@ -229,10 +247,10 @@ func (m *SessionManager) session(ctx context.Context, key ConversationKey, metad
 	startedAt := m.now()
 	session, err := m.client.NewSession(ctx, metadata)
 	if err != nil {
-		return Session{}, fmt.Errorf("create ACP session: %w", err)
+		return Session{}, fmt.Errorf("create agent session: %w", err)
 	}
 	m.sessions[key] = managedSession{session: session, lastUsed: m.now()}
-	m.logger.Info("created ACP session", "team", key.TeamID, "channel", key.ChannelID, "thread", key.ThreadTS, "dm", key.DM, "duration", m.now().Sub(startedAt))
+	m.logger.Info("created agent session", "type", m.kind, "team", key.TeamID, "channel", key.ChannelID, "thread", key.ThreadTS, "dm", key.DM, "duration", m.now().Sub(startedAt))
 	return session, nil
 }
 

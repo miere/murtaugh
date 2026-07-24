@@ -321,7 +321,9 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 				client,
 				cfg.Defaults.EffectiveSessionIdleTimeout(),
 				cfg.Defaults.EffectiveMaxSessions(),
-			).WithLogger(logger.With("agent", name)).WithCancelOverride(interruptible)
+			).WithLogger(logger.With("agent", name)).
+				WithCancelOverride(interruptible).
+				WithDescriptor(string(profile.ResolvedKind()), profile.ResolvedApproval())
 		}
 
 		// The resolver runs on the Slack socket goroutine, so it must not do any
@@ -656,10 +658,10 @@ func (a *Gateway) warmChat(ctx context.Context) {
 		warmCtx, cancel := context.WithTimeout(ctx, a.chatWarmTimeout)
 		defer cancel()
 		if err := a.chat.Warm(warmCtx); err != nil {
-			a.logger.Error("ACP warmup failed", "error", err)
+			a.logger.Error("agent warmup failed", "error", err)
 			return
 		}
-		a.logger.Info("ACP warmup completed")
+		a.logger.Info("agent warmup completed")
 	}()
 }
 
@@ -1251,7 +1253,7 @@ func (a *Gateway) handleEventsAPI(event socketmode.Event) {
 		a.handleLinkShared(eventsAPI.TeamID, inner)
 	case *slackevents.AppMentionEvent:
 		if a.chat == nil {
-			a.logger.Debug("ignored app_mention because ACP chat is disabled")
+			a.logger.Debug("ignored app_mention because chat is disabled")
 			return
 		}
 		if inner.BotID != "" {
@@ -1269,7 +1271,7 @@ func (a *Gateway) handleEventsAPI(event socketmode.Event) {
 		a.startChat(context.Background(), ChatRequest{TeamID: eventsAPI.TeamID, ChannelID: inner.Channel, UserID: inner.User, ThreadTS: inner.ThreadTimeStamp, MessageTS: inner.TimeStamp, Text: text, Files: inner.Files, Source: "app_mention"})
 	case *slackevents.MessageEvent:
 		if a.chat == nil {
-			a.logger.Debug("ignored message because ACP chat is disabled")
+			a.logger.Debug("ignored message because chat is disabled")
 			return
 		}
 		// Bot/self messages are never answered, in DMs or channels.
@@ -1502,7 +1504,7 @@ func (a *Gateway) buildInterruptCancel(key agent.ConversationKey, agent string, 
 					if sessionID, live := sessions.Lookup(key); live {
 						cancelReqCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 						if err := sessions.Cancel(cancelReqCtx, sessionID); err != nil {
-							a.logger.Warn("ACP session cancel failed", "agent", agent, "session_id", sessionID, "error", err)
+							a.logger.Warn("agent session cancel failed", "agent", agent, "session_id", sessionID, "error", err)
 						}
 						cancel()
 					}
