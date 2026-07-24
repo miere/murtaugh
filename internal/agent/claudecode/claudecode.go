@@ -252,9 +252,10 @@ func (s *procSession) start(sessionArgs []string) error {
 	args := append(append([]string{}, s.opts.Args...), sessionArgs...)
 	cmd := exec.Command(s.opts.Command, args...)
 	cmd.Dir = s.opts.WorkDir
-	if len(s.opts.Env) > 0 {
-		cmd.Env = append(cmd.Environ(), s.opts.Env...)
-	}
+	// Inherit the daemon's environment minus the nested-Claude-Code marker (so the
+	// claude CLI launches even when Murtaugh itself runs inside a Claude Code
+	// session), plus the profile's overrides.
+	cmd.Env = agent.SpawnEnv(s.opts.Env)
 	stderr := &cappedBuffer{limit: 8 << 10}
 	cmd.Stderr = stderr
 	stdin, err := cmd.StdinPipe()
