@@ -15,7 +15,7 @@ import (
 // firing, so post/start counts reflect sections, not refreshes.
 func newTestSectionRenderer(api *fakeStreamAPI, msgr *fakeStatusMessenger) *sectionRenderer {
 	return newSectionRenderer(
-		func() *StreamWriter {
+		func() SlackSink {
 			return NewStreamWriter(api, "C1", StreamWriterOptions{ThreadTS: "100.0", Interval: time.Hour, MinChars: 1, Logger: discardLogger()})
 		},
 		func() toolBlock {

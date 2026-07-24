@@ -197,11 +197,7 @@ func (w *StreamWriter) rollover(ctx context.Context) error {
 }
 
 func (w *StreamWriter) Fail(ctx context.Context, err error) error {
-	message := "\n\n:warning: Murtaugh hit an error while talking to the ACP agent."
-	if err != nil {
-		message += "\n`" + sanitizeSlackInline(err.Error()) + "`"
-	}
-	if appendErr := w.Append(ctx, message); appendErr != nil {
+	if appendErr := w.Append(ctx, streamFailMessage(err)); appendErr != nil {
 		return appendErr
 	}
 	return w.Stop(ctx)

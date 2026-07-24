@@ -143,7 +143,7 @@ const (
 // messages, alternating between streamed text messages and in-place tool blocks
 // as the stream switches between text and tool activity.
 type sectionRenderer struct {
-	newText   func() *StreamWriter
+	newText   func() SlackSink
 	newBlock  func() toolBlock
 	uploader  attachmentUploader
 	channelID string
@@ -151,7 +151,7 @@ type sectionRenderer struct {
 	logger    *slog.Logger
 
 	mode   sectionMode
-	text   *StreamWriter
+	text   SlackSink
 	block  toolBlock
 	titles []string // distinct tool titles in the current block, for its summary
 
@@ -168,7 +168,7 @@ type sectionRenderer struct {
 	planRendered bool
 }
 
-func newSectionRenderer(newText func() *StreamWriter, newBlock func() toolBlock, uploader attachmentUploader, channelID, threadTS string, logger *slog.Logger) *sectionRenderer {
+func newSectionRenderer(newText func() SlackSink, newBlock func() toolBlock, uploader attachmentUploader, channelID, threadTS string, logger *slog.Logger) *sectionRenderer {
 	if logger == nil {
 		logger = slog.Default()
 	}
