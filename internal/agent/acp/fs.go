@@ -13,7 +13,7 @@ import (
 // only method we implement is session/request_permission; anything else gets a
 // method-not-found reply (and a warn) so the agent fails fast instead of blocking
 // forever waiting for a response we would otherwise never send.
-func (c *ProcessClient) handleAgentRequest(line []byte) {
+func (c *acpSession) handleAgentRequest(line []byte) {
 	var req struct {
 		ID     json.RawMessage `json:"id"`
 		Method string          `json:"method"`
@@ -41,7 +41,7 @@ func (c *ProcessClient) handleAgentRequest(line []byte) {
 // it only within the agent's workdir so a read can never exfiltrate host files
 // outside the project, mirroring how the attach tool is rooted. line (1-based)
 // and limit (max lines) narrow the returned slice when present.
-func (c *ProcessClient) handleReadTextFile(id, params json.RawMessage) {
+func (c *acpSession) handleReadTextFile(id, params json.RawMessage) {
 	var p struct {
 		Path  string `json:"path"`
 		Line  *int   `json:"line"`
@@ -71,7 +71,7 @@ func (c *ProcessClient) handleReadTextFile(id, params json.RawMessage) {
 // handleWriteTextFile serves an agent-initiated fs/write_text_file request,
 // rooted in the agent's workdir for the same reason as the read. Parent
 // directories are created so the agent can write new files under the project.
-func (c *ProcessClient) handleWriteTextFile(id, params json.RawMessage) {
+func (c *acpSession) handleWriteTextFile(id, params json.RawMessage) {
 	var p struct {
 		Path    string `json:"path"`
 		Content string `json:"content"`
@@ -100,7 +100,7 @@ func (c *ProcessClient) handleWriteTextFile(id, params json.RawMessage) {
 // configured workdir. A relative path is resolved against that root; any path
 // that escapes it is rejected so a confused or compromised agent cannot read or
 // overwrite host files outside the project it was scoped to.
-func (c *ProcessClient) resolveWithinWorkDir(p string) (string, error) {
+func (c *acpSession) resolveWithinWorkDir(p string) (string, error) {
 	if strings.TrimSpace(p) == "" {
 		return "", errors.New("fs path is required")
 	}

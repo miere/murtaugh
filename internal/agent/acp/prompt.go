@@ -1,8 +1,11 @@
 package acp
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"github.com/miere/murtaugh/internal/agent"
 )
@@ -25,7 +28,7 @@ import (
 //  3. the thread transcript, when History is set (a freshly opened session
 //     backfilling an existing thread).
 //  4. the user's text.
-func (c *ProcessClient) promptBlocks(request agent.PromptRequest) []map[string]string {
+func (c *acpSession) promptBlocks(request agent.PromptRequest) []map[string]string {
 	blocks := make([]map[string]string, 0, 5)
 	if persona := strings.TrimSpace(c.opts.Persona); persona != "" {
 		blocks = append(blocks, map[string]string{"type": "text", "text": "<persona>\n" + persona + "\n</persona>"})
@@ -54,7 +57,7 @@ func (c *ProcessClient) promptBlocks(request agent.PromptRequest) []map[string]s
 // It mirrors the native RenderTurnContext format so the two backends present the
 // same facts to the model; the Slack location is intentionally left to the
 // separate <conversation-context> block above.
-func (c *ProcessClient) renderTurnContext() string {
+func (c *acpSession) renderTurnContext() string {
 	var lines []string
 	if c.now != nil {
 		if now := c.now(); !now.IsZero() {
@@ -68,4 +71,93 @@ func (c *ProcessClient) renderTurnContext() string {
 		return ""
 	}
 	return "<context>\n" + strings.Join(lines, "\n") + "\n</context>"
+}
+
+// prompt drives one turn: it installs the turn's subscription/scope/watcher,
+// starts the heartbeat, sends session/prompt, and streams events until the turn
+// completes. The returned channel closes when the turn ends.
+func (c *acpSession) prompt(ctx context.Context, request agent.PromptRequest) (<-chan agent.Event, error) {
+	sub := &subscription{events: make(chan agent.Event, 32)}
+	events := sub.events
+	sawText := &atomic.Bool{}
+	watcher := newToolWatcher(c.now)
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil, errors.New("ACP session is closed")
+	}
+	sessionID := c.sessionID
+	c.active = sub
+	c.scope = promptScope{loc: agent.TurnLocation{ChannelID: request.Channel, ThreadTS: request.Thread}, ctx: ctx, sawText: sawText}
+	c.watcher = watcher
+	c.mu.Unlock()
+
+	go func() {
+		// The heartbeat keeps this turn alive while a tool legitimately runs and
+		// fails it if one runs past its ceiling. It rides an inner cancellable
+		// context so the ceiling can unblock the in-flight session/prompt without
+		// disturbing the caller's ctx.
+		promptCtx, cancelPrompt := context.WithCancelCause(ctx)
+		defer cancelPrompt(nil)
+		stopHB := make(chan struct{})
+		hbDone := make(chan struct{})
+		go c.heartbeat(promptCtx, watcher, events, cancelPrompt, stopHB, hbDone)
+		defer func() {
+			close(stopHB)
+			<-hbDone
+			c.clearToolWatch(watcher)
+			c.closeSubscription(sub)
+		}()
+		result, err := c.call(promptCtx, "session/prompt", map[string]any{
+			"sessionId": sessionID,
+			"prompt":    c.promptBlocks(request),
+		})
+		if err != nil {
+			if cause := context.Cause(promptCtx); errors.Is(cause, ErrToolCeiling) {
+				events <- agent.Event{Type: agent.EventError, Error: cause}
+				return
+			}
+			events <- agent.Event{Type: agent.EventError, Error: err}
+			return
+		}
+		text := extractText(result)
+		stopReason := extractStopReason(result)
+		c.log.Info("ACP prompt completed", "session_id", sessionID, "stop_reason", stopReason, "response_text", text != "")
+		// Emit the final result text ONLY when nothing was streamed this turn.
+		// Streaming agents deliver the reply incrementally via agent_message_chunk
+		// notifications and echo the same text in the prompt result; re-emitting it
+		// here would duplicate the whole reply. A non-streaming agent still has its
+		// reply surfaced, since nothing set sawText.
+		if text != "" && !sawText.Load() {
+			events <- agent.Event{Type: agent.EventText, Text: text}
+		}
+		events <- agent.Event{Type: agent.EventComplete, StopReason: stopReason}
+	}()
+	return events, nil
+}
+
+// closeSubscription retracts this turn's subscription and closes its event
+// channel — but only after every readLoop-originated send that already captured
+// the subscription has drained. The readLoop registers as an in-flight sender
+// (sub.wg.Add) under mu before sending; retracting active under mu stops NEW
+// captures, and wg.Wait waits out the ones already past the lookup. Closing before
+// that drain is what let a trailing notification panic on a closed channel.
+func (c *acpSession) closeSubscription(sub *subscription) {
+	c.mu.Lock()
+	if c.active == sub {
+		c.active = nil
+		c.scope = promptScope{}
+	}
+	c.mu.Unlock()
+	sub.wg.Wait()
+	close(sub.events)
+}
+
+// clearToolWatch retracts this turn's tool watcher if it is still the live one.
+func (c *acpSession) clearToolWatch(w *toolWatcher) {
+	c.mu.Lock()
+	if c.watcher == w {
+		c.watcher = nil
+	}
+	c.mu.Unlock()
 }

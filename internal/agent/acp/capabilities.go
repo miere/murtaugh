@@ -22,14 +22,6 @@ type MCPCapabilities struct {
 	SSE  bool
 }
 
-// Capabilities returns what the agent advertised at initialize. Zero value until
-// Initialize completes.
-func (c *ProcessClient) Capabilities() AgentCapabilities {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.caps
-}
-
 // parseAgentCapabilities decodes the subset of an ACP initialize response that
 // Murtaugh acts on. Missing fields decode to their zero value (stdio-only), the
 // safe default. An unparseable result yields zero capabilities rather than an

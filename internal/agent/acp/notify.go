@@ -6,7 +6,7 @@ import (
 	"github.com/miere/murtaugh/internal/agent"
 )
 
-func (c *ProcessClient) deliverNotification(notification rpcNotification) {
+func (c *acpSession) deliverNotification(notification rpcNotification) {
 	if notification.Method != "session/update" {
 		// Surface any ACP notification we don't implement so a protocol feature we
 		// silently ignore is visible in the log rather than invisible (the class of
@@ -26,8 +26,8 @@ func (c *ProcessClient) deliverNotification(notification rpcNotification) {
 		return
 	}
 	c.mu.Lock()
-	sub := c.subscribers[sessionID]
-	scope := c.dests[sessionID]
+	sub := c.active
+	scope := c.scope
 	if sub != nil {
 		// Register as an in-flight sender while still holding the lock that guards
 		// the map, so teardown either sees us here (and waits) or has already
@@ -50,7 +50,7 @@ func (c *ProcessClient) deliverNotification(notification rpcNotification) {
 		// output-silent tool gives; plan updates below are the agent's task list,
 		// not tool execution, so they are deliberately not watched.
 		c.mu.Lock()
-		w := c.toolWatch[sessionID]
+		w := c.watcher
 		c.mu.Unlock()
 		if w != nil {
 			w.observe(task.ID, task.Title, task.Status)

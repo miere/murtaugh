@@ -31,7 +31,7 @@ func TestAggregatorServersEmitsBridgeServer(t *testing.T) {
 		Args:    []string{"mcp-bridge"},
 		Env:     map[string]string{"MURTAUGH_BRIDGE_TOKEN": "tok", "MURTAUGH_BRIDGE_SOCKET": "/run/s"},
 	}}
-	c := NewProcessClient(ProcessOptions{Aggregator: fake})
+	c := newACPSession(ProcessOptions{Aggregator: fake})
 
 	servers, release := c.aggregatorServers(agent.SessionMetadata{})
 	if len(servers) != 1 {
@@ -66,7 +66,7 @@ func TestAggregatorServersEmitsBridgeServer(t *testing.T) {
 }
 
 func TestAggregatorServersEmptyWithoutAggregator(t *testing.T) {
-	c := NewProcessClient(ProcessOptions{})
+	c := newACPSession(ProcessOptions{})
 	servers, release := c.aggregatorServers(agent.SessionMetadata{})
 	if len(servers) != 0 {
 		t.Fatalf("expected no servers without an aggregator, got %d", len(servers))
@@ -78,7 +78,7 @@ func TestAggregatorServersEmptyWithoutAggregator(t *testing.T) {
 
 func TestAggregatorServersSwallowsRegistrationError(t *testing.T) {
 	fake := &fakeAggregator{err: context.DeadlineExceeded}
-	c := NewProcessClient(ProcessOptions{Aggregator: fake})
+	c := newACPSession(ProcessOptions{Aggregator: fake})
 	servers, release := c.aggregatorServers(agent.SessionMetadata{})
 	if len(servers) != 0 || release != nil {
 		t.Fatal("a registration error must yield no servers and no release (agent just gets no tools)")

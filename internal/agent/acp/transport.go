@@ -87,7 +87,7 @@ type rpcNotification struct {
 	Params  json.RawMessage `json:"params,omitempty"`
 }
 
-func (c *ProcessClient) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+func (c *acpSession) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	startedAt := time.Now()
 	if err := c.start(ctx); err != nil {
 		return nil, err
@@ -129,7 +129,7 @@ func (c *ProcessClient) call(ctx context.Context, method string, params any) (js
 	}
 }
 
-func (c *ProcessClient) readLoop(reader io.Reader) {
+func (c *acpSession) readLoop(reader io.Reader) {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
 	for scanner.Scan() {
@@ -169,7 +169,7 @@ func (c *ProcessClient) readLoop(reader io.Reader) {
 	}
 }
 
-func (c *ProcessClient) deliverResponse(response rpcResponse) {
+func (c *acpSession) deliverResponse(response rpcResponse) {
 	c.mu.Lock()
 	ch := c.pending[response.ID]
 	delete(c.pending, response.ID)
@@ -181,16 +181,16 @@ func (c *ProcessClient) deliverResponse(response rpcResponse) {
 }
 
 // respondResult writes a JSON-RPC success response to the agent, echoing id.
-func (c *ProcessClient) respondResult(id json.RawMessage, result any) {
+func (c *acpSession) respondResult(id json.RawMessage, result any) {
 	c.writeResponse(rpcOutgoingResponse{JSONRPC: "2.0", ID: id, Result: result})
 }
 
 // respondError writes a JSON-RPC error response to the agent, echoing id.
-func (c *ProcessClient) respondError(id json.RawMessage, code int, message string) {
+func (c *acpSession) respondError(id json.RawMessage, code int, message string) {
 	c.writeResponse(rpcOutgoingResponse{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: code, Message: message}})
 }
 
-func (c *ProcessClient) writeResponse(resp rpcOutgoingResponse) {
+func (c *acpSession) writeResponse(resp rpcOutgoingResponse) {
 	encoded, err := json.Marshal(resp)
 	if err != nil {
 		c.log.Warn("encode ACP response", "error", err)
@@ -206,7 +206,7 @@ func (c *ProcessClient) writeResponse(resp rpcOutgoingResponse) {
 	}
 }
 
-func (c *ProcessClient) failAll(err error) {
+func (c *acpSession) failAll(err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for id, ch := range c.pending {
@@ -214,14 +214,14 @@ func (c *ProcessClient) failAll(err error) {
 		close(ch)
 		delete(c.pending, id)
 	}
-	for _, sub := range c.subscribers {
+	if c.active != nil {
 		select {
-		case sub.events <- agent.Event{Type: agent.EventError, Error: err}:
+		case c.active.events <- agent.Event{Type: agent.EventError, Error: err}:
 		default:
 		}
 	}
 }
 
-func (c *ProcessClient) drainStderr(reader io.Reader) {
+func (c *acpSession) drainStderr(reader io.Reader) {
 	_, _ = io.Copy(io.Discard, io.LimitReader(reader, 64*1024))
 }

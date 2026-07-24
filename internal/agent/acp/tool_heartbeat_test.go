@@ -65,7 +65,7 @@ func TestToolWatcherTracksInFlightTools(t *testing.T) {
 
 // runHeartbeat starts c.heartbeat and returns its cancel cause func and channels so
 // a test can assert its emissions and shut it down.
-func runHeartbeat(c *ProcessClient, w *toolWatcher) (chan agent.Event, context.Context, context.CancelCauseFunc, chan struct{}, chan struct{}) {
+func runHeartbeat(c *acpSession, w *toolWatcher) (chan agent.Event, context.Context, context.CancelCauseFunc, chan struct{}, chan struct{}) {
 	events := make(chan agent.Event, 8)
 	ctx, cancel := context.WithCancelCause(context.Background())
 	stop := make(chan struct{})
@@ -79,7 +79,7 @@ func TestHeartbeatEmitsKeepAliveWhileToolRuns(t *testing.T) {
 	w := newToolWatcher(clk.now)
 	w.observe("t1", "go test", agent.TaskStatusInProgress)
 
-	c := NewProcessClient(ProcessOptions{ToolHeartbeatInterval: time.Millisecond, ToolCeiling: time.Hour})
+	c := newACPSession(ProcessOptions{ToolHeartbeatInterval: time.Millisecond, ToolCeiling: time.Hour})
 	events, _, cancel, stop, done := runHeartbeat(c, w)
 	defer cancel(nil)
 
@@ -101,7 +101,7 @@ func TestHeartbeatCeilingCancelsTurn(t *testing.T) {
 	w.observe("t1", "go test", agent.TaskStatusInProgress)
 	clk.advance(20 * time.Minute) // past the ceiling
 
-	c := NewProcessClient(ProcessOptions{ToolHeartbeatInterval: time.Millisecond, ToolCeiling: 10 * time.Minute})
+	c := newACPSession(ProcessOptions{ToolHeartbeatInterval: time.Millisecond, ToolCeiling: 10 * time.Minute})
 	events, ctx, cancel, stop, done := runHeartbeat(c, w)
 	defer cancel(nil)
 	defer close(stop)
@@ -126,7 +126,7 @@ func TestHeartbeatCeilingCancelsTurn(t *testing.T) {
 func TestHeartbeatSilentWhenNoToolRunning(t *testing.T) {
 	w := newToolWatcher(nil) // no tools in flight
 
-	c := NewProcessClient(ProcessOptions{ToolHeartbeatInterval: time.Millisecond, ToolCeiling: time.Hour})
+	c := newACPSession(ProcessOptions{ToolHeartbeatInterval: time.Millisecond, ToolCeiling: time.Hour})
 	events, ctx, cancel, stop, done := runHeartbeat(c, w)
 	defer cancel(nil)
 
