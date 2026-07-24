@@ -33,6 +33,55 @@ func (f *fakeClient) Prompt(context.Context, string, PromptRequest) (<-chan Even
 func (f *fakeClient) Cancel(context.Context, string) error { return nil }
 func (f *fakeClient) Close() error                         { return nil }
 
+// closingClient implements the optional sessionCloser seam so eviction/discard
+// can be asserted to release a backend's per-session resources.
+type closingClient struct {
+	fakeClient
+	closed []string
+}
+
+func (c *closingClient) CloseSession(id string) { c.closed = append(c.closed, id) }
+
+func TestSessionManagerClosesClientSessionOnDiscard(t *testing.T) {
+	c := &closingClient{}
+	m := NewSessionManager(c, time.Hour, 100)
+	key := ConversationKey{ChannelID: "C", ThreadTS: "1"}
+	sess, err := m.session(context.Background(), key, SessionMetadata{})
+	if err != nil {
+		t.Fatalf("session: %v", err)
+	}
+	m.Discard(key)
+	if len(c.closed) != 1 || c.closed[0] != sess.ID {
+		t.Fatalf("Discard should CloseSession %q, got %v", sess.ID, c.closed)
+	}
+}
+
+func TestSessionManagerClosesClientSessionOnEvict(t *testing.T) {
+	c := &closingClient{}
+	now := time.Now()
+	m := NewSessionManager(c, time.Minute, 100)
+	m.now = func() time.Time { return now }
+	first := ConversationKey{ChannelID: "C", ThreadTS: "1"}
+	sess, err := m.session(context.Background(), first, SessionMetadata{})
+	if err != nil {
+		t.Fatalf("session: %v", err)
+	}
+	// Advance past the idle timeout; opening another session triggers evictLocked.
+	now = now.Add(2 * time.Minute)
+	if _, err := m.session(context.Background(), ConversationKey{ChannelID: "C", ThreadTS: "2"}, SessionMetadata{}); err != nil {
+		t.Fatalf("second session: %v", err)
+	}
+	found := false
+	for _, id := range c.closed {
+		if id == sess.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("idle eviction should CloseSession %q, got %v", sess.ID, c.closed)
+	}
+}
+
 // probingClient adds the optional SupportsCancel capability surface so the
 // manager's auto-detection path can be exercised.
 type probingClient struct {

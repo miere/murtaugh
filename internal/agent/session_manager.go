@@ -38,6 +38,23 @@ type cancelCapabilityProber interface {
 	SupportsCancel(ctx context.Context) bool
 }
 
+// sessionCloser is the optional surface a Client implements when each session owns
+// a dedicated resource (e.g. a per-conversation process) that must be released
+// when the manager evicts or discards the conversation. A client that multiplexes
+// many sessions over one process/loop does not implement it, so the manager's
+// calls are simply no-ops there.
+type sessionCloser interface {
+	CloseSession(sessionID string)
+}
+
+// closeClientSession releases the client-side resources for a session when the
+// client owns per-session state. Safe to call for any backend.
+func (m *SessionManager) closeClientSession(sessionID string) {
+	if closer, ok := m.client.(sessionCloser); ok {
+		closer.CloseSession(sessionID)
+	}
+}
+
 type managedSession struct {
 	session  Session
 	lastUsed time.Time
@@ -177,7 +194,10 @@ func (m *SessionManager) Cancel(ctx context.Context, sessionID string) error {
 func (m *SessionManager) Discard(key ConversationKey) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(m.sessions, key)
+	if session, ok := m.sessions[key]; ok {
+		m.closeClientSession(session.session.ID)
+		delete(m.sessions, key)
+	}
 }
 
 func (m *SessionManager) session(ctx context.Context, key ConversationKey, metadata SessionMetadata) (Session, error) {
@@ -220,6 +240,7 @@ func (m *SessionManager) evictLocked() {
 	now := m.now()
 	for key, session := range m.sessions {
 		if now.Sub(session.lastUsed) > m.idleTimeout {
+			m.closeClientSession(session.session.ID)
 			delete(m.sessions, key)
 		}
 	}
@@ -234,6 +255,7 @@ func (m *SessionManager) evictLocked() {
 				first = false
 			}
 		}
+		m.closeClientSession(m.sessions[oldestKey].session.ID)
 		delete(m.sessions, oldestKey)
 	}
 }
