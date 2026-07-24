@@ -12,7 +12,7 @@
 //	go test -tags acplive ./internal/agent/acp/ -run TestLive -v
 //
 // Runs even from inside a Claude Code session: the backend strips the nested-CC
-// marker before spawning the adapter (see agentEnv), so no manual `env -u
+// marker before spawning the adapter (see agent.SpawnEnv), so no manual `env -u
 // CLAUDECODE` is needed.
 package acp
 
