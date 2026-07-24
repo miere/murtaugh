@@ -103,6 +103,14 @@ func TestChatHandlerRecordsErroredTurn(t *testing.T) {
 	if turns[0].Payload.(map[string]any)["outcome"] != turnErrored {
 		t.Fatalf("outcome = %v, want errored", turns[0].Payload.(map[string]any)["outcome"])
 	}
+	// The terminal error text is captured on the row so `journal query` alone
+	// explains the failure, without grepping daemon stderr.
+	if got := turns[0].Payload.(map[string]any)["error"]; got != "boom" {
+		t.Fatalf("payload error = %v, want %q", got, "boom")
+	}
+	if !strings.Contains(turns[0].Summary, "boom") {
+		t.Fatalf("summary = %q, want it to name the cause", turns[0].Summary)
+	}
 }
 
 func TestChatHandlerSurfacesEmptyReplyWithStopReason(t *testing.T) {

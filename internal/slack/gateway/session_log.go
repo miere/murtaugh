@@ -49,6 +49,19 @@ type sessionTurn struct {
 	duration   time.Duration
 	chunks     int
 	bytes      int
+	// errText is the terminal error message for an errored turn (empty otherwise),
+	// so a failed turn is explainable from the journal row alone.
+	errText string
+}
+
+// truncateForSummary bounds an error string embedded in a one-line summary, so a
+// long cause does not bloat the queryable index (the full text stays in the
+// payload's "error" field).
+func truncateForSummary(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "…"
 }
 
 // record writes the transcript blob (best-effort) and the journal row. A blob
@@ -79,11 +92,29 @@ func (s *sessionLogger) record(ctx context.Context, t sessionTurn) {
 		level = journal.LevelWarn
 	}
 
+	summary := fmt.Sprintf("%s turn via %s (%d bytes)", t.outcome, t.agent, t.bytes)
+	if t.errText != "" {
+		summary += ": " + truncateForSummary(t.errText, 160)
+	}
+
+	payload := map[string]any{
+		"agent":       t.agent,
+		"source":      t.req.Source,
+		"outcome":     t.outcome,
+		"stop_reason": t.stopReason,
+		"duration_ms": t.duration.Milliseconds(),
+		"chunks":      t.chunks,
+		"bytes":       t.bytes,
+	}
+	if t.errText != "" {
+		payload["error"] = t.errText
+	}
+
 	s.recorder.Record(ctx, journal.Event{
 		Stream:  journal.StreamACPSession,
 		Kind:    "session.turn",
 		Level:   level,
-		Summary: fmt.Sprintf("%s turn via %s (%d bytes)", t.outcome, t.agent, t.bytes),
+		Summary: summary,
 		Keys: journal.Keys{
 			TeamID:    t.req.TeamID,
 			ChannelID: t.req.ChannelID,
@@ -92,14 +123,6 @@ func (s *sessionLogger) record(ctx context.Context, t sessionTurn) {
 			SessionID: t.sessionID,
 		},
 		BlobRef: ref,
-		Payload: map[string]any{
-			"agent":       t.agent,
-			"source":      t.req.Source,
-			"outcome":     t.outcome,
-			"stop_reason": t.stopReason,
-			"duration_ms": t.duration.Milliseconds(),
-			"chunks":      t.chunks,
-			"bytes":       t.bytes,
-		},
+		Payload: payload,
 	})
 }

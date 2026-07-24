@@ -415,12 +415,27 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest) (retErr error
 			case turnErr != nil || retErr != nil:
 				outcome = turnErrored
 			}
+			// Capture the terminal error text for an errored turn so `journal
+			// query` alone explains the failure — previously the real cause (e.g.
+			// "start Slack stream: channel_type_not_supported") only existed in
+			// daemon stderr. turnErr is the agent-reported cause; retErr covers a
+			// delivery failure that Fail surfaced.
+			errText := ""
+			if outcome == turnErrored {
+				switch {
+				case turnErr != nil:
+					errText = turnErr.Error()
+				case retErr != nil:
+					errText = retErr.Error()
+				}
+			}
 			// Fresh context: on the interrupt/timeout paths the request ctx is
 			// already cancelled, but the row enqueue + transcript write must run.
 			h.sessionLog.record(context.Background(), sessionTurn{
 				req: req, agent: agentName, sessionID: sessionID, prompt: prompt,
 				response: respBuf.String(), outcome: outcome, stopReason: stopReason,
 				duration: time.Since(startedAt), chunks: chunkSeen, bytes: byteSeen,
+				errText: errText,
 			})
 		}()
 	}
