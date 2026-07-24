@@ -72,15 +72,49 @@ func providerRegistry(home, goos string) map[string][]DiagSource {
 		},
 	}
 
+	// Claude Code keeps its state under ~/.claude. We collect the safe config
+	// knobs and the debug logs — the artifacts that explain a claude_code
+	// backend turn — but deliberately NOT ~/.claude.json (the global config is
+	// large and carries per-project conversation history that redaction, which
+	// only scrubs Slack tokens, would leak) nor ~/.claude/projects (every
+	// unrelated session transcript). CLAUDE_CONFIG_DIR relocates the whole tree.
+	claudeRoots := func(rel ...string) []string {
+		var out []string
+		if root := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); root != "" {
+			for _, r := range rel {
+				out = append(out, filepath.Join(root, r))
+			}
+		}
+		return out
+	}
+	claudeCode := []DiagSource{
+		{
+			Label: "logs",
+			Roots: append(claudeRoots("debug"),
+				filepath.Join(home, ".claude", "debug"),
+			),
+		},
+		{
+			Label: "config",
+			Roots: append(claudeRoots("settings.json", "settings.local.json", ".last-update-result.json"),
+				filepath.Join(home, ".claude", "settings.json"),
+				filepath.Join(home, ".claude", "settings.local.json"),
+				// Records the installed claude version — cheap and often decisive.
+				filepath.Join(home, ".claude", ".last-update-result.json"),
+			),
+		},
+	}
+
 	return map[string][]DiagSource{
-		"goose": goose,
+		"goose":       goose,
+		"claude-code": claudeCode,
 	}
 }
 
 // KnownProviders lists the provider names the bundler can collect diagnostics
 // for. Used to validate the --include argument and document the tool.
 func KnownProviders() []string {
-	return []string{"goose"}
+	return []string{"goose", "claude-code"}
 }
 
 // resolveProviderSources expands a provider's candidate roots into the concrete
