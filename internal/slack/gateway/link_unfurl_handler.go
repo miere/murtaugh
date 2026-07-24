@@ -175,7 +175,7 @@ func (h *LinkUnfurlHandler) build(ctx context.Context, match unfurl.Match, req L
 	switch {
 	case action.DelegateToAgent != nil:
 		if h.delegator == nil {
-			return slack.Attachment{}, fmt.Errorf("delegate-to-agent requires ACP to be enabled")
+			return slack.Attachment{}, fmt.Errorf("delegate-to-agent requires an agent backend to be enabled")
 		}
 		prompt, err := unfurl.RenderPrompt(action.DelegateToAgent.Prompt, data)
 		if err != nil {

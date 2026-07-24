@@ -224,7 +224,7 @@ func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 // fire-and-forget session bounded by the job's timeout.
 func (t *Tool) invokeAgent(ctx context.Context, name string, job config.JobProfile, args map[string]any) (any, error) {
 	if t.delegator == nil {
-		return nil, fmt.Errorf("job %q delegates to agent %q but agent delegation is unavailable (is ACP enabled?)", name, job.Agent)
+		return nil, fmt.Errorf("job %q delegates to agent %q but agent delegation is unavailable (is an agent configured?)", name, job.Agent)
 	}
 
 	runtimeArgs := stringArgs(args["args"])

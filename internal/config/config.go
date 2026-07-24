@@ -977,6 +977,20 @@ func (p AgentProfile) ResolvedACPPermission() string {
 	return "ask"
 }
 
+// ResolvedApproval reports the effective approval posture as a short label for
+// logging/diagnostics, resolved per backend: a native agent gates its terminal
+// tool (allowlist|prompt|off, default allowlist), while acp/claude_code answer
+// the agent's own permission requests (ask|auto-allow|auto-deny, default ask).
+func (p AgentProfile) ResolvedApproval() string {
+	if p.ResolvedKind() == AgentKindNative {
+		if v := strings.ToLower(strings.TrimSpace(p.Approval.Terminal)); v != "" {
+			return v
+		}
+		return "allowlist"
+	}
+	return p.ResolvedACPPermission()
+}
+
 // ResolvedKind reports the backend selected by the present sub-block: a
 // `claude_code:` block is claude_code, an `acp:` block is ACP, otherwise native.
 // (Validate enforces exactly one sub-block, so the native default only applies to
