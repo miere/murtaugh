@@ -13,11 +13,12 @@ type stubBackfiller struct {
 	called bool
 	out    string
 	err    error
+	canvas *CanvasContext
 }
 
-func (s *stubBackfiller) Backfill(_ context.Context, _, _, _ string) (string, error) {
+func (s *stubBackfiller) BackfillWithSurface(_ context.Context, _, _, _ string) (string, *CanvasContext, error) {
 	s.called = true
-	return s.out, s.err
+	return s.out, s.canvas, s.err
 }
 
 // lookupSessions is a ChatSessionManager whose only meaningful behaviour is
@@ -39,7 +40,7 @@ func TestBackfillHistoryColdThreadedCallsBackfiller(t *testing.T) {
 	h := gateHandler(b)
 	req := ChatRequest{ChannelID: "C1", ThreadTS: "1700000000.000100", MessageTS: "1700000000.000300"}
 
-	got := h.backfillHistory(context.Background(), req, lookupSessions{live: false}, agent.ConversationKey{})
+	got, _ := h.backfillHistory(context.Background(), req, lookupSessions{live: false}, agent.ConversationKey{})
 	if !b.called {
 		t.Fatal("expected the backfiller to be called for a cold threaded conversation")
 	}
@@ -53,7 +54,7 @@ func TestBackfillHistorySkipsWarmSession(t *testing.T) {
 	h := gateHandler(b)
 	req := ChatRequest{ChannelID: "C1", ThreadTS: "1700000000.000100", MessageTS: "1700000000.000300"}
 
-	got := h.backfillHistory(context.Background(), req, lookupSessions{live: true}, agent.ConversationKey{})
+	got, _ := h.backfillHistory(context.Background(), req, lookupSessions{live: true}, agent.ConversationKey{})
 	if b.called {
 		t.Fatal("a warm session already holds the history; backfiller must not be called")
 	}
@@ -67,7 +68,7 @@ func TestBackfillHistorySkipsTopLevelMessage(t *testing.T) {
 	h := gateHandler(b)
 	req := ChatRequest{ChannelID: "C1", ThreadTS: "", MessageTS: "1700000000.000300"}
 
-	got := h.backfillHistory(context.Background(), req, lookupSessions{live: false}, agent.ConversationKey{})
+	got, _ := h.backfillHistory(context.Background(), req, lookupSessions{live: false}, agent.ConversationKey{})
 	if b.called {
 		t.Fatal("a top-level message has no prior thread; backfiller must not be called")
 	}
@@ -79,7 +80,7 @@ func TestBackfillHistorySkipsTopLevelMessage(t *testing.T) {
 func TestBackfillHistoryNilBackfiller(t *testing.T) {
 	h := gateHandler(nil)
 	req := ChatRequest{ChannelID: "C1", ThreadTS: "1700000000.000100", MessageTS: "1700000000.000300"}
-	if got := h.backfillHistory(context.Background(), req, lookupSessions{live: false}, agent.ConversationKey{}); got != "" {
+	if got, _ := h.backfillHistory(context.Background(), req, lookupSessions{live: false}, agent.ConversationKey{}); got != "" {
 		t.Fatalf("expected empty history when no backfiller is wired, got %q", got)
 	}
 }
@@ -89,7 +90,7 @@ func TestBackfillHistoryDegradesOnError(t *testing.T) {
 	h := gateHandler(b)
 	req := ChatRequest{ChannelID: "C1", ThreadTS: "1700000000.000100", MessageTS: "1700000000.000300"}
 
-	got := h.backfillHistory(context.Background(), req, lookupSessions{live: false}, agent.ConversationKey{})
+	got, _ := h.backfillHistory(context.Background(), req, lookupSessions{live: false}, agent.ConversationKey{})
 	if !b.called {
 		t.Fatal("expected the backfiller to be attempted")
 	}

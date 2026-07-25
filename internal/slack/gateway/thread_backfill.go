@@ -59,12 +59,34 @@ func NewThreadBackfiller(api backfillAPI, botUserID string, logger *slog.Logger)
 // string is returned (with no error) when the thread has no prior content worth
 // sending.
 func (b *ThreadBackfiller) Backfill(ctx context.Context, channelID, threadTS, excludeTS string) (string, error) {
+	history, _, err := b.BackfillWithSurface(ctx, channelID, threadTS, excludeTS)
+	return history, err
+}
+
+// CanvasContext marks a backfilled thread as a canvas comment thread — the bot
+// was mentioned in a canvas section. SectionRef is the thread-root ts, the anchor
+// of the tagged section. The canvas file id is resolved separately (it needs
+// conversations.info, not conversations.replies) — see spec 021 §9.3.
+type CanvasContext struct {
+	SectionRef string
+}
+
+// BackfillWithSurface is Backfill plus surface discovery: it reports a non-nil
+// CanvasContext when the thread root is a canvas comment (SubType
+// document_comment_root), so the caller can resolve the canvas id and mark the
+// session's surface. Detection is a byproduct of the replies fetch backfill
+// already does — no extra API call.
+func (b *ThreadBackfiller) BackfillWithSurface(ctx context.Context, channelID, threadTS, excludeTS string) (string, *CanvasContext, error) {
 	msgs, err := b.replies(ctx, channelID, threadTS)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
+	var canvas *CanvasContext
 	lines := make([]string, 0, len(msgs))
 	for _, m := range msgs {
+		if m.SubType == subtypeDocumentCommentRoot {
+			canvas = &CanvasContext{SectionRef: m.Timestamp}
+		}
 		if m.Timestamp == excludeTS {
 			continue
 		}
@@ -75,9 +97,9 @@ func (b *ThreadBackfiller) Backfill(ctx context.Context, channelID, threadTS, ex
 		lines = append(lines, b.renderLine(ctx, m, text))
 	}
 	if len(lines) == 0 {
-		return "", nil
+		return "", canvas, nil
 	}
-	return b.frame(ctx, lines), nil
+	return b.frame(ctx, lines), canvas, nil
 }
 
 // replies pages through conversations.replies, oldest-first. Slack returns the
