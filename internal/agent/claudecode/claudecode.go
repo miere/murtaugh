@@ -308,6 +308,18 @@ func (s *procSession) teardownProc() {
 	}
 }
 
+// composePrompt folds any backfilled history (thread transcript, canvas context)
+// into the first user turn. A cold claude_code session has no other channel for
+// it — the ACP and native backends prepend it the same way (acp/prompt.go,
+// native/client.go). Without this the model sees only the bare prompt and answers
+// with no context (e.g. no awareness it was mentioned inside a canvas).
+func composePrompt(req agent.PromptRequest) string {
+	if h := strings.TrimSpace(req.History); h != "" {
+		return h + "\n\n" + req.Text
+	}
+	return req.Text
+}
+
 func (s *procSession) prompt(req agent.PromptRequest) (<-chan agent.Event, error) {
 	sub := &subscription{events: make(chan agent.Event, 64)}
 	s.mu.Lock()
@@ -318,7 +330,7 @@ func (s *procSession) prompt(req agent.PromptRequest) (<-chan agent.Event, error
 	s.active = sub
 	s.mu.Unlock()
 
-	if err := s.writeUser(req.Text); err != nil {
+	if err := s.writeUser(composePrompt(req)); err != nil {
 		s.mu.Lock()
 		s.active = nil
 		s.mu.Unlock()
