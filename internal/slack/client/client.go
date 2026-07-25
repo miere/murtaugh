@@ -79,6 +79,19 @@ type CreateChannelResult struct {
 	InviteErrors []string
 }
 
+// CanvasEditParams collects the inputs EditCanvas accepts — a single change
+// applied via canvases.edit. Operation is one of insert_at_end, insert_at_start,
+// insert_after, insert_before, replace, or delete. SectionID targets a section
+// (required for replace/delete/insert_after/insert_before; omitted for the
+// document-level insert_at_* operations). Markdown is the content (unused by
+// delete).
+type CanvasEditParams struct {
+	CanvasID  string
+	Operation string
+	SectionID string
+	Markdown  string
+}
+
 // User is the minimal projection of a Slack user the resolver needs.
 type User struct {
 	ID          string
@@ -114,6 +127,15 @@ type SlackAPI interface {
 	// promptly. The returned view response is discarded — callers only need to
 	// know whether the open succeeded.
 	OpenView(ctx context.Context, triggerID string, view slackgo.ModalViewRequest) error
+	// EditCanvas applies a single change to a canvas (canvases.edit): insert /
+	// replace / delete markdown, optionally targeting a section.
+	EditCanvas(ctx context.Context, p CanvasEditParams) error
+	// LookupCanvasSection returns the id of the first canvas section whose text
+	// contains containsText (canvases.sections.lookup), or "" when none match.
+	LookupCanvasSection(ctx context.Context, canvasID, containsText string) (string, error)
+	// ReadCanvas returns a canvas document's content by downloading its backing
+	// file (files.info + the private download URL).
+	ReadCanvas(ctx context.Context, canvasID string) (string, error)
 }
 
 // SlackClient is the production SlackAPI implementation. It is constructed

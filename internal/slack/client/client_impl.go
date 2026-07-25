@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -217,6 +218,60 @@ func (c *SlackClient) CreateChannel(ctx context.Context, p CreateChannelParams) 
 		}
 	}
 	return res, nil
+}
+
+// EditCanvas applies a single change to a canvas via canvases.edit. delete omits
+// the document content; every other operation carries the markdown.
+func (c *SlackClient) EditCanvas(ctx context.Context, p CanvasEditParams) error {
+	change := slackgo.CanvasChange{Operation: p.Operation, SectionID: p.SectionID}
+	if p.Operation != "delete" {
+		change.DocumentContent = slackgo.DocumentContent{Type: "markdown", Markdown: p.Markdown}
+	}
+	if err := c.api.EditCanvasContext(ctx, slackgo.EditCanvasParams{
+		CanvasID: p.CanvasID,
+		Changes:  []slackgo.CanvasChange{change},
+	}); err != nil {
+		return slackError("canvases.edit", err)
+	}
+	return nil
+}
+
+// LookupCanvasSection returns the id of the first section whose text contains
+// containsText, or "" when none match.
+func (c *SlackClient) LookupCanvasSection(ctx context.Context, canvasID, containsText string) (string, error) {
+	sections, err := c.api.LookupCanvasSectionsContext(ctx, slackgo.LookupCanvasSectionsParams{
+		CanvasID: canvasID,
+		Criteria: slackgo.LookupCanvasSectionsCriteria{ContainsText: containsText},
+	})
+	if err != nil {
+		return "", slackError("canvases.sections.lookup", err)
+	}
+	if len(sections) == 0 {
+		return "", nil
+	}
+	return sections[0].ID, nil
+}
+
+// ReadCanvas returns a canvas document's content. Slack has no "read canvas"
+// method, so it resolves the backing file (files.info) and downloads its private
+// content (spec 021 §9.4).
+func (c *SlackClient) ReadCanvas(ctx context.Context, canvasID string) (string, error) {
+	file, _, _, err := c.api.GetFileInfoContext(ctx, canvasID, 0, 0)
+	if err != nil {
+		return "", slackError("files.info", err)
+	}
+	url := file.URLPrivateDownload
+	if url == "" {
+		url = file.URLPrivate
+	}
+	if url == "" {
+		return "", fmt.Errorf("canvas %s has no downloadable content", canvasID)
+	}
+	var buf bytes.Buffer
+	if err := c.api.GetFileContext(ctx, url, &buf); err != nil {
+		return "", slackError("files.download", err)
+	}
+	return buf.String(), nil
 }
 
 // convertMessages projects slack-go Message values into the package's public
