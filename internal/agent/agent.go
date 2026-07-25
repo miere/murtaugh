@@ -20,6 +20,13 @@ type SessionMetadata struct {
 	ThreadTS  string `json:"threadTs,omitempty"`
 	UserID    string `json:"userId,omitempty"`
 	Source    string `json:"source,omitempty"`
+	// Surface names the Slack surface the turn originates from when it is not an
+	// ordinary channel/DM — currently "canvas" for a canvas comment thread. Empty
+	// means an ordinary surface. Set by the gateway's cold-session discovery.
+	Surface string `json:"surface,omitempty"`
+	// CanvasID is the canvas file id (F…) when Surface == "canvas", so tools can
+	// read or edit the document the bot was mentioned in. Empty otherwise.
+	CanvasID string `json:"canvasId,omitempty"`
 }
 
 // Aggregator hands an ACP session the MCP server it should connect to in order

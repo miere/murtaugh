@@ -390,6 +390,7 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 		).WithIdleTimeout(cfg.Defaults.EffectiveRequestTimeout()).WithSessionLogger(sessionLog).
 			WithProgressDisplay(cfg.EffectiveProgressDisplay).WithStatusMessenger(api).
 			WithBackfiller(NewThreadBackfiller(api, botUserID, logger)).
+			WithCanvasInfo(slackCanvasInfo{api: api}).
 			WithFileFetcher(api).
 			WithUploader(slackAttachmentUploader{api: api}).
 			WithPermissionAsker(acpPermissionAsker).

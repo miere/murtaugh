@@ -75,6 +75,10 @@ type ChatHandler struct {
 	// conversation as context. nil disables backfill (the prompt is the single
 	// triggering message only).
 	backfiller threadBackfiller
+	// canvasInfo resolves a channel's canvas file id when a turn originates from a
+	// canvas comment thread, so the id reaches the agent's context and session
+	// metadata (spec 021 §9.3). nil records the canvas surface without an id.
+	canvasInfo canvasInfoResolver
 	// fileFetcher downloads plain-text attachments so their contents can be
 	// folded into the prompt. nil disables attachment handling (tests that do
 	// not wire Slack); the gateway always supplies it in production.
@@ -98,9 +102,18 @@ type ChatHandler struct {
 }
 
 // threadBackfiller renders a Slack thread into a transcript block for a cold
-// session's first prompt. *ThreadBackfiller satisfies it.
+// session's first prompt, and reports whether that thread is a canvas comment
+// (non-nil CanvasContext). *ThreadBackfiller satisfies it.
 type threadBackfiller interface {
-	Backfill(ctx context.Context, channelID, threadTS, excludeTS string) (string, error)
+	BackfillWithSurface(ctx context.Context, channelID, threadTS, excludeTS string) (string, *CanvasContext, error)
+}
+
+// canvasInfoResolver resolves a channel's canvas file id (F…) for a canvas
+// comment turn, so the agent's context carries the id it needs to read/edit the
+// document. A gateway wraps conversations.info; nil leaves canvas turns without an
+// id (Surface is still recorded).
+type canvasInfoResolver interface {
+	ChannelCanvasFileID(ctx context.Context, channelID string) (string, error)
 }
 
 type ChatRequest struct {
@@ -203,6 +216,14 @@ func (h *ChatHandler) WithBackfiller(b *ThreadBackfiller) *ChatHandler {
 		return h
 	}
 	h.backfiller = b
+	return h
+}
+
+// WithCanvasInfo wires the resolver that maps a channel to its canvas file id for
+// canvas comment turns. Returns the handler for chaining. nil (the default)
+// records the canvas surface without an id.
+func (h *ChatHandler) WithCanvasInfo(r canvasInfoResolver) *ChatHandler {
+	h.canvasInfo = r
 	return h
 }
 
@@ -334,22 +355,39 @@ func (h *ChatHandler) Warm(ctx context.Context) error {
 // excluded so it is not duplicated ahead of the user's own prompt text. A fetch
 // failure is logged and degraded to "" — the agent proceeds without backstory
 // rather than the turn failing.
-func (h *ChatHandler) backfillHistory(ctx context.Context, req ChatRequest, sessions ChatSessionManager, key agent.ConversationKey) string {
+func (h *ChatHandler) backfillHistory(ctx context.Context, req ChatRequest, sessions ChatSessionManager, key agent.ConversationKey) (string, *CanvasContext) {
 	if h.backfiller == nil || req.ThreadTS == "" {
-		return ""
+		return "", nil
 	}
 	if _, live := sessions.Lookup(key); live {
-		return ""
+		return "", nil
 	}
-	history, err := h.backfiller.Backfill(ctx, req.ChannelID, req.ThreadTS, req.MessageTS)
+	history, canvas, err := h.backfiller.BackfillWithSurface(ctx, req.ChannelID, req.ThreadTS, req.MessageTS)
 	if err != nil {
 		h.logger.Warn("thread backfill failed; proceeding without history", "channel", req.ChannelID, "thread", req.ThreadTS, "error", err)
-		return ""
+		return "", nil
 	}
 	if history != "" {
 		h.logger.Info("seeding new ACP session with thread history", "channel", req.ChannelID, "thread", req.ThreadTS)
 	}
-	return history
+	return history, canvas
+}
+
+// prependCanvasNote frames the canvas surface for the agent — it is looking at a
+// Slack canvas document, and (when resolved) the canvas id it can act on — ahead
+// of the thread transcript, so the model reads the framing before the section
+// content (spec 021 §9.3).
+func prependCanvasNote(history, canvasID string) string {
+	note := "<canvas-context>\nYou were mentioned inside a Slack canvas — a shared, editable document."
+	if canvasID != "" {
+		note += fmt.Sprintf(" Its canvas id is %s; use it with the canvas tools to read or edit the document.", canvasID)
+	}
+	note += "\nThe transcript below includes the canvas section you were tagged in."
+	note += "\n</canvas-context>"
+	if history == "" {
+		return note
+	}
+	return note + "\n\n" + history
 }
 
 func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest) (retErr error) {
@@ -382,7 +420,23 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest) (retErr error
 	}
 	key := conversationKey(req, route.ReplyOnThread)
 	metadata := agent.SessionMetadata{TeamID: req.TeamID, ChannelID: req.ChannelID, ThreadTS: key.ThreadTS, UserID: req.UserID, Source: req.Source}
-	history := h.backfillHistory(ctx, req, sessions, key)
+	history, canvas := h.backfillHistory(ctx, req, sessions, key)
+	// A canvas comment turn: mark the surface, resolve the canvas id, and tell the
+	// agent (in-context) which document it is looking at so it can read/edit it
+	// (spec 021 §9.3). Discovery runs once, on the cold session that produced the
+	// backfill; warm turns already carry this.
+	if canvas != nil {
+		metadata.Surface = "canvas"
+		if h.canvasInfo != nil {
+			if fileID, err := h.canvasInfo.ChannelCanvasFileID(ctx, req.ChannelID); err != nil {
+				h.logger.Warn("failed to resolve canvas id; proceeding without it", "channel", req.ChannelID, "error", err)
+			} else if fileID != "" {
+				metadata.CanvasID = fileID
+			}
+		}
+		history = prependCanvasNote(history, metadata.CanvasID)
+		h.logger.Info("canvas comment turn discovered", "channel", req.ChannelID, "canvas_id", metadata.CanvasID)
+	}
 	streamThreadTS := replyThreadTS(req, route.ReplyOnThread)
 	// streamThreadTS is empty by design in channel-reply mode (post at the channel
 	// root). Posting still needs a triggering timestamp, so guard on that instead.
