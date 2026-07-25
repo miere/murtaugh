@@ -33,10 +33,43 @@ func TestSlackCanvasInfo_ResolvesFileID(t *testing.T) {
 }
 
 func TestSlackCanvasInfo_NoCanvasIsEmptyNotPanic(t *testing.T) {
-	r := slackCanvasInfo{api: fakeCanvasInfoAPI{channel: &slack.Channel{}}} // Properties nil
+	r := slackCanvasInfo{api: fakeCanvasInfoAPI{channel: &slack.Channel{}}} // Properties nil, plain name
 	got, err := r.ChannelCanvasFileID(context.Background(), "C1")
 	if err != nil || got != "" {
 		t.Fatalf("no-canvas channel = (%q, %v), want (\"\", nil)", got, err)
+	}
+}
+
+// TestSlackCanvasInfo_StandaloneCanvasFromNameNormalized: a standalone canvas has
+// no `properties`; the file id is parsed from name_normalized "FC:<fileId>:<title>".
+// This is the exact shape returned by conversations.info for a live standalone
+// canvas (channel C0BKJ3RFJ10 → file F0BKJ3RFJ10).
+func TestSlackCanvasInfo_StandaloneCanvasFromNameNormalized(t *testing.T) {
+	ch := &slack.Channel{}
+	ch.NameNormalized = "FC:F0BKJ3RFJ10:My Canvas"
+	r := slackCanvasInfo{api: fakeCanvasInfoAPI{channel: ch}}
+
+	got, err := r.ChannelCanvasFileID(context.Background(), "C0BKJ3RFJ10")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if got != "F0BKJ3RFJ10" {
+		t.Fatalf("standalone canvas id = %q, want F0BKJ3RFJ10", got)
+	}
+}
+
+func TestCanvasFileIDFromName(t *testing.T) {
+	cases := map[string]string{
+		"FC:F0BKJ3RFJ10:My Canvas":  "F0BKJ3RFJ10",
+		"FC:F123:Title:with:colons": "F123", // stops at the first colon after the id
+		"My Canvas":                 "",     // not a file-canvas conversation
+		"FC:":                       "",     // malformed
+		"FC:F123":                   "",     // no trailing colon → not the FC:<id>:<title> shape
+	}
+	for in, want := range cases {
+		if got := canvasFileIDFromName(in); got != want {
+			t.Fatalf("canvasFileIDFromName(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 
