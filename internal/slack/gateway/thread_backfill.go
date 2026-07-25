@@ -68,10 +68,11 @@ func (b *ThreadBackfiller) Backfill(ctx context.Context, channelID, threadTS, ex
 		if m.Timestamp == excludeTS {
 			continue
 		}
-		if strings.TrimSpace(m.Text) == "" {
+		text := messageContent(m)
+		if text == "" {
 			continue // join/leave and other contentless system messages
 		}
-		lines = append(lines, b.renderLine(ctx, m))
+		lines = append(lines, b.renderLine(ctx, m, text))
 	}
 	if len(lines) == 0 {
 		return "", nil
@@ -120,15 +121,39 @@ func (b *ThreadBackfiller) frame(ctx context.Context, lines []string) string {
 	return sb.String()
 }
 
+// subtypeDocumentCommentRoot is the message SubType Slack gives the root of a
+// canvas comment thread — the canvas section the bot was tagged in. It is the
+// reliable, semantic canvas signal (the app_mention itself carries none), so
+// detection keys off it rather than the incidental parent_user_id=USLACKBOT
+// (spec 021 §9.1).
+const subtypeDocumentCommentRoot = "document_comment_root"
+
+// messageContent returns a message's text, falling back to its rich_text blocks
+// when the top-level text is empty. A canvas section's words live in blocks, not
+// text, so without this the backfiller drops the very line the bot was tagged on
+// (spec 021 §9.1/§9.3).
+func messageContent(m slack.Message) string {
+	if t := strings.TrimSpace(m.Text); t != "" {
+		return t
+	}
+	return richTextToPlain(m.Blocks)
+}
+
 // renderLine formats one message as `[HH:MM] @name: text` in Sydney time,
-// tagging the bot's own messages with "(you)".
-func (b *ThreadBackfiller) renderLine(ctx context.Context, m slack.Message) string {
+// tagging the bot's own messages with "(you)". The root of a canvas comment
+// thread is labelled as the tagged canvas section instead, so the agent reads it
+// as document context rather than a chat line. text is precomputed by the caller
+// (messageContent), so a canvas section rendered from blocks lands here too.
+func (b *ThreadBackfiller) renderLine(ctx context.Context, m slack.Message, text string) string {
+	if m.SubType == subtypeDocumentCommentRoot {
+		return fmt.Sprintf("[%s] (canvas section you were tagged in): %s", formatHHMM(m.Timestamp), text)
+	}
 	name := b.resolveName(ctx, m.User)
 	label := "@" + name
 	if b.botUserID != "" && m.User == b.botUserID {
 		label += " (you)"
 	}
-	return fmt.Sprintf("[%s] %s: %s", formatHHMM(m.Timestamp), label, m.Text)
+	return fmt.Sprintf("[%s] %s: %s", formatHHMM(m.Timestamp), label, text)
 }
 
 // resolveName maps a user id to a display name (display → real → handle → id),
