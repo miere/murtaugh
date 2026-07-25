@@ -40,6 +40,7 @@ import (
 	setupmcpregister "github.com/miere/murtaugh/internal/tools/setup/mcpregister"
 	setupslack "github.com/miere/murtaugh/internal/tools/setup/slack"
 	setupupdate "github.com/miere/murtaugh/internal/tools/setup/update"
+	slackcanvas "github.com/miere/murtaugh/internal/tools/slack/canvas"
 	slackcreatechannel "github.com/miere/murtaugh/internal/tools/slack/createchannel"
 	slackfetchmsgs "github.com/miere/murtaugh/internal/tools/slack/fetchmsgs"
 	slackfetchreactions "github.com/miere/murtaugh/internal/tools/slack/fetchreactions"
@@ -414,6 +415,7 @@ func buildRegistry(cfg config.Config, configPath, version string, recorder journ
 	reg.Register(slackfetchmsgs.New(botToken))
 	reg.Register(slackfetchreactions.New(botToken))
 	reg.Register(slackupdatemsg.New(botToken))
+	reg.Register(slackcanvas.New(botToken))
 
 	// `restart` only *requests* a restart: it posts the approval card the
 	// gateway already understands. The real restart fires when the admin

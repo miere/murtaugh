@@ -51,6 +51,24 @@ type FakeAPI struct {
 	OpenedViews  []slackgo.ModalViewRequest
 	OpenTriggers []string
 	OpenViewErr  error
+
+	CanvasEdits   []slacklib.CanvasEditParams
+	EditCanvasErr error
+	// SectionID is returned by LookupCanvasSection; LookupSectionArgs captures
+	// each (canvasID, containsText) it was asked for.
+	SectionID         string
+	LookupSectionErr  error
+	LookupSectionArgs []LookupSectionCall
+	// CanvasContent is returned by ReadCanvas; ReadCanvasIDs captures the ids read.
+	CanvasContent string
+	ReadCanvasErr error
+	ReadCanvasIDs []string
+}
+
+// LookupSectionCall captures one LookupCanvasSection invocation.
+type LookupSectionCall struct {
+	CanvasID     string
+	ContainsText string
 }
 
 // HistoryCall captures one GetHistory invocation.
@@ -132,6 +150,24 @@ func (f *FakeAPI) OpenView(_ context.Context, triggerID string, view slackgo.Mod
 	f.OpenTriggers = append(f.OpenTriggers, triggerID)
 	f.OpenedViews = append(f.OpenedViews, view)
 	return f.OpenViewErr
+}
+
+// EditCanvas records p and returns the configured err.
+func (f *FakeAPI) EditCanvas(_ context.Context, p slacklib.CanvasEditParams) error {
+	f.CanvasEdits = append(f.CanvasEdits, p)
+	return f.EditCanvasErr
+}
+
+// LookupCanvasSection records the query and returns the configured SectionID/err.
+func (f *FakeAPI) LookupCanvasSection(_ context.Context, canvasID, containsText string) (string, error) {
+	f.LookupSectionArgs = append(f.LookupSectionArgs, LookupSectionCall{CanvasID: canvasID, ContainsText: containsText})
+	return f.SectionID, f.LookupSectionErr
+}
+
+// ReadCanvas records the id and returns the configured CanvasContent/err.
+func (f *FakeAPI) ReadCanvas(_ context.Context, canvasID string) (string, error) {
+	f.ReadCanvasIDs = append(f.ReadCanvasIDs, canvasID)
+	return f.CanvasContent, f.ReadCanvasErr
 }
 
 // LazyClient returns a slacklib.LazyClient that yields f.

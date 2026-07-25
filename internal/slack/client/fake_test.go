@@ -82,3 +82,11 @@ func (f *fakeAPI) CreateChannel(_ context.Context, _ CreateChannelParams) (Creat
 func (f *fakeAPI) OpenView(_ context.Context, _ string, _ slackgo.ModalViewRequest) error {
 	return nil
 }
+
+func (f *fakeAPI) EditCanvas(_ context.Context, _ CanvasEditParams) error { return nil }
+
+func (f *fakeAPI) LookupCanvasSection(_ context.Context, _, _ string) (string, error) {
+	return "", nil
+}
+
+func (f *fakeAPI) ReadCanvas(_ context.Context, _ string) (string, error) { return "", nil }
