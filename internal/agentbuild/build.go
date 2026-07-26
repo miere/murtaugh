@@ -104,8 +104,25 @@ func Client(resolved ResolvedAgent, deps Deps) (agent.Client, error) {
 	case config.AgentKindClaudeCode:
 		// Direct Claude Code stream-json backend (spec 019). Tool permissions route
 		// to a human in Slack via EventPermission (same approval.requests policy as
-		// ACP). The background-completion route (OnUnsolicited) is wired in a later
-		// phase; until then background completions log.
+		// ACP).
+		//
+		// Wire Murtaugh's own tools the same way ACP does — a per-agent aggregator
+		// served over the shared stdio bridge — so a claude_code agent reaches the
+		// same tool surface (slack.*, jobs, …) instead of only the claude CLI's own
+		// MCP servers. The claudecode backend advertises this to the `claude`
+		// process via --mcp-config.
+		var aggregator agent.Aggregator
+		if deps.Bridge != nil {
+			var approver mcp.Approver
+			if deps.Approver != nil {
+				approver = mcpApprover{inner: deps.Approver}
+			}
+			aggr, err := newACPAggregator(deps.Bridge, deps.Registry, resolved, approver, native.MCPServerConfigs(deps.MCPServers), logger)
+			if err != nil {
+				return nil, fmt.Errorf("agentbuild: build claude_code aggregator: %w", err)
+			}
+			aggregator = aggr
+		}
 		return claudecode.New(claudecode.Options{
 			Command:          profile.ClaudeCode.Command,
 			Args:             profile.ClaudeCode.Args,
@@ -115,6 +132,7 @@ func Client(resolved ResolvedAgent, deps Deps) (agent.Client, error) {
 			Logger:           logger,
 			PermissionPolicy: profile.ResolvedACPPermission(),
 			OnBackground:     deps.BackgroundSink,
+			Aggregator:       aggregator,
 		}), nil
 	default:
 		return nil, fmt.Errorf("agentbuild: unknown agent kind %q", resolved.Kind)
