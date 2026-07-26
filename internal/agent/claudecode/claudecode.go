@@ -53,6 +53,12 @@ type Options struct {
 	// It is keyed by session id so the gateway can render them into the bound Slack
 	// thread (spec 019 §5). nil drops them (with a debug log).
 	OnBackground func(sessionID string, ev agent.Event)
+	// Aggregator, when set, registers each session with Murtaugh's per-agent MCP
+	// aggregator and advertises the stdio bridge to the `claude` process via
+	// --mcp-config, so the agent can reach Murtaugh's own tools — the same tool
+	// surface the ACP and native backends expose. nil leaves the process with only
+	// the tools the claude CLI configures itself.
+	Aggregator agent.Aggregator
 }
 
 // Client is a Claude Code stream-json backend implementing agent.Client. Because
@@ -88,6 +94,26 @@ func New(opts Options) *Client {
 	return &Client{opts: opts, log: opts.Logger, sessions: make(map[string]*procSession)}
 }
 
+// mcpConfigArg renders an aggregator MCP server spec into the JSON the `claude`
+// CLI accepts via --mcp-config: {"mcpServers":{"<name>":{command,args,env}}}. The
+// bridge command is stdio (command-based), so no transport type is needed.
+func mcpConfigArg(spec agent.MCPServerSpec) (string, error) {
+	cfg := map[string]any{
+		"mcpServers": map[string]any{
+			spec.Name: map[string]any{
+				"command": spec.Command,
+				"args":    spec.Args,
+				"env":     spec.Env,
+			},
+		},
+	}
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		return "", fmt.Errorf("claudecode: marshal mcp config: %w", err)
+	}
+	return string(b), nil
+}
+
 // Initialize validates the client is ready. Per-session processes are started
 // lazily in NewSession, where the conversation metadata (and thus the derived
 // --session-id) is known.
@@ -119,7 +145,26 @@ func (c *Client) NewSession(ctx context.Context, meta agent.SessionMetadata) (ag
 	c.mu.Unlock()
 
 	sess := newProcSession(sessionID, c.opts)
+	// Register this session with Murtaugh's tool aggregator (if wired) and hand the
+	// `claude` process the stdio bridge via --mcp-config, so it can reach Murtaugh's
+	// own tools (slack.*, jobs, …) — parity with the ACP/native backends. A failure
+	// here degrades to no Murtaugh tools rather than failing the turn.
+	if c.opts.Aggregator != nil {
+		spec, release, err := c.opts.Aggregator.RegisterSession(meta)
+		if err != nil {
+			c.log.Warn("claudecode: aggregator registration failed; agent will have no Murtaugh tools", "session", sessionID, "error", err)
+		} else if cfg, cerr := mcpConfigArg(spec); cerr != nil {
+			release()
+			c.log.Warn("claudecode: failed to build mcp config; agent will have no Murtaugh tools", "session", sessionID, "error", cerr)
+		} else {
+			sess.extraArgs = []string{"--mcp-config", cfg}
+			sess.releaseAgg = release
+		}
+	}
 	if err := sess.startSession(ctx); err != nil {
+		if sess.releaseAgg != nil {
+			sess.releaseAgg()
+		}
 		return agent.Session{}, err
 	}
 	c.mu.Lock()
@@ -185,6 +230,10 @@ func (c *Client) Close() error {
 	for _, sess := range sessions {
 		_ = sess.close()
 	}
+	// Tear down the aggregator's proxied MCP connections, mirroring the ACP client.
+	if closer, ok := c.opts.Aggregator.(io.Closer); ok {
+		_ = closer.Close()
+	}
 	return nil
 }
 
@@ -199,6 +248,11 @@ type procSession struct {
 	log    *slog.Logger
 	opts   Options // shared launch config + policy + OnBackground
 	policy string
+	// extraArgs are launch args added to every spawn of this session — currently
+	// the --mcp-config that advertises Murtaugh's tool bridge (set in NewSession).
+	extraArgs []string
+	// releaseAgg unregisters this session's aggregator token; called on close.
+	releaseAgg func()
 
 	mu       sync.Mutex
 	cmd      *exec.Cmd
@@ -249,7 +303,8 @@ func (s *procSession) spawnAndHandshake(ctx context.Context, sessionArgs []strin
 }
 
 func (s *procSession) start(sessionArgs []string) error {
-	args := append(append([]string{}, s.opts.Args...), sessionArgs...)
+	args := append(append([]string{}, s.opts.Args...), s.extraArgs...)
+	args = append(args, sessionArgs...)
 	cmd := exec.Command(s.opts.Command, args...)
 	cmd.Dir = s.opts.WorkDir
 	// Inherit the daemon's environment minus the nested-Claude-Code marker (so the
@@ -353,12 +408,16 @@ func (s *procSession) close() error {
 	}
 	s.closed = true
 	stdin, cmd := s.stdin, s.cmd
+	release := s.releaseAgg
 	s.mu.Unlock()
 	if stdin != nil {
 		_ = stdin.Close()
 	}
 	if cmd != nil && cmd.Process != nil {
 		_ = cmd.Process.Kill()
+	}
+	if release != nil {
+		release()
 	}
 	return nil
 }
