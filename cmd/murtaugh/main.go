@@ -25,6 +25,7 @@ import (
 	"github.com/miere/murtaugh/internal/app"
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/config/migrate"
+	configstore "github.com/miere/murtaugh/internal/config/store"
 	"github.com/miere/murtaugh/internal/help"
 	"github.com/miere/murtaugh/internal/journal"
 	"github.com/miere/murtaugh/internal/mcpbridge"
@@ -104,19 +105,20 @@ func run(rawArgs []string) error {
 	if err := config.Bootstrap(configPath); err != nil {
 		return err
 	}
-	// Setup tools are the bootstrap path: they may run before a valid config
-	// has been written, and Validate() would reject the placeholder gateway.yaml
-	// the installer plans to overwrite. Skip Load() and hand the tool an
-	// empty Config — every setup.* tool resolves its target path from the
-	// config dir alone.
-	var cfg config.Config
-	if !setupInvocation {
-		loaded, err := config.Load(configPath)
-		if err != nil {
-			return err
-		}
-		cfg = loaded
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// Resolve config from the store. On an upgrade this migrates the legacy YAML
+	// tree into a fresh SQLite database (rewriting gateway.yaml down to oauth +
+	// database, archiving the siblings). Setup tools open the store but skip the
+	// Load/validate — they run before a valid config exists and only need the
+	// store handle to write into.
+	cfg, cfgStore, err := configstore.Bootstrap(ctx, configPath, setupInvocation)
+	if err != nil {
+		return err
 	}
+	defer cfgStore.Close()
 
 	logger := newLogger(cfg.Access.Debug, mode)
 
@@ -126,10 +128,7 @@ func run(rawArgs []string) error {
 	store, recorder, closeJournal := openJournal(cfg, mode, rest, logger)
 	defer closeJournal()
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	application := app.New(mode, rest, cfg, configPath, version, logger, recorder).
+	application := app.New(mode, rest, cfg, cfgStore, configPath, version, logger, recorder).
 		WithJSONOutput(jsonOutput)
 	// The Slack gateway is the only long-running mode that needs a
 	// user-triggered restart path. stop is reused as the cancel hook so

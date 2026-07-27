@@ -4,9 +4,35 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 )
+
+// LoadBootstrap parses only the on-disk bootstrap file (the `oauth:` and
+// `database:` blocks of gateway.yaml), loads the sibling .env, and expands the
+// Slack tokens' ${VAR} references. It does NOT read the DB or validate — it is
+// the minimal step that yields the credentials and the store connection. The
+// returned Config carries OAuth, Database, and BaseDir; every other section is
+// left zero for the store to fill (Store.Load) or the importer to migrate.
+func LoadBootstrap(path string) (Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Config{}, fmt.Errorf("read config %q: %w", path, err)
+	}
+	cfg, err := Parse(data)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.BaseDir = filepath.Dir(path)
+	if err := LoadDotEnv(cfg.BaseDir); err != nil {
+		return Config{}, err
+	}
+	cfg.OAuth.AppToken = os.ExpandEnv(cfg.OAuth.AppToken)
+	cfg.OAuth.BotToken = os.ExpandEnv(cfg.OAuth.BotToken)
+	cfg.OAuth.UserToken = os.ExpandEnv(cfg.OAuth.UserToken)
+	return cfg, nil
+}
 
 // This file defines the database-backed configuration seam. The bulk of
 // Murtaugh's configuration (agents, MCP servers, jobs, rules, and the
@@ -49,6 +75,15 @@ const (
 	BackendSQLite   = "sqlite"
 	BackendPostgres = "postgres"
 )
+
+// IsZero reports whether the database block is absent/unset. A bootstrap
+// gateway.yaml written before this feature has no `database:` block, which is
+// the signal the startup path uses to run the one-shot YAML→DB migration.
+func (d DatabaseConfig) IsZero() bool {
+	return strings.TrimSpace(d.Backend) == "" &&
+		strings.TrimSpace(d.SQLite.Path) == "" &&
+		strings.TrimSpace(d.Postgres.DSN) == ""
+}
 
 // EffectiveBackend resolves the store backend, defaulting to SQLite.
 func (d DatabaseConfig) EffectiveBackend() string {
@@ -181,7 +216,14 @@ type SnapshotSingleton struct {
 // DB-sourced Config is indistinguishable from a file-sourced one. Store
 // implementations SELECT the rows and delegate here.
 func AssembleFromRows(base Config, items map[string]map[string]json.RawMessage, singletons map[string]json.RawMessage) (Config, error) {
-	cfg := base
+	// Carry through ONLY the file-sourced fields. Everything else comes from the
+	// DB, so a pre-migration base that still carries access:/chat: blocks in its
+	// gateway.yaml can't leak stale values past the store.
+	cfg := Config{
+		BaseDir:  base.BaseDir,
+		OAuth:    base.OAuth,
+		Database: base.Database,
+	}
 
 	if err := decodeItemMap(items[SectionAgent], func() *AgentProfile { return new(AgentProfile) }, func(m map[string]AgentProfile) { cfg.Agents = m }); err != nil {
 		return Config{}, err

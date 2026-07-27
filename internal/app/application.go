@@ -72,6 +72,7 @@ type Application struct {
 	mode       Mode
 	args       []string
 	cfg        config.Config
+	cfgStore   config.Store
 	configPath string
 	version    string
 	logger     *slog.Logger
@@ -106,7 +107,7 @@ type Application struct {
 // frontends. args is the list of positional arguments handed to the CLI
 // frontend (Slack/MCP ignore it). version is the binary's compile-time
 // version string (e.g. "v0.4.1" or "dev") and is consumed by setup.update.
-func New(mode Mode, args []string, cfg config.Config, configPath, version string, logger *slog.Logger, recorder journal.Recorder) *Application {
+func New(mode Mode, args []string, cfg config.Config, cfgStore config.Store, configPath, version string, logger *slog.Logger, recorder journal.Recorder) *Application {
 	if recorder == nil {
 		recorder = journal.NopRecorder{}
 	}
@@ -114,11 +115,12 @@ func New(mode Mode, args []string, cfg config.Config, configPath, version string
 	// gateway (which routes clicks back). Construct it first so both see the same
 	// instance and its pending registry.
 	broker := interaction.New(cfg.OAuth.BotToken)
-	reg := buildRegistry(cfg, configPath, version, recorder, broker)
+	reg := buildRegistry(cfg, cfgStore, configPath, version, recorder, broker)
 	return &Application{
 		mode:              mode,
 		args:              args,
 		cfg:               cfg,
+		cfgStore:          cfgStore,
 		configPath:        configPath,
 		version:           version,
 		logger:            logger,
@@ -326,7 +328,7 @@ func (a *Application) WithJournalSweeper(sweep func(context.Context) error, ever
 
 // buildRegistry wires every tool Murtaugh ships with. New tools must be
 // registered here so they appear in both the CLI and MCP frontends.
-func buildRegistry(cfg config.Config, configPath, version string, recorder journal.Recorder, broker *interaction.Broker) *tools.Registry {
+func buildRegistry(cfg config.Config, cfgStore config.Store, configPath, version string, recorder journal.Recorder, broker *interaction.Broker) *tools.Registry {
 	reg := tools.NewRegistry()
 	reg.Register(ping.New())
 	reg.Register(versiontool.New(version))
