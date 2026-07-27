@@ -27,24 +27,22 @@ automations/
 ## Triggering: the clock-tick model
 
 Automations are designed to be **stateless per run** and fired on a schedule by an
-external trigger. Murtaugh can register and run jobs (see `jobs.yaml`):
+external trigger. Murtaugh registers and runs jobs from the config database (see
+the **`murtaugh-jobs`** skill):
 
-```yaml
-# jobs.yaml
-jobs:
-  <name>:
-    command: /usr/bin/python3
-    args: ["/Users/<you>/.config/murtaugh/automations/<name>.py"]
-    # workdir: /Users/<you>/.config/murtaugh
-    # timeout: 5m
+```bash
+murtaugh cfg job set --name <name> \
+  --command /usr/bin/python3 \
+  --arg /Users/<you>/.config/murtaugh/automations/<name>.py
+  # optional: --workdir /Users/<you>/.config/murtaugh  --timeout 5m
 ```
 
-Define/run jobs with `murtaugh jobs define …` / `murtaugh jobs run --name <name>`
-(also exposed as MCP tools `jobs_define` / `jobs_run`). Murtaugh schedules jobs
-itself: add `schedule:` (cron) or `every:` (interval) to the job and the
-gateway runs it automatically — see the **`murtaugh-jobs`** skill for the full
-configuration. Whatever the cadence, make every run a full reconcile so a
-skipped or doubled tick is harmless.
+Define jobs with `cfg job set` (operator) or the `jobs_define` tool; run them with
+`murtaugh jobs run --name <name>` (also the MCP `jobs_run` tool). Murtaugh
+schedules jobs itself: add `--schedule` (cron) or `--every` (interval) and the
+gateway runs the job automatically — then **restart the gateway** to pick up the
+schedule. See **`murtaugh-jobs`** for the full configuration. Whatever the cadence,
+make every run a full reconcile so a skipped or doubled tick is harmless.
 
 ## State between runs
 

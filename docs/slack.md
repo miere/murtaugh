@@ -76,9 +76,9 @@ back to the embedded `assets/` defaults. The repo ships starter templates under
 
 ## Workflow rules
 
-Add rules to `workflow-rules.yaml` to react to Slack interactive events (button
-clicks, form submissions). Rules match the raw interaction payload; the first
-match wins, and its triggers run in order.
+Add rules with `cfg workflow-rule set` to react to Slack interactive events
+(button clicks, form submissions). Rules match the raw interaction payload; the
+first match wins, and its triggers run in order.
 
 A trigger has **three mutually exclusive action types**:
 
@@ -91,25 +91,33 @@ A trigger has **three mutually exclusive action types**:
   per-thread session). `agent` is an optional override; omit it to use the
   channel's normal routing.
 
+A rule's nested shape is written as a YAML fragment on disk, then loaded into the
+config store by name:
+
 ```yaml
-# ~/.config/murtaugh/workflow-rules.yaml
-workflow-rules:
-  code-review-approval:
-    request_event: interactive
-    match:
-      channel: { name: eng-reviews }
-      actions:
-        - block_id: github_pull_request
-          action_id: approve_only
-    trigger:
-      - reply-to-slack:
-          template: code-review/approved.json
-      - run:
-          cmd: /path/to/notify-script
-          args: [--env, production]
-      - delegate-to-agent:
-          agent: default
-          prompt: "Post a review summary for {{ .Payload.user.id }} in the thread."
+# rule.yaml — one rule's body
+request_event: interactive
+match:
+  channel: { name: eng-reviews }
+  actions:
+    - block_id: github_pull_request
+      action_id: approve_only
+trigger:
+  - reply-to-slack:
+      template: code-review/approved.json
+  - run:
+      cmd: /path/to/notify-script
+      args: [--env, production]
+  - delegate-to-agent:
+      agent: default
+      prompt: "Post a review summary for {{ .Payload.user.id }} in the thread."
+```
+
+```sh
+murtaugh cfg workflow-rule set --name code-review-approval --from-file rule.yaml
+murtaugh cfg workflow-rule list
+murtaugh cfg workflow-rule show --name code-review-approval
+murtaugh cfg workflow-rule delete --name code-review-approval
 ```
 
 `delegate-to-agent` prompts are rendered as Go templates against the interaction
@@ -119,38 +127,45 @@ one-shot session — no shared chat memory.
 
 > The **ping → pong** self-test is built into the binary, not a workflow rule —
 > it posts the card and answers the click directly, so the round-trip can't be
-> broken by a config edit. `workflow-rules.yaml` may be omitted entirely.
+> broken by a config edit. Defining no workflow rules at all is fine.
 
 ---
 
 ## Link unfurling
 
-Add rules to `unfurl-rules.yaml` to replace shared URLs with rich Block Kit
+Add rules with `cfg unfurl-rule set` to replace shared URLs with rich Block Kit
 previews. An `unfurl` action is exactly one of `template`, `run`, or
-`delegate-to-agent`.
+`delegate-to-agent`. Each rule's body is a YAML fragment loaded into the store by
+name:
 
 ```yaml
-# ~/.config/murtaugh/unfurl-rules.yaml
-unfurl-rules:
-  # Template-based: build the preview from the URL's parts alone.
-  github-pr:
-    match:
-      domain: github.com
-      url_pattern: '^https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/pull/(?P<number>\d+)'
-    unfurl:
-      template: templates/unfurl/github-pr.json
+# github-pr.yaml — template-based: build the preview from the URL's parts alone.
+match:
+  domain: github.com
+  url_pattern: '^https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/pull/(?P<number>\d+)'
+unfurl:
+  template: templates/unfurl/github-pr.json
+```
 
-  # Agent-based: the agent's final output must be a valid Slack attachment JSON.
-  github-issues:
-    match:
-      domain: github.com
-      url_pattern: '^https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/issues/(?P<number>\d+)'
-    unfurl:
-      delegate-to-agent:
-        agent: default
-        prompt: |
-          Summarise GitHub issue {{ .URL }} and return solely a valid Slack
-          attachment JSON object containing a one-paragraph summary.
+```yaml
+# github-issues.yaml — agent-based: the agent's final output must be valid Slack attachment JSON.
+match:
+  domain: github.com
+  url_pattern: '^https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/issues/(?P<number>\d+)'
+unfurl:
+  delegate-to-agent:
+    agent: default
+    prompt: |
+      Summarise GitHub issue {{ .URL }} and return solely a valid Slack
+      attachment JSON object containing a one-paragraph summary.
+```
+
+```sh
+murtaugh cfg unfurl-rule set --name github-pr --from-file github-pr.yaml
+murtaugh cfg unfurl-rule set --name github-issues --from-file github-issues.yaml
+murtaugh cfg unfurl-rule list
+murtaugh cfg unfurl-rule show --name github-pr
+murtaugh cfg unfurl-rule delete --name github-pr
 ```
 
 Prompts and templates can reference `{{ .URL }}`, `{{ .Domain }}`, and named

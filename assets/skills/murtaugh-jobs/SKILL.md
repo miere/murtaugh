@@ -1,22 +1,23 @@
 ---
 name: murtaugh-jobs
-description: Define, run, and schedule Murtaugh jobs in jobs.yaml — a shell command or an agent, run manually or on a cron/interval — via the jobs_run/jobs_define tools.
+description: Define, run, and schedule Murtaugh jobs (stored in the config database) via `murtaugh cfg job` and the jobs_run/jobs_define tools — a shell command or an agent, run manually or on a cron/interval.
 requires: [jobs]
 files:
-  reference/configuring.md: { requires: [jobs], summary: "define a job's command / agent+prompt / args / workdir / timeout" }
+  reference/configuring.md: { requires: [jobs], summary: "define a job (cfg job set) — command / agent+prompt / arg / workdir / timeout" }
   reference/scheduling.md:  { requires: [jobs], summary: "choose a schedule (cron) / every (interval) value; held-job approval" }
   reference/running.md:     { requires: [jobs], summary: "run a job by hand or wire jobs_run / jobs_define" }
 ---
 
 # Skill: Murtaugh Jobs
 
-A **job** is a named unit of work defined in `jobs.yaml`. It runs **either** a
-shell command (with args, working directory, and timeout) **or** an agent
-(`agent` + `prompt`, fire-and-forget) — the two are mutually exclusive. Jobs run
-**on demand** (CLI, MCP, or a workflow trigger) and can additionally run
-**automatically** on a schedule. Use this whenever a task involves defining,
-running, or scheduling work that Murtaugh executes — backups, syncs, reconcile
-scripts, clock-tick automations, or agent-delegated chores.
+A **job** is a named unit of work stored in the **config database** and managed
+with `murtaugh cfg job …` (`cfg job set|list|show|delete`, also `cfg.*` over MCP).
+It runs **either** a shell command (with args, working directory, and timeout)
+**or** an agent (`--agent` + `--prompt`, fire-and-forget) — the two are mutually
+exclusive. Jobs run **on demand** (CLI, MCP, or a workflow trigger) and can
+additionally run **automatically** on a schedule. Use this whenever a task
+involves defining, running, or scheduling work that Murtaugh executes — backups,
+syncs, reconcile scripts, clock-tick automations, or agent-delegated chores.
 
 ## The three trigger modes (at a glance)
 
@@ -32,46 +33,47 @@ exclusive** fields:
 Scheduled modes (`schedule`/`every`) only fire while the **`slack gateway`
 daemon** is running — it owns the in-process scheduler.
 
-**Operator-written vs agent-defined jobs.** A job you hand-write in `jobs.yaml`
-(no `confirmed:` field) is **trusted**: a scheduled one auto-runs as soon as the
-gateway is up, exactly as the table above describes. A job created by the
-`jobs_define` tool is stamped `confirmed: false` and is **held**: it is still
-scheduled, but on its **first trigger** the scheduler asks the admin (in their
-DM) to approve that run before it executes — see `reference/scheduling.md`. This
-exists because a defined job's command runs **headless and ungated**, so the
-agent never gets to define-then-auto-run a command without a human OK.
+**Operator-defined vs agent-defined jobs.** A job you create with `cfg job set`
+is **operator-trusted**: a scheduled one auto-runs as soon as the gateway is up,
+exactly as the table above describes. A job created by the `jobs_define` tool is
+stamped `confirmed: false` and is **held**: it is still scheduled, but on its
+**first trigger** the scheduler asks the admin (in their DM) to approve that run
+before it executes — see `reference/scheduling.md`. This exists because a defined
+job's command runs **headless and ungated**, so the agent never gets to
+define-then-auto-run a command without a human OK.
 
 ## Read the right file (don't load everything)
 
 | When you're… | Read |
 |---|---|
-| Defining a job's command / agent+prompt / args / workdir / timeout | `reference/configuring.md` |
+| Defining a job's command / agent+prompt / arg / workdir / timeout | `reference/configuring.md` |
 | Choosing or writing a `schedule` / `every` value | `reference/scheduling.md` |
 | Running a job by hand or wiring `jobs_run` / `jobs_define` | `reference/running.md` |
-| Wanting a working `jobs.yaml` | `examples/jobs.yaml` |
+| Wanting worked `cfg job set` examples | `examples/` |
 
 ## Global guidelines (defaults — follow unless the user says otherwise)
 
-- **Read `jobs.yaml` first.** It is the source of truth for existing job names;
-  reuse / overwrite a job that serves the same purpose rather than adding a
-  parallel one.
-- **One trigger mode per job.** Never set both `schedule` and `every` — Murtaugh
-  rejects that at validation time. Leave both unset for a manual-only job.
-- **Schedule edits apply on the next gateway restart**, not live. After editing
-  `jobs.yaml`, restart the gateway (e.g. the **Restart Murtaugh** button on the
+- **`cfg job list` first.** The store is the source of truth for existing job
+  names; reuse / overwrite (`cfg job set --name <same>`) a job that serves the
+  same purpose rather than adding a parallel one.
+- **One trigger mode per job.** Never set both `--schedule` and `--every` —
+  Murtaugh rejects that at validation time (and rolls the change back). Leave both
+  unset for a manual-only job.
+- **Schedule edits apply on the next gateway restart**, not live. After a
+  `cfg job set`, restart the gateway (e.g. the **Restart Murtaugh** button on the
   App Home tab).
-- **`jobs_define` requires approval.** Defining a job is never a silent write —
-  the tool always prompts a human, showing the rendered command + schedule, and
-  stamps the new/updated entry `confirmed: false` so its first scheduled run is
-  held until the admin confirms it (see `reference/running.md` and
-  `reference/scheduling.md`).
-- **`command` should be an absolute path** (or a binary on `PATH`); a relative
-  `command` resolves against the job's `workdir`, which defaults to the
-  workspace (`~/.config/murtaugh`).
+- **`jobs_define` requires approval.** Defining a job via the agent tool is never a
+  silent write — it always prompts a human, showing the rendered command +
+  schedule, and stamps the new/updated entry `confirmed: false` so its first
+  scheduled run is held until the admin confirms it (see `reference/running.md` and
+  `reference/scheduling.md`). `cfg job set` is the operator path and is trusted.
+- **`--command` should be an absolute path** (or a binary on `PATH`); a relative
+  command resolves against the job's `--workdir`, which defaults to the workspace
+  (`~/.config/murtaugh`).
 - **Scheduled runs are best-effort.** A run that would fire while the gateway is
   down is **skipped, not caught up** (see `reference/scheduling.md`). Don't rely
   on a scheduled job for must-not-miss accounting without external safeguards.
-- **Ask the binary for exact flags.** `murtaugh help jobs run` /
-  `murtaugh help jobs define` (or `murtaugh jobs <run|define> --help`) print the
-  full flag reference — which are required, the repeatable `--args` form, and
-  the `--timeout`/`--schedule`/`--every` value formats.
+- **Ask the binary for exact flags.** `murtaugh help cfg job` (defining) and
+  `murtaugh help jobs run` (running by hand) — or `--help` on either — print the
+  full flag reference: which are required, the repeatable `--arg` form, and the
+  `--timeout`/`--schedule`/`--every` value formats.

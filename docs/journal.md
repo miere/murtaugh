@@ -84,7 +84,8 @@ murtaugh journal query --corr-id gw_3f9c2b1a
 ```
 
 If `journal stats` shows the `gateway` stream at **0 rows**, recording is off —
-check `journal.yaml` (`streams.gateway.enabled`) and that the daemon restarted.
+check the journal config (`murtaugh cfg journal show` → `streams.gateway.enabled`)
+and that the daemon restarted.
 
 ---
 
@@ -106,23 +107,30 @@ Pruning removes a transcript along with its rows.
 
 ## Configuration
 
-Tune it in `journal.yaml` — per-stream `enabled` and `retention`, the database
-`path`, the transcript `blob_dir`, and the sweep cadence:
+The journal is a **singleton in the config store** — per-stream `enabled` and
+`retention`, the database `path`, the transcript `blob_dir`, and the sweep
+cadence. Inspect it with:
 
-```yaml
-# ~/.config/murtaugh/journal.yaml
-journal:
-  # path: ~/.local/state/murtaugh/journal.db          # default
-  # blob_dir: ~/.local/state/murtaugh/journal-blobs    # default beside the DB
-  streams:
-    gateway:     { enabled: true, retention: 168h }   # 7d
-    job:         { enabled: true, retention: 720h }   # 30d
-    acp_session: { enabled: true, retention: 2160h }  # 90d
-  sweep:
-    every: 24h                                        # also runs once at startup
+```sh
+murtaugh cfg journal show
 ```
 
-An absent `journal.yaml` keeps every stream on with the defaults above. Changes
-apply on the next gateway restart. The daemon prunes past-retention events
-automatically (at startup and every `sweep.every`); `journal prune` is the manual
-equivalent.
+```
+# path: ~/.local/state/murtaugh/journal.db          # default
+# blob_dir: ~/.local/state/murtaugh/journal-blobs    # default beside the DB
+streams:
+  gateway:     { enabled: true, retention: 168h }   # 7d
+  job:         { enabled: true, retention: 720h }   # 30d
+  acp_session: { enabled: true, retention: 2160h }  # 90d
+sweep:
+  every: 24h                                        # also runs once at startup
+```
+
+> Note: the journal DB is a **separate** store from the config store — it holds
+> event data, not configuration. `cfg journal show` reads the journal settings;
+> tuning them lives in the config store alongside the rest of `cfg`, and changes
+> apply on the next gateway restart.
+
+A fresh install keeps every stream on with the defaults above. The daemon prunes
+past-retention events automatically (at startup and every `sweep.every`);
+`journal prune` is the manual equivalent.

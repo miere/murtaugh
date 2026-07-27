@@ -69,7 +69,8 @@ murtaugh journal query --corr-id gw_3f9c2b1a…
 ```
 
 If `journal_stats` shows the `gateway` stream at **0 rows**, recording is off —
-check `journal.yaml` (`streams.gateway.enabled`) and that the daemon restarted.
+check the journal config (`cfg journal show` → `streams.gateway.enabled`) and that
+the daemon restarted.
 
 ## Useful filters (all optional, ANDed)
 

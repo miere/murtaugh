@@ -37,14 +37,27 @@ On other platforms, run `murtaugh slack gateway` under your own supervisor
 
 ## Applying config changes
 
-The gateway loads config **once at startup** — it never hot-reloads. When a
-config file changes, the running daemon *suggests* a restart (an admin-only
-button) but applies nothing until you restart.
+The gateway loads config **once at startup** — it never hot-reloads. After a
+`murtaugh cfg …` change, the running daemon *suggests* a restart (an admin-only
+button) but applies nothing until you restart. (Every `cfg` change is validated
+against the whole store immediately, so a rejected change never reaches the
+running gateway in the first place.)
 
 **Restart** is admin-only — `/murtaugh restart`, or the suggestion button. It
 preserves a "restarting… / back online" notice across the restart so users aren't
 left wondering. Schedule edits, agent changes, access-list changes, and journal
 settings all take effect on the next restart.
+
+### Auto-migration on upgrade
+
+The first run after upgrading from a YAML-tree install **auto-migrates** the old
+sibling YAMLs (`agents.yaml`, `jobs.yaml`, `journal.yaml`, `workflow-rules.yaml`,
+`unfurl-rules.yaml`, `troubleshoot.yaml`, plus the `access`/`chat` blocks) into a
+SQLite config store, rewrites `gateway.yaml` down to `oauth:` + `database:`, and
+**moves** the old files into `~/.config/murtaugh/migrated-<timestamp>/` (never
+deletes them). This is automatic and idempotent — a second run is a no-op. From
+then on, edit configuration with `murtaugh cfg …`. See
+[Configuration](configuration.md#upgrading-from-the-yaml-tree).
 
 ---
 
@@ -67,18 +80,19 @@ before assuming it's stuck.
 
 ### Access is fail-closed
 
-Only `admin_user` plus everyone in `access.allowed_users` may interact. With
-`allowed_users` empty, the bot is **admin-only** — so *"the bot ignores me"* is
-most often an access-list problem, not a bug. Handles in the access lists are
-resolved to IDs at startup, and **the gateway refuses to start if any entry can't
-be resolved** — check the startup log for a resolution error.
+Only the admin plus everyone in the access allowed-users list may interact. With
+the list empty, the bot is **admin-only** — so *"the bot ignores me"* is most
+often an access-list problem, not a bug. Inspect it with `murtaugh cfg access
+show`. Handles in the access lists are resolved to IDs at startup, and **the
+gateway refuses to start if any entry can't be resolved** — check the startup log
+for a resolution error.
 
 ### "The bot ignores me" checklist
 
-1. Are you the admin, or in `access.allowed_users`?
-2. In a channel, did you `@mention` the bot (unless you're in `chat.no_mention`)?
-3. Is `chat.enabled: true` and `chat.defaults.agent` a real agent in
-   `agents.yaml`?
+1. Are you the admin, or in the allowed-users list? (`murtaugh cfg access show`)
+2. In a channel, did you `@mention` the bot?
+3. Is chat enabled and pointed at a real agent? (`murtaugh cfg chat show`,
+   `murtaugh cfg agent list`)
 4. Did the gateway actually start? Check `slack.err.log` for an auth or
    config-validation failure.
 
@@ -93,12 +107,14 @@ the `gateway` stream are where to look for *"why did the daemon go silent?"*.
 
 ```sh
 murtaugh slack send-msg ...        # if Slack itself works
-/murtaugh troubleshoot             # from Slack: bundles the .yaml config files
+/murtaugh troubleshoot             # from Slack: bundles gateway.yaml + a config-store dump
 ```
 
-`/murtaugh troubleshoot` collects your `.yaml` config files into an uploadable
-bundle. It deliberately **never** includes `.env`, so secrets don't leak — which
-is exactly why secrets must live only there (see [Configuration](configuration.md)).
+`/murtaugh troubleshoot` collects `gateway.yaml` and a dump of the config store
+(the same content as `murtaugh cfg show`) into an uploadable bundle. It
+deliberately **never** includes `.env`, so secrets don't leak — and because every
+value in the store is a `${VAR}` reference, the dump carries no credentials
+either (see [Configuration](configuration.md)).
 
 ---
 

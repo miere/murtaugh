@@ -17,7 +17,30 @@ murtaugh ping                      # → pong
 murtaugh slack send-msg --to '#general' --body 'hello'
 murtaugh jobs run --name nightly-deploy
 murtaugh journal query --stream gateway --since 1h --level error
+murtaugh cfg agent list            # administer the config store
 ```
+
+### The `cfg` namespace
+
+`murtaugh cfg …` is the admin surface for the **config store** — the database
+that holds agents, MCP servers, jobs, chat routing, access control, runtime
+defaults, journal settings, and workflow/unfurl rules (everything except the
+`oauth:` + `database:` blocks in `gateway.yaml`):
+
+```sh
+murtaugh cfg agent create --name default --type native --provider gemini ...
+murtaugh cfg chat set --enabled true --default-agent default
+murtaugh cfg access set --admin-user your-handle
+murtaugh cfg job set --name nightly-backup --command /usr/local/bin/backup.sh --schedule "0 2 * * *"
+murtaugh cfg show                  # dump the whole config as JSON
+murtaugh cfg validate              # re-validate the store
+murtaugh cfg db migrate --to postgres --dsn-env MURTAUGH_DB_DSN
+```
+
+Every mutation re-validates the whole store and rolls back an invalid change.
+Like the rest, the gateway reads the store **once at startup** — restart to
+apply. See [Configuration → the `cfg` surface](configuration.md#the-murtaugh-cfg-surface)
+for the full command list.
 
 ### Discovering commands
 
@@ -74,8 +97,11 @@ This exposes **every registered tool** to MCP-capable AI clients (Claude
 Desktop, IDE extensions, etc.) over JSON-RPC on stdio. Stdout is reserved for the
 protocol; diagnostics go to stderr.
 
-Over MCP, tool names are dotted (`jobs.run`, `journal.query`, `slack.send-msg`)
-where the CLI uses spaces (`murtaugh jobs run`).
+Over MCP, tool names are dotted (`jobs.run`, `journal.query`, `slack.send-msg`,
+`cfg.agent.create`) where the CLI uses spaces (`murtaugh jobs run`,
+`murtaugh cfg agent create`). The whole `cfg` surface is available over MCP too,
+so a connected agent can reconfigure Murtaugh with the same validation and
+rollback guarantees.
 
 ### Registering with a client
 

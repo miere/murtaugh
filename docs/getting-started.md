@@ -1,8 +1,8 @@
 # Getting started
 
 This guide takes you from nothing to a running Murtaugh that answers in Slack.
-Three steps: **install the binary**, **create the Slack app**, **write the
-config and run the gateway**.
+Three steps: **install the binary**, **create the Slack app**, **configure it
+and run the gateway**.
 
 ---
 
@@ -40,7 +40,7 @@ During install you choose how chat is backed:
 - an **ACP agent** already on your machine (`opencode acp`, `goose acp`,
   `auggie --acp`, or a custom command). The installer records the command but
   does **not** download third-party agents for you.
-- **skip** — set chat up later in `agents.yaml`.
+- **skip** — set chat up later with `murtaugh cfg agent create`.
 
 For unattended installs (`--yes`), set `MURTAUGH_CHAT_AGENT=native` with
 `MURTAUGH_NATIVE_PROVIDER`, `MURTAUGH_NATIVE_MODEL`, and
@@ -60,20 +60,24 @@ Move the binary anywhere on your `$PATH`, then continue below.
 
 ### Guided setup with the tools
 
-Once the binary is on `PATH`, the `setup_*` tools can create and edit your whole
-config for you (each is idempotent and backs up what it replaces):
+Once the binary is on `PATH`, the `setup_*` tools create the on-disk pieces
+(config directory, tokens, provider keys) and the config store for you (each is
+idempotent and backs up what it replaces):
 
 ```sh
-murtaugh setup bootstrap          # seed ~/.config/murtaugh with defaults (run first)
-murtaugh setup slack ...          # write gateway.yaml (OAuth tokens, admin user, chat)
+murtaugh setup bootstrap          # seed ~/.config/murtaugh + init the config store (run first)
+murtaugh setup slack ...          # write gateway.yaml's oauth block (OAuth tokens, admin user)
 murtaugh setup env ...            # upsert provider keys into .env
-murtaugh setup agents ...         # write agents.yaml (a native or ACP agent)
+murtaugh setup agents ...         # create a native or ACP agent (writes to the config store)
 murtaugh setup launchd ...        # (macOS) install the daemon
 murtaugh setup mcp-register ...   # (optional) register Murtaugh in an MCP client
 ```
 
-Run `murtaugh help setup <tool>` for the exact flags of each. The rest of this
-guide shows the resulting files so you can also write them by hand.
+Run `murtaugh help setup <tool>` for the exact flags of each. `setup bootstrap`,
+`setup slack`, and `setup env` still touch files and credentials; `setup agents`
+now writes into the config store (the same place `murtaugh cfg agent …` edits).
+The rest of this guide shows the on-disk files and the `cfg` commands so you can
+also do it by hand.
 
 ---
 
@@ -108,8 +112,10 @@ need both next.
 
 ## 3. Configure and run
 
-Murtaugh reads its config from `~/.config/murtaugh/`. Secrets live in `.env`;
-the YAML files reference them as `${VAR}` and never hold values.
+Two files live in `~/.config/murtaugh/`: the secret `.env` and a slimmed
+`gateway.yaml`. Everything else — agents, chat routing, access — lives in a
+config store and is edited with `murtaugh cfg …`. Secrets stay in `.env`;
+`gateway.yaml` and the store reference them as `${VAR}`.
 
 ### `.env` — secrets
 
@@ -122,7 +128,7 @@ SLACK_BOT_TOKEN=xoxb-your-bot-token
 GEMINI_API_KEY=your-key-here
 ```
 
-### `gateway.yaml` — the gateway
+### `gateway.yaml` — oauth + database
 
 ```yaml
 # ~/.config/murtaugh/gateway.yaml
@@ -130,37 +136,50 @@ oauth:
   app_token: ${SLACK_APP_TOKEN}
   bot_token: ${SLACK_BOT_TOKEN}
 
-access:
-  admin_user: your-slack-handle   # @handle or Slack user ID
-  allowed_users: []               # empty = admin-only (fail-closed)
-  debug: false
-
-chat:
-  enabled: true                   # gate the DM + @mention chat surface
-  defaults:
-    agent: default                # must name an agent in agents.yaml
+database:
+  backend: sqlite                 # default; the config store is a single file
+  sqlite:
+    path: ~/.local/state/murtaugh/config.db
 ```
 
-`admin_user` may be a handle (with or without `@`) or a user ID. On startup
+`gateway.yaml` no longer holds `access:` or `chat:` — those are records in the
+config store now. `setup bootstrap` writes this file and initialises an empty
+SQLite store for you.
+
+### Access and chat routing
+
+Set the admin, the access list, and the chat surface with `cfg`:
+
+```sh
+murtaugh cfg access set --admin-user your-slack-handle --debug false
+#   allowed_users defaults to empty = admin-only (fail-closed)
+
+murtaugh cfg chat set --enabled true --default-agent default
+#   --default-agent must name an agent that exists (create one below first)
+```
+
+`--admin-user` may be a handle (with or without `@`) or a user ID. On startup
 Murtaugh opens a DM with that user and sends a **ping card**.
 
-### `agents.yaml` — the chat agent
+### The chat agent
 
-A minimal native agent (Murtaugh runs the LLM loop itself, no external process):
+Create a minimal native agent (Murtaugh runs the LLM loop itself, no external
+process):
 
-```yaml
-# ~/.config/murtaugh/agents.yaml
-agents:
-  default:
-    tools: [files, terminal, skills, slack, ask, present_plan]
-    native:
-      provider: gemini            # gemini | anthropic | openai
-      model: gemini-2.5-pro
-      api_key_env: GEMINI_API_KEY # names the variable in .env
+```sh
+murtaugh cfg agent create --name default --type native \
+  --tools files --tools terminal --tools skills --tools slack \
+  --tools ask --tools present_plan \
+  --provider gemini --model gemini-2.5-pro --api-key-env GEMINI_API_KEY
 ```
 
-If you don't need chat, set `chat.enabled: false` in `gateway.yaml` and omit the
-agent. See **[Agent chat](agents.md)** for ACP agents, tools, and tuning.
+`--api-key-env` names the variable in `.env` (never the key itself). If you
+don't need chat, run `murtaugh cfg chat set --enabled false` and skip the agent.
+See **[Agent chat](agents.md)** for ACP agents, tools, and tuning.
+
+Because every `cfg` change re-validates the whole store, `chat set
+--default-agent default` will be rejected until that agent exists — create the
+agent first, then enable chat.
 
 ### Start the gateway
 
@@ -192,7 +211,7 @@ through any extra Slack configuration the new rule needs.
 
 ## Next steps
 
-- [Configuration](configuration.md) — the full map of config files.
+- [Configuration](configuration.md) — `gateway.yaml`, `.env`, and the full `cfg` surface.
 - [Agent chat](agents.md) — tune which agent answers, its tools, and approvals.
 - [Slack](slack.md) — workflow rules and link unfurling in depth.
 - [Jobs](jobs.md) — schedule recurring work.

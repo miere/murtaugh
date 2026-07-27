@@ -3,7 +3,12 @@
 How Murtaugh turns a button click into a response — the *reactive* half of Slack.
 For composing and sending the message that carries the buttons, see
 `messaging.md`; for the blocks themselves, see `blocks.md`. This is operator
-config (it edits `workflow-rules.yaml`).
+config, stored in the config database and applied with
+`cfg workflow-rule set --name <n> --from-file <rule.yaml>` (view/manage with
+`cfg workflow-rule list|show|delete`). The `--from-file` YAML holds the rule
+**body** — the fields shown below, minus the outer map and name key; `--name` is
+the rule's key. Each `cfg` change re-validates the whole config and rolls back an
+invalid rule; **restart the gateway** to apply.
 
 > **`workflow-rules` are buttons-only.** A `workflow-rules` entry can only match
 > `block_actions` interactions; it **cannot** trigger on a modal `view_submission`.
@@ -23,8 +28,8 @@ config (it edits `workflow-rules.yaml`).
    `block_id`. These are your **routing keys**.
 3. When a user clicks, Slack delivers an `interactive` event of type
    `block_actions` to Murtaugh over Socket Mode.
-4. Murtaugh evaluates each `workflow-rules` entry in sorted-key order and runs the
-   **first** whose `match` is a subset of the interaction payload.
+4. Murtaugh evaluates each workflow rule in sorted-key (rule-name) order and runs
+   the **first** whose `match` is a subset of the interaction payload.
 5. The matched rule's triggers fire in order: `reply-to-slack` posts a reply
    (from a template, a command, or an agent), `run` invokes a command with the
    interaction JSON on stdin, and `delegate-to-agent` starts a real chat turn in
@@ -33,31 +38,32 @@ config (it edits `workflow-rules.yaml`).
 ## Stable routing keys
 
 Give every actionable element a stable `action_id` (and its block a `block_id`) so
-rules can target it precisely. **Check `workflow-rules.yaml` for keys that already
-exist and reuse them** — e.g. the code-review flow already uses `block_id: github_pull_request`
-with `action_id`s `approve_only` and `approve_merge`. Inventing parallel keys for
-the same behaviour leaves your buttons unwired.
+rules can target it precisely. **Check existing rules with `cfg workflow-rule
+list` / `cfg workflow-rule show` and reuse their keys** — e.g. the code-review flow
+already uses `block_id: github_pull_request` with `action_id`s `approve_only` and
+`approve_merge`. Inventing parallel keys for the same behaviour leaves your
+buttons unwired.
 
 ## Matching the interaction
 
-`match` is a partial (subset) match — specify only the fields you care about:
+`match` is a partial (subset) match — specify only the fields you care about. The
+`--from-file` YAML for a rule holds its body (here, the `pr-approve` rule):
 
 ```yaml
-workflow-rules:
-  pr-approve:
-    request_event: interactive
-    match:
-      type: block_actions
-      actions:
-        - block_id: github_pull_request
-          action_id: approve_only
-    trigger:
-      - reply-to-slack:
-          template: code-review/02-approved.json
-      - run:
-          cmd: /path/to/agent
-          args: [github, approve-pr]
-          timeout: 30s
+# pr-approve.yaml  →  cfg workflow-rule set --name pr-approve --from-file pr-approve.yaml
+request_event: interactive
+match:
+  type: block_actions
+  actions:
+    - block_id: github_pull_request
+      action_id: approve_only
+trigger:
+  - reply-to-slack:
+      template: code-review/02-approved.json
+  - run:
+      cmd: /path/to/agent
+      args: [github, approve-pr]
+      timeout: 30s
 ```
 
 Scope a rule to a channel by adding `channel: { name: nc-code-reviews }` to
@@ -92,7 +98,7 @@ more-specific rules to sort ahead of catch-alls.
   buttons: it's visible and steerable, not a silent background run. The `prompt` is
   rendered with the payload under `.Payload`. `agent` is an **optional override**:
   omit it to use the channel's normal routing (the agent a real mention in that
-  channel would reach), or name one (must be defined in `agents.yaml`) to pin it.
+  channel would reach), or name one (must be defined — `cfg agent list`) to pin it.
   Requires chat/ACP to be enabled.
 
   > Do **not** try to trigger the agent by having a `run:` command post a message
@@ -150,7 +156,9 @@ ephemeral, scope `allowed_users`, gate destructive actions) rather than ship-and
 
 ## Related
 
-- A worked, wired example lives in `workflow-rules.yaml` (the `code-review-approval`
-  rule) with its template at `templates/code-review/02-approved.json` — see `examples/`.
-- Unfurling bare URLs into rich previews is a *different* mechanism (`unfurl-rules`
+- A worked, wired example lives in `examples/` (the `code-review-approval` rule
+  body you'd pass to `cfg workflow-rule set`) with its template at
+  `templates/code-review/02-approved.json`. Inspect installed rules with
+  `cfg workflow-rule show --name code-review-approval`.
+- Unfurling bare URLs into rich previews is a *different* mechanism (unfurl rules
   + `link_shared`), covered by `unfurl.md` in this skill.
