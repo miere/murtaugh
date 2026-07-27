@@ -33,7 +33,7 @@ sections below assume them.
   `.env` (all secrets). Everything else — agents, MCP servers, jobs, chat
   routing, access, journal, troubleshoot, workflow/unfurl rules, runtime
   defaults — lives in the **config store** (a SQLite DB by default at
-  `~/.local/state/murtaugh/config.db`, or Postgres), managed with the
+  `~/.config/murtaugh/config.db`, or Postgres), managed with the
   `murtaugh cfg …` commands (also exposed over MCP as `cfg.*` tools). The old
   hand-edited siblings (`agents.yaml`, `jobs.yaml`, `journal.yaml`,
   `workflow-rules.yaml`, `unfurl-rules.yaml`, `troubleshoot.yaml`) no longer

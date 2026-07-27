@@ -176,8 +176,8 @@ func (a *Application) Run(ctx context.Context) error {
 				Note:      note,
 				Providers: effectiveTroubleshootProviders(a.cfg),
 			}, troubleshoot.ResolveSources(
-				a.cfg.Journal.EffectivePath(),
-				a.cfg.Journal.EffectiveBlobDir(),
+				a.cfg.Journal.EffectivePath(a.cfg.BaseDir),
+				a.cfg.Journal.EffectiveBlobDir(a.cfg.BaseDir),
 				baseDirFor(a.cfg, a.configPath),
 				a.version,
 			))
@@ -346,8 +346,8 @@ func buildRegistry(cfg config.Config, cfgStore config.Store, configPath, version
 	// backs all three. They are how Gateway Debug Mode and admins inspect and
 	// trim the journal over CLI and MCP.
 	journalOpener := func() (*journal.Store, error) {
-		return journal.Open(cfg.Journal.EffectivePath(), cfg.Journal.RetentionByStream(),
-			journal.WithBlobDir(cfg.Journal.EffectiveBlobDir()))
+		return journal.Open(cfg.Journal.EffectivePath(cfg.BaseDir), cfg.Journal.RetentionByStream(),
+			journal.WithBlobDir(cfg.Journal.EffectiveBlobDir(cfg.BaseDir)))
 	}
 	reg.Register(journalquery.New(journalOpener))
 	reg.Register(journalstats.New(journalOpener))
@@ -438,8 +438,8 @@ func buildRegistry(cfg config.Config, cfgStore config.Store, configPath, version
 	// every call, mirroring the journal/jobs path closures above.
 	troubleshootSources := func() troubleshoot.Sources {
 		return troubleshoot.ResolveSources(
-			cfg.Journal.EffectivePath(),
-			cfg.Journal.EffectiveBlobDir(),
+			cfg.Journal.EffectivePath(cfg.BaseDir),
+			cfg.Journal.EffectiveBlobDir(cfg.BaseDir),
 			baseDirFor(cfg, configPath),
 			version,
 		)

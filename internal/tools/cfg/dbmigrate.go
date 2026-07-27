@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -63,9 +64,11 @@ func (t *dbMigrateTool) Invoke(ctx context.Context, args map[string]any) (any, e
 		connectDBC = config.DatabaseConfig{Backend: config.BackendPostgres, Postgres: config.PostgresConfig{DSN: dsn}}
 		fileDBC = config.DatabaseConfig{Backend: config.BackendPostgres, Postgres: config.PostgresConfig{DSN: "${" + dsnEnv + "}"}}
 	case config.BackendSQLite:
+		// An unset path defaults to `config.db` beside gateway.yaml; a given
+		// --sqlite-path pins it. Keep the same value in the file so a default
+		// stays a default (portable) rather than being frozen to an absolute path.
 		path := strings.TrimSpace(mustString(args, "sqlite_path"))
 		connectDBC = config.DatabaseConfig{Backend: config.BackendSQLite, SQLite: config.SQLiteConfig{Path: path}}
-		connectDBC.SQLite.Path = connectDBC.EffectiveSQLitePath()
 		fileDBC = connectDBC
 	default:
 		return nil, fmt.Errorf("--to must be postgres or sqlite (got %q)", to)
@@ -75,7 +78,7 @@ func (t *dbMigrateTool) Invoke(ctx context.Context, args map[string]any) (any, e
 		return nil, fmt.Errorf("the config store is already using the %s backend", to)
 	}
 
-	target, err := store.Open(ctx, connectDBC)
+	target, err := store.Open(ctx, connectDBC, filepath.Dir(t.configPath))
 	if err != nil {
 		return nil, fmt.Errorf("open target store: %w", err)
 	}

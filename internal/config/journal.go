@@ -103,20 +103,29 @@ func (c JournalConfig) EffectiveSweepEvery() time.Duration {
 }
 
 // EffectivePath resolves the database path: the configured value (with ~
-// expansion) or the XDG state default $XDG_STATE_HOME/murtaugh/journal.db
-// (falling back to ~/.local/state/murtaugh/journal.db).
-func (c JournalConfig) EffectivePath() string {
+// expansion) or, by default, `journal.db` in the config directory (beside
+// gateway.yaml). configDir is the directory holding the bootstrap file; when it
+// is empty it falls back to the XDG state dir. Existing journal files at the old
+// location are not migrated — they are troubleshooting artifacts and can be
+// moved by hand if needed.
+func (c JournalConfig) EffectivePath(configDir string) string {
 	if p := strings.TrimSpace(c.Path); p != "" {
 		return expandHome(p)
+	}
+	if strings.TrimSpace(configDir) != "" {
+		return filepath.Join(configDir, "journal.db")
 	}
 	return filepath.Join(journalStateDir(), "journal.db")
 }
 
-// EffectiveBlobDir resolves the directory for large-body blobs (used by the ACP
-// session stream in a later PR), defaulting beside the database.
-func (c JournalConfig) EffectiveBlobDir() string {
+// EffectiveBlobDir resolves the directory for large-body blobs, defaulting
+// beside the database (in the config directory unless configured otherwise).
+func (c JournalConfig) EffectiveBlobDir(configDir string) string {
 	if p := strings.TrimSpace(c.BlobDir); p != "" {
 		return expandHome(p)
+	}
+	if strings.TrimSpace(configDir) != "" {
+		return filepath.Join(configDir, "journal-blobs")
 	}
 	return filepath.Join(journalStateDir(), "journal-blobs")
 }

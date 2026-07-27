@@ -55,7 +55,7 @@ your `automations/` and `templates/`.
 
 # Everything else — agents, jobs, journal, chat routing, access, defaults,
 # workflow-rules, unfurl-rules — lives in the config database (SQLite by default at
-# ~/.local/state/murtaugh/config.db), managed with `murtaugh cfg …`. The old sibling
+# ~/.config/murtaugh/config.db), managed with `murtaugh cfg …`. The old sibling
 # YAMLs (agents.yaml, jobs.yaml, journal.yaml, workflow-rules.yaml, unfurl-rules.yaml,
 # troubleshoot.yaml) are gone as the source of truth.
 ```

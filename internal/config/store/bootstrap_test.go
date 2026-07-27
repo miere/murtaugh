@@ -93,6 +93,12 @@ func TestBootstrapMigratesLegacyYAML(t *testing.T) {
 		t.Errorf("gateway.yaml lost the ${VAR} reference (leaked secret?):\n%s", txt)
 	}
 
+	// The config DB lands beside gateway.yaml (the config dir) by default, not in
+	// the XDG state dir — the store travels with its config.
+	if _, err := os.Stat(filepath.Join(dir, "config.db")); err != nil {
+		t.Errorf("config.db not created beside gateway.yaml: %v", err)
+	}
+
 	// Siblings were archived (moved), not left in place or deleted.
 	if _, err := os.Stat(filepath.Join(dir, "agents.yaml")); !os.IsNotExist(err) {
 		t.Errorf("agents.yaml not archived")

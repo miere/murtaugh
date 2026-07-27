@@ -33,11 +33,13 @@ type sqlstore struct {
 // Open opens (creating if absent) the config store described by dbc and brings
 // its schema up to date. The SQLite backend creates its parent directory and
 // opens the file in WAL mode; the Postgres backend connects via the DSN. The
-// returned Store owns the handle — call Close when done.
-func Open(ctx context.Context, dbc config.DatabaseConfig) (config.Store, error) {
+// returned Store owns the handle — call Close when done. configDir is the
+// directory holding the bootstrap file: a SQLite store with no explicit path
+// defaults to `config.db` there.
+func Open(ctx context.Context, dbc config.DatabaseConfig, configDir string) (config.Store, error) {
 	switch dbc.EffectiveBackend() {
 	case config.BackendSQLite:
-		return openSQLite(ctx, dbc.EffectiveSQLitePath())
+		return openSQLite(ctx, dbc.EffectiveSQLitePath(configDir))
 	case config.BackendPostgres:
 		return openPostgres(ctx, dbc.Postgres.DSN)
 	default:

@@ -213,7 +213,7 @@ live on disk; everything else lives in the store.
   `${VAR}` reference resolved from the sibling `.env`.
 - `database:` — the config-store backend (`config.DatabaseConfig`): `backend:
   sqlite` (default; `sqlite.path`, defaulting to
-  `~/.local/state/murtaugh/config.db`) or `backend: postgres` (`postgres.dsn`,
+  `~/.config/murtaugh/config.db`) or `backend: postgres` (`postgres.dsn`,
   a `${VAR}` reference into `.env`).
 
 `config.LoadBootstrap(path)` parses *only* these two blocks, loads `.env`, and

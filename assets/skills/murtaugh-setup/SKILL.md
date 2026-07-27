@@ -30,7 +30,7 @@ rules — and is managed with `murtaugh cfg …` (also exposed over MCP as `cfg.
 tools). The old sibling YAMLs (`agents.yaml`, `jobs.yaml`, `journal.yaml`,
 `workflow-rules.yaml`, `unfurl-rules.yaml`, `troubleshoot.yaml`) are **gone** as
 the source of truth. The default store is SQLite at
-`~/.local/state/murtaugh/config.db` (path in `gateway.yaml`).
+`~/.config/murtaugh/config.db` (beside `gateway.yaml`; override with `database.sqlite.path`).
 
 **Upgrading auto-migrates.** On the first run of a new binary against an old YAML
 tree, Murtaugh migrates the whole tree into SQLite, slims `gateway.yaml` down to
