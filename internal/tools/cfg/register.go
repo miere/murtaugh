@@ -9,7 +9,7 @@ import (
 // registers them all so the admin surface is exposed identically over the CLI
 // and MCP. Pass a store obtained from the running config store; a nil store
 // yields tools that fail cleanly at invoke time (see NewProvider). configPath is
-// the bootstrap gateway.yaml path, which `cfg db migrate` rewrites.
+// the bootstrap config.yaml path, which `cfg db migrate` rewrites.
 func All(store config.Store, configPath string) []tools.Tool {
 	p := NewProvider(store)
 	var out []tools.Tool

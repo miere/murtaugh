@@ -26,9 +26,9 @@ Run `murtaugh help` for this full document, or `murtaugh help <command>`
 These rules apply to **every** CLI command. Read them once; the per-command
 sections below assume them.
 
-- **Global flag `--config PATH`** — path to `gateway.yaml`. Default
-  `~/.config/murtaugh/gateway.yaml`. Accepts `--config PATH` or `--config=PATH`.
-  `gateway.yaml` is slimmed to two blocks — `oauth:` (Slack tokens, referenced
+- **Global flag `--config PATH`** — path to `config.yaml`. Default
+  `~/.config/murtaugh/config.yaml`. Accepts `--config PATH` or `--config=PATH`.
+  `config.yaml` is slimmed to two blocks — `oauth:` (Slack tokens, referenced
   as `${VAR}`) and `database:` (the config-store backend) — plus its sibling
   `.env` (all secrets). Everything else — agents, MCP servers, jobs, chat
   routing, access, journal, troubleshoot, workflow/unfurl rules, runtime
@@ -205,7 +205,7 @@ murtaugh journal prune
 
 Post a message (or upload a file) to a Slack channel or user. By default the
 message is posted as the app, using the bot token from `oauth.bot_token` in
-`gateway.yaml`. Pass `--as admin` to post as the human admin instead (see
+`config.yaml`. Pass `--as admin` to post as the human admin instead (see
 `--as` below).
 
 | Flag                | Required | Type   | Notes                                                                       |
@@ -233,7 +233,7 @@ murtaugh slack send-msg --to "#team" --body "Approving this — go ahead" --as a
 ## murtaugh slack create-channel
 
 Create a public or private Slack channel, optionally inviting users and setting
-a topic/purpose. Uses the bot token from `oauth.bot_token` in `gateway.yaml`. The
+a topic/purpose. Uses the bot token from `oauth.bot_token` in `config.yaml`. The
 bot needs the `channels:manage` scope for public channels and `groups:write`
 for private ones (those scopes also cover the invites).
 
@@ -304,7 +304,7 @@ murtaugh slack update-msg --channel "#deploys" --ts 1716950455.123456 \
 Start the Slack gateway: the long-running Socket Mode daemon. It responds to
 slash commands, runs YAML workflow rules against interactive payloads, bridges
 Slack conversations to an ACP agent with live streaming, renders custom link
-unfurls, and fires scheduled jobs. Configuration comes entirely from `gateway.yaml`
+unfurls, and fires scheduled jobs. Configuration comes entirely from `config.yaml`
 (`oauth:` + `database:`), its sibling `.env`, and the config store the database
 block points at (agents, jobs, rules, chat routing, access, …); there are no
 tool flags. Stop it with SIGINT/SIGTERM. Normally run under launchd (see `setup
@@ -312,7 +312,7 @@ launchd`).
 
 ```
 murtaugh slack gateway
-murtaugh --config /etc/murtaugh/gateway.yaml slack gateway
+murtaugh --config /etc/murtaugh/config.yaml slack gateway
 ```
 
 ## murtaugh mcp
@@ -427,7 +427,7 @@ murtaugh cfg db migrate --to <postgres|sqlite> [--dsn-env <VAR>|--sqlite-path <p
 ```
 
 `cfg db migrate` copies the current store into the target backend and rewrites
-the `database:` block of `gateway.yaml` to point at it. For Postgres, pass
+the `database:` block of `config.yaml` to point at it. For Postgres, pass
 `--dsn-env` naming the `.env` variable that holds the DSN (e.g.
 `--dsn-env MURTAUGH_DB_DSN`); the DSN itself is never written to YAML. For
 SQLite, `--sqlite-path` overrides the default `config.db` location.
@@ -442,7 +442,7 @@ murtaugh cfg db migrate --to postgres --dsn-env MURTAUGH_DB_DSN
 
 ## murtaugh setup bootstrap
 
-Seed the Murtaugh config directory with embedded defaults (`gateway.yaml` with
+Seed the Murtaugh config directory with embedded defaults (`config.yaml` with
 its `oauth:` + `database:` blocks, `.env`, `system-prompt.md`, Block Kit
 templates, bundled skills). The config store itself is seeded on first run;
 everything else (agents, jobs, rules, …) is created there via `cfg …` and the
@@ -453,7 +453,7 @@ first.
 |-----------|----------|---------|-------------------------------------------------------------------|
 | `--force` | no       | boolean | Refresh the bundled default `system-prompt.md` to the shipped version. |
 
-- **`gateway.yaml`, `.env`, templates** (`templates/`) and **`AGENTS.md`** (the
+- **`config.yaml`, `.env`, templates** (`templates/`) and **`AGENTS.md`** (the
   agent's identity) are created once and then **preserved** — your tokens,
   edits, and chosen persona are never overwritten, even with `--force`.
 - **`system-prompt.md`** (the default base prompt) is created once and preserved,
@@ -472,11 +472,11 @@ murtaugh setup bootstrap --force true   # refresh the default system prompt
 
 ## murtaugh setup slack
 
-Write the `oauth:` block of `gateway.yaml` (preserving its `database:` block) and
+Write the `oauth:` block of `config.yaml` (preserving its `database:` block) and
 store the Slack tokens in `~/.config/murtaugh/.env`; the admin user and chat
 routing go into the **config store** (`access` + `chat`). The YAML references the
 tokens as `${SLACK_APP_TOKEN}` / `${SLACK_BOT_TOKEN}`, so they never live in a
-file the troubleshoot bundler collects. Both `gateway.yaml` and `.env` are backed
+file the troubleshoot bundler collects. Both `config.yaml` and `.env` are backed
 up before being replaced/merged.
 
 | Flag              | Required | Type   | Notes                                                       |

@@ -32,7 +32,7 @@ murtaugh journal query --stream acp_session --user U123 --level warn
 ```
 
 Each row's `blob_ref` is a path **relative to the journal `blob_dir`** (see
-`cfg journal show`; default `~/.config/murtaugh/journal-blobs` (beside gateway.yaml)). Read that file
+`cfg journal show`; default `~/.config/murtaugh/journal-blobs` (beside config.yaml)). Read that file
 to see the transcript — it is NDJSON, one object per turn:
 `{ time, agent, source, outcome, prompt, response }`.
 

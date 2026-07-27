@@ -12,7 +12,7 @@ and operate it.
 | Guide | What it covers |
 |---|---|
 | [Getting started](getting-started.md) | Install Murtaugh, create the Slack app, write the config, and run the gateway. |
-| [Configuration](configuration.md) | The two on-disk files (`gateway.yaml`, `.env`), the database config store, and the `murtaugh cfg` admin CLI. |
+| [Configuration](configuration.md) | The two on-disk files (`config.yaml`, `.env`), the database config store, and the `murtaugh cfg` admin CLI. |
 | [Agent chat](agents.md) | Native and ACP agents, the tools they can call, routing, streaming, interrupts, and approval gates. |
 | [Slack](slack.md) | Posting and reading messages, asking the user, Block Kit, workflow rules, and link unfurling. |
 | [Jobs](jobs.md) | Defining, running, and scheduling shell-command and agent jobs. |
@@ -29,7 +29,7 @@ and operate it.
   three ways — as a Slack interaction, a CLI command (`murtaugh <tool>`), and an
   MCP tool (`murtaugh mcp`).
 - **Config lives in a database**, managed with `murtaugh cfg …`. Only two files
-  stay on disk in `~/.config/murtaugh/`: a slimmed `gateway.yaml` (`oauth` +
+  stay on disk in `~/.config/murtaugh/`: a slimmed `config.yaml` (`oauth` +
   `database`) and a secret `.env`. Secrets are *only* in `.env`; everything else
   references them as `${VAR}` so config can be shared safely.
 - **Agents** answer chat and can be delegated work by jobs, workflow rules, and
@@ -43,6 +43,6 @@ and operate it.
 Murtaugh moved its configuration **out of hand-edited YAML files and into a
 database** managed with `murtaugh cfg …`. A legacy YAML-tree config directory is
 **auto-migrated** on the first run of a new binary — imported into a SQLite
-config store, `gateway.yaml` rewritten to `oauth` + `database`, and the old
+config store, `config.yaml` rewritten to `oauth` + `database`, and the old
 sibling YAMLs moved (never deleted) into `~/.config/murtaugh/migrated-<timestamp>/`.
 The migration is idempotent. These docs describe the current model.

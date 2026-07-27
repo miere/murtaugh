@@ -2,17 +2,17 @@
 
 ## Config is loaded once
 
-The gateway reads `gateway.yaml` (only `oauth:` + `database:`) and the **config
+The gateway reads `config.yaml` (only `oauth:` + `database:`) and the **config
 database** it points at **at startup only**. Changing config — via `murtaugh cfg
 …` for everything in the database (access, chat routing, agents, jobs,
-workflow/unfurl rules, journal), or editing `gateway.yaml`'s two blocks — changes
+workflow/unfurl rules, journal), or editing `config.yaml`'s two blocks — changes
 nothing until the daemon restarts. Each `cfg` mutation re-validates the whole
 config and rolls back an invalid change, but the **live** gateway keeps running
 the config it loaded at boot until you restart it.
 
 (Upgrading a new binary against an old YAML tree — `agents.yaml`, `jobs.yaml`,
 `journal.yaml`, `workflow-rules.yaml`, `unfurl-rules.yaml`, `troubleshoot.yaml` —
-**auto-migrates** the whole tree into SQLite on first run, slims `gateway.yaml` to
+**auto-migrates** the whole tree into SQLite on first run, slims `config.yaml` to
 `oauth:`+`database:`, and archives the old siblings to
 `~/.config/murtaugh/migrated-<timestamp>/`. Validated, rolled back on failure.
 Move the store to Postgres later with
@@ -21,7 +21,7 @@ Move the store to Postgres later with
 ## Picking up a config change
 
 Config changes are not detected automatically — after any `cfg …` change (or a
-`gateway.yaml` edit), restart the daemon yourself to load them (see below).
+`config.yaml` edit), restart the daemon yourself to load them (see below).
 
 ## Triggering a restart
 

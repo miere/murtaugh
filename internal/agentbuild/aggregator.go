@@ -160,7 +160,7 @@ func resolveBuiltins(registry *tools.Registry, resolved ResolvedAgent) ([]tools.
 
 // bridgeUnsafe reports whether a tool must never be exposed to an external ACP
 // agent regardless of the allowlist. The setup.* family writes Murtaugh's own
-// config files (gateway.yaml, .env, agents.yaml); handing those to an outside
+// config files (config.yaml, .env, agents.yaml); handing those to an outside
 // agent would let it reconfigure the host.
 func bridgeUnsafe(name string) bool {
 	return name == "setup" || strings.HasPrefix(name, "setup.")

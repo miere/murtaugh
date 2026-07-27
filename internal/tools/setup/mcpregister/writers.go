@@ -103,7 +103,7 @@ func writeGoose(home, binary string) (Result, error) {
 // machine-managed troubleshoot.yaml, creating the file if needed and preserving
 // any other content. Returns whether the file changed (false when the provider
 // was already listed). troubleshoot.yaml carries no user comments, so a plain
-// map round-trip is safe here (unlike gateway.yaml).
+// map round-trip is safe here (unlike config.yaml).
 func recordTroubleshootProvider(path, provider string) (bool, error) {
 	doc, err := readYAML(path)
 	if err != nil {

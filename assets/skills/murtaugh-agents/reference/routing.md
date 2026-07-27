@@ -1,7 +1,7 @@
 # Chat routing: which agent answers
 
 Routing is **backend-agnostic** — the same rules pick a native or an ACP agent.
-The `chat` block in `gateway.yaml` decides which agent handles each conversation
+The `chat` block in `config.yaml` decides which agent handles each conversation
 and whether the reply is threaded:
 
 ```yaml

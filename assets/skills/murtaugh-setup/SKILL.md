@@ -1,9 +1,9 @@
 ---
 name: murtaugh-setup
-description: Install and configure Murtaugh from scratch with the idempotent setup_* tools and the murtaugh cfg admin CLI — binary on PATH, config dir, gateway.yaml (oauth + database), .env secrets, the config database (agents/chat/jobs/…), the macOS daemon, and self-update.
+description: Install and configure Murtaugh from scratch with the idempotent setup_* tools and the murtaugh cfg admin CLI — binary on PATH, config dir, config.yaml (oauth + database), .env secrets, the config database (agents/chat/jobs/…), the macOS daemon, and self-update.
 requires: [setup]
 files:
-  reference/config-tools.md:       { requires: [setup], summary: "seed config / write gateway.yaml (oauth+database) / .env secrets / seed the config DB via murtaugh cfg" }
+  reference/config-tools.md:       { requires: [setup], summary: "seed config / write config.yaml (oauth+database) / .env secrets / seed the config DB via murtaugh cfg" }
   reference/daemon-and-clients.md: { requires: [setup], summary: "install the daemon, register an MCP client, self-update" }
   reference/mcp-server.md:         { requires: [setup], summary: "run Murtaugh as an MCP server for another tool" }
 ---
@@ -19,7 +19,7 @@ afterward, see the `murtaugh-operations` skill.
 **Where config lives now.** Only **two files** sit on disk, both under
 `~/.config/murtaugh`:
 
-- **`gateway.yaml`** — slimmed to two blocks: `oauth:` (Slack tokens via `${VAR}`)
+- **`config.yaml`** — slimmed to two blocks: `oauth:` (Slack tokens via `${VAR}`)
   and `database:` (`backend: sqlite` [default, `sqlite.path`] or `postgres`
   [`postgres.dsn: ${VAR}`]).
 - **`.env`** — **all secrets**: Slack tokens, provider API keys, a Postgres DSN.
@@ -30,10 +30,10 @@ rules — and is managed with `murtaugh cfg …` (also exposed over MCP as `cfg.
 tools). The old sibling YAMLs (`agents.yaml`, `jobs.yaml`, `journal.yaml`,
 `workflow-rules.yaml`, `unfurl-rules.yaml`, `troubleshoot.yaml`) are **gone** as
 the source of truth. The default store is SQLite at
-`~/.config/murtaugh/config.db` (beside `gateway.yaml`; override with `database.sqlite.path`).
+`~/.config/murtaugh/config.db` (beside `config.yaml`; override with `database.sqlite.path`).
 
 **Upgrading auto-migrates.** On the first run of a new binary against an old YAML
-tree, Murtaugh migrates the whole tree into SQLite, slims `gateway.yaml` down to
+tree, Murtaugh migrates the whole tree into SQLite, slims `config.yaml` down to
 `oauth:`+`database:`, and archives the old siblings to
 `~/.config/murtaugh/migrated-<timestamp>/`. Move to Postgres later with
 `murtaugh cfg db migrate --to postgres --dsn-env MURTAUGH_DB_DSN`.
@@ -51,7 +51,7 @@ there's no on-disk skill copy to keep in sync — see `reference/config-tools.md
 1. **Get the binary** on `PATH` (download a release, or `go build`).
 2. **`setup_bootstrap`** — seed the config dir and create the store (must run
    first, so later steps write real files/rows). → `reference/config-tools.md`
-3. **`setup_slack`** — write `gateway.yaml` `oauth:` (tokens via `${VAR}`) and the
+3. **`setup_slack`** — write `config.yaml` `oauth:` (tokens via `${VAR}`) and the
    token values into `.env`.
 4. **`setup_env`** — upsert provider keys into `.env` (a native agent can't
    authenticate without its key here; run before/with `setup_agents`).
@@ -72,7 +72,7 @@ next start auto-migrates any old YAML tree, as above).
 
 | When you're… | Read |
 |---|---|
-| Seeding config / writing gateway.yaml (oauth+database) / .env secrets / seeding the DB with `cfg` | `reference/config-tools.md` |
+| Seeding config / writing config.yaml (oauth+database) / .env secrets / seeding the DB with `cfg` | `reference/config-tools.md` |
 | Installing the daemon, registering an MCP client, or self-updating | `reference/daemon-and-clients.md` |
 | Running Murtaugh as an MCP server for another tool | `reference/mcp-server.md` |
 | Wanting a copy-paste install sequence | `examples/install-sequence.sh` |
@@ -82,8 +82,8 @@ next start auto-migrates any old YAML tree, as above).
 - **`setup_bootstrap` first.** It creates the workspace (`~/.config/murtaugh`),
   the config store, and templates/skills; the other tools write files/rows that
   must already exist.
-- **`gateway.yaml` and `.env` hold secrets** — they're written `0600`. Slack
-  tokens and provider API keys live in `.env`; `gateway.yaml` `oauth:` and a
+- **`config.yaml` and `.env` hold secrets** — they're written `0600`. Slack
+  tokens and provider API keys live in `.env`; `config.yaml` `oauth:` and a
   Postgres DSN reference them by `${VAR}`. Agents reference their key by variable
   name via `api_key_env`. Don't commit them or echo tokens into logs.
 - **Restart to apply.** The runtime still loads config **once** at startup. After

@@ -623,21 +623,21 @@ func TestParseDelegateRejectsUnknownAgent(t *testing.T) {
 }
 
 // TestEmbeddedBootstrapValidates guards the shipped bootstrap file: the seeded
-// gateway.yaml (oauth + database) must parse and validate. Everything else lives
-// in the store now, so a fresh gateway.yaml with no agents and chat disabled is
+// config.yaml (oauth + database) must parse and validate. Everything else lives
+// in the store now, so a fresh config.yaml with no agents and chat disabled is
 // a complete, valid config. Credentials are referenced as ${VAR}; provide them
 // as a real .env would.
 func TestEmbeddedBootstrapValidates(t *testing.T) {
 	t.Setenv("SLACK_APP_TOKEN", "xapp-test")
 	t.Setenv("SLACK_BOT_TOKEN", "xoxb-test")
 	baseDir := t.TempDir()
-	data, err := assets.FS.ReadFile("gateway.yaml")
+	data, err := assets.FS.ReadFile("config.yaml")
 	if err != nil {
-		t.Fatalf("read embedded gateway.yaml: %v", err)
+		t.Fatalf("read embedded config.yaml: %v", err)
 	}
-	path := filepath.Join(baseDir, "gateway.yaml")
+	path := filepath.Join(baseDir, "config.yaml")
 	if err := os.WriteFile(path, data, 0o644); err != nil {
-		t.Fatalf("write gateway.yaml: %v", err)
+		t.Fatalf("write config.yaml: %v", err)
 	}
 	if _, err := Load(path); err != nil {
 		t.Fatalf("bundled bootstrap config failed to load/validate: %v", err)

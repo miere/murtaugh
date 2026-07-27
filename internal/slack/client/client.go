@@ -11,9 +11,9 @@ import (
 )
 
 // ErrTokenMissing is returned when a SlackClient is constructed without a
-// bot token. Murtaugh sources the token from oauth.bot_token in gateway.yaml,
+// bot token. Murtaugh sources the token from oauth.bot_token in config.yaml,
 // so an empty value means the daemon was never configured.
-var ErrTokenMissing = errors.New("Slack bot token is not configured; set oauth.bot_token in gateway.yaml")
+var ErrTokenMissing = errors.New("Slack bot token is not configured; set oauth.bot_token in config.yaml")
 
 // PostMessageParams collects the inputs PostMessage accepts. ThreadTS is
 // optional; an empty string means "post to the channel, not a thread".

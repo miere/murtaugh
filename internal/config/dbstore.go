@@ -10,7 +10,7 @@ import (
 )
 
 // LoadBootstrap parses only the on-disk bootstrap file (the `oauth:` and
-// `database:` blocks of gateway.yaml), loads the sibling .env, and expands the
+// `database:` blocks of config.yaml), loads the sibling .env, and expands the
 // Slack tokens' ${VAR} references. It does NOT read the DB or validate — it is
 // the minimal step that yields the credentials and the store connection. The
 // returned Config carries OAuth, Database, and BaseDir; every other section is
@@ -43,12 +43,12 @@ func LoadBootstrap(path string) (Config, error) {
 // Murtaugh's configuration (agents, MCP servers, jobs, rules, and the
 // access/chat/defaults/journal/troubleshoot singletons) lives in a database
 // behind the Store interface; only credentials stay on disk in the bootstrap
-// gateway.yaml (the `oauth:` and `database:` blocks) and .env. The concrete
+// config.yaml (the `oauth:` and `database:` blocks) and .env. The concrete
 // SQLite/Postgres implementation lives in internal/config/store; this package
 // owns the contract and the assembly-from-rows logic so that Validate (which
 // lives here) stays the single validated core.
 
-// DatabaseConfig is the `database:` block of the bootstrap gateway.yaml. It
+// DatabaseConfig is the `database:` block of the bootstrap config.yaml. It
 // selects the config-store backend and carries its connection settings. The
 // SQLite path is defined here (per the "location in the config file" rule); the
 // Postgres DSN is referenced from .env via ${VAR} and never stored literally.
@@ -63,8 +63,8 @@ type DatabaseConfig struct {
 
 // SQLiteConfig is the `database.sqlite:` block.
 type SQLiteConfig struct {
-	// Path is the config database file location. Empty falls back to
-	// $XDG_STATE_HOME/murtaugh/config.db (beside the journal).
+	// Path is the config database file location. Empty defaults to `config.db`
+	// in the config directory (beside config.yaml).
 	Path string `yaml:"path" json:"path"`
 }
 
@@ -82,7 +82,7 @@ const (
 )
 
 // IsZero reports whether the database block is absent/unset. A bootstrap
-// gateway.yaml written before this feature has no `database:` block, which is
+// config.yaml written before this feature has no `database:` block, which is
 // the signal the startup path uses to run the one-shot YAML→DB migration.
 func (d DatabaseConfig) IsZero() bool {
 	return strings.TrimSpace(d.Backend) == "" &&
@@ -100,7 +100,7 @@ func (d DatabaseConfig) EffectiveBackend() string {
 
 // EffectiveSQLitePath resolves the SQLite config-database path: the configured
 // value (with ~ expansion) or, by default, `config.db` in the config directory
-// (beside gateway.yaml), so the store travels with the config it belongs to.
+// (beside config.yaml), so the store travels with the config it belongs to.
 // configDir is the directory holding the bootstrap file; when it is empty (the
 // path is unknown) it falls back to the XDG state dir.
 func (d DatabaseConfig) EffectiveSQLitePath(configDir string) string {
@@ -223,7 +223,7 @@ type SnapshotSingleton struct {
 func AssembleFromRows(base Config, items map[string]map[string]json.RawMessage, singletons map[string]json.RawMessage) (Config, error) {
 	// Carry through ONLY the file-sourced fields. Everything else comes from the
 	// DB, so a pre-migration base that still carries access:/chat: blocks in its
-	// gateway.yaml can't leak stale values past the store.
+	// config.yaml can't leak stale values past the store.
 	cfg := Config{
 		BaseDir:  base.BaseDir,
 		OAuth:    base.OAuth,

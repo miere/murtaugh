@@ -15,7 +15,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const defaultRelativePath = ".config/murtaugh/gateway.yaml"
+const defaultRelativePath = ".config/murtaugh/config.yaml"
 const defaultAgentsRelativePath = ".config/murtaugh/agents.yaml"
 const defaultJobsRelativePath = ".config/murtaugh/jobs.yaml"
 const defaultJournalRelativePath = ".config/murtaugh/journal.yaml"
@@ -24,7 +24,7 @@ type Config struct {
 	BaseDir string      `yaml:"-" json:"-"`
 	OAuth   OAuthConfig `yaml:"oauth" json:"oauth"`
 	// Database is the config-store backend selection, parsed from the bootstrap
-	// gateway.yaml. It is the only non-credential block that stays on disk; every
+	// config.yaml. It is the only non-credential block that stays on disk; every
 	// other section below is sourced from the store it points at.
 	Database      DatabaseConfig                `yaml:"database" json:"-"`
 	Access        AccessConfig                  `yaml:"access" json:"access"`
@@ -583,7 +583,7 @@ func Load(path string) (Config, error) {
 	if err := LoadDotEnv(cfg.BaseDir); err != nil {
 		return Config{}, err
 	}
-	// Slack tokens are referenced from gateway.yaml as ${VAR}; expand them against
+	// Slack tokens are referenced from config.yaml as ${VAR}; expand them against
 	// the now-loaded environment. A literal token (no $) expands to itself, so
 	// pre-.env configs keep working.
 	cfg.OAuth.AppToken = os.ExpandEnv(cfg.OAuth.AppToken)

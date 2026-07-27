@@ -15,7 +15,7 @@ import (
 
 // showTool (cfg.show) dumps the entire stored configuration as indented JSON.
 // It reads raw bodies from a Snapshot so it needs no credentials and never
-// prints any (the oauth block lives only in gateway.yaml/.env).
+// prints any (the oauth block lives only in config.yaml/.env).
 type dumpTool struct{ p Provider }
 
 func (t *dumpTool) Name() string                    { return "cfg.show" }

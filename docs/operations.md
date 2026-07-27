@@ -53,7 +53,7 @@ settings all take effect on the next restart.
 The first run after upgrading from a YAML-tree install **auto-migrates** the old
 sibling YAMLs (`agents.yaml`, `jobs.yaml`, `journal.yaml`, `workflow-rules.yaml`,
 `unfurl-rules.yaml`, `troubleshoot.yaml`, plus the `access`/`chat` blocks) into a
-SQLite config store, rewrites `gateway.yaml` down to `oauth:` + `database:`, and
+SQLite config store, rewrites `config.yaml` down to `oauth:` + `database:`, and
 **moves** the old files into `~/.config/murtaugh/migrated-<timestamp>/` (never
 deletes them). This is automatic and idempotent — a second run is a no-op. From
 then on, edit configuration with `murtaugh cfg …`. See
@@ -107,10 +107,10 @@ the `gateway` stream are where to look for *"why did the daemon go silent?"*.
 
 ```sh
 murtaugh slack send-msg ...        # if Slack itself works
-/murtaugh troubleshoot             # from Slack: bundles gateway.yaml + a config-store dump
+/murtaugh troubleshoot             # from Slack: bundles config.yaml + a config-store dump
 ```
 
-`/murtaugh troubleshoot` collects `gateway.yaml` and a dump of the config store
+`/murtaugh troubleshoot` collects `config.yaml` and a dump of the config store
 (the same content as `murtaugh cfg show`) into an uploadable bundle. It
 deliberately **never** includes `.env`, so secrets don't leak — and because every
 value in the store is a `${VAR}` reference, the dump carries no credentials

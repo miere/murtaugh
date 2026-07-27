@@ -15,12 +15,12 @@ import (
 )
 
 // dbMigrateTool (cfg.db.migrate) copies the whole config store to another
-// backend and repoints gateway.yaml at it. The canonical use is SQLite→Postgres:
+// backend and repoints config.yaml at it. The canonical use is SQLite→Postgres:
 //
 //	murtaugh cfg db migrate --to postgres --dsn-env MURTAUGH_DB_DSN
 //
 // The DSN is read from the named .env variable (never passed on the command
-// line), and gateway.yaml records it as ${VAR} so the secret stays out of YAML.
+// line), and config.yaml records it as ${VAR} so the secret stays out of YAML.
 type dbMigrateTool struct {
 	p          Provider
 	configPath string
@@ -64,7 +64,7 @@ func (t *dbMigrateTool) Invoke(ctx context.Context, args map[string]any) (any, e
 		connectDBC = config.DatabaseConfig{Backend: config.BackendPostgres, Postgres: config.PostgresConfig{DSN: dsn}}
 		fileDBC = config.DatabaseConfig{Backend: config.BackendPostgres, Postgres: config.PostgresConfig{DSN: "${" + dsnEnv + "}"}}
 	case config.BackendSQLite:
-		// An unset path defaults to `config.db` beside gateway.yaml; a given
+		// An unset path defaults to `config.db` beside config.yaml; a given
 		// --sqlite-path pins it. Keep the same value in the file so a default
 		// stays a default (portable) rather than being frozen to an absolute path.
 		path := strings.TrimSpace(mustString(args, "sqlite_path"))
@@ -96,10 +96,10 @@ func (t *dbMigrateTool) Invoke(ctx context.Context, args map[string]any) (any, e
 	}
 
 	if strings.TrimSpace(t.configPath) == "" {
-		return nil, fmt.Errorf("copied %d items + %d singletons, but the config path is unknown; edit gateway.yaml's database block by hand", len(snap.Items), len(snap.Singletons))
+		return nil, fmt.Errorf("copied %d items + %d singletons, but the config path is unknown; edit config.yaml's database block by hand", len(snap.Items), len(snap.Singletons))
 	}
 	if err := store.RewriteDatabaseBlock(t.configPath, fileDBC); err != nil {
-		return nil, fmt.Errorf("copied data, but rewriting gateway.yaml failed: %w", err)
+		return nil, fmt.Errorf("copied data, but rewriting config.yaml failed: %w", err)
 	}
 	return okResult{Message: fmt.Sprintf("migrated config to the %s backend (%d items + %d singletons); restart Murtaugh to apply", to, len(snap.Items), len(snap.Singletons))}, nil
 }

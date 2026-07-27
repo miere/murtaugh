@@ -38,7 +38,7 @@ job runs, and errors are all there.
 ## Key operational facts
 
 - **Config changes need a restart.** The gateway loads config once at startup —
-  from `gateway.yaml` and the **config database**. You change the database with
+  from `config.yaml` and the **config database**. You change the database with
   `murtaugh cfg …`, then restart to apply; it never hot-reloads. (Upgrading a new
   binary against an old YAML tree auto-migrates it into the store first.) →
   `reference/config-and-restart.md`
@@ -55,6 +55,6 @@ job runs, and errors are all there.
   the **chat** and **unfurl** handlers (see `murtaugh-agents` and the
   `murtaugh-slack` skill's `unfurl.md`).
 - **The daemon takes no tool flags** — only the global `--config PATH`
-  (`murtaugh --config /path/gateway.yaml slack gateway`). Run
+  (`murtaugh --config /path/config.yaml slack gateway`). Run
   `murtaugh help slack gateway` for the full reference, or `murtaugh help` to
   list every command.

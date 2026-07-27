@@ -104,7 +104,7 @@ func (c JournalConfig) EffectiveSweepEvery() time.Duration {
 
 // EffectivePath resolves the database path: the configured value (with ~
 // expansion) or, by default, `journal.db` in the config directory (beside
-// gateway.yaml). configDir is the directory holding the bootstrap file; when it
+// config.yaml). configDir is the directory holding the bootstrap file; when it
 // is empty it falls back to the XDG state dir. Existing journal files at the old
 // location are not migrated — they are troubleshooting artifacts and can be
 // moved by hand if needed.

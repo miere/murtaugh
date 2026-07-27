@@ -66,7 +66,7 @@ idempotent and backs up what it replaces):
 
 ```sh
 murtaugh setup bootstrap          # seed ~/.config/murtaugh + init the config store (run first)
-murtaugh setup slack ...          # write gateway.yaml's oauth block (OAuth tokens, admin user)
+murtaugh setup slack ...          # write config.yaml's oauth block (OAuth tokens, admin user)
 murtaugh setup env ...            # upsert provider keys into .env
 murtaugh setup agents ...         # create a native or ACP agent (writes to the config store)
 murtaugh setup launchd ...        # (macOS) install the daemon
@@ -113,9 +113,9 @@ need both next.
 ## 3. Configure and run
 
 Two files live in `~/.config/murtaugh/`: the secret `.env` and a slimmed
-`gateway.yaml`. Everything else — agents, chat routing, access — lives in a
+`config.yaml`. Everything else — agents, chat routing, access — lives in a
 config store and is edited with `murtaugh cfg …`. Secrets stay in `.env`;
-`gateway.yaml` and the store reference them as `${VAR}`.
+`config.yaml` and the store reference them as `${VAR}`.
 
 ### `.env` — secrets
 
@@ -128,10 +128,10 @@ SLACK_BOT_TOKEN=xoxb-your-bot-token
 GEMINI_API_KEY=your-key-here
 ```
 
-### `gateway.yaml` — oauth + database
+### `config.yaml` — oauth + database
 
 ```yaml
-# ~/.config/murtaugh/gateway.yaml
+# ~/.config/murtaugh/config.yaml
 oauth:
   app_token: ${SLACK_APP_TOKEN}
   bot_token: ${SLACK_BOT_TOKEN}
@@ -142,7 +142,7 @@ database:
   #   path: /custom/config.db     # default: config.db beside this file
 ```
 
-`gateway.yaml` no longer holds `access:` or `chat:` — those are records in the
+`config.yaml` no longer holds `access:` or `chat:` — those are records in the
 config store now. `setup bootstrap` writes this file and initialises an empty
 SQLite store for you.
 
@@ -211,7 +211,7 @@ through any extra Slack configuration the new rule needs.
 
 ## Next steps
 
-- [Configuration](configuration.md) — `gateway.yaml`, `.env`, and the full `cfg` surface.
+- [Configuration](configuration.md) — `config.yaml`, `.env`, and the full `cfg` surface.
 - [Agent chat](agents.md) — tune which agent answers, its tools, and approvals.
 - [Slack](slack.md) — workflow rules and link unfurling in depth.
 - [Jobs](jobs.md) — schedule recurring work.

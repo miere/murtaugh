@@ -27,7 +27,7 @@ murtaugh slack update-msg --channel C123 --ts 1234.5678 --body 'edited'
 
 `send-msg` posts as the app by default. To post as the **human admin** instead,
 add `--as admin`; this requires the optional `oauth.user_token` (the admin's
-`xoxp-…` token, see [configuration](configuration.md#gatewayyaml)). Such a
+`xoxp-…` token, see [configuration](configuration.md#configyaml)). Such a
 message carries the admin's real Slack identity — indistinguishable from one
 they typed by hand — so reach for it only when speaking as the human is
 intended.

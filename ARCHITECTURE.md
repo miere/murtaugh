@@ -182,12 +182,12 @@ defaults, mutual exclusions, the boolean-needs-a-value CLI quirk, examples).
 1. Extracts the global `--config` flag from `os.Args` (supports
    `--config PATH` and `--config=PATH`).
 2. Resolves the config path (`config.DefaultPath()` →
-   `~/.config/murtaugh/gateway.yaml`, overridable with `--config`).
+   `~/.config/murtaugh/config.yaml`, overridable with `--config`).
 3. Selects the mode: `slack gateway` → `ModeGateway`, `mcp` → `ModeMCP`, or
    any other tokens (including `slack <tool>`) → `ModeCLI`. No subcommand, or
    a bare `slack`, prints usage rather than launching anything.
 4. `config.Bootstrap(path)` seeds the config directory on first run
-   (`gateway.yaml` + `.env` + templates; the former YAML siblings are no longer
+   (`config.yaml` + `.env` + templates; the former YAML siblings are no longer
    seeded). Then `store.Bootstrap(ctx, path, setup)` resolves the running
    config: it parses the slim bootstrap file (`config.LoadBootstrap` →
    `oauth:` + `database:`), auto-migrates a legacy YAML tree into a fresh store
@@ -207,7 +207,7 @@ Configuration is split between a slim on-disk **bootstrap file** and a
 **config store** (a database). Only the credentials and the store connection
 live on disk; everything else lives in the store.
 
-**On disk** — `~/.config/murtaugh/gateway.yaml`, two blocks only:
+**On disk** — `~/.config/murtaugh/config.yaml`, two blocks only:
 
 - `oauth:` — Slack tokens (`app_token`/`bot_token`/`user_token`), each a
   `${VAR}` reference resolved from the sibling `.env`.
@@ -252,7 +252,7 @@ singletons.
 legacy config from the on-disk siblings (`agents.yaml`, `jobs.yaml`,
 `journal.yaml`, `workflow-rules.yaml`, `unfurl-rules.yaml`, `troubleshoot.yaml`),
 writes every non-credential section into a fresh SQLite store, rewrites
-`gateway.yaml` down to `oauth:` + `database:` (keeping the `${VAR}` references,
+`config.yaml` down to `oauth:` + `database:` (keeping the `${VAR}` references,
 never the secrets), and **archives** the now-migrated siblings to
 `~/.config/murtaugh/migrated-<timestamp>/` (moved, never deleted). It then
 re-reads the rewritten bootstrap so it points at the new store.
@@ -501,8 +501,8 @@ filtered queries. Two lanes, never conflated.
 ## Assets and embedding (`internal/../assets`)
 
 `assets/assets.go` embeds reference files via
-`//go:embed gateway.yaml env.example system-prompt.md AGENTS.md cli-help.md templates skills troubleshoot`.
-The embedded `gateway.yaml` is the slim bootstrap default (`oauth:` +
+`//go:embed config.yaml env.example system-prompt.md AGENTS.md cli-help.md templates skills troubleshoot`.
+The embedded `config.yaml` is the slim bootstrap default (`oauth:` +
 `database:`); the former YAML siblings are no longer embedded or seeded, since
 that configuration now lives in the config store.
 Block Kit templates live under `templates/` (`unfurl/`); the ping → pong card is

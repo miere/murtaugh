@@ -29,7 +29,7 @@ the file your task needs:
 > **may** make the change that way (e.g. `cfg chat set`, `cfg access set`,
 > `cfg workflow-rule set --from-file`, `cfg unfurl-rule set --from-file`), then
 > note that a **gateway restart** is needed to apply it. The exceptions are
-> **secrets and `gateway.yaml`** (Slack tokens / provider keys in `.env`, the
+> **secrets and `config.yaml`** (Slack tokens / provider keys in `.env`, the
 > `oauth:`/`database:` blocks) — defer those to the operator.
 
 ## Guidelines (defaults — follow unless the user says otherwise)
