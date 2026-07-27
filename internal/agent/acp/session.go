@@ -126,6 +126,10 @@ func (c *acpSession) start(ctx context.Context) error {
 	// Inherit Murtaugh's environment (minus the nested-Claude-Code marker — see
 	// agent.SpawnEnv) plus the profile's overrides.
 	cmd.Env = agent.SpawnEnv(c.opts.Env)
+	// Run in a dedicated process group so close() can tear down the adapter AND
+	// the grandchildren it spawns (the mcp-bridge, the claude CLI, proxied MCP
+	// servers) rather than orphaning them on shutdown/restart.
+	agent.SetProcessGroup(cmd)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("open ACP stdout: %w", err)
@@ -279,9 +283,9 @@ func (c *acpSession) close() {
 	if c.stdin != nil {
 		_ = c.stdin.Close()
 	}
-	if c.cmd != nil && c.cmd.Process != nil {
-		_ = c.cmd.Process.Kill()
-	}
+	// Kill the whole process group (adapter + mcp-bridge + claude + MCP servers),
+	// not just the adapter, so nothing is orphaned.
+	agent.KillProcessGroup(c.cmd)
 	release := c.release
 	c.release = nil
 	c.mu.Unlock()

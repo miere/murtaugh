@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -581,6 +582,13 @@ func (a *Gateway) WithTroubleshootBundler(bundler TroubleshootBundler) *Gateway 
 }
 
 func (a *Gateway) Run(ctx context.Context) error {
+	// On shutdown/restart (ctx cancelled, superviseSocket returns) close every
+	// agent's session manager so its backend processes — and the whole tree each
+	// spawns (ACP adapter + mcp-bridge + claude + MCP servers) — are killed rather
+	// than orphaned. Runs before the process exits (or before the restart
+	// coordinator's os.Exit, within its grace window).
+	defer a.closeChatSessions()
+
 	resolveCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	err := a.resolveAllowSet(resolveCtx)
 	cancel()
@@ -600,6 +608,21 @@ func (a *Gateway) Run(ctx context.Context) error {
 	// recycles a wedged (half-open) connection via a heartbeat watchdog, rather
 	// than running socketmode.RunContext once and giving up when it returns.
 	return a.superviseSocket(ctx)
+}
+
+// closeChatSessions closes every agent's session manager, tearing down its backend
+// processes (and the process tree each spawned). Idempotent and safe to call when
+// no session ever started; a manager that is not a Closer is skipped.
+func (a *Gateway) closeChatSessions() {
+	for name, mgr := range a.chatSessions {
+		closer, ok := mgr.(io.Closer)
+		if !ok {
+			continue
+		}
+		if err := closer.Close(); err != nil {
+			a.logger.Warn("failed to close agent sessions on shutdown", "agent", name, "error", err)
+		}
+	}
 }
 
 // startBridge binds the MCP aggregator socket and tears it down when ctx ends.
