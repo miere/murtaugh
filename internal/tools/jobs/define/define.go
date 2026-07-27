@@ -1,7 +1,6 @@
 // Package define implements the `jobs.define` tool: register a new job (or
-// update an existing one) in jobs.yaml. The tool serialises the job entry
-// through gopkg.in/yaml.v3 and persists the updated mapping back to disk;
-// existing jobs that are not touched are preserved verbatim.
+// update an existing one) in the configuration store. Existing jobs that are
+// not touched are preserved verbatim.
 //
 // The tool is deliberately small and does NOT execute the job — it only
 // defines it. Use `jobs.run` to invoke a defined job.
@@ -19,20 +18,19 @@ import (
 	"github.com/miere/murtaugh/internal/config"
 )
 
-// PathProvider returns the path of the jobs.yaml file the tool should write
-// to. The composition root supplies a closure over the loaded config dir.
-type PathProvider func() string
+// StoreProvider yields the open configuration store. The composition root
+// supplies a closure; it is invoked per-call and may return an error when the
+// store is unavailable.
+type StoreProvider func() (config.Store, error)
 
 // Tool is the `jobs.define` capability.
 type Tool struct {
-	path PathProvider
+	store StoreProvider
 }
 
-// New constructs a Tool that writes jobs into the file path returned by
-// path. The provider is invoked per-call so the tool always observes the
-// latest config directory.
-func New(path PathProvider) *Tool {
-	return &Tool{path: path}
+// New constructs a Tool that writes jobs into the store returned by provider.
+func New(provider StoreProvider) *Tool {
+	return &Tool{store: provider}
 }
 
 // Name returns the registry key.
@@ -100,7 +98,6 @@ func (t *Tool) InputSchema() *jsonschema.Schema {
 
 // Result is the structured payload returned by Invoke.
 type Result struct {
-	Path    string            `json:"path"`
 	Name    string            `json:"name"`
 	Created bool              `json:"created"`
 	Job     config.JobProfile `json:"job"`
@@ -112,13 +109,13 @@ func (r Result) String() string {
 	if r.Created {
 		verb = "created"
 	}
-	return fmt.Sprintf("%s job %q in %s", verb, r.Name, r.Path)
+	return fmt.Sprintf("%s job %q in the config store", verb, r.Name)
 }
 
-// Invoke validates the arguments and writes the job into the file returned
-// by t.path. The file is read first so other jobs are preserved; if the
-// file does not yet exist it is created with a single job.
-func (t *Tool) Invoke(_ context.Context, args map[string]any) (any, error) {
+// Invoke validates the arguments and writes the job into the configuration
+// store. Existing jobs are preserved; the entry is stamped unconfirmed so the
+// scheduler holds an agent-defined job back until a human confirms it.
+func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 	name, _ := args["name"].(string)
 	command, _ := args["command"].(string)
 	workdir, _ := args["workdir"].(string)
@@ -153,26 +150,21 @@ func (t *Tool) Invoke(_ context.Context, args map[string]any) (any, error) {
 		return nil, fmt.Errorf("args: %w", err)
 	}
 
-	path := t.path()
-	if strings.TrimSpace(path) == "" {
-		return nil, errors.New("jobs.yaml path is not configured")
-	}
-
-	existing, err := readJobs(path)
+	s, err := t.store()
 	if err != nil {
 		return nil, err
 	}
-	if existing == nil {
-		existing = make(map[string]config.JobProfile)
+	_, exists, err := s.GetItem(ctx, config.SectionJob, name)
+	if err != nil {
+		return nil, err
 	}
 
-	_, exists := existing[name]
 	// Stamp agent-defined jobs as unconfirmed so the scheduler holds them back
-	// from auto-running until a human confirms the first run (a follow-up PR).
-	// This closes the bypass where an agent could define a scheduled command
-	// that then runs headless and ungated.
+	// from auto-running until a human confirms the first run. This closes the
+	// bypass where an agent could define a scheduled command that then runs
+	// headless and ungated.
 	unconfirmed := false
-	existing[name] = config.JobProfile{
+	job := config.JobProfile{
 		Command:   command,
 		Args:      jobArgs,
 		WorkDir:   workdir,
@@ -181,14 +173,8 @@ func (t *Tool) Invoke(_ context.Context, args map[string]any) (any, error) {
 		Every:     every,
 		Confirmed: &unconfirmed,
 	}
-
-	if err := writeJobs(path, existing); err != nil {
+	if err := s.UpsertItem(ctx, config.SectionJob, name, job); err != nil {
 		return nil, err
 	}
-	return Result{
-		Path:    path,
-		Name:    name,
-		Created: !exists,
-		Job:     existing[name],
-	}, nil
+	return Result{Name: name, Created: !exists, Job: job}, nil
 }

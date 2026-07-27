@@ -1,7 +1,9 @@
-// Package agents implements the `setup.agents` tool: write agents.yaml with the
-// runtime defaults block and a single named agent. It supports both backends — a
-// native LLM agent (a `native:` block, the default) and an external ACP agent
-// (an `acp:` block) — so the installer can configure either from one tool.
+// Package agents implements the `setup.agents` tool: register the runtime
+// defaults and a single named agent in the configuration store. It supports both
+// backends — a native LLM agent (a `native:` block, the default) and an external
+// ACP agent (an `acp:` block) — so the installer can configure either from one
+// tool. It is a thin installer convenience over the same store the richer
+// `cfg agent create` / `cfg defaults set` tools write to.
 //
 // Secrets are never written here: a native profile only records api_key_env (the
 // .env variable name); the key value goes to .env via setup.env.
@@ -11,27 +13,24 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
-	"gopkg.in/yaml.v3"
 
-	"github.com/miere/murtaugh/internal/tools/setup/internal/backup"
+	"github.com/miere/murtaugh/internal/config"
 )
 
-// PathProvider returns the absolute path of agents.yaml.
-type PathProvider func() string
+// StoreProvider yields the open configuration store.
+type StoreProvider func() (config.Store, error)
 
 // Tool is the `setup.agents` capability.
 type Tool struct {
-	path PathProvider
+	store StoreProvider
 }
 
-// New constructs a Tool that writes agents.yaml at the path returned by path.
-func New(path PathProvider) *Tool {
-	return &Tool{path: path}
+// New constructs a Tool that writes into the store returned by provider.
+func New(provider StoreProvider) *Tool {
+	return &Tool{store: provider}
 }
 
 // Name returns the registry key.
@@ -39,7 +38,7 @@ func (t *Tool) Name() string { return "setup.agents" }
 
 // Description returns the human-facing summary used by MCP clients.
 func (t *Tool) Description() string {
-	return "Write agents.yaml with the runtime block and a native (default) or ACP agent."
+	return "Register the runtime defaults and a native (default) or ACP agent in the config store."
 }
 
 // InputSchema returns the JSON Schema for the tool's arguments.
@@ -69,14 +68,12 @@ func (t *Tool) InputSchema() *jsonschema.Schema {
 
 // Result is the structured payload returned by Invoke. Enabled reports whether
 // an agent was configured (not whether chat is on — that gate, chat.enabled,
-// lives in gateway.yaml and is written by setup.slack).
+// lives in the chat singleton and is written by cfg chat set).
 type Result struct {
-	Path       string `json:"path"`
-	Created    bool   `json:"created"`
-	BackupPath string `json:"backup_path,omitempty"`
-	Enabled    bool   `json:"enabled"`
-	AgentName  string `json:"agent_name,omitempty"`
-	Kind       string `json:"kind,omitempty"`
+	Created   bool   `json:"created"`
+	Enabled   bool   `json:"enabled"`
+	AgentName string `json:"agent_name,omitempty"`
+	Kind      string `json:"kind,omitempty"`
 }
 
 // String renders a one-line CLI confirmation.
@@ -85,81 +82,24 @@ func (r Result) String() string {
 	if r.Created {
 		verb = "created"
 	}
-	state := "no agent configured"
-	if r.Enabled {
-		state = fmt.Sprintf("agent=%s kind=%s", r.AgentName, r.Kind)
+	if !r.Enabled {
+		return "runtime defaults set (no agent configured)"
 	}
-	if r.BackupPath != "" {
-		return fmt.Sprintf("%s %s (%s, backup: %s)", verb, r.Path, state, r.BackupPath)
-	}
-	return fmt.Sprintf("%s %s (%s)", verb, r.Path, state)
+	return fmt.Sprintf("%s agent %q (%s) in the config store", verb, r.AgentName, r.Kind)
 }
 
-// runtimeDefaults captures the runtime tuning baked into every fresh
-// agents.yaml, split by the concern each knob serves. The chat-surface gate
-// (chat.enabled) lives in gateway.yaml, written by setup.slack.
-var runtimeDefaults = defaultsBlock{
-	Session:   sessionBlock{IdleTimeout: "30m", RequestTimeout: "10m", LongRunningToolTimeout: "1h", MaxConcurrent: 100},
-	Rendering: renderingBlock{ProgressDisplay: "simplified", StreamMinChunkChars: 96, StreamAppendInterval: "750ms"},
-	ACP:       acpDefaultsBlock{StartupTimeout: "10s", CancelGracePeriod: "2s"},
+// runtimeDefaults is the runtime tuning the installer establishes on first run,
+// split by the concern each knob serves.
+var runtimeDefaults = config.RuntimeDefaults{
+	Session:   config.SessionDefaults{IdleTimeout: "30m", RequestTimeout: "10m", LongRunningToolTimeout: "1h", MaxConcurrent: 100},
+	Rendering: config.RenderingDefaults{ProgressDisplay: "simplified", StreamMinChunkChars: 96, StreamAppendInterval: "750ms"},
+	ACP:       config.ACPDefaults{StartupTimeout: "10s", CancelGracePeriod: "2s"},
 }
 
-type document struct {
-	Defaults defaultsBlock           `yaml:"defaults"`
-	Agents   map[string]profileBlock `yaml:"agents"`
-}
-
-type defaultsBlock struct {
-	Session   sessionBlock     `yaml:"session"`
-	Rendering renderingBlock   `yaml:"rendering"`
-	ACP       acpDefaultsBlock `yaml:"acp"`
-}
-
-type sessionBlock struct {
-	IdleTimeout            string `yaml:"idle_timeout"`
-	RequestTimeout         string `yaml:"request_timeout"`
-	LongRunningToolTimeout string `yaml:"long_running_tool_timeout"`
-	MaxConcurrent          int    `yaml:"max_concurrent"`
-}
-
-type renderingBlock struct {
-	ProgressDisplay      string `yaml:"progress_display"`
-	StreamMinChunkChars  int    `yaml:"stream_min_chunk_chars"`
-	StreamAppendInterval string `yaml:"stream_append_interval"`
-}
-
-type acpDefaultsBlock struct {
-	StartupTimeout    string `yaml:"startup_timeout"`
-	CancelGracePeriod string `yaml:"cancel_grace_period"`
-}
-
-// profileBlock holds an agent's shared knobs plus exactly one backend
-// sub-block; omitempty keeps each written profile minimal to its kind.
-type profileBlock struct {
-	Tools      []string         `yaml:"tools,omitempty"`
-	MCPServers []string         `yaml:"mcp_servers,omitempty"`
-	Native     *nativeBlock     `yaml:"native,omitempty"`
-	ACP        *acpProfileBlock `yaml:"acp,omitempty"`
-}
-
-type nativeBlock struct {
-	Provider         string `yaml:"provider,omitempty"`
-	Model            string `yaml:"model,omitempty"`
-	BaseURL          string `yaml:"base_url,omitempty"`
-	APIKeyEnv        string `yaml:"api_key_env,omitempty"`
-	SystemPromptFile string `yaml:"system_prompt_file,omitempty"`
-	ContextLimit     int    `yaml:"context_limit,omitempty"`
-	Compaction       string `yaml:"compaction,omitempty"`
-	CacheRetention   string `yaml:"cache_retention,omitempty"`
-}
-
-type acpProfileBlock struct {
-	Command string   `yaml:"command,omitempty"`
-	Args    []string `yaml:"args,omitempty"`
-}
-
-// Invoke validates arguments and writes the agents.yaml document.
-func (t *Tool) Invoke(_ context.Context, args map[string]any) (any, error) {
+// Invoke validates arguments and writes the agent + runtime defaults into the
+// store. The defaults singleton is written only when absent so a re-run never
+// clobbers an operator's customised defaults.
+func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 	agentName, _ := args["agent_name"].(string)
 	if strings.TrimSpace(agentName) == "" {
 		agentName = "default"
@@ -182,26 +122,23 @@ func (t *Tool) Invoke(_ context.Context, args map[string]any) (any, error) {
 		}
 	}
 
-	doc := document{Defaults: runtimeDefaults, Agents: map[string]profileBlock{}}
+	var profile config.AgentProfile
 	var resultKind string
-
 	switch kind {
 	case "native":
-		profile, err := buildNative(args, provider)
+		profile, err = buildNative(args, provider)
 		if err != nil {
 			return nil, err
 		}
-		doc.Agents[agentName] = profile
 		resultKind = "native"
 	case "acp":
 		if command == "" {
 			return nil, errors.New("kind acp requires --command")
 		}
-		doc.Agents[agentName] = profileBlock{ACP: &acpProfileBlock{Command: command, Args: agentArgs}}
+		profile = config.AgentProfile{ACP: &config.ACPProfile{Command: command, Args: agentArgs}}
 		resultKind = "acp"
 	case "":
-		// No agent configured: write a disabled file (chat off). Stray agent
-		// flags (e.g. --args without --command) are a mistake, not a silent skip.
+		// No agent configured. Stray agent flags are a mistake, not a silent skip.
 		if hasNativeArgs(args) || command != "" || len(agentArgs) > 0 {
 			return nil, errors.New("agent flags supplied but kind could not be determined; pass --kind, --command, or --provider")
 		}
@@ -209,81 +146,84 @@ func (t *Tool) Invoke(_ context.Context, args map[string]any) (any, error) {
 		return nil, fmt.Errorf("unknown kind %q (want native or acp)", kind)
 	}
 
-	path := t.path()
-	if strings.TrimSpace(path) == "" {
-		return nil, errors.New("agents.yaml path is not configured")
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, fmt.Errorf("ensure config dir: %w", err)
-	}
-
-	out, err := yaml.Marshal(doc)
-	if err != nil {
-		return nil, fmt.Errorf("marshal agents.yaml: %w", err)
-	}
-	backupPath, err := backup.IfExists(path)
+	s, err := t.store()
 	if err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(path, out, 0o600); err != nil {
-		return nil, fmt.Errorf("write %q: %w", path, err)
+	if _, ok, err := s.GetSingleton(ctx, config.SingletonDefaults); err != nil {
+		return nil, err
+	} else if !ok {
+		if err := s.PutSingleton(ctx, config.SingletonDefaults, runtimeDefaults); err != nil {
+			return nil, err
+		}
 	}
+
+	created := false
+	if resultKind != "" {
+		_, existed, err := s.GetItem(ctx, config.SectionAgent, agentName)
+		if err != nil {
+			return nil, err
+		}
+		created = !existed
+		if err := s.UpsertItem(ctx, config.SectionAgent, agentName, profile); err != nil {
+			return nil, err
+		}
+	}
+
 	return Result{
-		Path:       path,
-		Created:    backupPath == "",
-		BackupPath: backupPath,
-		Enabled:    resultKind != "",
-		AgentName:  agentName,
-		Kind:       resultKind,
+		Created:   created,
+		Enabled:   resultKind != "",
+		AgentName: agentName,
+		Kind:      resultKind,
 	}, nil
 }
 
 // buildNative assembles and validates a native profile. provider is passed in
 // already-trimmed since the caller used it for kind inference.
-func buildNative(args map[string]any, provider string) (profileBlock, error) {
+func buildNative(args map[string]any, provider string) (config.AgentProfile, error) {
 	model := strings.TrimSpace(stringArg(args, "model"))
 	apiKeyEnv := strings.TrimSpace(stringArg(args, "api_key_env"))
 	switch {
 	case provider == "":
-		return profileBlock{}, errors.New("kind native requires --provider")
+		return config.AgentProfile{}, errors.New("kind native requires --provider")
 	case model == "":
-		return profileBlock{}, errors.New("kind native requires --model")
+		return config.AgentProfile{}, errors.New("kind native requires --model")
 	case apiKeyEnv == "":
-		return profileBlock{}, errors.New("kind native requires --api-key-env")
+		return config.AgentProfile{}, errors.New("kind native requires --api-key-env")
 	}
 	switch provider {
 	case "gemini", "anthropic", "openai":
 	default:
-		return profileBlock{}, fmt.Errorf("provider %q must be gemini, anthropic, or openai", provider)
+		return config.AgentProfile{}, fmt.Errorf("provider %q must be gemini, anthropic, or openai", provider)
 	}
 	tools, err := coerceStringSlice(args["tools"])
 	if err != nil {
-		return profileBlock{}, fmt.Errorf("tools: %w", err)
+		return config.AgentProfile{}, fmt.Errorf("tools: %w", err)
 	}
 	mcpServers, err := coerceStringSlice(args["mcp_servers"])
 	if err != nil {
-		return profileBlock{}, fmt.Errorf("mcp_servers: %w", err)
+		return config.AgentProfile{}, fmt.Errorf("mcp_servers: %w", err)
 	}
 	contextLimit, err := coerceInt(args["context_limit"])
 	if err != nil {
-		return profileBlock{}, fmt.Errorf("context_limit: %w", err)
+		return config.AgentProfile{}, fmt.Errorf("context_limit: %w", err)
 	}
 	compaction := strings.ToLower(strings.TrimSpace(stringArg(args, "compaction")))
 	switch compaction {
 	case "", "truncate", "summarize":
 	default:
-		return profileBlock{}, fmt.Errorf("compaction %q must be truncate or summarize", compaction)
+		return config.AgentProfile{}, fmt.Errorf("compaction %q must be truncate or summarize", compaction)
 	}
 	cacheRetention := strings.ToLower(strings.TrimSpace(stringArg(args, "cache_retention")))
 	switch cacheRetention {
 	case "", "off", "none", "5m", "short", "1h", "long":
 	default:
-		return profileBlock{}, fmt.Errorf("cache_retention %q must be one of 5m, 1h, or off", cacheRetention)
+		return config.AgentProfile{}, fmt.Errorf("cache_retention %q must be one of 5m, 1h, or off", cacheRetention)
 	}
-	return profileBlock{
+	return config.AgentProfile{
 		Tools:      tools,
 		MCPServers: mcpServers,
-		Native: &nativeBlock{
+		Native: &config.NativeProfile{
 			Provider:         provider,
 			Model:            model,
 			BaseURL:          strings.TrimSpace(stringArg(args, "base_url")),

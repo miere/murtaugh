@@ -12,9 +12,15 @@ import (
 	"io"
 	"os"
 	"reflect"
+	"strings"
 
 	"github.com/miere/murtaugh/internal/tools"
 )
+
+// maxNameDepth caps how many leading tokens resolve() joins into a dotted tool
+// name. Three covers the deepest namespace in use (e.g. cfg.agent.create);
+// beyond that the remaining tokens are flags.
+const maxNameDepth = 3
 
 // ErrUsage is returned when the user invokes the CLI without arguments or
 // with an unknown command. Callers map it to a non-zero exit and a usage
@@ -118,17 +124,20 @@ func (f *Frontend) writeJSONLine(v any) error {
 }
 
 // resolve picks the registered tool name out of args and returns the
-// remaining tokens to pass to flag parsing. Flat lookup is tried first; if
-// it misses and a second token is present, a dotted "<a>.<b>" lookup is
-// tried.
+// remaining tokens to pass to flag parsing. It tries the LONGEST dotted prefix
+// first (up to maxNameDepth tokens) so a 3-level name like "cfg.agent.create"
+// wins over a shorter tool sharing its prefix, falling back through
+// "cfg.agent" and "cfg". This keeps the flat and two-level conventions
+// (`ping`, `jobs run`) working unchanged while enabling `cfg agent create`.
 func (f *Frontend) resolve(args []string) (string, []string, error) {
-	if _, ok := f.registry.Get(args[0]); ok {
-		return args[0], args[1:], nil
+	depth := len(args)
+	if depth > maxNameDepth {
+		depth = maxNameDepth
 	}
-	if len(args) >= 2 {
-		dotted := args[0] + "." + args[1]
-		if _, ok := f.registry.Get(dotted); ok {
-			return dotted, args[2:], nil
+	for n := depth; n >= 1; n-- {
+		name := strings.Join(args[:n], ".")
+		if _, ok := f.registry.Get(name); ok {
+			return name, args[n:], nil
 		}
 	}
 	return "", nil, fmt.Errorf("unknown command: %s (run `murtaugh help` to list commands)", args[0])

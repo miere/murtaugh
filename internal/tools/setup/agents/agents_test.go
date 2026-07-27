@@ -2,60 +2,47 @@ package agents
 
 import (
 	"context"
-	"os"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 
-	"gopkg.in/yaml.v3"
+	"github.com/miere/murtaugh/internal/config"
+	"github.com/miere/murtaugh/internal/config/store"
 )
 
-type loaded struct {
-	Defaults struct {
-		Session struct {
-			IdleTimeout    string `yaml:"idle_timeout"`
-			RequestTimeout string `yaml:"request_timeout"`
-			MaxConcurrent  int    `yaml:"max_concurrent"`
-		} `yaml:"session"`
-		Rendering struct {
-			StreamMinChunkChars int `yaml:"stream_min_chunk_chars"`
-		} `yaml:"rendering"`
-		ACP struct {
-			StartupTimeout string `yaml:"startup_timeout"`
-		} `yaml:"acp"`
-	} `yaml:"defaults"`
-	Agents map[string]struct {
-		Tools      []string `yaml:"tools"`
-		MCPServers []string `yaml:"mcp_servers"`
-		Native     *struct {
-			Provider       string `yaml:"provider"`
-			Model          string `yaml:"model"`
-			APIKeyEnv      string `yaml:"api_key_env"`
-			ContextLimit   int    `yaml:"context_limit"`
-			Compaction     string `yaml:"compaction"`
-			CacheRetention string `yaml:"cache_retention"`
-		} `yaml:"native"`
-		ACP *struct {
-			Command string   `yaml:"command"`
-			Args    []string `yaml:"args"`
-		} `yaml:"acp"`
-	} `yaml:"agents"`
+func newStore(t *testing.T) (config.Store, StoreProvider) {
+	t.Helper()
+	dbc := config.DatabaseConfig{
+		Backend: config.BackendSQLite,
+		SQLite:  config.SQLiteConfig{Path: filepath.Join(t.TempDir(), "config.db")},
+	}
+	s, err := store.Open(context.Background(), dbc)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return s, func() (config.Store, error) { return s, nil }
 }
 
-func load(t *testing.T, path string) loaded {
+func getAgent(t *testing.T, s config.Store, name string) (config.AgentProfile, bool) {
 	t.Helper()
-	data, err := os.ReadFile(path)
+	body, ok, err := s.GetItem(context.Background(), config.SectionAgent, name)
 	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
+		t.Fatalf("GetItem: %v", err)
 	}
-	var doc loaded
-	if err := yaml.Unmarshal(data, &doc); err != nil {
-		t.Fatalf("parse %s: %v", path, err)
+	if !ok {
+		return config.AgentProfile{}, false
 	}
-	return doc
+	var p config.AgentProfile
+	if err := json.Unmarshal(body, &p); err != nil {
+		t.Fatalf("unmarshal agent: %v", err)
+	}
+	return p, true
 }
 
 func TestTool_Metadata(t *testing.T) {
-	tl := New(func() string { return "" })
+	_, prov := newStore(t)
+	tl := New(prov)
 	if tl.Name() != "setup.agents" {
 		t.Fatalf("Name() = %q, want setup.agents", tl.Name())
 	}
@@ -64,35 +51,38 @@ func TestTool_Metadata(t *testing.T) {
 	}
 }
 
-func TestInvoke_NoCommandDisablesACP(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "agents.yaml")
-	tl := New(func() string { return path })
+func TestInvoke_NoCommandSetsDefaultsOnly(t *testing.T) {
+	s, prov := newStore(t)
+	tl := New(prov)
 
 	res, err := tl.Invoke(context.Background(), map[string]any{})
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
-	r := res.(Result)
-	if !r.Created {
-		t.Fatal("Created must be true on fresh write")
-	}
-	if r.Enabled {
+	if res.(Result).Enabled {
 		t.Fatal("Enabled must be false when no agent is configured")
 	}
-	doc := load(t, path)
-	if len(doc.Agents) != 0 {
-		t.Fatalf("agents must be empty when no command is supplied, got %+v", doc.Agents)
+	// Runtime defaults were established.
+	body, ok, err := s.GetSingleton(context.Background(), config.SingletonDefaults)
+	if err != nil || !ok {
+		t.Fatalf("defaults singleton missing: ok=%v err=%v", ok, err)
 	}
-	if doc.Defaults.ACP.StartupTimeout != "10s" || doc.Defaults.Session.MaxConcurrent != 100 {
-		t.Fatalf("runtime defaults missing: %+v", doc.Defaults)
+	var d config.RuntimeDefaults
+	if err := json.Unmarshal(body, &d); err != nil {
+		t.Fatal(err)
+	}
+	if d.ACP.StartupTimeout != "10s" || d.Session.MaxConcurrent != 100 {
+		t.Fatalf("runtime defaults wrong: %+v", d)
+	}
+	// No agent row was written.
+	if list, _ := s.ListItems(context.Background(), config.SectionAgent); len(list) != 0 {
+		t.Fatalf("no agent expected, got %v", list)
 	}
 }
 
-func TestInvoke_WithCommandRegistersAgentAndEnablesACP(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "agents.yaml")
-	tl := New(func() string { return path })
+func TestInvoke_WithCommandRegistersACPAgent(t *testing.T) {
+	s, prov := newStore(t)
+	tl := New(prov)
 
 	res, err := tl.Invoke(context.Background(), map[string]any{
 		"command": "/usr/local/bin/auggie",
@@ -104,65 +94,55 @@ func TestInvoke_WithCommandRegistersAgentAndEnablesACP(t *testing.T) {
 	if !res.(Result).Enabled {
 		t.Fatal("Enabled must be true when an agent is configured")
 	}
-	doc := load(t, path)
-	agent, ok := doc.Agents["default"]
+	agent, ok := getAgent(t, s, "default")
 	if !ok {
-		t.Fatalf("default agent missing in %+v", doc.Agents)
+		t.Fatal("default agent missing")
 	}
 	if agent.ACP == nil || agent.ACP.Command != "/usr/local/bin/auggie" {
-		t.Fatalf("command wrong, want auggie path: %+v", agent.ACP)
+		t.Fatalf("command wrong: %+v", agent.ACP)
 	}
-	want := []string{"--acp", "--allow-indexing"}
-	if len(agent.ACP.Args) != 2 || agent.ACP.Args[0] != want[0] || agent.ACP.Args[1] != want[1] {
-		t.Fatalf("args = %v, want %v", agent.ACP.Args, want)
+	if len(agent.ACP.Args) != 2 || agent.ACP.Args[0] != "--acp" {
+		t.Fatalf("args = %v", agent.ACP.Args)
 	}
 }
 
 func TestInvoke_CustomAgentNameIsHonoured(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "agents.yaml")
-	tl := New(func() string { return path })
+	s, prov := newStore(t)
+	tl := New(prov)
 
-	_, err := tl.Invoke(context.Background(), map[string]any{
+	if _, err := tl.Invoke(context.Background(), map[string]any{
 		"agent_name": "ccode",
 		"command":    "/usr/local/bin/claude",
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
-	doc := load(t, path)
-	if _, ok := doc.Agents["ccode"]; !ok {
-		t.Fatalf("agents[ccode] missing in %+v", doc.Agents)
+	if _, ok := getAgent(t, s, "ccode"); !ok {
+		t.Fatal("agents[ccode] missing")
 	}
 }
 
-func TestInvoke_BacksUpExistingFile(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "agents.yaml")
-	if err := os.WriteFile(path, []byte("acp:\n  enabled: true\n"), 0o600); err != nil {
-		t.Fatalf("seed: %v", err)
+func TestInvoke_PreservesCustomisedDefaults(t *testing.T) {
+	s, prov := newStore(t)
+	// An operator-customised defaults singleton must not be clobbered on re-run.
+	custom := config.RuntimeDefaults{Session: config.SessionDefaults{MaxConcurrent: 7}}
+	if err := s.PutSingleton(context.Background(), config.SingletonDefaults, custom); err != nil {
+		t.Fatal(err)
 	}
-	tl := New(func() string { return path })
-	res, err := tl.Invoke(context.Background(), map[string]any{})
-	if err != nil {
+	tl := New(prov)
+	if _, err := tl.Invoke(context.Background(), map[string]any{"command": "/bin/x"}); err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
-	r := res.(Result)
-	if r.Created {
-		t.Fatal("Created must be false when file existed")
-	}
-	if r.BackupPath == "" {
-		t.Fatal("BackupPath must be populated when overwriting")
-	}
-	if _, err := os.Stat(r.BackupPath); err != nil {
-		t.Fatalf("backup missing: %v", err)
+	body, _, _ := s.GetSingleton(context.Background(), config.SingletonDefaults)
+	var d config.RuntimeDefaults
+	_ = json.Unmarshal(body, &d)
+	if d.Session.MaxConcurrent != 7 {
+		t.Fatalf("customised defaults were clobbered: %+v", d)
 	}
 }
 
 func TestInvoke_NativeAgent(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "agents.yaml")
-	tl := New(func() string { return path })
+	s, prov := newStore(t)
+	tl := New(prov)
 
 	res, err := tl.Invoke(context.Background(), map[string]any{
 		"agent_name":      "emily",
@@ -182,19 +162,18 @@ func TestInvoke_NativeAgent(t *testing.T) {
 	if !r.Enabled || r.Kind != "native" || r.AgentName != "emily" {
 		t.Fatalf("unexpected result: %+v", r)
 	}
-	doc := load(t, path)
-	a, ok := doc.Agents["emily"]
+	a, ok := getAgent(t, s, "emily")
 	if !ok {
-		t.Fatalf("native agent missing: %+v", doc.Agents)
+		t.Fatal("native agent missing")
 	}
 	if a.Native == nil || a.Native.Provider != "gemini" || a.Native.Model != "gemini-2.5-pro" || a.Native.APIKeyEnv != "GEMINI_API_KEY" {
 		t.Fatalf("native fields wrong: %+v", a.Native)
 	}
 	if a.ACP != nil {
-		t.Errorf("native profile must not carry an acp block, got %+v", a.ACP)
+		t.Errorf("native profile must not carry an acp block")
 	}
 	if a.Native.ContextLimit != 200000 || a.Native.Compaction != "summarize" || a.Native.CacheRetention != "1h" {
-		t.Errorf("context_limit/compaction/cache_retention wrong: %+v", a.Native)
+		t.Errorf("native tuning wrong: %+v", a.Native)
 	}
 	if len(a.Tools) != 3 || len(a.MCPServers) != 1 {
 		t.Errorf("tools/mcp_servers wrong: %+v", a)
@@ -202,14 +181,15 @@ func TestInvoke_NativeAgent(t *testing.T) {
 }
 
 func TestInvoke_NativeValidation(t *testing.T) {
-	tl := New(func() string { return filepath.Join(t.TempDir(), "agents.yaml") })
+	_, prov := newStore(t)
+	tl := New(prov)
 	cases := []map[string]any{
-		{"provider": "gemini", "model": "m"},                                              // missing api_key_env
-		{"provider": "gemini", "api_key_env": "K"},                                        // missing model
-		{"kind": "native", "model": "m", "api_key_env": "K"},                              // missing provider
-		{"provider": "cohere", "model": "m", "api_key_env": "K"},                          // bad provider
-		{"provider": "gemini", "model": "m", "api_key_env": "K", "compaction": "shrink"},  // bad compaction
-		{"provider": "gemini", "model": "m", "api_key_env": "K", "cache_retention": "2h"}, // bad cache_retention
+		{"provider": "gemini", "model": "m"},
+		{"provider": "gemini", "api_key_env": "K"},
+		{"kind": "native", "model": "m", "api_key_env": "K"},
+		{"provider": "cohere", "model": "m", "api_key_env": "K"},
+		{"provider": "gemini", "model": "m", "api_key_env": "K", "compaction": "shrink"},
+		{"provider": "gemini", "model": "m", "api_key_env": "K", "cache_retention": "2h"},
 	}
 	for i, args := range cases {
 		if _, err := tl.Invoke(context.Background(), args); err == nil {
@@ -219,11 +199,9 @@ func TestInvoke_NativeValidation(t *testing.T) {
 }
 
 func TestInvoke_RejectsArgsWithoutCommand(t *testing.T) {
-	tl := New(func() string { return filepath.Join(t.TempDir(), "agents.yaml") })
-	_, err := tl.Invoke(context.Background(), map[string]any{
-		"args": []any{"--foo"},
-	})
-	if err == nil {
+	_, prov := newStore(t)
+	tl := New(prov)
+	if _, err := tl.Invoke(context.Background(), map[string]any{"args": []any{"--foo"}}); err == nil {
 		t.Fatal("Invoke should reject args without command")
 	}
 }

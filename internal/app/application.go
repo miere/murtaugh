@@ -6,6 +6,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"github.com/miere/murtaugh/internal/slack/interaction"
 	"github.com/miere/murtaugh/internal/tools"
 	"github.com/miere/murtaugh/internal/tools/ask"
+	cfgtools "github.com/miere/murtaugh/internal/tools/cfg"
 	"github.com/miere/murtaugh/internal/tools/jobs/define"
 	"github.com/miere/murtaugh/internal/tools/jobs/run"
 	journalprune "github.com/miere/murtaugh/internal/tools/journal/prune"
@@ -351,19 +353,19 @@ func buildRegistry(cfg config.Config, cfgStore config.Store, configPath, version
 	reg.Register(journalstats.New(journalOpener))
 	reg.Register(journalprune.New(journalOpener))
 
-	jobsPath := func() string {
-		baseDir := cfg.BaseDir
-		if baseDir == "" && configPath != "" {
-			baseDir = filepath.Dir(configPath)
+	// Config-writing tools go through the store: jobs.define (agent-facing) and
+	// the whole `cfg …` admin surface. A closure over cfgStore lets them fail
+	// cleanly when the store is unavailable (e.g. a partial setup invocation).
+	storeProvider := func() (config.Store, error) {
+		if cfgStore == nil {
+			return nil, errors.New("config store is unavailable")
 		}
-		if baseDir == "" {
-			if home, err := os.UserHomeDir(); err == nil {
-				baseDir = filepath.Join(home, ".config", "murtaugh")
-			}
-		}
-		return filepath.Join(baseDir, "jobs.yaml")
+		return cfgStore, nil
 	}
-	reg.Register(define.New(jobsPath))
+	reg.Register(define.New(storeProvider))
+	for _, t := range cfgtools.All(cfgStore) {
+		reg.Register(t)
+	}
 
 	bootstrapPath := func() string {
 		if strings.TrimSpace(configPath) != "" {
@@ -377,13 +379,7 @@ func buildRegistry(cfg config.Config, cfgStore config.Store, configPath, version
 	reg.Register(setupbootstrap.New(bootstrapPath))
 	reg.Register(setupslack.New(bootstrapPath))
 
-	agentsPath := func() string {
-		if base := baseDirFor(cfg, configPath); base != "" {
-			return filepath.Join(base, "agents.yaml")
-		}
-		return ""
-	}
-	reg.Register(setupagents.New(agentsPath))
+	reg.Register(setupagents.New(storeProvider))
 	envPath := func() string {
 		if base := baseDirFor(cfg, configPath); base != "" {
 			return filepath.Join(base, ".env")
