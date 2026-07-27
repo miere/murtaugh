@@ -377,7 +377,7 @@ func buildRegistry(cfg config.Config, cfgStore config.Store, configPath, version
 		return ""
 	}
 	reg.Register(setupbootstrap.New(bootstrapPath))
-	reg.Register(setupslack.New(bootstrapPath))
+	reg.Register(setupslack.New(bootstrapPath, storeProvider))
 
 	reg.Register(setupagents.New(storeProvider))
 	envPath := func() string {

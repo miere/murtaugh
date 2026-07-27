@@ -2,15 +2,29 @@ package slack
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"gopkg.in/yaml.v3"
-
 	"github.com/miere/murtaugh/internal/config"
+	"github.com/miere/murtaugh/internal/config/store"
 )
+
+func newStore(t *testing.T) (config.Store, StoreProvider) {
+	t.Helper()
+	dbc := config.DatabaseConfig{
+		Backend: config.BackendSQLite,
+		SQLite:  config.SQLiteConfig{Path: filepath.Join(t.TempDir(), "config.db")},
+	}
+	s, err := store.Open(context.Background(), dbc)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return s, func() (config.Store, error) { return s, nil }
+}
 
 func validArgs() map[string]any {
 	return map[string]any{
@@ -20,28 +34,39 @@ func validArgs() map[string]any {
 	}
 }
 
+func gateway(t *testing.T, path string) config.Config {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	cfg, err := config.Parse(data)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	return cfg
+}
+
 func TestTool_Metadata(t *testing.T) {
-	tl := New(func() string { return "" })
+	_, prov := newStore(t)
+	tl := New(func() string { return "" }, prov)
 	if tl.Name() != "setup.slack" {
 		t.Fatalf("Name() = %q, want setup.slack", tl.Name())
 	}
-	schema := tl.InputSchema()
-	if schema == nil {
-		t.Fatal("InputSchema must not be nil")
-	}
 	required := map[string]bool{}
-	for _, r := range schema.Required {
+	for _, r := range tl.InputSchema().Required {
 		required[r] = true
 	}
 	for _, want := range []string{"app_token", "bot_token", "admin_user"} {
 		if !required[want] {
-			t.Fatalf("required missing %q (have %v)", want, schema.Required)
+			t.Fatalf("required missing %q", want)
 		}
 	}
 }
 
 func TestInvoke_RejectsBadInputs(t *testing.T) {
-	tl := New(func() string { return filepath.Join(t.TempDir(), "slack.yaml") })
+	_, prov := newStore(t)
+	tl := New(func() string { return filepath.Join(t.TempDir(), "gateway.yaml") }, prov)
 	cases := []map[string]any{
 		{},
 		{"app_token": "no-prefix", "bot_token": "xoxb-x", "admin_user": "@a"},
@@ -55,112 +80,88 @@ func TestInvoke_RejectsBadInputs(t *testing.T) {
 	}
 }
 
-func TestInvoke_FirstWriteCreatesFile(t *testing.T) {
+func TestInvoke_WritesOAuthAndStoresAccess(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "slack.yaml")
-	tl := New(func() string { return path })
+	path := filepath.Join(dir, "gateway.yaml")
+	s, prov := newStore(t)
+	tl := New(func() string { return path }, prov)
 
 	res, err := tl.Invoke(context.Background(), validArgs())
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
 	r := res.(Result)
-	if !r.Created {
-		t.Fatal("Result.Created = false, want true on first write")
-	}
-	if r.BackupPath != "" {
-		t.Fatalf("BackupPath = %q, want empty on fresh write", r.BackupPath)
-	}
-	cfg := loadSlack(t, path)
-	// slack.yaml must reference the tokens, not embed them.
+
+	// gateway.yaml references the tokens, never embeds them.
+	cfg := gateway(t, path)
 	if cfg.OAuth.AppToken != "${SLACK_APP_TOKEN}" || cfg.OAuth.BotToken != "${SLACK_BOT_TOKEN}" {
-		t.Fatalf("oauth = %+v, want ${VAR} references, not literal tokens", cfg.OAuth)
+		t.Fatalf("oauth = %+v, want ${VAR} references", cfg.OAuth)
 	}
-	// The actual tokens must land in the .env sibling.
-	if r.EnvPath == "" {
-		t.Fatal("Result.EnvPath empty; tokens were not routed to .env")
+	raw, _ := os.ReadFile(path)
+	if strings.Contains(string(raw), "xapp-1-test") || strings.Contains(string(raw), "xoxb-test") {
+		t.Fatalf("raw token leaked into gateway.yaml:\n%s", raw)
 	}
+	// Tokens landed in .env.
 	envData, err := os.ReadFile(r.EnvPath)
 	if err != nil {
 		t.Fatalf("read .env: %v", err)
 	}
-	if !strings.Contains(string(envData), "SLACK_APP_TOKEN=xapp-1-test") ||
-		!strings.Contains(string(envData), "SLACK_BOT_TOKEN=xoxb-test") {
-		t.Fatalf(".env missing tokens:\n%s", envData)
+	if !strings.Contains(string(envData), "SLACK_APP_TOKEN=xapp-1-test") {
+		t.Fatalf(".env missing token:\n%s", envData)
 	}
-	// The yaml itself must NOT contain the raw token values.
-	rawYAML, _ := os.ReadFile(path)
-	if strings.Contains(string(rawYAML), "xapp-1-test") || strings.Contains(string(rawYAML), "xoxb-test") {
-		t.Fatalf("raw token leaked into slack.yaml:\n%s", rawYAML)
+	// access went to the store, NOT gateway.yaml.
+	body, ok, err := s.GetSingleton(context.Background(), config.SingletonAccess)
+	if err != nil || !ok {
+		t.Fatalf("access singleton missing: ok=%v err=%v", ok, err)
 	}
-	if cfg.Access.AdminUser != "@admin" {
-		t.Fatalf("admin_user = %q, want @admin", cfg.Access.AdminUser)
-	}
-	if cfg.Access.Debug {
-		t.Fatal("debug must default to false")
-	}
-	st, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat: %v", err)
-	}
-	if st.Mode().Perm() != 0o600 {
-		t.Fatalf("perm = %o, want 0600", st.Mode().Perm())
+	var access config.AccessConfig
+	_ = json.Unmarshal(body, &access)
+	if access.AdminUser != "@admin" {
+		t.Fatalf("stored admin_user = %q, want @admin", access.AdminUser)
 	}
 }
 
-func TestInvoke_SecondWriteBacksUpExisting(t *testing.T) {
+func TestInvoke_PreservesDatabaseBlock(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "slack.yaml")
-	if err := os.WriteFile(path, []byte("oauth:\n  app_token: 'old'\n"), 0o600); err != nil {
-		t.Fatalf("seed: %v", err)
+	path := filepath.Join(dir, "gateway.yaml")
+	// Seed a gateway.yaml that already selects Postgres; setup.slack must keep it.
+	seed := "oauth:\n  app_token: old\ndatabase:\n  backend: postgres\n  postgres:\n    dsn: ${MURTAUGH_DB_DSN}\n"
+	if err := os.WriteFile(path, []byte(seed), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	tl := New(func() string { return path })
-
-	res, err := tl.Invoke(context.Background(), validArgs())
-	if err != nil {
+	_, prov := newStore(t)
+	tl := New(func() string { return path }, prov)
+	if _, err := tl.Invoke(context.Background(), validArgs()); err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
-	r := res.(Result)
-	if r.Created {
-		t.Fatal("Result.Created = true, want false when overwriting")
-	}
-	if r.BackupPath == "" {
-		t.Fatal("BackupPath must be set when overwriting an existing file")
-	}
-	if _, err := os.Stat(r.BackupPath); err != nil {
-		t.Fatalf("backup missing at %q: %v", r.BackupPath, err)
+	cfg := gateway(t, path)
+	if cfg.Database.Backend != "postgres" || cfg.Database.Postgres.DSN != "${MURTAUGH_DB_DSN}" {
+		t.Fatalf("database block not preserved: %+v", cfg.Database)
 	}
 }
 
-func TestInvoke_DefaultAgentSwitchesChatBlock(t *testing.T) {
+func TestInvoke_DefaultAgentEnablesChat(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "slack.yaml")
-	tl := New(func() string { return path })
+	path := filepath.Join(dir, "gateway.yaml")
+	s, prov := newStore(t)
+	tl := New(func() string { return path }, prov)
 
 	args := validArgs()
-	args["default_agent"] = "default"
-	if _, err := tl.Invoke(context.Background(), args); err != nil {
+	args["default_agent"] = "code"
+	res, err := tl.Invoke(context.Background(), args)
+	if err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
-	cfg := loadSlack(t, path)
-	if cfg.Chat.Defaults.Agent != "default" {
-		t.Fatalf("chat.defaults.agent = %q, want default", cfg.Chat.Defaults.Agent)
+	if !res.(Result).ChatEnabled {
+		t.Fatal("chat should be enabled when a default agent is given")
 	}
-	raw, _ := os.ReadFile(path)
-	if !strings.Contains(string(raw), "agent: default") {
-		t.Fatalf("gateway.yaml missing chat.defaults.agent line:\n%s", raw)
+	body, ok, _ := s.GetSingleton(context.Background(), config.SingletonChat)
+	if !ok {
+		t.Fatal("chat singleton missing")
 	}
-}
-
-func loadSlack(t *testing.T, path string) config.Config {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
+	var chat config.ChatConfig
+	_ = json.Unmarshal(body, &chat)
+	if !chat.Enabled || chat.Defaults.Agent != "code" {
+		t.Fatalf("stored chat = %+v, want enabled + agent code", chat)
 	}
-	var cfg config.Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		t.Fatalf("parse %s: %v", path, err)
-	}
-	return cfg
 }

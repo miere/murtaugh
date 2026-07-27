@@ -139,6 +139,20 @@ func RewriteDatabaseBlock(configPath string, dbc config.DatabaseConfig) error {
 	return writeBootstrap(configPath, boot.OAuth, dbc)
 }
 
+// SetBootstrapOAuth writes gateway.yaml's `oauth:` block while preserving the
+// existing `database:` block (a missing file defaults to the SQLite backend). It
+// is the symmetric counterpart to RewriteDatabaseBlock, used by setup.slack so
+// writing Slack credentials never clobbers the store selection.
+func SetBootstrapOAuth(configPath string, oauth config.OAuthConfig) error {
+	var dbc config.DatabaseConfig
+	if raw, err := os.ReadFile(configPath); err == nil {
+		if boot, perr := config.Parse(raw); perr == nil {
+			dbc = boot.Database
+		}
+	}
+	return writeBootstrap(configPath, oauth, dbc)
+}
+
 // writeBootstrap renders and writes the slim gateway.yaml (oauth + database).
 func writeBootstrap(configPath string, oauth config.OAuthConfig, dbc config.DatabaseConfig) error {
 	out, err := yaml.Marshal(bootstrapFile{OAuth: oauth, Database: dbc})
