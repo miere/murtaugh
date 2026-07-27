@@ -1,62 +1,24 @@
+# Murtaugh bootstrap file. This is the ONLY configuration kept on disk; it holds
+# just credentials and the database connection. Everything else — agents, MCP
+# servers, jobs, chat routing, access control, workflow/unfurl rules — lives in
+# the database and is managed with `murtaugh cfg …` (e.g. `murtaugh cfg agent
+# list`, `murtaugh cfg chat set --enabled true --default-agent code`).
+#
 # Credentials are NOT stored here. They live in ~/.config/murtaugh/.env (a
 # template .env is seeded on first run) and are referenced below as ${VAR}.
-# Keeping secrets out of YAML is what lets `murtaugh troubleshoot` ship the
-# config files safely — the bundler collects the .yaml siblings, never .env.
 oauth:
   app_token: ${SLACK_APP_TOKEN}
   bot_token: ${SLACK_BOT_TOKEN}
+  # user_token: ${SLACK_USER_TOKEN}   # optional: post "as admin" (xoxp-…)
 
-access:
-  admin_user: murtaugh-admin
-  # Users allowed to interact with the bot (slash commands, mentions, DMs).
-  # The admin_user is implicitly allowed; leave the list empty to keep the bot
-  # admin-only. Each entry may be a Slack user ID (e.g. U0123ABC) or a handle
-  # (e.g. alice, @alice); handles are resolved to IDs at startup and the bot
-  # refuses to start if any entry cannot be resolved.
-  allowed_users: []
-  debug: false
-
-chat:
-  # enabled gates the Slack chat surface (DM + @mention replies). Agent
-  # delegation (jobs, workflow rules, unfurls) runs regardless of this flag.
-  enabled: false
-  # defaults holds the global routing/reply defaults.
-  defaults:
-    # agent is the fallback agent for any channel without a matching channels
-    # entry (required when chat is enabled).
-    agent: default
-    # dm_agent routes direct messages; falls back to agent when unset.
-    # dm_agent: default
-    # reply_on_thread selects the default reply strategy: true (the default)
-    # roots a thread on each new top-level channel message; false replies
-    # directly in the channel. A channel replying off-thread is treated as one
-    # long rolling conversation rather than per-thread sessions.
-    # reply_on_thread: true
-  # channels routes a channel to a specific agent and/or reply strategy. Each
-  # key is an exact Slack channel ID (C…/G…) or a channel-NAME glob that may
-  # contain `*` (e.g. "feature-*", "*-prod"). An entry may set agent,
-  # reply_on_thread, or both; an omitted agent falls back to defaults.agent and
-  # an omitted reply_on_thread to defaults.reply_on_thread.
-  # channels:
-  #   support-*:
-  #     agent: support-bot
-  #     reply_on_thread: false
-  #   C0123ABC:
-  #     agent: ops
-  # no_mention waives the @mention requirement for listed users. `everywhere`
-  # applies in every channel; `by_channel` applies per channel (same channel-ID
-  # / channel-NAME glob syntax as channels). The effective set for a channel is
-  # the UNION of everywhere and every matching by_channel pattern. A waived user
-  # must STILL be in access.allowed_users (or be the admin).
-  no_mention:
-    everywhere: []
-    # by_channel:
-    #   feature-*: [alice, U0123ABC]
-    #   incident-prod: [oncall]
-
-# Slash commands (/murtaugh, /stop) are registered in the Slack app manifest,
-# not here. Murtaugh recognises the verbs `chat`, `stop`, `troubleshoot`,
-# `restart`, and `help` (e.g. `/murtaugh stop`, or a standalone `/stop`).
-
-# Interactive button automation lives in workflow-rules.yaml, and custom link
-# previews in unfurl-rules.yaml — both siblings of this file.
+# database selects the config store backend. SQLite (the default) needs no
+# external service; its file location is recorded here. Switch to Postgres with
+# `murtaugh cfg db migrate --to postgres` (it rewrites this block for you).
+database:
+  backend: sqlite            # sqlite | postgres
+  sqlite:
+    # Absolute path to the config database. Defaults to
+    # $XDG_STATE_HOME/murtaugh/config.db (~/.local/state/murtaugh/config.db).
+    path: ~/.local/state/murtaugh/config.db
+  # postgres:
+  #   dsn: ${MURTAUGH_DB_DSN}   # e.g. postgres://user:pass@host:5432/murtaugh
