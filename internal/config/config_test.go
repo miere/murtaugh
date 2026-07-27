@@ -622,28 +622,25 @@ func TestParseDelegateRejectsUnknownAgent(t *testing.T) {
 	}
 }
 
-// TestEmbeddedExampleConfigValidates guards the shipped default config: the
-// bundled slack.yaml / agents.yaml / jobs.yaml must parse and validate together
-// as a unit. It catches indentation slips and dangling delegate-to-agent agent
-// references before they reach a fresh install.
-func TestEmbeddedExampleConfigValidates(t *testing.T) {
-	// Credentials live in .env / the environment now; the shipped gateway.yaml
-	// references them as ${SLACK_APP_TOKEN}/${SLACK_BOT_TOKEN}. Provide them as a
-	// real .env would so the bundled config validates as a unit.
+// TestEmbeddedBootstrapValidates guards the shipped bootstrap file: the seeded
+// gateway.yaml (oauth + database) must parse and validate. Everything else lives
+// in the store now, so a fresh gateway.yaml with no agents and chat disabled is
+// a complete, valid config. Credentials are referenced as ${VAR}; provide them
+// as a real .env would.
+func TestEmbeddedBootstrapValidates(t *testing.T) {
 	t.Setenv("SLACK_APP_TOKEN", "xapp-test")
 	t.Setenv("SLACK_BOT_TOKEN", "xoxb-test")
 	baseDir := t.TempDir()
-	for _, name := range []string{"gateway.yaml", "agents.yaml", "jobs.yaml", "workflow-rules.yaml", "unfurl-rules.yaml"} {
-		data, err := assets.FS.ReadFile(name)
-		if err != nil {
-			t.Fatalf("read embedded %s: %v", name, err)
-		}
-		if err := os.WriteFile(filepath.Join(baseDir, name), data, 0o644); err != nil {
-			t.Fatalf("write %s: %v", name, err)
-		}
+	data, err := assets.FS.ReadFile("gateway.yaml")
+	if err != nil {
+		t.Fatalf("read embedded gateway.yaml: %v", err)
 	}
-	if _, err := Load(filepath.Join(baseDir, "gateway.yaml")); err != nil {
-		t.Fatalf("bundled example config failed to load/validate: %v", err)
+	path := filepath.Join(baseDir, "gateway.yaml")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write gateway.yaml: %v", err)
+	}
+	if _, err := Load(path); err != nil {
+		t.Fatalf("bundled bootstrap config failed to load/validate: %v", err)
 	}
 }
 

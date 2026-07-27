@@ -62,11 +62,16 @@ internal/frontends/   CLI and MCP adapters over the Tool registry.
 internal/tools/       Shared Tool interface + one package per tool.
   tool.go             Tool interface + Registry.
   ping/               Health-check tool (the canonical example).
-  jobs/run/           Tool `jobs.run`: execute a job defined in jobs.yaml.
-  jobs/define/        Tool `jobs.define`: register a job in jobs.yaml.
+  jobs/run/           Tool `jobs.run`: execute a job stored in the config store.
+  jobs/define/        Tool `jobs.define`: register a job in the config store.
   journal/            Tools `journal.query`/`.stats`/`.prune`: inspect the event journal.
   slack/              Slack tools: send-msg, fetch-msgs, fetch-reactions, update-msg.
-internal/config/      Config schema, loading, and validation.
+  cfg/                Tools `cfg.*`: read/write the config store (agents, mcp,
+                      jobs, chat, access, rules, defaults, db migrate) with
+                      validate-and-rollback on every mutation.
+internal/config/      Config schema, validation, bootstrap-file loader, and the
+                      config-store seam.
+  store/              SQLite/Postgres store implementation + YAML→DB migration.
 internal/journal/     Event journal: SQLite store, async recorder, query/stats/prune.
 internal/slack/       Slack subsystem:
   gateway/            Socket Mode gateway, event loop, all Slack event handlers.
@@ -177,12 +182,18 @@ defaults, mutual exclusions, the boolean-needs-a-value CLI quirk, examples).
 1. Extracts the global `--config` flag from `os.Args` (supports
    `--config PATH` and `--config=PATH`).
 2. Resolves the config path (`config.DefaultPath()` →
-   `~/.config/murtaugh/slack.yaml`, overridable with `--config`).
+   `~/.config/murtaugh/gateway.yaml`, overridable with `--config`).
 3. Selects the mode: `slack gateway` → `ModeGateway`, `mcp` → `ModeMCP`, or
    any other tokens (including `slack <tool>`) → `ModeCLI`. No subcommand, or
    a bare `slack`, prints usage rather than launching anything.
-4. `config.Bootstrap(path)` seeds the config directory on first run, then
-   `config.Load(path)` reads, parses, validates, and records `BaseDir`.
+4. `config.Bootstrap(path)` seeds the config directory on first run
+   (`gateway.yaml` + `.env` + templates; the former YAML siblings are no longer
+   seeded). Then `store.Bootstrap(ctx, path, setup)` resolves the running
+   config: it parses the slim bootstrap file (`config.LoadBootstrap` →
+   `oauth:` + `database:`), auto-migrates a legacy YAML tree into a fresh store
+   on first upgrade, opens the `config.Store`, and (outside setup invocations)
+   loads + validates the whole config from it. It returns the assembled
+   `config.Config` and the open store, which `main` closes on shutdown.
 5. Builds an `slog.Logger` (text handler; debug level when
    `configuration.debug: true`; warn level for CLI mode so tool output
    dominates the terminal).
@@ -190,29 +201,77 @@ defaults, mutual exclusions, the boolean-needs-a-value CLI quirk, examples).
 7. `app.New(...)` builds the Registry and the chosen frontend; `Run(ctx)`
    blocks until the context is cancelled or the frontend returns.
 
-## Configuration (`internal/config`)
+## Configuration (`internal/config` + `internal/config/store`)
 
-`Config` is the root struct, populated from YAML via `gopkg.in/yaml.v3`:
+Configuration is split between a slim on-disk **bootstrap file** and a
+**config store** (a database). Only the credentials and the store connection
+live on disk; everything else lives in the store.
 
-- `BaseDir` (`yaml:"-"`) — directory of the loaded file; used as the template
-  search root.
-- `OAuth` — Slack Socket Mode and bot tokens (`oauth.app_token`,
-  `oauth.bot_token`) loaded from `slack.yaml`.
-- `Configuration` — runtime Slack settings (`configuration.admin_user`,
-  `configuration.debug`) loaded from `slack.yaml`.
-- `Chat` — routing fields (`chat.defaults.agent`, `chat.defaults.dm_agent`,
-  `chat.defaults.reply_on_thread`, `chat.channels.<k>.{agent,reply_on_thread}`)
-  loaded from `gateway.yaml`.
-- `ACP` (`yaml:"-"`) — timeout and streaming knobs loaded from `agents.yaml`.
-- `Agents` (`yaml:"-"`) — map of agent profiles loaded from `agents.yaml`.
-- `Commands` — registered slash commands (names must start with `/`).
-- `WorkflowRules` — `map[string]WorkflowRuleConfig` keyed by rule name.
-- `UnfurlRules` — `map[string]UnfurlRuleConfig` keyed by rule name.
+**On disk** — `~/.config/murtaugh/gateway.yaml`, two blocks only:
+
+- `oauth:` — Slack tokens (`app_token`/`bot_token`/`user_token`), each a
+  `${VAR}` reference resolved from the sibling `.env`.
+- `database:` — the config-store backend (`config.DatabaseConfig`): `backend:
+  sqlite` (default; `sqlite.path`, defaulting to
+  `~/.local/state/murtaugh/config.db`) or `backend: postgres` (`postgres.dsn`,
+  a `${VAR}` reference into `.env`).
+
+`config.LoadBootstrap(path)` parses *only* these two blocks, loads `.env`, and
+expands the `${VAR}` references. It does **not** read the store or validate — it
+is the minimal step that yields the credentials + the store connection. The
+returned `Config` carries `OAuth`, `Database`, and `BaseDir`; every other
+section is left zero for the store to fill.
+
+**In the store** — the bulk of configuration: agents, MCP servers, jobs, chat
+routing, access (admin/allowed users), runtime defaults, journal, troubleshoot,
+and workflow/unfurl rules. `Config` is still the root struct these assemble
+into; the store-backed sections carry `yaml:"-"` tags because they are no longer
+parsed from YAML. Collection entities (agent, mcp, job, workflow-rule,
+unfurl-rule) are `config_items` rows keyed by `(section, name)`; the rest are
+singletons.
+
+**The store seam** (`config.Store`, implemented in `internal/config/store`):
+
+- `store.Open(ctx, config.DatabaseConfig)` opens the backend and returns a
+  `config.Store`. A `Dialect` (`internal/config/store/dialect.go`) abstracts the
+  SQLite vs Postgres SQL differences (placeholders, JSON column type, `now()`),
+  so one store implementation serves both.
+- `store.Bootstrap(ctx, configPath, setup)` is the single startup entrypoint
+  that replaced the old `config.Load`: parse the bootstrap file, migrate a
+  legacy YAML tree on first upgrade (below), open the store, and — unless
+  `setup` is true — load + validate the whole config from it.
+- `config.AssembleFromRows(base, items, singletons)` is the **validated core**:
+  it merges the bootstrap `Config` with the store rows into a full `Config` and
+  runs `Config.Validate()`. `Store.Load` calls it; so does every `cfg` mutation.
+  Validation covers required Slack tokens, agent routing references, durations,
+  and per-rule checks — a single place, regardless of where the rows came from.
+
+**YAML → DB auto-migration.** A bootstrap file predating this feature has no
+`database:` block (`DatabaseConfig.IsZero()`). On the first non-setup run,
+`store.Bootstrap` calls `migrateFilesToStore`: it loads and validates the full
+legacy config from the on-disk siblings (`agents.yaml`, `jobs.yaml`,
+`journal.yaml`, `workflow-rules.yaml`, `unfurl-rules.yaml`, `troubleshoot.yaml`),
+writes every non-credential section into a fresh SQLite store, rewrites
+`gateway.yaml` down to `oauth:` + `database:` (keeping the `${VAR}` references,
+never the secrets), and **archives** the now-migrated siblings to
+`~/.config/murtaugh/migrated-<timestamp>/` (moved, never deleted). It then
+re-reads the rewritten bootstrap so it points at the new store.
+
+**`cfg` tools** (`internal/tools/cfg`) are the store's write surface, exposed on
+both the CLI (`murtaugh cfg …`) and MCP (`cfg.*`). Every mutation is
+**validate-and-rollback**: it upserts the row, re-loads and validates the whole
+assembled config via `AssembleFromRows`, and on failure restores the prior row
+(`upsertItemValidated`/`putSingletonValidated` in `internal/tools/cfg/deps.go`),
+so a bad edit can never leave the store in an unloadable state. `cfg db migrate`
+copies the store into the other backend and rewrites the `database:` block.
+
+The runtime loads config **once** at startup — a `cfg` change requires a daemon
+restart to take effect.
 
 ### Multi-agent routing
 
-ACP settings and agent profiles are defined in `agents.yaml`. Murtaugh routes
-chat requests to agents based on the `chat` config in `slack.yaml`:
+Agent profiles and the `chat` routing config now live in the store (agents as
+`config_items`, `chat` as a singleton). Routing is unchanged:
 
 1.  **Direct Messages**: Use `chat.defaults.dm_agent` if set, otherwise
     `chat.defaults.agent`.
@@ -222,10 +281,6 @@ chat requests to agents based on the `chat` config in `slack.yaml`:
     threaded or posted directly in the channel.
 
 `chat.defaults.agent` is required when `chat.enabled: true`.
-
-`Load` → `Parse` → load `agents.yaml` / `jobs.yaml` → `Validate()`. Validation
-covers required Slack tokens, slash-command name prefixes, ACP durations, agent
-routing references, and per-rule checks.
 
 ### Triggers and actions
 
@@ -237,7 +292,7 @@ other key is rejected at parse time.
 - `ReplyToSlackTriggerConfig` — exactly one of `template` (path), a nested
   `run`, or `delegate-to-agent`.
 - `RunTriggerConfig` — `cmd`, `args`, `timeout`, `workdir`.
-- `DelegateToAgentConfig` — `agent` (must exist in `agents.yaml`) + `prompt`.
+- `DelegateToAgentConfig` — `agent` (must exist as a stored agent) + `prompt`.
   Nested in `reply-to-slack` or an unfurl action it captures JSON output; as a
   top-level trigger it is fire-and-forget.
 
@@ -289,7 +344,7 @@ context. Long work must never block the event loop.
 
 `agent.Client` is the backend interface (`Initialize`, `NewSession`, `Prompt`,
 `Cancel`, `Close`). There are **two implementations**, selected per agent by
-`agents.yaml` `kind:` (default `native`); `agentbuild.Client` is the single place
+each stored agent's `kind:` (default `native`); `agentbuild.Client` is the single place
 the choice is made, shared by the gateway and the `agentdelegate` runner:
 
 - **`agent.ProcessClient`** (`kind: acp`) drives an **external** agent process by
@@ -434,17 +489,22 @@ filtered queries. Two lanes, never conflated.
   non-setup invocations (fail-soft: a store that can't open degrades to no-op and
   logs a warning), draining on shutdown. The daemon (single writer) runs the
   retention **sweeper** in `Gateway.startJournalSweeper` — once at startup and
-  every `journal.yaml` `sweep.every` — reusing that same store; `journal.prune`
+  every configured `sweep.every` — reusing that same store; `journal.prune`
   is the manual equivalent.
-- **Config** — `journal.yaml` (a sibling of `agents.yaml`/`jobs.yaml`, loaded by
-  `config.Load`): per-stream `enabled` (a `*bool` so streams default on and opt
-  out with `enabled: false`) and `retention`, plus the DB `path` and `sweep`
-  cadence. See `internal/config/journal.go`.
+- **Config** — the journal settings are a singleton in the config store (read
+  with `cfg journal show`): per-stream `enabled` (a `*bool` so streams default
+  on and opt out with `enabled: false`) and `retention`, plus the DB `path` and
+  `sweep` cadence. The `JournalConfig` type still lives in
+  `internal/config/journal.go`. Note this is the **event journal's** SQLite DB,
+  a separate database from the config store.
 
 ## Assets and embedding (`internal/../assets`)
 
 `assets/assets.go` embeds reference files via
-`//go:embed slack.yaml agents.yaml jobs.yaml cli-help.md templates skills`.
+`//go:embed gateway.yaml env.example system-prompt.md AGENTS.md cli-help.md templates skills troubleshoot`.
+The embedded `gateway.yaml` is the slim bootstrap default (`oauth:` +
+`database:`); the former YAML siblings are no longer embedded or seeded, since
+that configuration now lives in the config store.
 Block Kit templates live under `templates/` (`unfurl/`); the ping → pong card is
 built in Go (`internal/slack/pingcard`), not a template. Bundled agent skills
 live under `skills/`, each a `SKILL.md` + `reference/` + `examples/` tree.
@@ -488,8 +548,10 @@ Created, Updated, or Preserved.
 1. **Work in a dedicated git worktree** under `ignore/worktrees/`, branched off
    the up-to-date local `HEAD`. Never push without explicit permission.
 2. **Keep config changes complete.** A new config field means: struct field +
-   `yaml` tag, `Validate()` coverage, an example in the relevant `assets/*.yaml`,
-   a README note, and tests in `config_test.go`.
+   tag, `Validate()` coverage (run through `AssembleFromRows`), store read/write
+   support in `internal/config/store` (and a `cfg` flag if it's user-editable),
+   migration coverage for the legacy-YAML importer, a README note, and tests in
+   `config_test.go`.
 2b. **Keep command docs complete.** A new/changed/removed tool or flag means
    updating its section in `assets/cli-help.md` (and the command list in
    `internal/help/help_test.go`). See "Adding a new tool".

@@ -6,15 +6,20 @@ import (
 	"sort"
 )
 
-// FS contains reference Slack assets that are also used as built-in defaults:
-// the seed config files, the Block Kit templates under templates/, the bundled
+// FS contains reference assets that are also used as built-in defaults: the
+// seed bootstrap file (gateway.yaml — oauth + database) and .env template, the
+// default system prompt, the Block Kit templates under templates/, the bundled
 // agent skills under skills/ (each a SKILL.md + reference/ + examples/ tree),
 // and cli-help.md (the canonical CLI/MCP command reference surfaced by
 // `murtaugh help`). Both templates and skills are embedded recursively, as is
 // troubleshoot/ (the diagnostics-bundle instructions surfaced by
 // `troubleshoot.bundle`).
 //
-//go:embed gateway.yaml agents.yaml jobs.yaml journal.yaml workflow-rules.yaml unfurl-rules.yaml env.example system-prompt.md AGENTS.md cli-help.md templates skills troubleshoot
+// The former per-vertical config templates (agents.yaml, jobs.yaml, …) are gone:
+// that configuration lives in the database now and is authored via `murtaugh
+// cfg …`, so there is nothing to seed.
+//
+//go:embed gateway.yaml env.example system-prompt.md AGENTS.md cli-help.md templates skills troubleshoot
 var FS embed.FS
 
 // skillsRoot is the embedded directory holding one subdirectory per bundled
