@@ -4,8 +4,11 @@ Murtaugh can replace a bare URL posted in Slack with a **rich Block Kit preview*
 When a message containing a matched link is posted, Slack sends a `link_shared`
 event; Murtaugh matches it against an `unfurl-rules` entry and renders a preview
 from a **template**, a **command** you run, or an **agent** you delegate to. This
-is operator config (it edits `unfurl-rules.yaml`), a sibling of `workflow-rules.md`
-— same shape: inbound Slack event → rule match → action.
+is operator config, stored in the config database and applied with
+`cfg unfurl-rule set --name <n> --from-file <rule.yaml>` (view/manage with
+`cfg unfurl-rule list|show|delete`). It's a sibling of `workflow-rules.md` — same
+shape: inbound Slack event → rule match → action. Each `cfg` change re-validates
+the whole config and rolls back an invalid rule; **restart the gateway** to apply.
 
 > **Prerequisite — register the domain.** Slack only delivers `link_shared` for
 > domains listed in your Slack app's **App Unfurl Domains** (max 5). If a domain
@@ -24,16 +27,16 @@ is operator config (it edits `unfurl-rules.yaml`), a sibling of `workflow-rules.
 
 ## Configuring the rule
 
-Rules live under `unfurl-rules:` in `unfurl-rules.yaml`, keyed by name:
+Each rule's `--from-file` YAML holds the rule **body** (the `match` + `unfurl`
+fields below); `--name` is the rule's key:
 
 ```yaml
-unfurl-rules:
-  github-pr:
-    match:
-      domain: github.com
-      url_pattern: '^https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/pull/(?P<number>\d+)'
-    unfurl:
-      template: templates/unfurl/github-pr.json
+# github-pr.yaml  →  cfg unfurl-rule set --name github-pr --from-file github-pr.yaml
+match:
+  domain: github.com
+  url_pattern: '^https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/pull/(?P<number>\d+)'
+unfurl:
+  template: templates/unfurl/github-pr.json
 ```
 
 ### `match` — which links a rule claims
@@ -74,8 +77,8 @@ conditions must hold.
 - `url_pattern`, if set, must compile as a Go regexp.
 - each `channels` entry must be non-blank.
 - `unfurl` requires exactly one of `template`, `run`, or `delegate-to-agent`; a
-  `run` requires `cmd`; a `delegate-to-agent` requires both `agent` (defined in
-  `agents.yaml`) and `prompt`.
+  `run` requires `cmd`; a `delegate-to-agent` requires both `agent` (defined —
+  `cfg agent list`) and `prompt`.
 
 ## The three actions
 
@@ -151,8 +154,8 @@ Murtaugh runs `cmd` (with `args`, in `workdir`, bounded by `timeout`) and:
 
 ### `delegate-to-agent` — agent renders the attachment JSON
 
-Hands the preview to an agent (keyed in `agents.yaml`) running in an isolated
-one-shot session. The prompt is rendered with the same shared-data fields as a
+Hands the preview to an agent (keyed in the config — `cfg agent list`) running in
+an isolated one-shot session. The prompt is rendered with the same shared-data fields as a
 template (`{{ .URL }}`, `{{ .Captures.<name> }}`, …), using `missingkey=error`.
 
 ```yaml

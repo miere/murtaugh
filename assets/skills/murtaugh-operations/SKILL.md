@@ -37,11 +37,13 @@ job runs, and errors are all there.
 
 ## Key operational facts
 
-- **Config changes need a restart.** The gateway loads config once at startup; it
-  *suggests* a restart when a config file changes but never hot-reloads. →
+- **Config changes need a restart.** The gateway loads config once at startup —
+  from `gateway.yaml` and the **config database**. You change the database with
+  `murtaugh cfg …`, then restart to apply; it never hot-reloads. (Upgrading a new
+  binary against an old YAML tree auto-migrates it into the store first.) →
   `reference/config-and-restart.md`
-- **Authorization is fail-closed.** Only `admin_user` + `allowed_users` may
-  interact; with both empty the bot is locked down. →
+- **Authorization is fail-closed.** Only the `cfg access set` admin + allowed
+  users may interact; with both empty the bot is locked down. →
   `reference/auth-and-troubleshooting.md`
 - **Restart is admin-only** (`/murtaugh restart` or the suggestion button) and
   preserves a "restarting… / back online" notice across the restart.

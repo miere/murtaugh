@@ -32,7 +32,7 @@ murtaugh journal query --stream acp_session --user U123 --level warn
 ```
 
 Each row's `blob_ref` is a path **relative to the journal `blob_dir`** (see
-`journal.yaml`; default `~/.local/state/murtaugh/journal-blobs`). Read that file
+`cfg journal show`; default `~/.local/state/murtaugh/journal-blobs`). Read that file
 to see the transcript — it is NDJSON, one object per turn:
 `{ time, agent, source, outcome, prompt, response }`.
 
@@ -51,7 +51,9 @@ errors); `--level error` for failures only.
 ## Retention & privacy
 
 Transcripts contain **real user and agent message content**. The `acp_session`
-stream is on by default with a 90-day retention (tunable in `journal.yaml`; set
-`enabled: false` to stop recording). Pruning — the daemon's automatic sweep or
+stream is on by default with a 90-day retention (inspect the journal config with
+`cfg journal show`; to change retention or set `enabled: false` to stop recording,
+`cfg export` the config, edit the journal block, and `cfg import` it back). Pruning
+— the daemon's automatic sweep or
 `journal prune` — deletes both the rows and the transcript files once a whole
 session has aged out, so retention applies to the bodies too.

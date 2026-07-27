@@ -2,20 +2,26 @@
 
 ## Config is loaded once
 
-The gateway reads `gateway.yaml`, `agents.yaml`, `jobs.yaml`, and the rule-file
-siblings `workflow-rules.yaml` / `unfurl-rules.yaml` **at startup only**. Editing
-them on disk changes nothing until the daemon restarts — this applies to
-allowlists, chat routing, agents, workflow/unfurl rules, and job schedules alike.
+The gateway reads `gateway.yaml` (only `oauth:` + `database:`) and the **config
+database** it points at **at startup only**. Changing config — via `murtaugh cfg
+…` for everything in the database (access, chat routing, agents, jobs,
+workflow/unfurl rules, journal), or editing `gateway.yaml`'s two blocks — changes
+nothing until the daemon restarts. Each `cfg` mutation re-validates the whole
+config and rolls back an invalid change, but the **live** gateway keeps running
+the config it loaded at boot until you restart it.
 
-(A legacy `slack.yaml` config dir is auto-migrated to this layout on the first
-run of a new binary — backed up and validated, rolled back on failure — or
-convert it ahead of time with `murtaugh config migrate`; a `.schema_version`
-sidecar tracks the version.)
+(Upgrading a new binary against an old YAML tree — `agents.yaml`, `jobs.yaml`,
+`journal.yaml`, `workflow-rules.yaml`, `unfurl-rules.yaml`, `troubleshoot.yaml` —
+**auto-migrates** the whole tree into SQLite on first run, slims `gateway.yaml` to
+`oauth:`+`database:`, and archives the old siblings to
+`~/.config/murtaugh/migrated-<timestamp>/`. Validated, rolled back on failure.
+Move the store to Postgres later with
+`murtaugh cfg db migrate --to postgres --dsn-env MURTAUGH_DB_DSN`.)
 
 ## Picking up a config change
 
-Config changes are not detected automatically — after editing any of the files
-above, restart the daemon yourself to load them (see below).
+Config changes are not detected automatically — after any `cfg …` change (or a
+`gateway.yaml` edit), restart the daemon yourself to load them (see below).
 
 ## Triggering a restart
 

@@ -2,18 +2,23 @@
 
 ## Who can interact
 
-Two settings in `gateway.yaml` `access:`:
+Two settings in the config database, set with `cfg access set` (view with
+`cfg access show`):
 
-- **`admin_user`** — a single user (handle or ID). Can do everything, including
+- **`--admin-user`** — a single user (handle or ID). Can do everything, including
   **restart**.
-- **`allowed_users`** — a list (handles or IDs). Can use slash commands, send
-  mentions/DMs, and click buttons.
+- **`--allowed-users`** — a list (handles or IDs; repeat the flag). Can use slash
+  commands, send mentions/DMs, and click buttons.
+
+```bash
+murtaugh cfg access set --admin-user @you --allowed-users U0AAA --allowed-users U0BBB
+```
 
 At startup both are resolved from handles to Slack user IDs (fail-closed: an
 unresolvable entry aborts startup). After that, checks are ID-only:
 
-- **`allowed`** = matches `admin_user` (when it's an ID) or any `allowed_users`.
-- **`admin`** = matches the resolved `admin_user` only.
+- **`allowed`** = matches the admin user (when it's an ID) or any allowed user.
+- **`admin`** = matches the resolved admin user only.
 
 **Both empty → the bot is locked down** (no one can interact); a warning is
 logged at startup.
@@ -31,10 +36,10 @@ logged at startup.
 
 | Symptom | Likely cause |
 |---|---|
-| No startup DM | `access.admin_user` unset or unresolvable; or the daemon didn't start — check `slack.err.log`. |
-| Bot ignores my DM / @-mention | Your user isn't in `access.admin_user`/`access.allowed_users` (mentions/DMs fail **silently**); or the chat surface is disabled (`chat.enabled: false`, no `chat.defaults.agent`). See `murtaugh-agents`. |
+| No startup DM | The `cfg access set` admin user is unset or unresolvable; or the daemon didn't start — check `slack.err.log`. |
+| Bot ignores my DM / @-mention | Your user isn't the `cfg access` admin / allowed user (mentions/DMs fail **silently**); or the chat surface is disabled (`cfg chat set --enabled false`, or no default agent). See `murtaugh-agents`. |
 | "you are not authorized" on a slash command | Same allowlist issue, surfaced because slash commands deny loudly. |
-| Config edit had no effect | Config loads once — **restart** to apply. See `reference/config-and-restart.md`. |
+| Ran `cfg` but the bot is unchanged | Config loads once — you changed the store but didn't **restart**. Restart to apply. See `reference/config-and-restart.md`. |
 | Link previews don't appear | The domain isn't in the Slack app's **App Unfurl Domains** (no `link_shared` is delivered), or no matching `unfurl-rules`. See the `murtaugh-slack` skill's `unfurl.md`. |
 | A scheduled job didn't run | The gateway was down at fire time (no catch-up), or the schedule edit needs a restart. See `murtaugh-jobs`. |
 | A message handled twice | Not redelivery (that's de-duped) — check you don't have **two daemons** running. |
