@@ -31,6 +31,11 @@ func LoadBootstrap(path string) (Config, error) {
 	cfg.OAuth.AppToken = os.ExpandEnv(cfg.OAuth.AppToken)
 	cfg.OAuth.BotToken = os.ExpandEnv(cfg.OAuth.BotToken)
 	cfg.OAuth.UserToken = os.ExpandEnv(cfg.OAuth.UserToken)
+	// The database connection is a credential too: the Postgres DSN is referenced
+	// as ${VAR} (and the SQLite path may use one), so expand them against .env
+	// before the store opens.
+	cfg.Database.Postgres.DSN = os.ExpandEnv(cfg.Database.Postgres.DSN)
+	cfg.Database.SQLite.Path = os.ExpandEnv(cfg.Database.SQLite.Path)
 	return cfg, nil
 }
 

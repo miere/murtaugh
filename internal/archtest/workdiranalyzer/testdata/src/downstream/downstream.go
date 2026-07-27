@@ -20,3 +20,11 @@ type other struct{ WorkDir string }
 func clean(o other) string {
 	return o.WorkDir
 }
+
+// writeField is a config-authoring WRITE: setting the raw field (as `cfg agent
+// create` does) produces config rather than consuming it, so it must NOT be
+// flagged. A subsequent READ of the same field still is.
+func writeField(p *config.AgentProfile, v string) string {
+	p.WorkDir = v
+	return p.WorkDir // want `downstream access to config.AgentProfile.WorkDir is forbidden`
+}

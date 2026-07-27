@@ -134,7 +134,7 @@ func (s *sqlstore) UpsertItem(ctx context.Context, section, name string, body an
 	stmt := fmt.Sprintf(
 		`INSERT INTO config_items (section, name, body, updated_at) VALUES (%s, %s, %s, %s) `+
 			`ON CONFLICT (section, name) DO UPDATE SET body = excluded.body, updated_at = excluded.updated_at`,
-		s.d.Placeholder(1), s.d.Placeholder(2), s.d.Placeholder(3), s.d.Now())
+		s.d.Placeholder(1), s.d.Placeholder(2), s.d.JSONValue(3), s.d.Now())
 	if _, err := s.db.ExecContext(ctx, stmt, section, name, string(raw)); err != nil {
 		return fmt.Errorf("upsert %s/%s: %w", section, name, err)
 	}
@@ -196,7 +196,7 @@ func (s *sqlstore) PutSingleton(ctx context.Context, key string, body any) error
 	stmt := fmt.Sprintf(
 		`INSERT INTO config_singletons (key, body, updated_at) VALUES (%s, %s, %s) `+
 			`ON CONFLICT (key) DO UPDATE SET body = excluded.body, updated_at = excluded.updated_at`,
-		s.d.Placeholder(1), s.d.Placeholder(2), s.d.Now())
+		s.d.Placeholder(1), s.d.JSONValue(2), s.d.Now())
 	if _, err := s.db.ExecContext(ctx, stmt, key, string(raw)); err != nil {
 		return fmt.Errorf("put singleton %s: %w", key, err)
 	}

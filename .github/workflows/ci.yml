@@ -21,6 +21,23 @@ jobs:
   check:
     name: Format, vet, build & test
     runs-on: ubuntu-latest
+    # A Postgres service backs the config-store integration tests. They skip
+    # themselves unless MURTAUGH_TEST_POSTGRES_DSN is set (below), so the SQLite
+    # path stays the default everywhere else; here we point them at this service.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: murtaugh
+          POSTGRES_PASSWORD: murtaugh
+          POSTGRES_DB: murtaugh
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U murtaugh"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 15
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -54,6 +71,8 @@ jobs:
         run: go build ./...
 
       - name: Test (race detector)
+        env:
+          MURTAUGH_TEST_POSTGRES_DSN: postgres://murtaugh:murtaugh@localhost:5432/murtaugh?sslmode=disable
         run: go test -race ./...
 
   macos-installer-tests:
