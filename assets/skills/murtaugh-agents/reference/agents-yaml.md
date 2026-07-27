@@ -1,20 +1,23 @@
 # agents.yaml: runtime tuning & agent profiles
 
 `agents.yaml` has two parts: a `defaults:` block of runtime tuning that applies
-to **both** backends, and an `agents` map of the profiles Murtaugh can talk to.
-Each profile uses one of two **backends**:
+to **all** backends, and an `agents` map of the profiles Murtaugh can talk to.
+Each profile uses one of three **backends**:
 
 - **native** (the **default**) — Murtaugh runs the LLM loop in-process: it talks
   to the provider directly and owns the conversation. This is what you almost
   always want.
+- **claude_code** — Murtaugh drives the `claude` CLI directly over its
+  stream-json protocol (one process per conversation), bypassing the ACP adapter.
 - **ACP** (legacy) — Murtaugh drives an external agent process over ACP (the
   Agent Client Protocol). Kept for back-compat.
 
 A profile is a **tagged union**: there is no `kind:` field. The backend is
 chosen by which sub-block is present — a `native:` block makes the profile
-native, an `acp:` block makes it a legacy ACP process. Shared knobs (`workdir`,
-`tools`, `mcp_servers`, `approval`, `progress_display`, `export_skills_to_fs`)
-sit at the top level of the profile.
+native, a `claude_code:` block makes it a Claude Code stream-json process, an
+`acp:` block makes it a legacy ACP process (exactly one is allowed). Shared knobs
+(`workdir`, `tools`, `mcp_servers`, `approval`, `progress_display`,
+`export_skills_to_fs`) sit at the top level of the profile.
 
 ```yaml
 defaults:                  # runtime tuning, grouped by concern
@@ -64,11 +67,11 @@ agents:
       cache_retention: 5m
 ```
 
-## `defaults:` — runtime tuning (both backends)
+## `defaults:` — runtime tuning (all backends)
 
 `defaults:` is the runtime block, grouped by the concern each knob serves:
 `session`, `rendering`, `acp`, and an optional `approval` global default. The
-knobs apply to native and ACP agents alike. Each field is a Go duration / int;
+knobs apply to native, claude_code, and ACP agents alike. Each field is a Go duration / int;
 the **effective default** below is what applies when the field is omitted (the
 bootstrapped file ships tuned values).
 
@@ -184,6 +187,46 @@ are answered: `ask` (default — surface them to the user), `auto-allow`, or
 
 The terminal gate is only active in a **live Slack chat** (where there's a human
 to ask); headless runs — scheduled jobs and delegated agents — are never gated.
+
+## Claude Code profiles (a `claude_code:` sub-block)
+
+Murtaugh drives the `claude` CLI directly over its stream-json protocol — one
+process per conversation, no ACP adapter in between. A profile becomes
+claude_code by carrying a `claude_code:` sub-block (which holds `command`). Like
+an ACP agent, it reaches Murtaugh's own tools (`slack.*`, `jobs`, `ask`, …)
+through the tool bridge, gated by the same top-level `approval` policy. The
+backend-specific knobs (`command`, `args`, `model`, `env`) live under
+`claude_code:`; the shared knobs (`workdir`, `tools`, `approval`,
+`progress_display`, `export_skills_to_fs`) stay at the top level of the profile.
+
+| Field | Block | Required | Meaning |
+|---|---|---|---|
+| `command` | `claude_code:` | yes | Path to the `claude` binary to launch. |
+| `args` | `claude_code:` | no | Override the default stream-json launch flags. Empty uses the built-in defaults (headless bidirectional stream-json). |
+| `model` | `claude_code:` | no | Passed as `--model` (e.g. `claude-opus-4-8`). Empty lets the binary resolve its own (e.g. via an `ANTHROPIC_MODEL` entry in `env`). |
+| `env` | `claude_code:` | no | Extra environment variables for the process; expanded and layered on the inherited environment exactly like `acp.env`. |
+| `workdir` | top level | no | Working directory. Defaults to the workspace (`~/.config/murtaugh`) when unset. |
+| `progress_display` | top level | no | Override `defaults.rendering.progress_display`: `simplified` or `tasks`. |
+
+```yaml
+agents:
+  coder:
+    workdir: ${HOME}/work/coder
+    tools: [files, terminal, skills, slack, jobs, ask, present_plan]
+    approval:
+      terminal: allowlist
+      allow: [kubectl, "docker ps"]
+    claude_code:
+      command: claude
+      model: claude-opus-4-8
+      # args: [...]         # override the default stream-json flags
+      # env:
+      #   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+```
+
+Because claude_code discovers skills from the **filesystem** (like a Claude-based
+ACP agent), use `export_skills_to_fs` to mirror the bundled `murtaugh-*` skills
+into its `workdir` — see that section above.
 
 ## ACP profiles (legacy — an `acp:` sub-block)
 

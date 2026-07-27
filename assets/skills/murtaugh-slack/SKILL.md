@@ -1,10 +1,11 @@
 ---
 name: murtaugh-slack
-description: Everything Slack on Murtaugh — post/update/read messages and reactions, ask the user and block for the answer, compose Block Kit, and (operator) wire reactive buttons and link previews. Read only the row your task needs.
+description: Everything Slack on Murtaugh — post/update/read messages and reactions, ask the user and block for the answer, compose Block Kit, read/edit canvas documents, and (operator) wire reactive buttons and link previews. Read only the row your task needs.
 requires: [slack, ask, present_plan, manage]
 templated: true
 files:
   reference/messaging.md:      { requires: [slack],            summary: "post, update, and read messages & reactions" }
+  reference/canvas.md:         { requires: [slack],            summary: "read & edit a Slack canvas document (Markdown in and out)" }
   reference/asking.md:         { requires: [ask, present_plan], summary: "ask the user a question / get plan sign-off and block for the answer" }
   reference/blocks.md:         { requires: [slack, manage],    summary: "compose Block Kit (sections, actions, plan, card)" }
   reference/automations.md:    { requires: [manage],           summary: "conventions for scheduled clock-tick scripts that post to Slack" }
