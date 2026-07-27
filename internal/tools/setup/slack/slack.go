@@ -1,9 +1,10 @@
-// Package slack implements the `setup.slack` tool: write the Slack OAuth and
-// runtime config block (gateway.yaml) the daemon depends on. The tool replaces
-// the inline `write_slack_yaml` helper that lived in install.sh.
+// Package slack implements the `setup.slack` tool: write the Slack OAuth block
+// to the bootstrap gateway.yaml (preserving its database block) and record the
+// admin user + chat routing in the configuration store.
 //
-// The tool is deliberately narrow: it only touches gateway.yaml. Agent and ACP
-// configuration is owned by `setup.agents`, MCP wiring by `setup.mcp-register`.
+// The tool is deliberately narrow: it owns Slack credentials + the access/chat
+// entry point. Agent configuration is owned by `setup.agents` / `cfg agent`,
+// MCP wiring by `setup.mcp-register`.
 package slack
 
 import (
@@ -15,9 +16,9 @@ import (
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
-	"gopkg.in/yaml.v3"
 
-	"github.com/miere/murtaugh/internal/tools/setup/internal/backup"
+	"github.com/miere/murtaugh/internal/config"
+	"github.com/miere/murtaugh/internal/config/store"
 	"github.com/miere/murtaugh/internal/tools/setup/internal/envfile"
 )
 
@@ -34,15 +35,19 @@ const (
 // observed whether the tool runs via the CLI, MCP, or a direct test.
 type PathProvider func() string
 
+// StoreProvider yields the open configuration store (access + chat live there).
+type StoreProvider func() (config.Store, error)
+
 // Tool is the `setup.slack` capability.
 type Tool struct {
-	path PathProvider
+	path  PathProvider
+	store StoreProvider
 }
 
-// New constructs a Tool that writes gateway.yaml at the file path returned by
-// path.
-func New(path PathProvider) *Tool {
-	return &Tool{path: path}
+// New constructs a Tool that writes gateway.yaml at the path returned by path
+// and the access/chat singletons into the store returned by provider.
+func New(path PathProvider, provider StoreProvider) *Tool {
+	return &Tool{path: path, store: provider}
 }
 
 // Name returns the registry key.
@@ -50,7 +55,7 @@ func (t *Tool) Name() string { return "setup.slack" }
 
 // Description returns the human-facing summary used by MCP clients.
 func (t *Tool) Description() string {
-	return "Write gateway.yaml with OAuth tokens, admin user"
+	return "Write Slack OAuth to gateway.yaml and the admin user + chat routing to the config store."
 }
 
 // InputSchema returns the JSON Schema for the tool's arguments.
@@ -61,7 +66,7 @@ func (t *Tool) InputSchema() *jsonschema.Schema {
 			"app_token":     {Type: "string", Description: "Slack app-level token (must start with xapp-)."},
 			"bot_token":     {Type: "string", Description: "Slack bot OAuth token (must start with xoxb-)."},
 			"admin_user":    {Type: "string", Description: "Slack admin handle (@name) or user ID (U…)."},
-			"default_agent": {Type: "string", Description: "Optional agents.yaml key wired into chat.defaults.agent."},
+			"default_agent": {Type: "string", Description: "Optional agent name wired into chat.defaults.agent (also enables chat)."},
 		},
 		Required: []string{"app_token", "bot_token", "admin_user"},
 	}
@@ -69,59 +74,26 @@ func (t *Tool) InputSchema() *jsonschema.Schema {
 
 // Result is the structured payload returned by Invoke.
 type Result struct {
-	Path       string `json:"path"`
-	Created    bool   `json:"created"`
-	BackupPath string `json:"backup_path,omitempty"`
+	Path string `json:"path"`
 	// EnvPath is the .env the Slack tokens were written to (referenced from
 	// gateway.yaml as ${SLACK_APP_TOKEN}/${SLACK_BOT_TOKEN}).
-	EnvPath string `json:"env_path,omitempty"`
+	EnvPath     string `json:"env_path,omitempty"`
+	ChatEnabled bool   `json:"chat_enabled"`
 }
 
 // String renders a one-line CLI confirmation. It never echoes the tokens.
 func (r Result) String() string {
-	verb := "updated"
-	if r.Created {
-		verb = "created"
+	state := "chat off"
+	if r.ChatEnabled {
+		state = "chat on"
 	}
-	msg := fmt.Sprintf("%s %s (tokens → %s)", verb, r.Path, r.EnvPath)
-	if r.BackupPath != "" {
-		msg += " (backup: " + r.BackupPath + ")"
-	}
-	return msg
+	return fmt.Sprintf("wrote Slack oauth → %s (tokens → %s); admin + %s in the config store", r.Path, r.EnvPath, state)
 }
 
-// document mirrors the on-disk YAML shape produced by the bash installer so
-// existing fixtures and the running daemon see identical input.
-type document struct {
-	OAuth  oauthBlock  `yaml:"oauth"`
-	Access accessBlock `yaml:"access"`
-	Chat   chatBlock   `yaml:"chat"`
-}
-
-type chatBlock struct {
-	// Enabled gates the Slack chat surface; on when a default agent is set.
-	Enabled  bool           `yaml:"enabled"`
-	Defaults *defaultsBlock `yaml:"defaults,omitempty"`
-}
-
-type defaultsBlock struct {
-	Agent string `yaml:"agent,omitempty"`
-}
-
-type oauthBlock struct {
-	AppToken string `yaml:"app_token"`
-	BotToken string `yaml:"bot_token"`
-}
-
-type accessBlock struct {
-	AdminUser string `yaml:"admin_user"`
-	Debug     bool   `yaml:"debug"`
-}
-
-// Invoke validates arguments, builds the gateway.yaml document, and writes it
-// to disk with 0600 perms. An existing file is backed up before being
-// replaced.
-func (t *Tool) Invoke(_ context.Context, args map[string]any) (any, error) {
+// Invoke validates arguments, writes the Slack tokens to .env, sets the oauth
+// block in gateway.yaml (preserving the database block), and stores the access
+// and chat singletons.
+func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 	appToken, _ := args["app_token"].(string)
 	botToken, _ := args["bot_token"].(string)
 	adminUser, _ := args["admin_user"].(string)
@@ -145,8 +117,7 @@ func (t *Tool) Invoke(_ context.Context, args map[string]any) (any, error) {
 		return nil, fmt.Errorf("ensure config dir: %w", err)
 	}
 
-	// Secrets go to the .env sibling; gateway.yaml only references them. This is
-	// what keeps tokens out of a shareable config / troubleshoot bundle.
+	// Secrets go to the .env sibling; gateway.yaml only references them.
 	envPath := filepath.Join(filepath.Dir(path), ".env")
 	if _, err := envfile.Merge(envPath, map[string]string{
 		appTokenVar: appToken,
@@ -155,28 +126,28 @@ func (t *Tool) Invoke(_ context.Context, args map[string]any) (any, error) {
 		return nil, fmt.Errorf("write Slack tokens to .env: %w", err)
 	}
 
-	doc := document{
-		OAuth:  oauthBlock{AppToken: "${" + appTokenVar + "}", BotToken: "${" + botTokenVar + "}"},
-		Access: accessBlock{AdminUser: adminUser, Debug: false},
-	}
-	// A configured default agent is what makes the chat surface useful, so
-	// enable it in the same step; with no agent, chat stays off.
-	if da := strings.TrimSpace(defaultAgent); da != "" {
-		doc.Chat.Defaults = &defaultsBlock{Agent: da}
-		doc.Chat.Enabled = true
+	// Set the oauth block, preserving whatever database block is already present.
+	oauth := config.OAuthConfig{AppToken: "${" + appTokenVar + "}", BotToken: "${" + botTokenVar + "}"}
+	if err := store.SetBootstrapOAuth(path, oauth); err != nil {
+		return nil, err
 	}
 
-	out, err := yaml.Marshal(doc)
-	if err != nil {
-		return nil, fmt.Errorf("marshal gateway.yaml: %w", err)
-	}
-
-	backupPath, err := backup.IfExists(path)
+	// Access + chat live in the store now.
+	s, err := t.store()
 	if err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(path, out, 0o600); err != nil {
-		return nil, fmt.Errorf("write %q: %w", path, err)
+	if err := s.PutSingleton(ctx, config.SingletonAccess, config.AccessConfig{AdminUser: adminUser}); err != nil {
+		return nil, fmt.Errorf("store access config: %w", err)
 	}
-	return Result{Path: path, Created: backupPath == "", BackupPath: backupPath, EnvPath: envPath}, nil
+	chat := config.ChatConfig{}
+	if da := strings.TrimSpace(defaultAgent); da != "" {
+		chat.Enabled = true
+		chat.Defaults = config.ChatDefaults{Agent: da}
+	}
+	if err := s.PutSingleton(ctx, config.SingletonChat, chat); err != nil {
+		return nil, fmt.Errorf("store chat config: %w", err)
+	}
+
+	return Result{Path: path, EnvPath: envPath, ChatEnabled: chat.Enabled}, nil
 }
