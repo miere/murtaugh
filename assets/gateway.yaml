@@ -16,9 +16,9 @@ oauth:
 # `murtaugh cfg db migrate --to postgres` (it rewrites this block for you).
 database:
   backend: sqlite            # sqlite | postgres
-  sqlite:
-    # Absolute path to the config database. Defaults to
-    # $XDG_STATE_HOME/murtaugh/config.db (~/.local/state/murtaugh/config.db).
-    path: ~/.local/state/murtaugh/config.db
+  # sqlite:
+  #   # Path to the config database. Defaults to `config.db` beside this file
+  #   # (the config directory); set an absolute path to move it elsewhere.
+  #   path: /custom/path/config.db
   # postgres:
   #   dsn: ${MURTAUGH_DB_DSN}   # e.g. postgres://user:pass@host:5432/murtaugh

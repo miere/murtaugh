@@ -27,7 +27,8 @@ can run it by hand). What it touches:
 - `gateway.yaml` and `templates/` — **created once, then preserved**: your tokens
   and edits are never overwritten. A fresh `gateway.yaml` carries just the two
   blocks — `oauth:` (Slack tokens via `${VAR}`) and `database:` (`backend: sqlite`
-  by default, with `sqlite.path` at `~/.local/state/murtaugh/config.db`).
+  by default; the store is `config.db` beside `gateway.yaml` unless you set
+  `sqlite.path`).
 - The **config database** itself — created empty if absent. This is the source of
   truth for everything except OAuth and the DB pointer.
 - `.agents/skills/` (the home for your **bespoke** skills) plus a `.claude/skills`

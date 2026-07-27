@@ -116,8 +116,8 @@ murtaugh cfg journal show
 ```
 
 ```
-# path: ~/.local/state/murtaugh/journal.db          # default
-# blob_dir: ~/.local/state/murtaugh/journal-blobs    # default beside the DB
+# path: ~/.config/murtaugh/journal.db          # default (beside gateway.yaml)
+# blob_dir: ~/.config/murtaugh/journal-blobs    # default (beside the DB)
 streams:
   gateway:     { enabled: true, retention: 168h }   # 7d
   job:         { enabled: true, retention: 720h }   # 30d

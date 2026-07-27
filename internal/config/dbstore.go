@@ -99,17 +99,17 @@ func (d DatabaseConfig) EffectiveBackend() string {
 }
 
 // EffectiveSQLitePath resolves the SQLite config-database path: the configured
-// value (with ~ expansion) or the XDG state default beside the journal.
-func (d DatabaseConfig) EffectiveSQLitePath() string {
+// value (with ~ expansion) or, by default, `config.db` in the config directory
+// (beside gateway.yaml), so the store travels with the config it belongs to.
+// configDir is the directory holding the bootstrap file; when it is empty (the
+// path is unknown) it falls back to the XDG state dir.
+func (d DatabaseConfig) EffectiveSQLitePath(configDir string) string {
 	if p := strings.TrimSpace(d.SQLite.Path); p != "" {
 		return expandHome(p)
 	}
-	return sqliteDefaultPath()
-}
-
-// sqliteDefaultPath is $XDG_STATE_HOME/murtaugh/config.db (falling back to
-// ~/.local/state/murtaugh/config.db) — the same state dir the journal uses.
-func sqliteDefaultPath() string {
+	if strings.TrimSpace(configDir) != "" {
+		return filepath.Join(configDir, "config.db")
+	}
 	return filepath.Join(journalStateDir(), "config.db")
 }
 

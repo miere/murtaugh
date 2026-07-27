@@ -72,8 +72,8 @@ oauth:
 
 database:
   backend: sqlite                 # sqlite (default) | postgres
-  sqlite:
-    path: ~/.local/state/murtaugh/config.db   # default SQLite store location
+  # sqlite:
+  #   path: /custom/config.db     # default: config.db beside this file
   # postgres:
   #   dsn: ${MURTAUGH_DB_DSN}     # DSN lives in .env; referenced as ${VAR}
 ```
@@ -82,8 +82,9 @@ database:
 
 `database:` selects where the rest of the configuration lives:
 
-- **`backend: sqlite`** (default) — a single file, `sqlite.path`, defaulting to
-  `~/.local/state/murtaugh/config.db`. Zero setup; ideal for one host.
+- **`backend: sqlite`** (default) — a single file, `config.db` beside
+  `gateway.yaml` by default (override with `sqlite.path`). Zero setup; ideal for
+  one host.
 - **`backend: postgres`** — `postgres.dsn`, referenced as `${VAR}` so the real
   DSN stays in `.env`. Use this to share one config store across hosts.
 
@@ -253,9 +254,9 @@ validate` is the same whole-config check every mutation runs, on demand.
 
 ### SQLite (default)
 
-Nothing to set up. The store is a single file at
-`~/.local/state/murtaugh/config.db` (recorded in `gateway.yaml`'s
-`database.sqlite.path`). This is the right choice for a single host.
+Nothing to set up. The store is a single file — `config.db` in the config
+directory (beside `gateway.yaml`) by default; set `database.sqlite.path` to move
+it elsewhere. This is the right choice for a single host.
 
 ### Postgres
 
@@ -272,7 +273,7 @@ murtaugh cfg db migrate --to postgres --dsn-env MURTAUGH_DB_DSN
 
 `cfg db migrate` copies everything and **rewrites `gateway.yaml`'s `database:`
 block for you** — you don't hand-edit it. Migrate back to a file with
-`--to sqlite --sqlite-path ~/.local/state/murtaugh/config.db`.
+`--to sqlite --sqlite-path ~/.config/murtaugh/config.db`.
 
 ---
 
@@ -284,7 +285,7 @@ of the new binary auto-migrates them** — no action required, and it's idempote
 1. The existing YAML tree (`agents.yaml`, `jobs.yaml`, `journal.yaml`,
    `workflow-rules.yaml`, `unfurl-rules.yaml`, `troubleshoot.yaml`, plus the
    `access`/`chat` blocks that used to live in `gateway.yaml`) is read and
-   imported into a SQLite config store at `~/.local/state/murtaugh/config.db`.
+   imported into a SQLite config store at `~/.config/murtaugh/config.db`.
 2. `gateway.yaml` is rewritten down to just the `oauth:` and `database:` blocks.
 3. The old sibling YAMLs are **moved** (never deleted) into
    `~/.config/murtaugh/migrated-<timestamp>/`, so the originals stay recoverable.

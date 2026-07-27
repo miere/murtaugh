@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -53,7 +54,7 @@ func Bootstrap(ctx context.Context, configPath string, setup bool) (config.Confi
 		}
 	}
 
-	s, err := Open(ctx, boot.Database)
+	s, err := Open(ctx, boot.Database, filepath.Dir(configPath))
 	if err != nil {
 		return config.Config{}, nil, err
 	}
@@ -69,11 +70,40 @@ func Bootstrap(ctx context.Context, configPath string, setup bool) (config.Confi
 }
 
 // bootstrapFile is the slim, post-migration shape of gateway.yaml: credentials
-// plus the store connection, nothing else. Access/chat and the siblings now
-// live in the store.
+// plus the store connection, nothing else. The sqlite/postgres sub-blocks are
+// pointers so an unset one is omitted — a default SQLite store writes just
+// `database: { backend: sqlite }`, letting the path default to config.db beside
+// this file.
 type bootstrapFile struct {
-	OAuth    config.OAuthConfig    `yaml:"oauth"`
-	Database config.DatabaseConfig `yaml:"database"`
+	OAuth    config.OAuthConfig `yaml:"oauth"`
+	Database databaseBlock      `yaml:"database"`
+}
+
+type databaseBlock struct {
+	Backend  string         `yaml:"backend"`
+	SQLite   *sqliteBlock   `yaml:"sqlite,omitempty"`
+	Postgres *postgresBlock `yaml:"postgres,omitempty"`
+}
+
+type sqliteBlock struct {
+	Path string `yaml:"path"`
+}
+
+type postgresBlock struct {
+	DSN string `yaml:"dsn"`
+}
+
+// toBlock renders a DatabaseConfig for writing, omitting empty sub-blocks so a
+// default store produces a clean bootstrap file.
+func toBlock(d config.DatabaseConfig) databaseBlock {
+	b := databaseBlock{Backend: d.EffectiveBackend()}
+	if p := strings.TrimSpace(d.SQLite.Path); p != "" {
+		b.SQLite = &sqliteBlock{Path: d.SQLite.Path}
+	}
+	if dsn := strings.TrimSpace(d.Postgres.DSN); dsn != "" {
+		b.Postgres = &postgresBlock{DSN: d.Postgres.DSN}
+	}
+	return b
 }
 
 // migrateFilesToStore performs the one-shot YAML→database migration. It loads
@@ -101,7 +131,7 @@ func migrateFilesToStore(ctx context.Context, configPath string) error {
 
 	dir := filepath.Dir(configPath)
 	dbc := config.DatabaseConfig{Backend: config.BackendSQLite}
-	s, err := Open(ctx, dbc)
+	s, err := Open(ctx, dbc, dir)
 	if err != nil {
 		return err
 	}
@@ -112,8 +142,8 @@ func migrateFilesToStore(ctx context.Context, configPath string) error {
 	}
 
 	// Rewrite gateway.yaml to the slim bootstrap shape, keeping the raw oauth
-	// references and recording the SQLite path so it lives in the config file.
-	dbc.SQLite.Path = dbc.EffectiveSQLitePath()
+	// references. The SQLite path is left unset so it defaults to `config.db`
+	// beside this file — the store travels with its config.
 	if err := writeBootstrap(configPath, rawBoot.OAuth, dbc); err != nil {
 		return err
 	}
@@ -155,7 +185,7 @@ func SetBootstrapOAuth(configPath string, oauth config.OAuthConfig) error {
 
 // writeBootstrap renders and writes the slim gateway.yaml (oauth + database).
 func writeBootstrap(configPath string, oauth config.OAuthConfig, dbc config.DatabaseConfig) error {
-	out, err := yaml.Marshal(bootstrapFile{OAuth: oauth, Database: dbc})
+	out, err := yaml.Marshal(bootstrapFile{OAuth: oauth, Database: toBlock(dbc)})
 	if err != nil {
 		return fmt.Errorf("render bootstrap: %w", err)
 	}

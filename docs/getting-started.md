@@ -138,8 +138,8 @@ oauth:
 
 database:
   backend: sqlite                 # default; the config store is a single file
-  sqlite:
-    path: ~/.local/state/murtaugh/config.db
+  # sqlite:
+  #   path: /custom/config.db     # default: config.db beside this file
 ```
 
 `gateway.yaml` no longer holds `access:` or `chat:` — those are records in the
