@@ -311,6 +311,10 @@ func (s *procSession) start(sessionArgs []string) error {
 	// claude CLI launches even when Murtaugh itself runs inside a Claude Code
 	// session), plus the profile's overrides.
 	cmd.Env = agent.SpawnEnv(s.opts.Env)
+	// Run in a dedicated process group so teardown kills the claude CLI AND the
+	// MCP servers it spawns (including Murtaugh's own mcp-bridge) rather than
+	// orphaning them on shutdown/restart.
+	agent.SetProcessGroup(cmd)
 	stderr := &cappedBuffer{limit: 8 << 10}
 	cmd.Stderr = stderr
 	stdin, err := cmd.StdinPipe()
@@ -358,9 +362,9 @@ func (s *procSession) teardownProc() {
 	if stdin != nil {
 		_ = stdin.Close()
 	}
-	if cmd != nil && cmd.Process != nil {
-		_ = cmd.Process.Kill()
-	}
+	// Kill the whole process group (claude CLI + the MCP servers it spawned,
+	// including Murtaugh's mcp-bridge), not just the direct process.
+	agent.KillProcessGroup(cmd)
 }
 
 // composePrompt folds any backfilled history (thread transcript, canvas context)
@@ -413,9 +417,9 @@ func (s *procSession) close() error {
 	if stdin != nil {
 		_ = stdin.Close()
 	}
-	if cmd != nil && cmd.Process != nil {
-		_ = cmd.Process.Kill()
-	}
+	// Kill the whole process group (claude CLI + the MCP servers it spawned,
+	// including Murtaugh's mcp-bridge), not just the direct process.
+	agent.KillProcessGroup(cmd)
 	if release != nil {
 		release()
 	}
