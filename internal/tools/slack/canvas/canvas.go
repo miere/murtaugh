@@ -33,8 +33,8 @@ func NewWith(client *slacklib.LazyClient) *Tool {
 func (t *Tool) Name() string { return "slack.canvas" }
 
 func (t *Tool) Description() string {
-	return "Read or edit a Slack canvas document by its canvas id (F…). Actions: " +
-		"read (return the whole page); edit_page (append/prepend markdown to the page); " +
+	return "Read or edit a Slack canvas document by its canvas id (F…). Reads and writes both use Markdown. " +
+		"Actions: read (return the whole page as Markdown); edit_page (append/prepend Markdown to the page); " +
 		"edit_section (replace, insert around, or delete the section matching some text)."
 }
 
