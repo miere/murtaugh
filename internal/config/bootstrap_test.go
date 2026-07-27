@@ -57,16 +57,12 @@ func TestBootstrapFreshInstall(t *testing.T) {
 		t.Fatalf("gateway.yaml content mismatch: got %q want %q", got, want)
 	}
 
-	wantAgents, err := assets.FS.ReadFile("agents.yaml")
-	if err != nil {
-		t.Fatalf("read embedded agents.yaml: %v", err)
-	}
-	gotAgents, err := os.ReadFile(filepath.Join(baseDir, "agents.yaml"))
-	if err != nil {
-		t.Fatalf("read bootstrapped agents.yaml: %v", err)
-	}
-	if string(gotAgents) != string(wantAgents) {
-		t.Fatalf("agents.yaml content mismatch")
+	// The former sibling config files are NOT seeded any more: that config lives
+	// in the database and is managed via `murtaugh cfg …`.
+	for _, sibling := range []string{"agents.yaml", "jobs.yaml", "journal.yaml", "workflow-rules.yaml", "unfurl-rules.yaml"} {
+		if _, err := os.Stat(filepath.Join(baseDir, sibling)); !os.IsNotExist(err) {
+			t.Fatalf("expected %s NOT to be seeded (it is DB-backed now), stat err=%v", sibling, err)
+		}
 	}
 
 	// Templates are mirrored into the workspace.
@@ -290,27 +286,6 @@ func contains(xs []string, want string) bool {
 		}
 	}
 	return false
-}
-
-func TestBootstrapCopiesJobsYAML(t *testing.T) {
-	baseDir := filepath.Join(t.TempDir(), "murtaugh")
-	configPath := filepath.Join(baseDir, "gateway.yaml")
-
-	if err := Bootstrap(configPath); err != nil {
-		t.Fatalf("Bootstrap returned error: %v", err)
-	}
-
-	wantJobs, err := assets.FS.ReadFile("jobs.yaml")
-	if err != nil {
-		t.Fatalf("read embedded jobs.yaml: %v", err)
-	}
-	gotJobs, err := os.ReadFile(filepath.Join(baseDir, "jobs.yaml"))
-	if err != nil {
-		t.Fatalf("read bootstrapped jobs.yaml: %v", err)
-	}
-	if string(gotJobs) != string(wantJobs) {
-		t.Fatalf("jobs.yaml content mismatch: got %q want %q", gotJobs, wantJobs)
-	}
 }
 
 func TestBootstrapDoesNotOverwriteExistingJobsYAML(t *testing.T) {

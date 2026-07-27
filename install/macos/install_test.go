@@ -117,6 +117,37 @@ func runInstaller(t *testing.T, env []string) (string, error) {
 	return string(out), err
 }
 
+// configDump runs the installed binary's `cfg show` (against the same HOME the
+// installer used, so the SQLite config store path resolves identically) and
+// returns the JSON dump. Agents, chat, and access now live in the store rather
+// than in YAML siblings, so the installer tests assert on this dump.
+func configDump(t *testing.T, home string) string {
+	t.Helper()
+	bin := filepath.Join(home, ".local", "bin", "murtaugh")
+	gw := filepath.Join(home, ".config", "murtaugh", "gateway.yaml")
+	cmd := exec.Command(bin, "--config", gw, "cfg", "show")
+	// Pass a SINGLE HOME (and drop XDG_STATE_HOME) so the binary resolves the
+	// same ~/.local/state/murtaugh/config.db the installer wrote to. Appending a
+	// second HOME would leave the process's real HOME first, and macOS getenv
+	// returns the first match.
+	env := make([]string, 0, len(os.Environ()))
+	for _, e := range os.Environ() {
+		if strings.HasPrefix(e, "HOME=") || strings.HasPrefix(e, "XDG_STATE_HOME=") {
+			continue
+		}
+		env = append(env, e)
+	}
+	cmd.Env = append(env, "HOME="+home)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("cfg show failed: %v\n%s", err, out)
+	}
+	// `cfg show` pretty-prints the JSON; flatten whitespace so compact substring
+	// assertions match regardless of indentation. Config values carry no internal
+	// spaces, so this is lossless for our checks.
+	return strings.Join(strings.Fields(string(out)), "")
+}
+
 func TestInstallerConfiguresAuggieAndBacksUpMCPSettings(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("installer is macOS-only")
@@ -160,24 +191,17 @@ func TestInstallerConfiguresAuggieAndBacksUpMCPSettings(t *testing.T) {
 		t.Fatalf("EvalSymlinks(installedBin): %v", err)
 	}
 
-	agentsData, err := os.ReadFile(filepath.Join(home, ".config", "murtaugh", "agents.yaml"))
-	if err != nil {
-		t.Fatalf("read agents.yaml: %v", err)
+	// The auggie agent (an ACP backend) and the chat routing now live in the
+	// config store, not in YAML siblings.
+	dump := configDump(t, home)
+	if !strings.Contains(dump, "--acp") || !strings.Contains(dump, "--allow-indexing") {
+		t.Fatalf("expected auggie ACP args in the config store, got:\n%s", dump)
 	}
-	agentsText := string(agentsData)
-	if !strings.Contains(agentsText, "--acp") || !strings.Contains(agentsText, "--allow-indexing") {
-		t.Fatalf("expected auggie ACP args in agents.yaml, got:\n%s", agentsText)
+	if strings.Contains(dump, "workspace-root") {
+		t.Fatalf("config unexpectedly set workspace root:\n%s", dump)
 	}
-	if strings.Contains(agentsText, "workspace-root") {
-		t.Fatalf("agents.yaml unexpectedly set workspace root:\n%s", agentsText)
-	}
-
-	slackData, err := os.ReadFile(filepath.Join(home, ".config", "murtaugh", "gateway.yaml"))
-	if err != nil {
-		t.Fatalf("read gateway.yaml: %v", err)
-	}
-	if !strings.Contains(string(slackData), "agent: default") {
-		t.Fatalf("gateway.yaml missing chat.defaults.agent:\n%s", slackData)
+	if !strings.Contains(dump, `"agent":"default"`) {
+		t.Fatalf("chat.defaults.agent not stored:\n%s", dump)
 	}
 
 	if _, err := os.Stat(filepath.Join(home, "Library", "LaunchAgents", "dev.murtaugh.plist")); err != nil {
@@ -244,14 +268,17 @@ func TestInstallerConfiguresNativeAgent(t *testing.T) {
 
 	configDir := filepath.Join(home, ".config", "murtaugh")
 
-	agentsText := readFileString(t, filepath.Join(configDir, "agents.yaml"))
-	for _, want := range []string{"native:", "provider: gemini", "model: gemini-2.5-pro", "api_key_env: GEMINI_API_KEY"} {
-		if !strings.Contains(agentsText, want) {
-			t.Fatalf("agents.yaml missing %q:\n%s", want, agentsText)
+	// The native agent lives in the config store now.
+	dump := configDump(t, home)
+	for _, want := range []string{`"native"`, `"provider":"gemini"`, `"model":"gemini-2.5-pro"`, `"api_key_env":"GEMINI_API_KEY"`} {
+		if !strings.Contains(dump, want) {
+			t.Fatalf("config store missing %q:\n%s", want, dump)
 		}
 	}
-	if strings.Contains(agentsText, "command:") {
-		t.Fatalf("native agents.yaml must not carry a command:\n%s", agentsText)
+	// A native agent carries no process command / acp args (the defaults singleton
+	// has its own acp: block, so we check for the agent-level markers instead).
+	if strings.Contains(dump, `"--acp"`) || strings.Contains(dump, `"claude_code"`) {
+		t.Fatalf("native agent must not carry a process backend block:\n%s", dump)
 	}
 
 	// The API key must land in .env, never in YAML.
@@ -263,8 +290,9 @@ func TestInstallerConfiguresNativeAgent(t *testing.T) {
 	if strings.Contains(slackText, "test-gemini-key-123") || strings.Contains(slackText, "xapp-test-token") {
 		t.Fatalf("a secret leaked into gateway.yaml:\n%s", slackText)
 	}
-	if !strings.Contains(slackText, "agent: default") {
-		t.Fatalf("gateway.yaml missing chat.defaults.agent:\n%s", slackText)
+	// chat.defaults.agent now lives in the config store, not gateway.yaml.
+	if !strings.Contains(dump, `"agent":"default"`) {
+		t.Fatalf("chat.defaults.agent not stored:\n%s", dump)
 	}
 	// Slack tokens also went to .env.
 	if !strings.Contains(envText, "SLACK_APP_TOKEN=xapp-test-token") {
