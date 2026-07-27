@@ -271,7 +271,9 @@ func (c *SlackClient) ReadCanvas(ctx context.Context, canvasID string) (string, 
 	if err := c.api.GetFileContext(ctx, url, &buf); err != nil {
 		return "", slackError("files.download", err)
 	}
-	return buf.String(), nil
+	// Slack serves a canvas as HTML (quip); convert to Markdown so reads yield the
+	// same syntax edits accept (spec 021 §9.4).
+	return canvasHTMLToMarkdown(buf.String()), nil
 }
 
 // convertMessages projects slack-go Message values into the package's public
