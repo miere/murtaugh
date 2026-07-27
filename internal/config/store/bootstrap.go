@@ -114,19 +114,42 @@ func migrateFilesToStore(ctx context.Context, configPath string) error {
 	// Rewrite gateway.yaml to the slim bootstrap shape, keeping the raw oauth
 	// references and recording the SQLite path so it lives in the config file.
 	dbc.SQLite.Path = dbc.EffectiveSQLitePath()
-	out, err := yaml.Marshal(bootstrapFile{OAuth: rawBoot.OAuth, Database: dbc})
-	if err != nil {
-		return fmt.Errorf("render bootstrap: %w", err)
-	}
-	header := "# Murtaugh bootstrap. Credentials live in .env and are referenced as ${VAR}.\n" +
-		"# All other configuration now lives in the database below — manage it with\n" +
-		"# `murtaugh cfg …` (e.g. `murtaugh cfg agent list`).\n"
-	if err := os.WriteFile(configPath, append([]byte(header), out...), 0o644); err != nil {
-		return fmt.Errorf("write %q: %w", configPath, err)
+	if err := writeBootstrap(configPath, rawBoot.OAuth, dbc); err != nil {
+		return err
 	}
 
 	if err := archiveSiblings(dir); err != nil {
 		return err
+	}
+	return nil
+}
+
+// RewriteDatabaseBlock rewrites gateway.yaml's `database:` block to dbc while
+// preserving the raw oauth references (never the expanded secrets). It backs the
+// `cfg db migrate` tool's final step of pointing the bootstrap at the new store.
+func RewriteDatabaseBlock(configPath string, dbc config.DatabaseConfig) error {
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("read %q: %w", configPath, err)
+	}
+	boot, err := config.Parse(raw)
+	if err != nil {
+		return err
+	}
+	return writeBootstrap(configPath, boot.OAuth, dbc)
+}
+
+// writeBootstrap renders and writes the slim gateway.yaml (oauth + database).
+func writeBootstrap(configPath string, oauth config.OAuthConfig, dbc config.DatabaseConfig) error {
+	out, err := yaml.Marshal(bootstrapFile{OAuth: oauth, Database: dbc})
+	if err != nil {
+		return fmt.Errorf("render bootstrap: %w", err)
+	}
+	header := "# Murtaugh bootstrap. Credentials live in .env and are referenced as ${VAR}.\n" +
+		"# All other configuration lives in the database below — manage it with\n" +
+		"# `murtaugh cfg …` (e.g. `murtaugh cfg agent list`).\n"
+	if err := os.WriteFile(configPath, append([]byte(header), out...), 0o644); err != nil {
+		return fmt.Errorf("write %q: %w", configPath, err)
 	}
 	return nil
 }

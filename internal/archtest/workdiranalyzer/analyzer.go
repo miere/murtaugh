@@ -12,6 +12,7 @@ package workdiranalyzer
 
 import (
 	"go/ast"
+	"go/token"
 	"go/types"
 	"strings"
 
@@ -43,9 +44,27 @@ func run(pass *analysis.Pass) (any, error) {
 	if !ok {
 		return nil, nil
 	}
+	// The rule forbids READS of the raw field (consuming the unresolved workdir).
+	// A plain assignment target (`p.WorkDir = v`) is a WRITE — config-authoring
+	// tools like `cfg agent create` legitimately produce config — so collect
+	// those selectors and exempt them. Compound assignments (`+=`) read too and
+	// are deliberately not exempted.
+	writeTargets := make(map[ast.Expr]bool)
+	insp.Preorder([]ast.Node{(*ast.AssignStmt)(nil)}, func(n ast.Node) {
+		as := n.(*ast.AssignStmt)
+		if as.Tok != token.ASSIGN {
+			return
+		}
+		for _, lhs := range as.Lhs {
+			writeTargets[lhs] = true
+		}
+	})
 	insp.Preorder([]ast.Node{(*ast.SelectorExpr)(nil)}, func(n ast.Node) {
 		sel := n.(*ast.SelectorExpr)
 		if sel.Sel == nil || sel.Sel.Name != "WorkDir" {
+			return
+		}
+		if writeTargets[sel] {
 			return
 		}
 		selection := pass.TypesInfo.Selections[sel]

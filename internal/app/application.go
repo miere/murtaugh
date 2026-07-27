@@ -363,7 +363,7 @@ func buildRegistry(cfg config.Config, cfgStore config.Store, configPath, version
 		return cfgStore, nil
 	}
 	reg.Register(define.New(storeProvider))
-	for _, t := range cfgtools.All(cfgStore) {
+	for _, t := range cfgtools.All(cfgStore, configPath) {
 		reg.Register(t)
 	}
 
