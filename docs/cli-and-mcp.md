@@ -25,7 +25,7 @@ murtaugh cfg agent list            # administer the config store
 `murtaugh cfg …` is the admin surface for the **config store** — the database
 that holds agents, MCP servers, jobs, chat routing, access control, runtime
 defaults, journal settings, and workflow/unfurl rules (everything except the
-`oauth:` + `database:` blocks in `gateway.yaml`):
+`oauth:` + `database:` blocks in `config.yaml`):
 
 ```sh
 murtaugh cfg agent create --name default --type native --provider gemini ...
@@ -80,7 +80,7 @@ global `--config PATH`:
 
 ```sh
 murtaugh slack gateway
-murtaugh --config /path/to/gateway.yaml slack gateway
+murtaugh --config /path/to/config.yaml slack gateway
 ```
 
 See [Operations](operations.md) for running it as a daemon.

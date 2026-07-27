@@ -1,4 +1,4 @@
-# Example agents.yaml (chat enabled via gateway.yaml — see the foot of this file).
+# Example agents.yaml (chat enabled via config.yaml — see the foot of this file).
 # Leads with a native agent (the default backend); an ACP profile is shown as
 # the legacy alternative. The backend is chosen by the sub-block present:
 # `native:` makes an agent native, `acp:` makes it an external ACP process.
@@ -72,7 +72,7 @@ agents:
   #     # interruptible: false  # pin only if the startup probe is wrong
 
 # ---------------------------------------------------------------------------
-# Chat routing and the chat-surface gate live in gateway.yaml:
+# Chat routing and the chat-surface gate live in config.yaml:
 #
 # chat:
 #   enabled: true               # gates DM + @mention replies (delegation runs regardless)

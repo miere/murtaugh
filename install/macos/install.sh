@@ -7,7 +7,7 @@
 # downloading + version-comparing + atomically replacing the binary, and
 # restarting the LaunchAgent when one was previously loaded.
 #
-# Everything else — writing gateway.yaml (oauth + database blocks), seeding the
+# Everything else — writing config.yaml (oauth + database blocks), seeding the
 # config store (agents, chat routing, access) via `murtaugh cfg`/`setup`,
 # dev.murtaugh.plist, and MCP client config — is delegated to the
 # freshly-installed binary via `murtaugh setup ...` tools, which share the exact
@@ -506,7 +506,7 @@ restart_launch_agent_if_needed() {
   log "Restarted LaunchAgent dev.murtaugh"
 }
 
-# write_slack_config delegates the oauth block of gateway.yaml (plus the admin
+# write_slack_config delegates the oauth block of config.yaml (plus the admin
 # user and chat routing, which go into the config store) to `murtaugh setup
 # slack`. The agent write (`setup agents`, also into the store) is paired here
 # so the daemon never sees an inconsistent intermediate state where chat routing
@@ -610,13 +610,13 @@ main() {
     die "the installed Murtaugh (${installed_bin}) does not support 'setup' yet. Upgrade to a release that includes the setup tools, or pass --skip-config to update the binary only."
   fi
 
-  # gateway.yaml is the single on-disk config file on a fresh install (agents,
+  # config.yaml is the single on-disk config file on a fresh install (agents,
   # jobs, and rules now live in the config store, not YAML siblings). An older
   # install that still has YAML siblings gets them auto-migrated into the store
-  # by the binary on first run, so gateway.yaml is a sufficient existence check.
+  # by the binary on first run, so config.yaml is a sufficient existence check.
   local config_dir gateway_yaml has_config
   config_dir="$HOME/.config/murtaugh"
-  gateway_yaml="$config_dir/gateway.yaml"
+  gateway_yaml="$config_dir/config.yaml"
   has_config=0
   [[ -f "$gateway_yaml" ]] && has_config=1
 

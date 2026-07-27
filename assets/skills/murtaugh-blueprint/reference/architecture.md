@@ -16,7 +16,7 @@ that ties them together; the **mechanics** of each surface live in a dedicated
 capability skill — defer to them for flag/tool details:
 
 Most config lives in the **config database**, managed with `murtaugh cfg …`; only
-`gateway.yaml` (`oauth:` + `database:`) and `.env` (secrets) sit on disk, along with
+`config.yaml` (`oauth:` + `database:`) and `.env` (secrets) sit on disk, along with
 your `automations/` and `templates/`.
 
 | Surface | What it is | Deep-dive skill |
@@ -44,7 +44,7 @@ your `automations/` and `templates/`.
 ```
 ~/.config/murtaugh/
 ├── AGENTS.md                 # agent persona + working guidelines (not architecture)
-├── gateway.yaml              # ONLY two blocks: oauth: (Slack tokens via ${VAR}) + database:
+├── config.yaml              # ONLY two blocks: oauth: (Slack tokens via ${VAR}) + database:
 │                             #   (a second workspace bot runs as its own instance with --config)
 ├── .env                      # all secrets: Slack tokens, provider keys, Postgres DSN
 ├── automations/              # the automation routines (see below)

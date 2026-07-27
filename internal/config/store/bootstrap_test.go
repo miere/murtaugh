@@ -10,9 +10,9 @@ import (
 	"github.com/miere/murtaugh/internal/config"
 )
 
-// writeLegacyConfigDir creates a pre-database config dir: a gateway.yaml with no
+// writeLegacyConfigDir creates a pre-database config dir: a config.yaml with no
 // `database:` block (oauth + access + chat) plus agents.yaml/jobs.yaml siblings
-// and a .env. It returns the gateway.yaml path.
+// and a .env. It returns the config.yaml path.
 func writeLegacyConfigDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -21,7 +21,7 @@ func writeLegacyConfigDir(t *testing.T) string {
 			t.Fatal(err)
 		}
 	}
-	write("gateway.yaml", `oauth:
+	write("config.yaml", `oauth:
   app_token: ${SLACK_APP_TOKEN}
   bot_token: ${SLACK_BOT_TOKEN}
 access:
@@ -43,7 +43,7 @@ chat:
   nightly:
     command: echo
 `)
-	return filepath.Join(dir, "gateway.yaml")
+	return filepath.Join(dir, "config.yaml")
 }
 
 func TestBootstrapMigratesLegacyYAML(t *testing.T) {
@@ -76,7 +76,7 @@ func TestBootstrapMigratesLegacyYAML(t *testing.T) {
 		t.Errorf("oauth not carried through / .env not loaded: %q", cfg.OAuth.AppToken)
 	}
 
-	// gateway.yaml was slimmed to oauth + database (no access/chat), keeping
+	// config.yaml was slimmed to oauth + database (no access/chat), keeping
 	// the ${VAR} reference rather than the expanded secret.
 	raw, err := os.ReadFile(gatewayPath)
 	if err != nil {
@@ -84,19 +84,19 @@ func TestBootstrapMigratesLegacyYAML(t *testing.T) {
 	}
 	txt := string(raw)
 	if !strings.Contains(txt, "database:") || !strings.Contains(txt, "backend: sqlite") {
-		t.Errorf("gateway.yaml missing database block:\n%s", txt)
+		t.Errorf("config.yaml missing database block:\n%s", txt)
 	}
 	if strings.Contains(txt, "chat:") || strings.Contains(txt, "access:") {
-		t.Errorf("gateway.yaml still has access/chat:\n%s", txt)
+		t.Errorf("config.yaml still has access/chat:\n%s", txt)
 	}
 	if !strings.Contains(txt, "${SLACK_APP_TOKEN}") {
-		t.Errorf("gateway.yaml lost the ${VAR} reference (leaked secret?):\n%s", txt)
+		t.Errorf("config.yaml lost the ${VAR} reference (leaked secret?):\n%s", txt)
 	}
 
-	// The config DB lands beside gateway.yaml (the config dir) by default, not in
+	// The config DB lands beside config.yaml (the config dir) by default, not in
 	// the XDG state dir — the store travels with its config.
 	if _, err := os.Stat(filepath.Join(dir, "config.db")); err != nil {
-		t.Errorf("config.db not created beside gateway.yaml: %v", err)
+		t.Errorf("config.db not created beside config.yaml: %v", err)
 	}
 
 	// Siblings were archived (moved), not left in place or deleted.
@@ -119,7 +119,7 @@ func TestBootstrapIsIdempotent(t *testing.T) {
 	}
 	s1.Close()
 
-	// Second run: gateway.yaml now has a database block, so migration is skipped
+	// Second run: config.yaml now has a database block, so migration is skipped
 	// and the config loads straight from the store.
 	cfg2, s2, err := Bootstrap(context.Background(), gatewayPath, false)
 	if err != nil {
@@ -143,14 +143,14 @@ func TestBootstrapIsIdempotent(t *testing.T) {
 func TestBootstrapSetupSkipsLoad(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	dir := t.TempDir()
-	// A fresh bootstrap gateway.yaml (already has a database block, à la the seed).
+	// A fresh bootstrap config.yaml (already has a database block, à la the seed).
 	body := `oauth:
   app_token: ${SLACK_APP_TOKEN}
   bot_token: ${SLACK_BOT_TOKEN}
 database:
   backend: sqlite
 `
-	gatewayPath := filepath.Join(dir, "gateway.yaml")
+	gatewayPath := filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(gatewayPath, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}

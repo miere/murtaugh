@@ -102,6 +102,13 @@ func run(rawArgs []string) error {
 		}
 	}
 
+	// The bootstrap file was renamed gateway.yaml → config.yaml. Adopt an existing
+	// gateway.yaml — from an older install, or just produced by the schema
+	// migration above — so upgrades are seamless before bootstrap seeds a fresh one.
+	if err := adoptLegacyBootstrap(configPath); err != nil {
+		return fmt.Errorf("adopt legacy config file: %w", err)
+	}
+
 	if err := config.Bootstrap(configPath); err != nil {
 		return err
 	}
@@ -110,7 +117,7 @@ func run(rawArgs []string) error {
 	defer stop()
 
 	// Resolve config from the store. On an upgrade this migrates the legacy YAML
-	// tree into a fresh SQLite database (rewriting gateway.yaml down to oauth +
+	// tree into a fresh SQLite database (rewriting config.yaml down to oauth +
 	// database, archiving the siblings). Setup tools open the store but skip the
 	// Load/validate — they run before a valid config exists and only need the
 	// store handle to write into.
@@ -313,6 +320,27 @@ func openJournal(cfg config.Config, mode app.Mode, rest []string, logger *slog.L
 		}
 	}
 	return store, recorder, cleanup
+}
+
+// adoptLegacyBootstrap renames a legacy gateway.yaml to configPath when the
+// target does not yet exist. It bridges the gateway.yaml → config.yaml rename
+// for existing installs (and for the output of the schema migration), so an
+// upgrade is seamless. It is a no-op when configPath already exists or when the
+// operator pointed --config at a gateway.yaml directly.
+func adoptLegacyBootstrap(configPath string) error {
+	if filepath.Base(configPath) == "gateway.yaml" {
+		return nil // operator explicitly targeted the legacy file
+	}
+	if _, err := os.Stat(configPath); err == nil {
+		return nil // config.yaml already present
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	legacy := filepath.Join(filepath.Dir(configPath), "gateway.yaml")
+	if _, err := os.Stat(legacy); err != nil {
+		return nil // nothing to adopt
+	}
+	return os.Rename(legacy, configPath)
 }
 
 // isSetupInvocation reports whether the CLI was asked to run a setup.* tool.

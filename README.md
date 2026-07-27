@@ -59,7 +59,7 @@ murtaugh slack gateway
 | Guide | What it covers |
 |---|---|
 | 🚀 [Getting started](docs/getting-started.md) | Install, create the Slack app, write the config, first run. |
-| ⚙️ [Configuration](docs/configuration.md) | `gateway.yaml` (`oauth` + `database`), the `.env` secrets, and the `murtaugh cfg` admin CLI for everything else. |
+| ⚙️ [Configuration](docs/configuration.md) | `config.yaml` (`oauth` + `database`), the `.env` secrets, and the `murtaugh cfg` admin CLI for everything else. |
 | 🤖 [Agent chat](docs/agents.md) | Native vs ACP agents, tools, routing, streaming, interrupts, approval. |
 | 💬 [Slack](docs/slack.md) | Messaging, asking the user, Block Kit, workflow rules, and link unfurling. |
 | ⏰ [Jobs](docs/jobs.md) | Define, run, and schedule shell-command and agent jobs. |

@@ -7,7 +7,7 @@ import (
 )
 
 // FS contains reference assets that are also used as built-in defaults: the
-// seed bootstrap file (gateway.yaml — oauth + database) and .env template, the
+// seed bootstrap file (config.yaml — oauth + database) and .env template, the
 // default system prompt, the Block Kit templates under templates/, the bundled
 // agent skills under skills/ (each a SKILL.md + reference/ + examples/ tree),
 // and cli-help.md (the canonical CLI/MCP command reference surfaced by
@@ -19,7 +19,7 @@ import (
 // that configuration lives in the database now and is authored via `murtaugh
 // cfg …`, so there is nothing to seed.
 //
-//go:embed gateway.yaml env.example system-prompt.md AGENTS.md cli-help.md templates skills troubleshoot
+//go:embed config.yaml env.example system-prompt.md AGENTS.md cli-help.md templates skills troubleshoot
 var FS embed.FS
 
 // skillsRoot is the embedded directory holding one subdirectory per bundled

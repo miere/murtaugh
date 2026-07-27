@@ -55,7 +55,7 @@ func Bootstrap(configPath string) error {
 //
 // Under the workspace directory (the directory holding configPath, e.g.
 // ~/.config/murtaugh) it manages:
-//   - gateway.yaml (seeded with the default Slack configuration), agents.yaml,
+//   - config.yaml (seeded with the default Slack configuration), agents.yaml,
 //     and jobs.yaml — created on first run, then PRESERVED: these hold the
 //     user's tokens and customisations and are never overwritten.
 //   - templates/ — the bundled Block Kit templates (ping/, unfurl/), also
@@ -75,14 +75,14 @@ func BootstrapWithReport(configPath string, force bool) (BootstrapReport, error)
 		return report, fmt.Errorf("create config dir %q: %w", baseDir, err)
 	}
 
-	// The bootstrap file (gateway.yaml: oauth + database) and the credentials
+	// The bootstrap file (config.yaml: oauth + database) and the credentials
 	// template are seeded once and then preserved. The former sibling config
 	// files (agents.yaml, jobs.yaml, journal.yaml, workflow-rules.yaml,
 	// unfurl-rules.yaml) are NO LONGER seeded: that configuration lives in the
 	// database now and is managed via `murtaugh cfg …`. On an UPGRADE the real
 	// siblings still exist on disk and are auto-migrated into the store.
 	plan := []struct{ src, dst string }{
-		{"gateway.yaml", configPath},
+		{"config.yaml", configPath},
 		// Seed a template .env (from the non-dotfile asset env.example) so a
 		// fresh install has the credentials file to fill in. preserveExisting
 		// means a real .env is never clobbered.

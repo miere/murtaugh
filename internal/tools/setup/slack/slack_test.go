@@ -66,7 +66,7 @@ func TestTool_Metadata(t *testing.T) {
 
 func TestInvoke_RejectsBadInputs(t *testing.T) {
 	_, prov := newStore(t)
-	tl := New(func() string { return filepath.Join(t.TempDir(), "gateway.yaml") }, prov)
+	tl := New(func() string { return filepath.Join(t.TempDir(), "config.yaml") }, prov)
 	cases := []map[string]any{
 		{},
 		{"app_token": "no-prefix", "bot_token": "xoxb-x", "admin_user": "@a"},
@@ -82,7 +82,7 @@ func TestInvoke_RejectsBadInputs(t *testing.T) {
 
 func TestInvoke_WritesOAuthAndStoresAccess(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "gateway.yaml")
+	path := filepath.Join(dir, "config.yaml")
 	s, prov := newStore(t)
 	tl := New(func() string { return path }, prov)
 
@@ -92,14 +92,14 @@ func TestInvoke_WritesOAuthAndStoresAccess(t *testing.T) {
 	}
 	r := res.(Result)
 
-	// gateway.yaml references the tokens, never embeds them.
+	// config.yaml references the tokens, never embeds them.
 	cfg := gateway(t, path)
 	if cfg.OAuth.AppToken != "${SLACK_APP_TOKEN}" || cfg.OAuth.BotToken != "${SLACK_BOT_TOKEN}" {
 		t.Fatalf("oauth = %+v, want ${VAR} references", cfg.OAuth)
 	}
 	raw, _ := os.ReadFile(path)
 	if strings.Contains(string(raw), "xapp-1-test") || strings.Contains(string(raw), "xoxb-test") {
-		t.Fatalf("raw token leaked into gateway.yaml:\n%s", raw)
+		t.Fatalf("raw token leaked into config.yaml:\n%s", raw)
 	}
 	// Tokens landed in .env.
 	envData, err := os.ReadFile(r.EnvPath)
@@ -109,7 +109,7 @@ func TestInvoke_WritesOAuthAndStoresAccess(t *testing.T) {
 	if !strings.Contains(string(envData), "SLACK_APP_TOKEN=xapp-1-test") {
 		t.Fatalf(".env missing token:\n%s", envData)
 	}
-	// access went to the store, NOT gateway.yaml.
+	// access went to the store, NOT config.yaml.
 	body, ok, err := s.GetSingleton(context.Background(), config.SingletonAccess)
 	if err != nil || !ok {
 		t.Fatalf("access singleton missing: ok=%v err=%v", ok, err)
@@ -123,8 +123,8 @@ func TestInvoke_WritesOAuthAndStoresAccess(t *testing.T) {
 
 func TestInvoke_PreservesDatabaseBlock(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "gateway.yaml")
-	// Seed a gateway.yaml that already selects Postgres; setup.slack must keep it.
+	path := filepath.Join(dir, "config.yaml")
+	// Seed a config.yaml that already selects Postgres; setup.slack must keep it.
 	seed := "oauth:\n  app_token: old\ndatabase:\n  backend: postgres\n  postgres:\n    dsn: ${MURTAUGH_DB_DSN}\n"
 	if err := os.WriteFile(path, []byte(seed), 0o600); err != nil {
 		t.Fatal(err)
@@ -142,7 +142,7 @@ func TestInvoke_PreservesDatabaseBlock(t *testing.T) {
 
 func TestInvoke_DefaultAgentEnablesChat(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "gateway.yaml")
+	path := filepath.Join(dir, "config.yaml")
 	s, prov := newStore(t)
 	tl := New(func() string { return path }, prov)
 

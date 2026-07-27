@@ -1,7 +1,7 @@
-# Seeding & config: bootstrap, slack (gateway.yaml), env, agents, and `murtaugh cfg`
+# Seeding & config: bootstrap, slack (config.yaml), env, agents, and `murtaugh cfg`
 
 Two files live on disk under the workspace (`~/.config/murtaugh` by default):
-`gateway.yaml` (only `oauth:` + `database:`) and `.env` (all secrets). Everything
+`config.yaml` (only `oauth:` + `database:`) and `.env` (all secrets). Everything
 else — agents, mcp_servers, jobs, chat, access, defaults, journal, troubleshoot,
 workflow/unfurl rules — lives in the **config database** and is managed with
 `murtaugh cfg …`. The `setup_*` tools below write the two files and seed the
@@ -24,10 +24,10 @@ store.*
 Takes **no arguments**. It runs automatically on every Murtaugh start (and you
 can run it by hand). What it touches:
 
-- `gateway.yaml` and `templates/` — **created once, then preserved**: your tokens
-  and edits are never overwritten. A fresh `gateway.yaml` carries just the two
+- `config.yaml` and `templates/` — **created once, then preserved**: your tokens
+  and edits are never overwritten. A fresh `config.yaml` carries just the two
   blocks — `oauth:` (Slack tokens via `${VAR}`) and `database:` (`backend: sqlite`
-  by default; the store is `config.db` beside `gateway.yaml` unless you set
+  by default; the store is `config.db` beside `config.yaml` unless you set
   `sqlite.path`).
 - The **config database** itself — created empty if absent. This is the source of
   truth for everything except OAuth and the DB pointer.
@@ -40,16 +40,16 @@ can run it by hand). What it touches:
 > **Upgrading auto-migrates.** On the first run of a new binary against an old
 > YAML tree (`agents.yaml`, `jobs.yaml`, `journal.yaml`, `workflow-rules.yaml`,
 > `unfurl-rules.yaml`, `troubleshoot.yaml`), Murtaugh migrates the whole tree into
-> SQLite, slims `gateway.yaml` to `oauth:`+`database:`, and archives the old
+> SQLite, slims `config.yaml` to `oauth:`+`database:`, and archives the old
 > siblings to `~/.config/murtaugh/migrated-<timestamp>/`. It's validated and safe
 > to re-run; the archived copies are left for you to inspect or delete.
 
 Returns a report of which files were **created**, **updated** (refreshed), and
 **preserved**. Run it first on a fresh install; safe to re-run any time.
 
-## `setup_slack` — write gateway.yaml `oauth:` + `.env`
+## `setup_slack` — write config.yaml `oauth:` + `.env`
 
-*Write `gateway.yaml`'s `oauth:` block (tokens via `${VAR}`) and the token values
+*Write `config.yaml`'s `oauth:` block (tokens via `${VAR}`) and the token values
 into `.env`.*
 
 | Arg | Required | Meaning |
@@ -57,7 +57,7 @@ into `.env`.*
 | `app_token` | yes | Slack app-level token; must start with `xapp-`. Stored in `.env`; `oauth:` references it by `${VAR}`. |
 | `bot_token` | yes | Slack bot token; must start with `xoxb-`. Stored in `.env`; `oauth:` references it by `${VAR}`. |
 
-Validates the token prefixes, writes the `oauth:` block into `gateway.yaml` at
+Validates the token prefixes, writes the `oauth:` block into `config.yaml` at
 `0600` (backing up any existing file), and upserts the token values into `.env`.
 Re-run to rotate tokens. The **admin user** and **default chat agent** are no
 longer written here — set them in the database with `cfg access set` and

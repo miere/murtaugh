@@ -14,7 +14,7 @@ import (
 )
 
 // legacySiblings are the sibling config files a pre-database install keeps
-// alongside gateway.yaml. On migration their contents move into the store and
+// alongside config.yaml. On migration their contents move into the store and
 // the files themselves are archived (moved, never deleted).
 var legacySiblings = []string{
 	"agents.yaml",
@@ -69,7 +69,7 @@ func Bootstrap(ctx context.Context, configPath string, setup bool) (config.Confi
 	return cfg, s, nil
 }
 
-// bootstrapFile is the slim, post-migration shape of gateway.yaml: credentials
+// bootstrapFile is the slim, post-migration shape of config.yaml: credentials
 // plus the store connection, nothing else. The sqlite/postgres sub-blocks are
 // pointers so an unset one is omitted — a default SQLite store writes just
 // `database: { backend: sqlite }`, letting the path default to config.db beside
@@ -108,7 +108,7 @@ func toBlock(d config.DatabaseConfig) databaseBlock {
 
 // migrateFilesToStore performs the one-shot YAML→database migration. It loads
 // the full legacy config from disk (validating it), writes every non-credential
-// section into a fresh SQLite store, rewrites gateway.yaml down to oauth +
+// section into a fresh SQLite store, rewrites config.yaml down to oauth +
 // database, and archives the now-migrated siblings. The credentials never enter
 // the store: only the oauth block stays on disk (referencing .env).
 func migrateFilesToStore(ctx context.Context, configPath string) error {
@@ -123,7 +123,7 @@ func migrateFilesToStore(ctx context.Context, configPath string) error {
 		return err
 	}
 
-	// Load the full legacy tree (gateway.yaml + siblings), validated.
+	// Load the full legacy tree (config.yaml + siblings), validated.
 	legacy, err := config.Load(configPath)
 	if err != nil {
 		return err
@@ -141,7 +141,7 @@ func migrateFilesToStore(ctx context.Context, configPath string) error {
 		return err
 	}
 
-	// Rewrite gateway.yaml to the slim bootstrap shape, keeping the raw oauth
+	// Rewrite config.yaml to the slim bootstrap shape, keeping the raw oauth
 	// references. The SQLite path is left unset so it defaults to `config.db`
 	// beside this file — the store travels with its config.
 	if err := writeBootstrap(configPath, rawBoot.OAuth, dbc); err != nil {
@@ -154,7 +154,7 @@ func migrateFilesToStore(ctx context.Context, configPath string) error {
 	return nil
 }
 
-// RewriteDatabaseBlock rewrites gateway.yaml's `database:` block to dbc while
+// RewriteDatabaseBlock rewrites config.yaml's `database:` block to dbc while
 // preserving the raw oauth references (never the expanded secrets). It backs the
 // `cfg db migrate` tool's final step of pointing the bootstrap at the new store.
 func RewriteDatabaseBlock(configPath string, dbc config.DatabaseConfig) error {
@@ -169,7 +169,7 @@ func RewriteDatabaseBlock(configPath string, dbc config.DatabaseConfig) error {
 	return writeBootstrap(configPath, boot.OAuth, dbc)
 }
 
-// SetBootstrapOAuth writes gateway.yaml's `oauth:` block while preserving the
+// SetBootstrapOAuth writes config.yaml's `oauth:` block while preserving the
 // existing `database:` block (a missing file defaults to the SQLite backend). It
 // is the symmetric counterpart to RewriteDatabaseBlock, used by setup.slack so
 // writing Slack credentials never clobbers the store selection.
@@ -183,7 +183,7 @@ func SetBootstrapOAuth(configPath string, oauth config.OAuthConfig) error {
 	return writeBootstrap(configPath, oauth, dbc)
 }
 
-// writeBootstrap renders and writes the slim gateway.yaml (oauth + database).
+// writeBootstrap renders and writes the slim config.yaml (oauth + database).
 func writeBootstrap(configPath string, oauth config.OAuthConfig, dbc config.DatabaseConfig) error {
 	out, err := yaml.Marshal(bootstrapFile{OAuth: oauth, Database: toBlock(dbc)})
 	if err != nil {
@@ -246,7 +246,7 @@ func importConfig(ctx context.Context, s config.Store, cfg config.Config) error 
 }
 
 // archiveSiblings moves the migrated sibling YAMLs into a timestamped
-// migrated-<ts>/ directory beside gateway.yaml. Files are moved (never deleted)
+// migrated-<ts>/ directory beside config.yaml. Files are moved (never deleted)
 // so the operator keeps a copy; a missing sibling is skipped.
 func archiveSiblings(dir string) error {
 	archive := filepath.Join(dir, "migrated-"+time.Now().Format("20060102-150405"))

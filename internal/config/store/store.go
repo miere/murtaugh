@@ -4,7 +4,7 @@
 // documents in a small relational schema, behind a Dialect seam so the same
 // code serves SQLite (the default) and Postgres. Credentials never live here:
 // Slack tokens and the database connection stay in the on-disk bootstrap
-// gateway.yaml + .env.
+// config.yaml + .env.
 package store
 
 import (

@@ -2,16 +2,16 @@
 
 Murtaugh keeps almost nothing on disk. Two files live in
 `~/.config/murtaugh/` (override the gateway path with
-`--config /path/to/gateway.yaml`); **everything else lives in a database** and is
+`--config /path/to/config.yaml`); **everything else lives in a database** and is
 managed with the `murtaugh cfg …` admin CLI.
 
 | Where | Holds | Reference |
 |---|---|---|
 | `.env` | **All secrets** — Slack tokens, provider API keys, the Postgres DSN. Mode `0600`. | [below](#env--secrets) |
-| `gateway.yaml` | Two blocks only: `oauth:` (Slack tokens) and `database:` (the config-store backend). | [below](#gatewayyaml) |
+| `config.yaml` | Two blocks only: `oauth:` (Slack tokens) and `database:` (the config-store backend). | [below](#configyaml) |
 | the **config store** (SQLite/Postgres) | Agents, MCP servers, jobs, chat routing, access control, runtime defaults, journal, troubleshoot providers, workflow-rules, unfurl-rules. | [The `cfg` surface](#the-murtaugh-cfg-surface) |
 
-> **Golden rule:** secrets live **only** in `.env`. `gateway.yaml` and the config
+> **Golden rule:** secrets live **only** in `.env`. `config.yaml` and the config
 > store reference them as `${VAR}`. This is what lets `murtaugh troubleshoot`
 > bundle your configuration for sharing without leaking credentials — the bundler
 > never collects `.env`.
@@ -56,13 +56,13 @@ directly.
 
 ---
 
-## `gateway.yaml`
+## `config.yaml`
 
 Slimmed to two blocks: how the gateway authenticates to Slack, and which
 config-store backend it reads everything else from.
 
 ```yaml
-# ~/.config/murtaugh/gateway.yaml
+# ~/.config/murtaugh/config.yaml
 oauth:
   app_token: ${SLACK_APP_TOKEN}   # xapp-… Socket Mode token
   bot_token: ${SLACK_BOT_TOKEN}   # xoxb-… bot token
@@ -83,7 +83,7 @@ database:
 `database:` selects where the rest of the configuration lives:
 
 - **`backend: sqlite`** (default) — a single file, `config.db` beside
-  `gateway.yaml` by default (override with `sqlite.path`). Zero setup; ideal for
+  `config.yaml` by default (override with `sqlite.path`). Zero setup; ideal for
   one host.
 - **`backend: postgres`** — `postgres.dsn`, referenced as `${VAR}` so the real
   DSN stays in `.env`. Use this to share one config store across hosts.
@@ -255,7 +255,7 @@ validate` is the same whole-config check every mutation runs, on demand.
 ### SQLite (default)
 
 Nothing to set up. The store is a single file — `config.db` in the config
-directory (beside `gateway.yaml`) by default; set `database.sqlite.path` to move
+directory (beside `config.yaml`) by default; set `database.sqlite.path` to move
 it elsewhere. This is the right choice for a single host.
 
 ### Postgres
@@ -267,11 +267,11 @@ migrate:
 # 1. add the DSN to ~/.config/murtaugh/.env
 #    MURTAUGH_DB_DSN=postgres://murtaugh:secret@host:5432/murtaugh?sslmode=disable
 
-# 2. copy the whole store into Postgres and rewrite gateway.yaml
+# 2. copy the whole store into Postgres and rewrite config.yaml
 murtaugh cfg db migrate --to postgres --dsn-env MURTAUGH_DB_DSN
 ```
 
-`cfg db migrate` copies everything and **rewrites `gateway.yaml`'s `database:`
+`cfg db migrate` copies everything and **rewrites `config.yaml`'s `database:`
 block for you** — you don't hand-edit it. Migrate back to a file with
 `--to sqlite --sqlite-path ~/.config/murtaugh/config.db`.
 
@@ -284,9 +284,9 @@ of the new binary auto-migrates them** — no action required, and it's idempote
 
 1. The existing YAML tree (`agents.yaml`, `jobs.yaml`, `journal.yaml`,
    `workflow-rules.yaml`, `unfurl-rules.yaml`, `troubleshoot.yaml`, plus the
-   `access`/`chat` blocks that used to live in `gateway.yaml`) is read and
+   `access`/`chat` blocks that used to live in `config.yaml`) is read and
    imported into a SQLite config store at `~/.config/murtaugh/config.db`.
-2. `gateway.yaml` is rewritten down to just the `oauth:` and `database:` blocks.
+2. `config.yaml` is rewritten down to just the `oauth:` and `database:` blocks.
 3. The old sibling YAMLs are **moved** (never deleted) into
    `~/.config/murtaugh/migrated-<timestamp>/`, so the originals stay recoverable.
 
@@ -304,7 +304,7 @@ you do. See [Operations](operations.md#applying-config-changes).
 
 ## Reference assets
 
-The repository's `assets/` directory ships a fully-commented `gateway.yaml` and
+The repository's `assets/` directory ships a fully-commented `config.yaml` and
 `env.example` starter, plus default Block Kit templates. `setup_bootstrap` seeds
 copies into your config directory and initialises an empty config store; you can
 also read the templates in-tree as the canonical reference.
