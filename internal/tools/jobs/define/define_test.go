@@ -2,33 +2,51 @@ package define
 
 import (
 	"context"
-	"os"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"gopkg.in/yaml.v3"
-
 	"github.com/miere/murtaugh/internal/config"
+	"github.com/miere/murtaugh/internal/config/store"
 )
 
-func loadJobs(t *testing.T, path string) map[string]config.JobProfile {
+// newStore opens a fresh SQLite config store in a temp dir and returns it with a
+// provider closure suitable for New.
+func newStore(t *testing.T) (config.Store, StoreProvider) {
 	t.Helper()
-	data, err := os.ReadFile(path)
+	dbc := config.DatabaseConfig{
+		Backend: config.BackendSQLite,
+		SQLite:  config.SQLiteConfig{Path: filepath.Join(t.TempDir(), "config.db")},
+	}
+	s, err := store.Open(context.Background(), dbc)
 	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
+		t.Fatalf("open store: %v", err)
 	}
-	var doc struct {
-		Jobs map[string]config.JobProfile `yaml:"jobs"`
-	}
-	if err := yaml.Unmarshal(data, &doc); err != nil {
-		t.Fatalf("parse %s: %v", path, err)
-	}
-	return doc.Jobs
+	t.Cleanup(func() { _ = s.Close() })
+	return s, func() (config.Store, error) { return s, nil }
 }
 
+func getJob(t *testing.T, s config.Store, name string) (config.JobProfile, bool) {
+	t.Helper()
+	body, ok, err := s.GetItem(context.Background(), config.SectionJob, name)
+	if err != nil {
+		t.Fatalf("GetItem: %v", err)
+	}
+	if !ok {
+		return config.JobProfile{}, false
+	}
+	var job config.JobProfile
+	if err := json.Unmarshal(body, &job); err != nil {
+		t.Fatalf("unmarshal job: %v", err)
+	}
+	return job, true
+}
+
+func nilStore() StoreProvider { return func() (config.Store, error) { return nil, nil } }
+
 func TestTool_Metadata(t *testing.T) {
-	tl := New(func() string { return "" })
+	tl := New(nilStore())
 	if tl.Name() != "jobs.define" {
 		t.Fatalf("Name() = %q, want jobs.define", tl.Name())
 	}
@@ -45,9 +63,8 @@ func TestTool_Metadata(t *testing.T) {
 }
 
 func TestInvoke_CreatesNewJob(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "jobs.yaml")
-	tl := New(func() string { return path })
+	s, prov := newStore(t)
+	tl := New(prov)
 
 	res, err := tl.Invoke(context.Background(), map[string]any{
 		"name":    "hello",
@@ -62,17 +79,20 @@ func TestInvoke_CreatesNewJob(t *testing.T) {
 	if !r.Created {
 		t.Fatal("Result.Created = false, want true on first write")
 	}
-	jobs := loadJobs(t, path)
-	if jobs["hello"].Command != "/bin/echo" {
-		t.Fatalf("jobs[hello].Command = %q, want /bin/echo", jobs["hello"].Command)
+	job, ok := getJob(t, s, "hello")
+	if !ok {
+		t.Fatal("job not stored")
 	}
-	if len(jobs["hello"].Args) != 1 || jobs["hello"].Args[0] != "hi" {
-		t.Fatalf("jobs[hello].Args = %v, want [hi]", jobs["hello"].Args)
+	if job.Command != "/bin/echo" {
+		t.Fatalf("job.Command = %q, want /bin/echo", job.Command)
+	}
+	if len(job.Args) != 1 || job.Args[0] != "hi" {
+		t.Fatalf("job.Args = %v, want [hi]", job.Args)
 	}
 }
 
 func TestRequiresApproval_AlwaysTrue(t *testing.T) {
-	tl := New(func() string { return "" })
+	tl := New(nilStore())
 	if !tl.RequiresApproval(nil) {
 		t.Fatal("RequiresApproval(nil) = false, want true")
 	}
@@ -82,7 +102,7 @@ func TestRequiresApproval_AlwaysTrue(t *testing.T) {
 }
 
 func TestApprovalSummary(t *testing.T) {
-	tl := New(func() string { return "" })
+	tl := New(nilStore())
 
 	t.Run("cron", func(t *testing.T) {
 		got := tl.ApprovalSummary(map[string]any{
@@ -121,9 +141,8 @@ func TestApprovalSummary(t *testing.T) {
 }
 
 func TestInvoke_StampsNewJobUnconfirmed(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "jobs.yaml")
-	tl := New(func() string { return path })
+	s, prov := newStore(t)
+	tl := New(prov)
 
 	if _, err := tl.Invoke(context.Background(), map[string]any{
 		"name":    "held",
@@ -133,53 +152,44 @@ func TestInvoke_StampsNewJobUnconfirmed(t *testing.T) {
 		t.Fatalf("Invoke: %v", err)
 	}
 
-	// Round-trip the written YAML: the job must carry confirmed: false so the
-	// scheduler holds it back from auto-running.
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
+	job, ok := getJob(t, s, "held")
+	if !ok {
+		t.Fatal("job not stored")
 	}
-	if !strings.Contains(string(data), "confirmed: false") {
-		t.Fatalf("written jobs.yaml missing 'confirmed: false':\n%s", data)
-	}
-
-	jobs := loadJobs(t, path)
-	if !jobs["held"].AwaitingConfirmation() {
-		t.Fatalf("jobs[held].AwaitingConfirmation() = false, want true (Confirmed=%v)", jobs["held"].Confirmed)
+	if !job.AwaitingConfirmation() {
+		t.Fatalf("job.AwaitingConfirmation() = false, want true (Confirmed=%v)", job.Confirmed)
 	}
 }
 
 func TestInvoke_UpdatesExistingJob_PreservesOthers(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "jobs.yaml")
-	seed := []byte("jobs:\n  keep:\n    command: /bin/true\n  edit:\n    command: /bin/false\n")
-	if err := os.WriteFile(path, seed, 0o644); err != nil {
-		t.Fatalf("seed: %v", err)
+	s, prov := newStore(t)
+	ctx := context.Background()
+	if err := s.UpsertItem(ctx, config.SectionJob, "keep", config.JobProfile{Command: "/bin/true"}); err != nil {
+		t.Fatal(err)
 	}
-	tl := New(func() string { return path })
+	if err := s.UpsertItem(ctx, config.SectionJob, "edit", config.JobProfile{Command: "/bin/false"}); err != nil {
+		t.Fatal(err)
+	}
+	tl := New(prov)
 
-	res, err := tl.Invoke(context.Background(), map[string]any{
-		"name":    "edit",
-		"command": "/bin/echo",
-	})
+	res, err := tl.Invoke(ctx, map[string]any{"name": "edit", "command": "/bin/echo"})
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
-	r := res.(Result)
-	if r.Created {
+	if res.(Result).Created {
 		t.Fatal("Result.Created = true, want false on update")
 	}
-	jobs := loadJobs(t, path)
-	if jobs["edit"].Command != "/bin/echo" {
-		t.Fatalf("jobs[edit].Command = %q, want /bin/echo", jobs["edit"].Command)
+	if job, _ := getJob(t, s, "edit"); job.Command != "/bin/echo" {
+		t.Fatalf("job[edit].Command = %q, want /bin/echo", job.Command)
 	}
-	if jobs["keep"].Command != "/bin/true" {
-		t.Fatalf("jobs[keep] was clobbered: %+v", jobs["keep"])
+	if job, _ := getJob(t, s, "keep"); job.Command != "/bin/true" {
+		t.Fatalf("job[keep] was clobbered: %+v", job)
 	}
 }
 
 func TestInvoke_RejectsMissingFields(t *testing.T) {
-	tl := New(func() string { return filepath.Join(t.TempDir(), "jobs.yaml") })
+	_, prov := newStore(t)
+	tl := New(prov)
 	cases := []map[string]any{
 		{},
 		{"name": "x"},
@@ -194,7 +204,7 @@ func TestInvoke_RejectsMissingFields(t *testing.T) {
 }
 
 func TestResult_String(t *testing.T) {
-	r := Result{Name: "demo", Path: "/tmp/jobs.yaml", Created: true}
+	r := Result{Name: "demo", Created: true}
 	got := r.String()
 	if !strings.Contains(got, "created") || !strings.Contains(got, "demo") {
 		t.Fatalf("String() = %q, want it to mention created + demo", got)
