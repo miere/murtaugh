@@ -75,15 +75,14 @@ func BootstrapWithReport(configPath string, force bool) (BootstrapReport, error)
 		return report, fmt.Errorf("create config dir %q: %w", baseDir, err)
 	}
 
-	// Config files and workspace docs are seeded once and then preserved —
-	// they carry the user's tokens and edits.
+	// The bootstrap file (gateway.yaml: oauth + database) and the credentials
+	// template are seeded once and then preserved. The former sibling config
+	// files (agents.yaml, jobs.yaml, journal.yaml, workflow-rules.yaml,
+	// unfurl-rules.yaml) are NO LONGER seeded: that configuration lives in the
+	// database now and is managed via `murtaugh cfg …`. On an UPGRADE the real
+	// siblings still exist on disk and are auto-migrated into the store.
 	plan := []struct{ src, dst string }{
 		{"gateway.yaml", configPath},
-		{"agents.yaml", filepath.Join(baseDir, "agents.yaml")},
-		{"jobs.yaml", filepath.Join(baseDir, "jobs.yaml")},
-		{"journal.yaml", filepath.Join(baseDir, "journal.yaml")},
-		{"workflow-rules.yaml", filepath.Join(baseDir, "workflow-rules.yaml")},
-		{"unfurl-rules.yaml", filepath.Join(baseDir, "unfurl-rules.yaml")},
 		// Seed a template .env (from the non-dotfile asset env.example) so a
 		// fresh install has the credentials file to fill in. preserveExisting
 		// means a real .env is never clobbered.
