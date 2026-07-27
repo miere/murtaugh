@@ -28,9 +28,17 @@ sections below assume them.
 
 - **Global flag `--config PATH`** — path to `gateway.yaml`. Default
   `~/.config/murtaugh/gateway.yaml`. Accepts `--config PATH` or `--config=PATH`.
-  Its sibling files `agents.yaml`, `jobs.yaml`, `journal.yaml`,
-  `workflow-rules.yaml`, and `unfurl-rules.yaml` are resolved from the same
-  directory.
+  `gateway.yaml` is slimmed to two blocks — `oauth:` (Slack tokens, referenced
+  as `${VAR}`) and `database:` (the config-store backend) — plus its sibling
+  `.env` (all secrets). Everything else — agents, MCP servers, jobs, chat
+  routing, access, journal, troubleshoot, workflow/unfurl rules, runtime
+  defaults — lives in the **config store** (a SQLite DB by default at
+  `~/.local/state/murtaugh/config.db`, or Postgres), managed with the
+  `murtaugh cfg …` commands (also exposed over MCP as `cfg.*` tools). The old
+  hand-edited siblings (`agents.yaml`, `jobs.yaml`, `journal.yaml`,
+  `workflow-rules.yaml`, `unfurl-rules.yaml`, `troubleshoot.yaml`) no longer
+  exist; on upgrade an existing set is auto-migrated into the store on first
+  run and archived to `~/.config/murtaugh/migrated-<timestamp>/`.
 - **Flags take values; there are no positional arguments.** Every flag is
   `--flag value`. There is no `--flag=value` form for tool flags (only the
   global `--config` accepts `=`).
@@ -93,13 +101,13 @@ murtaugh ping
 
 ## murtaugh jobs run
 
-Run a job previously defined in `jobs.yaml`, by name. The job's command runs
-with its configured args/workdir/timeout; child stdout/stderr stream to your
-terminal (and are captured into the JSON result over MCP).
+Run a job previously defined in the config store, by name. The job's command
+runs with its configured args/workdir/timeout; child stdout/stderr stream to
+your terminal (and are captured into the JSON result over MCP).
 
-| Flag     | Required | Type   | Notes                                   |
-|----------|----------|--------|-----------------------------------------|
-| `--name` | yes      | string | Job key as it appears in `jobs.yaml`.   |
+| Flag     | Required | Type   | Notes                                       |
+|----------|----------|--------|---------------------------------------------|
+| `--name` | yes      | string | Job key as registered in the config store.  |
 
 - Default timeout is **10 minutes** when the job has no `timeout` set.
 - Exit code is reported in the result; a non-zero exit is **not** a CLI error
@@ -112,8 +120,9 @@ murtaugh jobs run --name nightly-backup
 
 ## murtaugh jobs define
 
-Register a new job, or update an existing one, in `jobs.yaml`. Does **not** run
-the job — use `jobs run` for that. Unrelated jobs in the file are preserved.
+Register a new job, or update an existing one, in the config store. Does **not**
+run the job — use `jobs run` for that. Unrelated jobs are preserved. (`cfg job
+set` is the equivalent under the unified `cfg` surface.)
 
 | Flag         | Required | Type            | Notes                                                                 |
 |--------------|----------|-----------------|-----------------------------------------------------------------------|
@@ -141,7 +150,8 @@ Read structured events back out of the **event journal** — the queryable recor
 of what Murtaugh did (gateway interactions, workflow rules, link unfurls, job
 runs). This is how Gateway Debug Mode answers "why did this interaction
 misbehave?". Distinct from the daemon's stderr logs: the journal is for filtered,
-correlated inspection. Configure it in `journal.yaml`.
+correlated inspection. Configure it in the config store (`cfg journal show` to
+inspect the current settings).
 
 All filters are optional and ANDed; results are most-recent-first.
 
@@ -173,7 +183,7 @@ murtaugh journal query --corr-id gw_3f9c2b1a
 
 Summarise the journal: row count and oldest/newest timestamp per stream. Every
 known stream is listed, including empty ones — a `0` count on `gateway` means
-Gateway Debug Mode is not recording (check `journal.yaml` and restart the
+Gateway Debug Mode is not recording (check `cfg journal show` and restart the
 daemon). Takes no flags.
 
 ```
@@ -182,9 +192,10 @@ murtaugh journal stats
 
 ## murtaugh journal prune
 
-Delete events older than each stream's configured retention (from `journal.yaml`)
-— a manual run of the sweep the gateway daemon performs automatically (on startup
-and every `sweep.every`). Takes no flags; uses the configured retention.
+Delete events older than each stream's configured retention (from the config
+store's journal settings) — a manual run of the sweep the gateway daemon
+performs automatically (on startup and every `sweep.every`). Takes no flags;
+uses the configured retention.
 
 ```
 murtaugh journal prune
@@ -293,10 +304,11 @@ murtaugh slack update-msg --channel "#deploys" --ts 1716950455.123456 \
 Start the Slack gateway: the long-running Socket Mode daemon. It responds to
 slash commands, runs YAML workflow rules against interactive payloads, bridges
 Slack conversations to an ACP agent with live streaming, renders custom link
-unfurls, and fires scheduled jobs. Configuration comes entirely from the config
-files (`gateway.yaml`, `agents.yaml`, `jobs.yaml`, `workflow-rules.yaml`,
-`unfurl-rules.yaml`); there are no tool flags. Stop it with SIGINT/SIGTERM.
-Normally run under launchd (see `setup launchd`).
+unfurls, and fires scheduled jobs. Configuration comes entirely from `gateway.yaml`
+(`oauth:` + `database:`), its sibling `.env`, and the config store the database
+block points at (agents, jobs, rules, chat routing, access, …); there are no
+tool flags. Stop it with SIGINT/SIGTERM. Normally run under launchd (see `setup
+launchd`).
 
 ```
 murtaugh slack gateway
@@ -314,22 +326,136 @@ this interactively expecting human output. Register it with a client via
 murtaugh mcp
 ```
 
+## murtaugh cfg
+
+Manage the **config store** — the SQLite (default) or Postgres database that
+holds everything except the Slack tokens and the store connection itself
+(agents, MCP servers, jobs, chat routing, access, runtime defaults, journal,
+troubleshoot, and workflow/unfurl rules). Every mutation writes the store and
+then re-validates the **whole** assembled config; a change that would produce an
+invalid config is rejected and rolled back, so the store is never left broken.
+The same commands are exposed over MCP as `cfg.*` tools. The runtime loads
+config once at startup — **restart the daemon to apply** any `cfg` change.
+
+Grouped below by entity. Collection entities (`agent`, `mcp`, `job`,
+`workflow-rule`, `unfurl-rule`) share the `set`/`list`/`show`/`delete` verbs
+keyed by `--name`; singletons (`chat`, `access`, `defaults`, `journal`,
+`troubleshoot`) are edited/read in place.
+
+### Agents (`cfg agent`)
+
+```
+murtaugh cfg agent create --name <n> --type <native|acp|claude_code> [flags]
+murtaugh cfg agent update --name <n> [flags]
+murtaugh cfg agent list
+murtaugh cfg agent show   --name <n>
+murtaugh cfg agent delete --name <n>
+```
+
+Same backend fields as `setup agents` (provider/model/api-key-env/tools/…
+for native; command/args for acp). `--type claude_code` selects the direct
+Claude Code stream-json backend.
+
+### MCP servers (`cfg mcp`)
+
+```
+murtaugh cfg mcp set    --name <n> [...]
+murtaugh cfg mcp list
+murtaugh cfg mcp show   --name <n>
+murtaugh cfg mcp delete --name <n>
+```
+
+### Jobs (`cfg job`)
+
+```
+murtaugh cfg job set    --name <n> [--command --args --workdir --timeout --schedule|--every]
+murtaugh cfg job list
+murtaugh cfg job show   --name <n>
+murtaugh cfg job delete --name <n>
+```
+
+`cfg job set` is the store-native equivalent of `jobs define`; `jobs run`
+executes a job by name.
+
+### Chat routing (`cfg chat`) — singleton
+
+```
+murtaugh cfg chat set  [--enabled --default-agent --dm-agent --reply-on-thread]
+murtaugh cfg chat show
+```
+
+### Access (`cfg access`) — singleton
+
+```
+murtaugh cfg access set  [--admin-user --allowed-users <u> (repeat) --debug]
+murtaugh cfg access show
+```
+
+### Workflow & unfurl rules (`cfg workflow-rule`, `cfg unfurl-rule`)
+
+Rules are authored as YAML and loaded whole from a file (the rule shape is
+unchanged; only its home moved into the store).
+
+```
+murtaugh cfg workflow-rule set    --name <n> --from-file <rule.yaml>
+murtaugh cfg workflow-rule list
+murtaugh cfg workflow-rule show   --name <n>
+murtaugh cfg workflow-rule delete --name <n>
+
+murtaugh cfg unfurl-rule set    --name <n> --from-file <rule.yaml>
+murtaugh cfg unfurl-rule list
+murtaugh cfg unfurl-rule show   --name <n>
+murtaugh cfg unfurl-rule delete --name <n>
+```
+
+### Read-only views (singletons)
+
+```
+murtaugh cfg defaults show       # runtime defaults
+murtaugh cfg journal show        # journal streams, retention, sweep cadence
+murtaugh cfg troubleshoot show   # default diagnostics providers
+```
+
+### Store-wide operations
+
+```
+murtaugh cfg show                # the whole assembled config
+murtaugh cfg validate            # validate the store's config without changing it
+murtaugh cfg export [--file <path>]   # dump the store (stdout, or a file)
+murtaugh cfg import --file <path>     # load a previously exported store
+murtaugh cfg db migrate --to <postgres|sqlite> [--dsn-env <VAR>|--sqlite-path <path>]
+```
+
+`cfg db migrate` copies the current store into the target backend and rewrites
+the `database:` block of `gateway.yaml` to point at it. For Postgres, pass
+`--dsn-env` naming the `.env` variable that holds the DSN (e.g.
+`--dsn-env MURTAUGH_DB_DSN`); the DSN itself is never written to YAML. For
+SQLite, `--sqlite-path` overrides the default `config.db` location.
+
+```
+murtaugh cfg agent create --name default --type native --provider gemini \
+  --model gemini-2.5-pro --api-key-env GEMINI_API_KEY --tools files --tools terminal
+murtaugh cfg access set --admin-user @miere --allowed-users @alex --allowed-users @sam
+murtaugh cfg workflow-rule set --name deploy-approve --from-file ./rules/deploy.yaml
+murtaugh cfg db migrate --to postgres --dsn-env MURTAUGH_DB_DSN
+```
+
 ## murtaugh setup bootstrap
 
-Seed the Murtaugh config directory with embedded defaults (`gateway.yaml`,
-`agents.yaml`, `jobs.yaml`, `workflow-rules.yaml`, `unfurl-rules.yaml`,
-`system-prompt.md`, Block Kit templates, bundled skills). Runs on every Murtaugh
-start, not just the first.
+Seed the Murtaugh config directory with embedded defaults (`gateway.yaml` with
+its `oauth:` + `database:` blocks, `.env`, `system-prompt.md`, Block Kit
+templates, bundled skills). The config store itself is seeded on first run;
+everything else (agents, jobs, rules, …) is created there via `cfg …` and the
+`setup` tools, not as YAML siblings. Runs on every Murtaugh start, not just the
+first.
 
 | Flag      | Required | Type    | Notes                                                              |
 |-----------|----------|---------|-------------------------------------------------------------------|
 | `--force` | no       | boolean | Refresh the bundled default `system-prompt.md` to the shipped version. |
 
-- **Config files and templates** (`gateway.yaml`, `agents.yaml`, `jobs.yaml`,
-  `workflow-rules.yaml`, `unfurl-rules.yaml`, `templates/`) and **`AGENTS.md`**
-  (the agent's identity) are created once and
-  then **preserved** — your tokens, edits, and chosen persona are never
-  overwritten, even with `--force`.
+- **`gateway.yaml`, `.env`, templates** (`templates/`) and **`AGENTS.md`** (the
+  agent's identity) are created once and then **preserved** — your tokens,
+  edits, and chosen persona are never overwritten, even with `--force`.
 - **`system-prompt.md`** (the default base prompt) is created once and preserved,
   but `--force` refreshes it to the version shipped with the binary.
 - **Bundled skills** (`.agents/skills/`) are **refreshed** to the shipped version
@@ -346,18 +472,19 @@ murtaugh setup bootstrap --force true   # refresh the default system prompt
 
 ## murtaugh setup slack
 
-Write `gateway.yaml` (admin user and the `/murtaugh` slash command) and store the
-Slack tokens in `~/.config/murtaugh/.env`. The YAML references them as
-`${SLACK_APP_TOKEN}` / `${SLACK_BOT_TOKEN}`, so the tokens never live in a file
-the troubleshoot bundler collects. Both `gateway.yaml` and `.env` are backed up
-before being replaced/merged.
+Write the `oauth:` block of `gateway.yaml` (preserving its `database:` block) and
+store the Slack tokens in `~/.config/murtaugh/.env`; the admin user and chat
+routing go into the **config store** (`access` + `chat`). The YAML references the
+tokens as `${SLACK_APP_TOKEN}` / `${SLACK_BOT_TOKEN}`, so they never live in a
+file the troubleshoot bundler collects. Both `gateway.yaml` and `.env` are backed
+up before being replaced/merged.
 
 | Flag              | Required | Type   | Notes                                                       |
 |-------------------|----------|--------|-------------------------------------------------------------|
 | `--app-token`     | yes      | string | Slack app-level token; must start with `xapp-`. Stored in `.env`. |
 | `--bot-token`     | yes      | string | Slack bot OAuth token; must start with `xoxb-`. Stored in `.env`. |
-| `--admin-user`    | yes      | string | Admin handle (`@name`) or user ID (`U…`).                   |
-| `--default-agent` | no       | string | `agents.yaml` key to wire into `chat.defaults.agent`.       |
+| `--admin-user`    | yes      | string | Admin handle (`@name`) or user ID (`U…`). Written to the store's `access`. |
+| `--default-agent` | no       | string | Store agent key to wire into the store's `chat.defaults.agent`. |
 
 ```
 murtaugh setup slack --app-token xapp-… --bot-token xoxb-… --admin-user @miere
@@ -366,9 +493,10 @@ murtaugh setup slack --app-token xapp-… --bot-token xoxb-… --admin-user @mie
 ## murtaugh setup env
 
 Upsert `KEY=VALUE` secrets into `~/.config/murtaugh/.env`, preserving existing
-entries and comments. This is where LLM provider API keys live; `agents.yaml`
-references them by name via `api_key_env`. The file is backed up before being
-merged. Output reports key **names** only — never the secret values.
+entries and comments. This is where all secrets live — LLM provider API keys
+(store agents reference them by name via `api_key_env`), Slack tokens, and the
+Postgres DSN. The file is backed up before being merged. Output reports key
+**names** only — never the secret values.
 
 | Flag    | Required | Type            | Notes                                   |
 |---------|----------|-----------------|-----------------------------------------|
@@ -380,14 +508,14 @@ murtaugh setup env --set GEMINI_API_KEY=AIza… --set VAULTRE_TOKEN=…
 
 ## murtaugh setup agents
 
-Write `agents.yaml` with the runtime `defaults` block and a single named agent.
+Write the runtime `defaults` and a single named agent into the **config store**.
 Supports both backends: a **native** LLM agent (the default — Murtaugh talks to
-the model directly, configured under a `native:` block) and an external **ACP**
-agent (under an `acp:` block). The backend is inferred from the flags when
-`--kind` is omitted: `--provider` ⇒ native, `--command` ⇒ acp. With no agent flags the file is
-written with chat disabled. Secrets are never written here — a native profile
-records `--api-key-env` (the `.env` variable name); set the value with
-`setup env`.
+the model directly) and an external **ACP** agent. The backend is inferred from
+the flags when `--kind` is omitted: `--provider` ⇒ native, `--command` ⇒ acp.
+With no agent flags chat is left disabled. Secrets are never written to the
+store — a native agent records `--api-key-env` (the `.env` variable name); set
+the value with `setup env`. (`cfg agent create|update` is the equivalent under
+the unified `cfg` surface.)
 
 | Flag                   | Required | Type            | Notes                                                             |
 |------------------------|----------|-----------------|------------------------------------------------------------------|
@@ -428,10 +556,10 @@ Target files: `opencode` → `~/.config/opencode/opencode.json`; `auggie` →
 `~/.augment/settings.json`; `goose` → `~/.config/goose/config.yaml`.
 
 When the client is also a provider Murtaugh can collect diagnostics for (today
-`goose`), it is recorded in `troubleshoot.yaml` so `troubleshoot bundle` and
-`/murtaugh troubleshoot` include that provider's sessions/logs **by default**
-(no `--include` needed). Recording is best-effort — a failure there only adds a
-warning, it does not fail the client registration.
+`goose`), it is recorded in the config store's `troubleshoot` settings so
+`troubleshoot bundle` and `/murtaugh troubleshoot` include that provider's
+sessions/logs **by default** (no `--include` needed). Recording is best-effort —
+a failure there only adds a warning, it does not fail the client registration.
 
 ```
 murtaugh setup mcp-register --client opencode --binary-path /usr/local/bin/murtaugh
@@ -485,7 +613,7 @@ never asks an agent to gather the files.
 | Flag             | Required | Type            | Notes                                                                          |
 |------------------|----------|-----------------|--------------------------------------------------------------------------------|
 | `--note`         | no       | string          | Symptom description; recorded in the manifest.                                 |
-| `--include`      | no       | string (repeat) | Provider whose on-disk diagnostics to add (known: `goose`). Repeat per provider. Defaults to the providers in `troubleshoot.yaml` (written by `setup mcp-register`), else all known providers.|
+| `--include`      | no       | string (repeat) | Provider whose on-disk diagnostics to add (known: `goose`). Repeat per provider. Defaults to the providers in the store's `troubleshoot` settings (written by `setup mcp-register`), else all known providers.|
 | `--out`          | no       | string          | Output path for the zip. Defaults to a timestamped file in the temp dir.       |
 | `--max-log-bytes`| no       | integer         | Tail cap per log file in bytes. Defaults to 5 MiB.                             |
 | `--redact`       | no       | boolean         | Redact known secrets. Defaults to `true`; only set `false` for local-only use. |

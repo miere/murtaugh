@@ -7,10 +7,12 @@
 # downloading + version-comparing + atomically replacing the binary, and
 # restarting the LaunchAgent when one was previously loaded.
 #
-# Everything else — writing gateway.yaml, agents.yaml, dev.murtaugh.plist, and
-# MCP client config — is delegated to the freshly-installed binary via
-# `murtaugh setup ...` tools, which share the exact same code path the CLI
-# and MCP frontends use. See internal/tools/setup/* for the implementations.
+# Everything else — writing gateway.yaml (oauth + database blocks), seeding the
+# config store (agents, chat routing, access) via `murtaugh cfg`/`setup`,
+# dev.murtaugh.plist, and MCP client config — is delegated to the
+# freshly-installed binary via `murtaugh setup ...` tools, which share the exact
+# same code path the CLI and MCP frontends use. See internal/tools/setup/* for
+# the implementations.
 
 set -euo pipefail
 
@@ -408,8 +410,8 @@ binary_supports_setup() {
 }
 
 # api_key_env_for maps a provider to the .env variable name that holds its key.
-# agents.yaml references the agent's credential by this name (api_key_env), so the
-# key value never lives in YAML.
+# The stored agent references its credential by this name (api_key_env), so the
+# key value never lives in the config store — only in .env.
 api_key_env_for() {
   case "$1" in
     gemini) printf 'GEMINI_API_KEY' ;;
@@ -504,10 +506,11 @@ restart_launch_agent_if_needed() {
   log "Restarted LaunchAgent dev.murtaugh"
 }
 
-# write_slack_config delegates gateway.yaml writing to `murtaugh setup slack`.
-# The agents.yaml write is paired here so the daemon never sees an
-# inconsistent intermediate state where one file points at an agent the other
-# doesn't define.
+# write_slack_config delegates the oauth block of gateway.yaml (plus the admin
+# user and chat routing, which go into the config store) to `murtaugh setup
+# slack`. The agent write (`setup agents`, also into the store) is paired here
+# so the daemon never sees an inconsistent intermediate state where chat routing
+# points at an agent that isn't defined yet.
 write_slack_config() {
   local bin=$1 app=$2 bot=$3 admin=$4 chat_choice=$5 chat_cmd=$6
   shift 6
@@ -517,8 +520,8 @@ write_slack_config() {
   fi
   "$bin" "${setup_args[@]}" >&2
 
-  # Native agent: write the provider key to .env, then a native profile that
-  # references it. No external binary, no ACP.
+  # Native agent: write the provider key to .env, then a native agent into the
+  # store that references it by name. No external binary, no ACP.
   if [[ "$chat_choice" == "native" ]]; then
     "$bin" setup env --set "${NATIVE_API_KEY_ENV}=${NATIVE_API_KEY}" >&2
     "$bin" setup agents --provider "$NATIVE_PROVIDER" --model "$NATIVE_MODEL" \
@@ -607,12 +610,15 @@ main() {
     die "the installed Murtaugh (${installed_bin}) does not support 'setup' yet. Upgrade to a release that includes the setup tools, or pass --skip-config to update the binary only."
   fi
 
-  local config_dir gateway_yaml agents_yaml has_config
+  # gateway.yaml is the single on-disk config file on a fresh install (agents,
+  # jobs, and rules now live in the config store, not YAML siblings). An older
+  # install that still has YAML siblings gets them auto-migrated into the store
+  # by the binary on first run, so gateway.yaml is a sufficient existence check.
+  local config_dir gateway_yaml has_config
   config_dir="$HOME/.config/murtaugh"
   gateway_yaml="$config_dir/gateway.yaml"
-  agents_yaml="$config_dir/agents.yaml"
   has_config=0
-  [[ -f "$gateway_yaml" || -f "$agents_yaml" ]] && has_config=1
+  [[ -f "$gateway_yaml" ]] && has_config=1
 
   local app_token bot_token admin_user chat_choice chat_command=""
   local -a chat_args=()
@@ -652,7 +658,7 @@ main() {
     chmod 700 "$config_dir" 2>/dev/null || true
 
     if [[ "$DRY_RUN" -eq 1 ]]; then
-      log "[DRY-RUN] Would write ${gateway_yaml} and ${agents_yaml}"
+      log "[DRY-RUN] Would write ${gateway_yaml} and seed the config store"
     else
       # Seed embedded defaults first so skills/ + docs land before the
       # user-provided slack/agents writes overlay on top. On --reconfigure also
@@ -662,8 +668,8 @@ main() {
       [[ "$RECONFIGURE" -eq 1 ]] && boot_args+=(--force true)
       "$installed_bin" "${boot_args[@]}" >&2
       write_slack_config "$installed_bin" "$app_token" "$bot_token" "$admin_user" "$chat_choice" "$chat_command" ${chat_args[@]+"${chat_args[@]}"}
-      log "Wrote Slack config to ${gateway_yaml}"
-      log "Wrote agent config to ${agents_yaml}"
+      log "Wrote Slack oauth config to ${gateway_yaml}"
+      log "Seeded access, chat routing, and the agent into the config store"
     fi
   fi
 
