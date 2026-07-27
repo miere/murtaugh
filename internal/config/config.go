@@ -21,18 +21,22 @@ const defaultJobsRelativePath = ".config/murtaugh/jobs.yaml"
 const defaultJournalRelativePath = ".config/murtaugh/journal.yaml"
 
 type Config struct {
-	BaseDir       string                        `yaml:"-"`
-	OAuth         OAuthConfig                   `yaml:"oauth"`
-	Access        AccessConfig                  `yaml:"access"`
-	Chat          ChatConfig                    `yaml:"chat"`
-	Defaults      RuntimeDefaults               `yaml:"-"`
-	Agents        map[string]AgentProfile       `yaml:"-"`
-	MCPServers    map[string]MCPServerConfig    `yaml:"-"`
-	Jobs          map[string]JobProfile         `yaml:"-"`
-	Journal       JournalConfig                 `yaml:"-"`
-	Troubleshoot  TroubleshootConfig            `yaml:"-"`
-	WorkflowRules map[string]WorkflowRuleConfig `yaml:"-"`
-	UnfurlRules   map[string]UnfurlRuleConfig   `yaml:"-"`
+	BaseDir string      `yaml:"-" json:"-"`
+	OAuth   OAuthConfig `yaml:"oauth" json:"oauth"`
+	// Database is the config-store backend selection, parsed from the bootstrap
+	// gateway.yaml. It is the only non-credential block that stays on disk; every
+	// other section below is sourced from the store it points at.
+	Database      DatabaseConfig                `yaml:"database" json:"-"`
+	Access        AccessConfig                  `yaml:"access" json:"access"`
+	Chat          ChatConfig                    `yaml:"chat" json:"chat"`
+	Defaults      RuntimeDefaults               `yaml:"-" json:"-"`
+	Agents        map[string]AgentProfile       `yaml:"-" json:"-"`
+	MCPServers    map[string]MCPServerConfig    `yaml:"-" json:"-"`
+	Jobs          map[string]JobProfile         `yaml:"-" json:"-"`
+	Journal       JournalConfig                 `yaml:"-" json:"-"`
+	Troubleshoot  TroubleshootConfig            `yaml:"-" json:"-"`
+	WorkflowRules map[string]WorkflowRuleConfig `yaml:"-" json:"-"`
+	UnfurlRules   map[string]UnfurlRuleConfig   `yaml:"-" json:"-"`
 }
 
 // TroubleshootConfig is the machine-managed troubleshoot.yaml sibling. It
@@ -40,33 +44,33 @@ type Config struct {
 // include by default. setup.mcp-register appends to Providers when it registers
 // Murtaugh into a client that is also a known diagnostics provider (e.g. goose).
 type TroubleshootConfig struct {
-	Providers []string `yaml:"providers"`
+	Providers []string `yaml:"providers" json:"providers,omitempty"`
 }
 
 type OAuthConfig struct {
-	AppToken string `yaml:"app_token"`
-	BotToken string `yaml:"bot_token"`
+	AppToken string `yaml:"app_token" json:"app_token"`
+	BotToken string `yaml:"bot_token" json:"bot_token"`
 	// UserToken is the admin's Slack user token (xoxp-…) carrying the
 	// user-scope chat:write. It is optional; when set it enables posting
 	// "as admin" so a message shows the admin's real identity instead of
 	// the app/bot.
-	UserToken string `yaml:"user_token"`
+	UserToken string `yaml:"user_token" json:"user_token"`
 }
 
 type AccessConfig struct {
-	AdminUser    string   `yaml:"admin_user"`
-	AllowedUsers []string `yaml:"allowed_users"`
-	Debug        bool     `yaml:"debug"`
+	AdminUser    string   `yaml:"admin_user" json:"admin_user"`
+	AllowedUsers []string `yaml:"allowed_users" json:"allowed_users,omitempty"`
+	Debug        bool     `yaml:"debug" json:"debug"`
 }
 
 type ChatConfig struct {
 	// Enabled gates the Slack chat surface: DM and @mention replies. It does NOT
 	// gate agent delegation (jobs, workflow rules, unfurls) — those run whenever
 	// the target agent is defined, independent of the chat surface.
-	Enabled bool `yaml:"enabled"`
+	Enabled bool `yaml:"enabled" json:"enabled"`
 	// Defaults holds the global chat routing/reply defaults: the fallback agent,
 	// the DM agent, and the default reply strategy.
-	Defaults ChatDefaults `yaml:"defaults"`
+	Defaults ChatDefaults `yaml:"defaults" json:"defaults"`
 	// Channels routes a channel to a specific agent and/or reply strategy. Each
 	// key is either an exact Slack channel ID (C…/G…, for back-compat) or a
 	// channel-NAME glob that may contain `*` (e.g. "feature-*", "*-prod"),
@@ -75,35 +79,35 @@ type ChatConfig struct {
 	// gateway.matchChannel). A matched entry whose agent is empty falls back to
 	// Defaults.Agent; an unset reply_on_thread falls back to
 	// Defaults.ReplyOnThread.
-	Channels map[string]ChannelConfig `yaml:"channels"`
+	Channels map[string]ChannelConfig `yaml:"channels" json:"channels,omitempty"`
 	// NoMention waives the @mention requirement for listed users (both the
 	// everywhere list and the per-channel map). It waives the mention
 	// requirement only — listed users must still pass IsAllowedUser.
-	NoMention NoMentionConfig `yaml:"no_mention"`
+	NoMention NoMentionConfig `yaml:"no_mention" json:"no_mention"`
 }
 
 // ChatDefaults are the global chat routing/reply defaults.
 type ChatDefaults struct {
 	// Agent is the fallback agent for any channel without a matching Channels
 	// entry. Required when chat is enabled.
-	Agent string `yaml:"agent"`
+	Agent string `yaml:"agent" json:"agent"`
 	// DMAgent routes direct messages; falls back to Agent when empty.
-	DMAgent string `yaml:"dm_agent"`
+	DMAgent string `yaml:"dm_agent" json:"dm_agent"`
 	// ReplyOnThread sets the default reply strategy: true (the default when
 	// omitted) makes the bot root a thread on each new top-level channel message;
 	// false makes it reply directly in the channel. A pointer so an omitted value
 	// (→ default true) is distinct from an explicit false.
-	ReplyOnThread *bool `yaml:"reply_on_thread"`
+	ReplyOnThread *bool `yaml:"reply_on_thread" json:"reply_on_thread,omitempty"`
 }
 
 // ChannelConfig is a per-channel routing/reply override.
 type ChannelConfig struct {
 	// Agent routes this channel to a specific agent; empty falls back to
 	// ChatDefaults.Agent.
-	Agent string `yaml:"agent"`
+	Agent string `yaml:"agent" json:"agent"`
 	// ReplyOnThread overrides ChatDefaults.ReplyOnThread for this channel; nil
 	// (omitted) inherits the default.
-	ReplyOnThread *bool `yaml:"reply_on_thread"`
+	ReplyOnThread *bool `yaml:"reply_on_thread" json:"reply_on_thread,omitempty"`
 }
 
 // EffectiveReplyOnThread resolves the global default reply strategy: an omitted
@@ -121,54 +125,54 @@ func (d ChatDefaults) EffectiveReplyOnThread() bool {
 // is ID-only.
 type NoMentionConfig struct {
 	// Everywhere applies in every channel.
-	Everywhere []string `yaml:"everywhere"`
+	Everywhere []string `yaml:"everywhere" json:"everywhere,omitempty"`
 	// ByChannel applies per channel; keys use the same channel-ID/channel-NAME
 	// glob syntax as ChannelAgents (e.g. "feature-*"). The effective no-mention
 	// set for a channel is the union of Everywhere and the values of every
 	// pattern whose glob matches the channel.
-	ByChannel map[string][]string `yaml:"by_channel"`
+	ByChannel map[string][]string `yaml:"by_channel" json:"by_channel,omitempty"`
 }
 
 // RuntimeDefaults are the agent-runtime defaults applied to every agent, split
 // by the concern each knob serves. Parsed from the agents.yaml `defaults:` block.
 type RuntimeDefaults struct {
-	Session   SessionDefaults   `yaml:"session"`
-	Rendering RenderingDefaults `yaml:"rendering"`
-	ACP       ACPDefaults       `yaml:"acp"`
+	Session   SessionDefaults   `yaml:"session" json:"session"`
+	Rendering RenderingDefaults `yaml:"rendering" json:"rendering"`
+	ACP       ACPDefaults       `yaml:"acp" json:"acp"`
 	// Approval is the global default approval policy, overridden per agent.
-	Approval ApprovalConfig `yaml:"approval"`
+	Approval ApprovalConfig `yaml:"approval" json:"approval"`
 }
 
 // SessionDefaults tune chat-session lifecycle (both backends).
 type SessionDefaults struct {
-	IdleTimeout string `yaml:"idle_timeout"`
+	IdleTimeout string `yaml:"idle_timeout" json:"idle_timeout"`
 	// RequestTimeout bounds a chat turn by INACTIVITY, not total wall-clock: the
 	// timer resets on every chunk or task update the agent emits, so a long turn
 	// that keeps making progress is never killed mid-flight. Only an agent that
 	// goes silent for this long is treated as stalled.
-	RequestTimeout string `yaml:"request_timeout"`
+	RequestTimeout string `yaml:"request_timeout" json:"request_timeout"`
 	// LongRunningToolTimeout bounds how long a SINGLE tool call may hold a turn
 	// before the turn is failed. Unlike RequestTimeout this is a total-duration
 	// cap, not an inactivity one: while a tool runs a heartbeat keeps the turn
 	// alive (so request_timeout never trips), and this is what stops a wedged tool.
 	// Empty takes a 1h default. Applies to ACP agents (native tools are in-process).
-	LongRunningToolTimeout string `yaml:"long_running_tool_timeout"`
-	MaxConcurrent          int    `yaml:"max_concurrent"`
+	LongRunningToolTimeout string `yaml:"long_running_tool_timeout" json:"long_running_tool_timeout"`
+	MaxConcurrent          int    `yaml:"max_concurrent" json:"max_concurrent"`
 }
 
 // RenderingDefaults tune how a streaming turn renders in Slack (both backends).
 type RenderingDefaults struct {
 	// ProgressDisplay is the default rendering for tool/step progress across all
 	// agents. Empty means simplified. Per-agent profiles may override it.
-	ProgressDisplay      string `yaml:"progress_display"`
-	StreamMinChunkChars  int    `yaml:"stream_min_chunk_chars"`
-	StreamAppendInterval string `yaml:"stream_append_interval"`
+	ProgressDisplay      string `yaml:"progress_display" json:"progress_display"`
+	StreamMinChunkChars  int    `yaml:"stream_min_chunk_chars" json:"stream_min_chunk_chars"`
+	StreamAppendInterval string `yaml:"stream_append_interval" json:"stream_append_interval"`
 }
 
 // ACPDefaults tune the ACP child-process lifecycle (native agents ignore these).
 type ACPDefaults struct {
-	StartupTimeout    string `yaml:"startup_timeout"`
-	CancelGracePeriod string `yaml:"cancel_grace_period"`
+	StartupTimeout    string `yaml:"startup_timeout" json:"startup_timeout"`
+	CancelGracePeriod string `yaml:"cancel_grace_period" json:"cancel_grace_period"`
 }
 
 // ProgressDisplay selects how an agent's tool/step progress renders in Slack
@@ -213,16 +217,16 @@ type ApprovalConfig struct {
 	//   "off"                 — never ask (the pre-gate behaviour)
 	// Gating is only active in a Slack chat (where there is a human to ask);
 	// headless runs (scheduled jobs, delegated agents) are never gated.
-	Terminal string `yaml:"terminal"`
+	Terminal string `yaml:"terminal" json:"terminal"`
 	// Allow extends the built-in read-only allowlist with extra command keys:
 	// an argv0 ("kubectl") or a "binary subcommand" pair ("docker ps").
-	Allow []string `yaml:"allow"`
+	Allow []string `yaml:"allow" json:"allow,omitempty"`
 	// Requests governs how an ACP agent's own permission requests
 	// (session/request_permission) are answered: "ask" (default — route to a
 	// human in the Slack thread), "auto-allow", or "auto-deny". Headless/CLI
 	// callers have no human, so "ask" there denies; set "auto-allow" for
 	// unattended ACP automation. Unused by native agents.
-	Requests string `yaml:"requests"`
+	Requests string `yaml:"requests" json:"requests"`
 }
 
 // AgentProfile defines one agent. Shared knobs live at the top; the backend is
@@ -232,11 +236,11 @@ type ApprovalConfig struct {
 type AgentProfile struct {
 	// WorkDir roots the agent: the files/terminal tools for a native agent, or
 	// the spawned process's cwd for an ACP agent.
-	WorkDir string `yaml:"workdir"`
+	WorkDir string `yaml:"workdir" json:"workdir"`
 	// Tools is the allowlist of registry/native tool groups exposed to this
 	// agent (e.g. "files", "terminal", "skills", "slack", "jobs"). Empty means
 	// no tools beyond the always-on set the toolset resolver decides.
-	Tools []string `yaml:"tools"`
+	Tools []string `yaml:"tools" json:"tools,omitempty"`
 	// ExportSkillsToFS lists bundled (murtaugh-*) skills to write into this
 	// agent's workdir so an external, filesystem-discovering agent (e.g. a
 	// Claude-based ACP backend) can load them. Empty (the default) keeps the
@@ -246,26 +250,26 @@ type AgentProfile struct {
 	// skills are (re)written and any previously-exported murtaugh-* skill not
 	// listed is removed (bespoke skills are never touched). Exporting a skill
 	// opts it out of the in-binary blind for this agent.
-	ExportSkillsToFS []string `yaml:"export_skills_to_fs"`
+	ExportSkillsToFS []string `yaml:"export_skills_to_fs" json:"export_skills_to_fs,omitempty"`
 	// MCPServers names additional MCP servers (defined in the top-level
 	// mcp_servers block) to attach to this agent on top of the authoritative
 	// global set. Empty attaches just the global set; names must exist.
-	MCPServers []string `yaml:"mcp_servers"`
+	MCPServers []string `yaml:"mcp_servers" json:"mcp_servers,omitempty"`
 	// Approval governs tool-call approvals for whichever backend applies (the
 	// terminal gate for native, request answering for ACP). Empty defaults to
 	// allowlist (native gating on) / ask (ACP).
-	Approval ApprovalConfig `yaml:"approval"`
+	Approval ApprovalConfig `yaml:"approval" json:"approval"`
 	// ProgressDisplay overrides the global rendering default for this agent.
 	// Empty inherits it (which itself defaults to simplified).
-	ProgressDisplay string `yaml:"progress_display"`
+	ProgressDisplay string `yaml:"progress_display" json:"progress_display"`
 
 	// Native carries the in-process backend config; non-nil selects kind native.
-	Native *NativeProfile `yaml:"native"`
+	Native *NativeProfile `yaml:"native" json:"native,omitempty"`
 	// ACP carries the external-process backend config; non-nil selects kind acp.
-	ACP *ACPProfile `yaml:"acp"`
+	ACP *ACPProfile `yaml:"acp" json:"acp,omitempty"`
 	// ClaudeCode carries the direct Claude Code stream-json backend config;
 	// non-nil selects kind claude_code. Experimental (spec 019).
-	ClaudeCode *ClaudeCodeProfile `yaml:"claude_code"`
+	ClaudeCode *ClaudeCodeProfile `yaml:"claude_code" json:"claude_code,omitempty"`
 }
 
 // NativeProfile is the in-process LLM backend config (the `native:` sub-block).
@@ -273,53 +277,53 @@ type NativeProfile struct {
 	// Provider selects the litellm provider family: "gemini", "anthropic"
 	// (Anthropic-compatible, incl. base_url overrides), or "openai"
 	// (OpenAI-compatible, incl. GLM/DeepSeek/Kimi via base_url).
-	Provider string `yaml:"provider"`
+	Provider string `yaml:"provider" json:"provider"`
 	// Model is the provider model id (e.g. "gemini-2.5-pro", "glm-4.6").
-	Model string `yaml:"model"`
+	Model string `yaml:"model" json:"model"`
 	// BaseURL overrides the provider endpoint for compatible third parties
 	// (Z.ai, DeepSeek, Kimi, self-hosted). Empty uses the provider default.
-	BaseURL string `yaml:"base_url"`
+	BaseURL string `yaml:"base_url" json:"base_url"`
 	// APIKeyEnv names the environment variable (loaded from ~/.config/murtaugh/.env)
 	// holding the provider credential. The key value itself never lives in YAML.
-	APIKeyEnv string `yaml:"api_key_env"`
+	APIKeyEnv string `yaml:"api_key_env" json:"api_key_env"`
 	// SystemPrompt is the inline system prompt. Mutually exclusive with
 	// SystemPromptFile; when both are empty the loop uses a built-in default.
-	SystemPrompt string `yaml:"system_prompt"`
+	SystemPrompt string `yaml:"system_prompt" json:"system_prompt"`
 	// SystemPromptFile is a path (resolved against the config dir) to a file
 	// holding the system prompt. Mutually exclusive with SystemPrompt.
-	SystemPromptFile string `yaml:"system_prompt_file"`
+	SystemPromptFile string `yaml:"system_prompt_file" json:"system_prompt_file"`
 	// MaxTurns bounds tool-call iterations in a single prompt. 0 uses a default.
-	MaxTurns int `yaml:"max_turns"`
+	MaxTurns int `yaml:"max_turns" json:"max_turns"`
 	// ContextLimit is the conversation token budget that drives compaction. 0
 	// uses a per-provider-family default. The loop compacts the message array
 	// before a turn would exceed this.
-	ContextLimit int `yaml:"context_limit"`
+	ContextLimit int `yaml:"context_limit" json:"context_limit"`
 	// Compaction selects how the conversation is kept within ContextLimit:
 	// "truncate" (default — drop oldest turn-groups) or "summarize" (LLM-compress
 	// the oldest groups, with truncation as the fallback). Empty means truncate.
-	Compaction string `yaml:"compaction"`
+	Compaction string `yaml:"compaction" json:"compaction"`
 	// CacheRetention overrides the prompt-cache TTL: "5m" (default) or "1h";
 	// "off"/"none" disables caching. Empty uses the default. Applied for
 	// Anthropic/OpenAI; Gemini caches a static prefix implicitly regardless.
-	CacheRetention string `yaml:"cache_retention"`
+	CacheRetention string `yaml:"cache_retention" json:"cache_retention"`
 }
 
 // ACPProfile is the external-process backend config (the `acp:` sub-block).
 type ACPProfile struct {
 	// Command and Args launch the ACP agent process. Command is required.
-	Command string   `yaml:"command"`
-	Args    []string `yaml:"args"`
+	Command string   `yaml:"command" json:"command"`
+	Args    []string `yaml:"args" json:"args,omitempty"`
 	// Interruptible overrides auto-detection of session/cancel support. When
 	// nil (the default) Murtaugh probes the agent at warmup; set it explicitly
 	// to skip the probe or to correct a wrong verdict.
-	Interruptible *bool `yaml:"interruptible"`
+	Interruptible *bool `yaml:"interruptible" json:"interruptible,omitempty"`
 	// Env injects environment variables into the agent process. Each value is
 	// expanded against Murtaugh's own environment first (so "${HOME}/bin" and
 	// "$PATH" resolve), then the resulting KEY=VALUE pairs are layered on top of
 	// the inherited environment — the agent sees Murtaugh's env plus these, with
 	// these winning on a duplicate key. Empty (the default) leaves the inherited
 	// environment untouched.
-	Env map[string]string `yaml:"env"`
+	Env map[string]string `yaml:"env" json:"env,omitempty"`
 }
 
 // ClaudeCodeProfile is the direct Claude Code stream-json backend config (the
@@ -328,16 +332,16 @@ type ACPProfile struct {
 // (spec 019).
 type ClaudeCodeProfile struct {
 	// Command is the `claude` binary to launch. Required.
-	Command string `yaml:"command"`
+	Command string `yaml:"command" json:"command"`
 	// Args overrides the default stream-json launch flags. Empty uses the
 	// backend's built-in defaults (headless bidirectional stream-json).
-	Args []string `yaml:"args"`
+	Args []string `yaml:"args" json:"args,omitempty"`
 	// Model, when set, is passed as --model. Empty uses whatever the binary
 	// resolves (e.g. via an ANTHROPIC_MODEL entry in Env).
-	Model string `yaml:"model"`
+	Model string `yaml:"model" json:"model"`
 	// Env injects environment variables into the process, expanded and layered
 	// exactly like acp.env.
-	Env map[string]string `yaml:"env"`
+	Env map[string]string `yaml:"env" json:"env,omitempty"`
 }
 
 // EnvOverrides renders the active backend's Env map into the KEY=VALUE slice
@@ -373,31 +377,31 @@ func (p AgentProfile) EnvOverrides() []string {
 }
 
 type JobProfile struct {
-	Command string   `yaml:"command"`
-	Args    []string `yaml:"args"`
-	WorkDir string   `yaml:"workdir"`
-	Timeout string   `yaml:"timeout"`
+	Command string   `yaml:"command" json:"command"`
+	Args    []string `yaml:"args" json:"args,omitempty"`
+	WorkDir string   `yaml:"workdir" json:"workdir"`
+	Timeout string   `yaml:"timeout" json:"timeout"`
 	// Agent and Prompt turn the job into an agent delegation: instead of
 	// running Command, Murtaugh starts the named agent in an isolated one-shot
 	// session and sends the rendered Prompt. Mutually exclusive with Command.
 	// The prompt supports positional placeholders ({{ 1 }}, {{ 2 }}, ...) that
 	// expand to the runtime args passed to `jobs run`.
-	Agent  string `yaml:"agent"`
-	Prompt string `yaml:"prompt"`
+	Agent  string `yaml:"agent" json:"agent"`
+	Prompt string `yaml:"prompt" json:"prompt"`
 	// Schedule, when set, runs the job automatically on a cron schedule
 	// using standard 5-field cron syntax (e.g. "0 2 * * *" for 02:00 daily).
 	// Mutually exclusive with Every.
-	Schedule string `yaml:"schedule"`
+	Schedule string `yaml:"schedule" json:"schedule"`
 	// Every, when set, runs the job automatically at a fixed interval
 	// expressed as a Go duration (e.g. "1h", "30m"). Mutually exclusive with
 	// Schedule. When both Schedule and Every are empty the job is
 	// manual-only: it runs solely when invoked via jobs.run or a workflow.
-	Every string `yaml:"every"`
+	Every string `yaml:"every" json:"every"`
 	// Confirmed tracks whether a job may auto-run. nil = operator-defined/trusted
 	// (runs). A non-nil false marks an agent-defined job awaiting first-run
 	// confirmation (held, not auto-run). true = confirmed. Uses a pointer so an
 	// absent field (hand-written jobs) is distinguishable from an explicit false.
-	Confirmed *bool `yaml:"confirmed"`
+	Confirmed *bool `yaml:"confirmed" json:"confirmed,omitempty"`
 }
 
 // AwaitingConfirmation reports whether the job is an agent-defined job that has
@@ -437,9 +441,9 @@ func (p JobProfile) ScheduleKind() ScheduleKind {
 }
 
 type WorkflowRuleConfig struct {
-	RequestEvent string          `yaml:"request_event"`
-	Match        map[string]any  `yaml:"match"`
-	Triggers     []TriggerConfig `yaml:"trigger"`
+	RequestEvent string          `yaml:"request_event" json:"request_event"`
+	Match        map[string]any  `yaml:"match" json:"match,omitempty"`
+	Triggers     []TriggerConfig `yaml:"trigger" json:"trigger,omitempty"`
 }
 
 type TriggerConfig struct {
@@ -450,9 +454,9 @@ type TriggerConfig struct {
 }
 
 type ReplyToSlackTriggerConfig struct {
-	Template        string                 `yaml:"template"`
-	Run             *RunTriggerConfig      `yaml:"run"`
-	DelegateToAgent *DelegateToAgentConfig `yaml:"delegate-to-agent"`
+	Template        string                 `yaml:"template" json:"template"`
+	Run             *RunTriggerConfig      `yaml:"run" json:"run,omitempty"`
+	DelegateToAgent *DelegateToAgentConfig `yaml:"delegate-to-agent" json:"delegate-to-agent,omitempty"`
 }
 
 // DelegateToAgentConfig hands work to an agent. Where it sits decides how:
@@ -467,33 +471,33 @@ type ReplyToSlackTriggerConfig struct {
 // with the same template data the surrounding surface's templates receive (the
 // interaction Payload for workflow rules, the URL/Captures for unfurls).
 type DelegateToAgentConfig struct {
-	Agent  string `yaml:"agent"`
-	Prompt string `yaml:"prompt"`
+	Agent  string `yaml:"agent" json:"agent"`
+	Prompt string `yaml:"prompt" json:"prompt"`
 }
 
 type RunTriggerConfig struct {
-	Cmd     string   `yaml:"cmd"`
-	Args    []string `yaml:"args"`
-	Timeout string   `yaml:"timeout"`
-	WorkDir string   `yaml:"workdir"`
+	Cmd     string   `yaml:"cmd" json:"cmd"`
+	Args    []string `yaml:"args" json:"args,omitempty"`
+	Timeout string   `yaml:"timeout" json:"timeout"`
+	WorkDir string   `yaml:"workdir" json:"workdir"`
 }
 
 type UnfurlRuleConfig struct {
-	Match  UnfurlMatchConfig  `yaml:"match"`
-	Unfurl UnfurlActionConfig `yaml:"unfurl"`
+	Match  UnfurlMatchConfig  `yaml:"match" json:"match"`
+	Unfurl UnfurlActionConfig `yaml:"unfurl" json:"unfurl"`
 }
 
 type UnfurlMatchConfig struct {
-	Channels   []string `yaml:"channels"`
-	Domain     string   `yaml:"domain"`
-	URLPrefix  string   `yaml:"url_prefix"`
-	URLPattern string   `yaml:"url_pattern"`
+	Channels   []string `yaml:"channels" json:"channels,omitempty"`
+	Domain     string   `yaml:"domain" json:"domain"`
+	URLPrefix  string   `yaml:"url_prefix" json:"url_prefix"`
+	URLPattern string   `yaml:"url_pattern" json:"url_pattern"`
 }
 
 type UnfurlActionConfig struct {
-	Template        string                 `yaml:"template"`
-	Run             *RunTriggerConfig      `yaml:"run"`
-	DelegateToAgent *DelegateToAgentConfig `yaml:"delegate-to-agent"`
+	Template        string                 `yaml:"template" json:"template"`
+	Run             *RunTriggerConfig      `yaml:"run" json:"run,omitempty"`
+	DelegateToAgent *DelegateToAgentConfig `yaml:"delegate-to-agent" json:"delegate-to-agent,omitempty"`
 }
 
 func (t *TriggerConfig) UnmarshalYAML(value *yaml.Node) error {
@@ -1009,10 +1013,10 @@ func backendBlockCount(p AgentProfile) int {
 // or a remote endpoint (URL). The full wiring + validation lands in T5/T6; this
 // is the config contract Wave-1 tasks share.
 type MCPServerConfig struct {
-	Command string            `yaml:"command"`
-	Args    []string          `yaml:"args"`
-	Env     map[string]string `yaml:"env"`
-	URL     string            `yaml:"url"`
+	Command string            `yaml:"command" json:"command"`
+	Args    []string          `yaml:"args" json:"args,omitempty"`
+	Env     map[string]string `yaml:"env" json:"env,omitempty"`
+	URL     string            `yaml:"url" json:"url"`
 }
 
 // EffectiveProgressDisplay resolves how the given agent's progress renders:

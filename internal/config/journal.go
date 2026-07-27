@@ -33,10 +33,10 @@ const journalDefaultSweepEvery = 24 * time.Hour
 // its own file (a sibling of agents.yaml/jobs.yaml) to keep each vertical
 // legible; an absent file yields all-streams-on defaults.
 type JournalConfig struct {
-	Path    string                         `yaml:"path"`
-	BlobDir string                         `yaml:"blob_dir"`
-	Streams map[string]JournalStreamConfig `yaml:"streams"`
-	Sweep   JournalSweepConfig             `yaml:"sweep"`
+	Path    string                         `yaml:"path" json:"path"`
+	BlobDir string                         `yaml:"blob_dir" json:"blob_dir"`
+	Streams map[string]JournalStreamConfig `yaml:"streams" json:"streams,omitempty"`
+	Sweep   JournalSweepConfig             `yaml:"sweep" json:"sweep"`
 }
 
 // JournalStreamConfig is the per-stream knob. Enabled is a *bool so an omitted
@@ -44,13 +44,13 @@ type JournalConfig struct {
 // false` opts that stream out — the same tri-state pattern as
 // AgentProfile.Interruptible.
 type JournalStreamConfig struct {
-	Enabled   *bool  `yaml:"enabled"`
-	Retention string `yaml:"retention"`
+	Enabled   *bool  `yaml:"enabled" json:"enabled,omitempty"`
+	Retention string `yaml:"retention" json:"retention"`
 }
 
 // JournalSweepConfig controls the daemon's internal retention sweeper.
 type JournalSweepConfig struct {
-	Every string `yaml:"every"`
+	Every string `yaml:"every" json:"every"`
 }
 
 // EffectiveEnabled reports whether a stream is persisted. Streams default to on:
