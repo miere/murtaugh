@@ -1,6 +1,6 @@
 ---
 name: murtaugh-agents
-description: Configure Murtaugh's agent chat in agents.yaml/gateway.yaml — native vs ACP profiles, which tools an agent may call, the defaults block, and which agent answers DMs vs each channel.
+description: Configure Murtaugh's agent chat in agents.yaml/gateway.yaml — native, claude_code, and ACP profiles, which tools an agent may call, the defaults block, and which agent answers DMs vs each channel.
 requires: [manage]
 files:
   reference/agents-yaml.md: { requires: [manage], summary: "define agents (provider/model/tools/approval/defaults block) or a legacy ACP command" }
@@ -15,7 +15,7 @@ back into the thread, and let a follow-up interrupt an in-flight response. Use
 this whenever a task involves configuring which agent answers, tuning
 streaming/timeouts, or understanding the `/chat` and `/stop` behavior.
 
-## Two agent backends
+## Three agent backends
 
 - **native** (the **default**) — Murtaugh runs the LLM loop in-process and
   talks to a provider (`gemini` / `anthropic` / `openai`, plus compatible third
@@ -23,6 +23,11 @@ streaming/timeouts, or understanding the `/chat` and `/stop` behavior.
   read from `~/.config/murtaugh/.env` — its profile names the variable via
   `api_key_env`, and the key value lives only in that `.env`, never in YAML.
   Configured with a `native:` sub-block.
+- **claude_code** — Murtaugh drives the `claude` CLI directly over its
+  stream-json protocol (one process per conversation). Configured with a
+  `claude_code:` sub-block naming the `claude` binary `command` and an optional
+  `model`. Like ACP, it reaches Murtaugh's own tools (`slack.*`, `jobs`, …)
+  through the tool bridge, gated by the same `approval` policy.
 - **ACP** (legacy) — Murtaugh drives an external agent process over ACP (the
   Agent Client Protocol). Configured with an `acp:` sub-block holding a `command`.
 
@@ -30,7 +35,8 @@ streaming/timeouts, or understanding the `/chat` and `/stop` behavior.
 
 1. **`agents.yaml`** — define at least one agent. For a **native** agent that
    means a `native:` sub-block with `provider` + `model` + `api_key_env`; for a
-   legacy **ACP** agent it means an `acp:` sub-block with a `command`. →
+   **claude_code** agent a `claude_code:` sub-block with a `command` (and optional
+   `model`); for a legacy **ACP** agent an `acp:` sub-block with a `command`. →
    `reference/agents-yaml.md`
 2. **`gateway.yaml`** — set `chat.enabled: true` and `chat.defaults.agent` to one
    of those agent names. → `reference/routing.md`
@@ -41,8 +47,8 @@ delegation (jobs, workflow rules, unfurls) runs whenever the target agent is
 defined, regardless of this flag.
 
 > The runtime tuning block is `defaults:` in `agents.yaml`; its knobs (under
-> `session`, `rendering`, `acp`, `approval`) govern **both** native and ACP
-> agents.
+> `session`, `rendering`, `acp`, `approval`) govern native, claude_code, and ACP
+> agents alike.
 
 ## The flow (mental model)
 
@@ -61,7 +67,7 @@ defined, regardless of this flag.
 
 | When you're… | Read |
 |---|---|
-| Defining agents (native `provider`/`model`/`tools`/`approval` or legacy ACP `command`) and tuning the `defaults` block (timeouts, streaming, sessions) | `reference/agents-yaml.md` |
+| Defining agents (native `provider`/`model`/`tools`/`approval`, a `claude_code` command, or a legacy ACP `command`) and tuning the `defaults` block (timeouts, streaming, sessions) | `reference/agents-yaml.md` |
 | Wiring which agent answers DMs vs each channel | `reference/routing.md` |
 | Understanding `/chat`, `/stop`, interrupts, streaming, and warmup (how chat behaves) | `reference/interaction.md` |
 | How an agent *uses* `ask` / `present_plan` / the approval gate (vs *enabling* them here) | the `murtaugh-slack` skill (`reference/asking.md`) |
@@ -70,9 +76,11 @@ defined, regardless of this flag.
 ## Global guidelines (defaults — follow unless the user says otherwise)
 
 - **Native is the default backend.** The backend is chosen by which sub-block a
-  profile carries: a `native:` block makes it native, an `acp:` block makes it a
-  legacy ACP process. There is no `kind:` field. Native needs `provider` +
-  `model` + `api_key_env` (under `native:`), not a `command`.
+  profile carries: a `native:` block makes it native, a `claude_code:` block makes
+  it a Claude Code stream-json process, an `acp:` block makes it a legacy ACP
+  process. There is no `kind:` field. Native needs `provider` + `model` +
+  `api_key_env` (under `native:`), not a `command`; `claude_code` and `acp` each
+  need a `command`.
 - **Native agents authenticate via `~/.config/murtaugh/.env`.** The profile names
   the variable with `api_key_env`; write the value there with `setup_env` (see
   the `murtaugh-setup` skill). The key never goes in YAML.
