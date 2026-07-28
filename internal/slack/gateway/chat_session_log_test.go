@@ -49,7 +49,7 @@ func TestChatHandlerRecordsCompletedTurn(t *testing.T) {
 	}}
 	handler := newLoggingHandler(t, rec, blobDir, sessions)
 
-	if err := handler.Handle(context.Background(), ChatRequest{TeamID: "T1", ChannelID: "C1", UserID: "U1", MessageTS: "1.1", Text: "hi there", Source: "test"}); err != nil {
+	if err := handler.handleResolving(context.Background(), ChatRequest{TeamID: "T1", ChannelID: "C1", UserID: "U1", MessageTS: "1.1", Text: "hi there", Source: "test"}); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 
@@ -95,7 +95,7 @@ func TestChatHandlerRecordsErroredTurn(t *testing.T) {
 
 	// An agent error is rendered onto the Slack stream and Handle returns nil;
 	// the turn is still recorded at error level via the explicit turnErr path.
-	_ = handler.Handle(context.Background(), ChatRequest{ChannelID: "C1", MessageTS: "1.1", Text: "go", Source: "test"})
+	_ = handler.handleResolving(context.Background(), ChatRequest{ChannelID: "C1", MessageTS: "1.1", Text: "go", Source: "test"})
 	turns := rec.byKind("session.turn")
 	if len(turns) != 1 || turns[0].Level != journal.LevelError {
 		t.Fatalf("expected one error-level session.turn, got %+v", turns)
@@ -126,7 +126,7 @@ func TestChatHandlerSurfacesEmptyReplyWithStopReason(t *testing.T) {
 		func(ChatRequest) ChatRoute { return ChatRoute{Agent: "default", ReplyOnThread: true} }, time.Hour, 1, discardLogger()).
 		WithSessionLogger(newSessionLogger(rec, blobDir, discardLogger()))
 
-	if err := handler.Handle(context.Background(), ChatRequest{ChannelID: "C1", MessageTS: "1.1", Text: "why is it broken?", Source: "dm"}); err != nil {
+	if err := handler.handleResolving(context.Background(), ChatRequest{ChannelID: "C1", MessageTS: "1.1", Text: "why is it broken?", Source: "dm"}); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 
@@ -158,7 +158,7 @@ func TestChatHandlerNoSessionLogIsNoop(t *testing.T) {
 	sessions := scriptedSessions{id: "s", events: []agent.Event{{Type: agent.EventText, Text: "hi"}, {Type: agent.EventComplete}}}
 	handler := NewChatHandler(&fakeStreamAPI{}, map[string]ChatSessionManager{"default": sessions},
 		func(ChatRequest) ChatRoute { return ChatRoute{Agent: "default", ReplyOnThread: true} }, time.Hour, 1, discardLogger())
-	if err := handler.Handle(context.Background(), ChatRequest{ChannelID: "C1", MessageTS: "1.1", Text: "hi", Source: "test"}); err != nil {
+	if err := handler.handleResolving(context.Background(), ChatRequest{ChannelID: "C1", MessageTS: "1.1", Text: "hi", Source: "test"}); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 }

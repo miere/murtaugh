@@ -230,7 +230,9 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 	if channelAPI, err := slackclient.NewClient(cfg.OAuth.BotToken); err != nil {
 		logger.Warn("channel-name routing disabled: could not build Slack client", "error", err)
 	} else {
-		channelCache = newChannelNameCache(channelAPI, 30*time.Second, logger)
+		// api (a *slack.Client) provides conversations.info for the synchronous
+		// resolve-on-miss that lets canvas turns route by their channel.
+		channelCache = newChannelNameCache(channelAPI, api, 30*time.Second, logger)
 	}
 
 	var chat *ChatHandler
@@ -1436,6 +1438,19 @@ func (a *Gateway) startChat(parent context.Context, req ChatRequest) {
 // grace window lets trailing chunks already on the wire flush as "_interrupted_"
 // rather than vanish.
 func (a *Gateway) dispatchTurn(parent context.Context, key agent.ConversationKey, agentName string, route ChatRoute, req ChatRequest) {
+	// Authoritative agent resolution happens here, off the socket goroutine
+	// (dispatchTurn is invoked from the coalescer's timer/worker goroutines, not
+	// the event loop). startChat resolved the route cache-only for the coalescer
+	// key; now synchronously resolve the channel (one bounded conversations.info
+	// on a miss) so a canvas turn — or any cold-cache channel — routes by its real
+	// channel instead of the default agent. Only the agent is corrected; the reply
+	// strategy from startChat is kept so the conversation key never diverges.
+	if a.chat != nil && a.chat.resolver != nil {
+		a.channelCache.resolveChannelName(parent, req.ChannelID)
+		route.Agent = a.chat.resolver(req).Agent
+		agentName = route.Agent
+	}
+
 	// No total wall-clock deadline: a turn is bounded by inactivity inside
 	// ChatHandler (WithIdleTimeout), so a long-but-progressing response is never
 	// killed mid-flight. This context stays cancellable purely for the interrupt
@@ -1451,7 +1466,7 @@ func (a *Gateway) dispatchTurn(parent context.Context, key agent.ConversationKey
 	}
 	go func() {
 		defer cancelCtx()
-		err := a.chat.Handle(ctx, req)
+		err := a.chat.Handle(ctx, req, route)
 		a.inFlight.Cancel(key) // self-unregister; no-op if /stop already removed it
 		if a.coalescer != nil {
 			a.coalescer.onComplete(key) // drain any messages queued during this turn
