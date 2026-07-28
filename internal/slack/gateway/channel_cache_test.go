@@ -10,8 +10,103 @@ import (
 	"testing"
 	"time"
 
+	"github.com/slack-go/slack"
+
+	"github.com/miere/murtaugh/internal/config"
 	slackclient "github.com/miere/murtaugh/internal/slack/client"
 )
+
+// countingCanvasInfo is a canvasInfoAPI that returns a fixed channel/error and
+// counts calls, for resolve-on-miss tests.
+type countingCanvasInfo struct {
+	channel *slack.Channel
+	err     error
+	calls   atomic.Int32
+}
+
+func (c *countingCanvasInfo) GetConversationInfoContext(context.Context, *slack.GetConversationInfoInput) (*slack.Channel, error) {
+	c.calls.Add(1)
+	return c.channel, c.err
+}
+
+func channelNamed(name string) *slack.Channel {
+	ch := &slack.Channel{}
+	ch.Name = name
+	return ch
+}
+
+// TestResolveChannelName_ResolvesAndMemoizesOnMiss: a channel canvas whose parent
+// channel isn't in the warm list resolves via conversations.info and is cached.
+func TestResolveChannelName_ResolvesAndMemoizesOnMiss(t *testing.T) {
+	info := &countingCanvasInfo{channel: channelNamed("feature-xyz")}
+	cache := newChannelNameCache(&fakeChannelDirectory{}, info, time.Second, cacheTestLogger())
+
+	name, ok := cache.resolveChannelName(context.Background(), "C1")
+	if !ok || name != "feature-xyz" {
+		t.Fatalf("resolveChannelName = (%q, %v), want (feature-xyz, true)", name, ok)
+	}
+	if n2, ok2 := cache.nameFor("C1"); !ok2 || n2 != "feature-xyz" {
+		t.Fatalf("nameFor after resolve = (%q, %v), want it memoized", n2, ok2)
+	}
+	_, _ = cache.resolveChannelName(context.Background(), "C1")
+	if info.calls.Load() != 1 {
+		t.Fatalf("conversations.info called %d times, want 1 (second lookup memoized)", info.calls.Load())
+	}
+}
+
+// TestResolveChannelName_StandaloneCanvasHasNoName: an "FC:…" file conversation has
+// no parent channel, so it returns no name and is NOT memoized (it must not poison
+// exact-ID/default routing).
+func TestResolveChannelName_StandaloneCanvasHasNoName(t *testing.T) {
+	ch := &slack.Channel{}
+	ch.NameNormalized = "FC:F0CANVAS:My Canvas"
+	info := &countingCanvasInfo{channel: ch}
+	cache := newChannelNameCache(&fakeChannelDirectory{}, info, time.Second, cacheTestLogger())
+
+	if name, ok := cache.resolveChannelName(context.Background(), "C0CANVAS"); ok || name != "" {
+		t.Fatalf("standalone resolve = (%q, %v), want (\"\", false)", name, ok)
+	}
+	if _, ok := cache.nameFor("C0CANVAS"); ok {
+		t.Fatal("standalone canvas id was memoized; it must not be")
+	}
+}
+
+func TestResolveChannelName_ErrorFallsThrough(t *testing.T) {
+	info := &countingCanvasInfo{err: errors.New("slack down")}
+	cache := newChannelNameCache(&fakeChannelDirectory{}, info, time.Second, cacheTestLogger())
+	if name, ok := cache.resolveChannelName(context.Background(), "C1"); ok || name != "" {
+		t.Fatalf("errored resolve = (%q, %v), want (\"\", false)", name, ok)
+	}
+	if _, ok := cache.nameFor("C1"); ok {
+		t.Fatal("errored resolve must not memoize")
+	}
+}
+
+func TestResolveChannelName_NilInfoDegradesToNameFor(t *testing.T) {
+	cache := newChannelNameCache(&fakeChannelDirectory{}, nil, time.Second, cacheTestLogger())
+	if _, ok := cache.resolveChannelName(context.Background(), "C1"); ok {
+		t.Fatal("nil info must miss cleanly, no panic")
+	}
+}
+
+// TestResolveChannelName_UnblocksNameGlobRouting is the routing-relevant seam: a
+// canvas turn's channel, unknown to the warm cache, resolves via conversations.info
+// so matchChannel's name-glob picks the configured agent (feature-* → coder). This
+// is exactly what was silently defaulting before the fix.
+func TestResolveChannelName_UnblocksNameGlobRouting(t *testing.T) {
+	info := &countingCanvasInfo{channel: channelNamed("feature-xyz")}
+	cache := newChannelNameCache(&fakeChannelDirectory{}, info, time.Second, cacheTestLogger())
+	channels := map[string]config.ChannelConfig{"feature-*": {Agent: "coder"}}
+
+	if _, ok := matchChannel("C1", "", channels); ok {
+		t.Fatal("expected no name-glob match while the name is unresolved")
+	}
+	name, _ := cache.resolveChannelName(context.Background(), "C1")
+	cc, ok := matchChannel("C1", name, channels)
+	if !ok || cc.Agent != "coder" {
+		t.Fatalf("after resolve, matchChannel = (%+v, %v), want coder", cc, ok)
+	}
+}
 
 // fakeChannelDirectory is an in-memory channelDirectoryAPI. The channels it
 // returns and any error are swappable under a lock so a test can change them
@@ -46,7 +141,7 @@ func TestChannelNameCacheWarmAndLookup(t *testing.T) {
 		{ID: "C1", Name: "general"},
 		{ID: "C2", Name: "feature-login"},
 	}}
-	cache := newChannelNameCache(dir, time.Second, cacheTestLogger())
+	cache := newChannelNameCache(dir, nil, time.Second, cacheTestLogger())
 
 	if name, ok := cache.nameFor("C1"); ok || name != "" {
 		t.Fatalf("before warm: got (%q, %v), want miss", name, ok)
@@ -67,7 +162,7 @@ func TestChannelNameCacheWarmAndLookup(t *testing.T) {
 
 func TestChannelNameCacheRefreshErrorKeepsPrevious(t *testing.T) {
 	dir := &fakeChannelDirectory{channels: []slackclient.Channel{{ID: "C1", Name: "general"}}}
-	cache := newChannelNameCache(dir, time.Second, cacheTestLogger())
+	cache := newChannelNameCache(dir, nil, time.Second, cacheTestLogger())
 	if err := cache.refresh(context.Background()); err != nil {
 		t.Fatalf("first refresh: %v", err)
 	}
@@ -83,7 +178,7 @@ func TestChannelNameCacheRefreshErrorKeepsPrevious(t *testing.T) {
 
 func TestChannelNameCacheRefreshAsyncOnMiss(t *testing.T) {
 	dir := &fakeChannelDirectory{channels: []slackclient.Channel{{ID: "C1", Name: "general"}}}
-	cache := newChannelNameCache(dir, time.Second, cacheTestLogger())
+	cache := newChannelNameCache(dir, nil, time.Second, cacheTestLogger())
 
 	// Simulate a brand-new channel: the resolver looks it up, misses, and kicks
 	// off an async refresh that will learn it.
@@ -109,7 +204,7 @@ func TestChannelNameCacheRefreshAsyncOnMiss(t *testing.T) {
 func TestChannelNameCacheRefreshAsyncDeduplicates(t *testing.T) {
 	release := make(chan struct{})
 	dir := &blockingDirectory{release: release}
-	cache := newChannelNameCache(dir, time.Second, cacheTestLogger())
+	cache := newChannelNameCache(dir, nil, time.Second, cacheTestLogger())
 
 	for i := 0; i < 10; i++ {
 		cache.refreshAsync(context.Background())

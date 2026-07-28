@@ -47,7 +47,7 @@ func TestChatHandlerDeliversAttachmentAndSuppressesEmptyNote(t *testing.T) {
 	resolver := func(ChatRequest) ChatRoute { return ChatRoute{Agent: "default", ReplyOnThread: true} }
 	handler := NewChatHandler(api, sessions, resolver, time.Hour, 5, nil).WithUploader(up)
 
-	if err := handler.Handle(context.Background(), ChatRequest{
+	if err := handler.handleResolving(context.Background(), ChatRequest{
 		TeamID: "T1", ChannelID: "C1", UserID: "U1", MessageTS: "123.4", Text: "send it", Source: "test",
 	}); err != nil {
 		t.Fatalf("Handle: %v", err)

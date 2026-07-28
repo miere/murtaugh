@@ -390,13 +390,16 @@ func prependCanvasNote(history, canvasID string) string {
 	return note + "\n\n" + history
 }
 
-func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest) (retErr error) {
+// Handle runs one chat turn. route is the already-resolved routing decision
+// (agent + reply strategy) computed and corrected upstream in Gateway.dispatchTurn
+// — Handle does NOT re-resolve, so its conversation key is provably the same one
+// the coalescer/interrupt registry used.
+func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest, route ChatRoute) (retErr error) {
 	startedAt := time.Now()
 	if h == nil || len(h.sessions) == 0 {
 		return fmt.Errorf("ACP chat is not enabled")
 	}
 
-	route := h.resolver(req)
 	agentName := route.Agent
 	sessions, ok := h.sessions[agentName]
 	if !ok {

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	slackclient "github.com/miere/murtaugh/internal/slack/client"
+	"github.com/slack-go/slack"
 )
 
 // channelDirectoryAPI is the minimal Slack surface the channel-name cache needs
@@ -22,6 +23,11 @@ type channelDirectoryAPI interface {
 // process restart. Channel renames are rare, so the cadence is generous.
 const defaultChannelCacheRefresh = 10 * time.Minute
 
+// conversationInfoTimeout bounds the single conversations.info lookup a routing
+// miss triggers (resolveChannelName), kept short so a slow Slack call can never
+// stall a turn.
+const conversationInfoTimeout = 5 * time.Second
+
 // channelNameCache is an in-memory Slack channel ID→name map consulted by the
 // chat resolver to route channel→agent by NAME glob without doing Slack API
 // I/O on the socket goroutine. It is warmed once at startup, refreshed on a
@@ -29,7 +35,12 @@ const defaultChannelCacheRefresh = 10 * time.Minute
 // the cache has not learned yet). Lookups are pure in-memory reads guarded by
 // an RWMutex; the resolver never blocks on the network.
 type channelNameCache struct {
-	api    channelDirectoryAPI
+	api channelDirectoryAPI
+	// info resolves a single channel via conversations.info on a cache miss
+	// (resolveChannelName). Unlike api's ListChannels it returns file-backed
+	// canvas conversations too, which is how canvas turns learn their channel.
+	// nil disables resolve-on-miss (routing then degrades to exact-ID matching).
+	info   canvasInfoAPI
 	logger *slog.Logger
 
 	mu      sync.RWMutex
@@ -43,10 +54,11 @@ type channelNameCache struct {
 	refreshing atomic.Bool
 }
 
-// newChannelNameCache builds an empty cache over the given directory. timeout
-// bounds each ListChannels call; a non-positive value uses a 30s default. A nil
-// logger falls back to slog.Default.
-func newChannelNameCache(api channelDirectoryAPI, timeout time.Duration, logger *slog.Logger) *channelNameCache {
+// newChannelNameCache builds an empty cache over the given directory. info
+// (conversations.info) backs the synchronous resolve-on-miss; pass nil to
+// disable it. timeout bounds each ListChannels call; a non-positive value uses a
+// 30s default. A nil logger falls back to slog.Default.
+func newChannelNameCache(api channelDirectoryAPI, info canvasInfoAPI, timeout time.Duration, logger *slog.Logger) *channelNameCache {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -55,6 +67,7 @@ func newChannelNameCache(api channelDirectoryAPI, timeout time.Duration, logger 
 	}
 	return &channelNameCache{
 		api:     api,
+		info:    info,
 		logger:  logger,
 		byID:    map[string]string{},
 		timeout: timeout,
@@ -73,6 +86,53 @@ func (c *channelNameCache) nameFor(id string) (string, bool) {
 	defer c.mu.RUnlock()
 	name, ok := c.byID[id]
 	return name, ok
+}
+
+// resolveChannelName returns the channel name for id, resolving it via a bounded
+// conversations.info on a cache miss and memoizing the result so later turns and
+// the interrupt path are warm. Unlike nameFor it may do Slack I/O, so callers
+// MUST invoke it OFF the socket goroutine (the per-turn goroutine). It is how a
+// canvas turn learns its channel: ListChannels never returns canvas/file-backed
+// conversations, but conversations.info does. A standalone canvas — a file-backed
+// "FC:<fileId>:<title>" conversation — has no routable channel name and returns
+// ("", false) unmemoized. Any error leaves the cache untouched and returns
+// ("", false) so routing falls back to exact-ID/default rather than failing.
+func (c *channelNameCache) resolveChannelName(ctx context.Context, id string) (string, bool) {
+	if c == nil || id == "" {
+		return "", false
+	}
+	if name, ok := c.nameFor(id); ok {
+		return name, true
+	}
+	if c.info == nil {
+		return "", false
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, conversationInfoTimeout)
+	defer cancel()
+	ch, err := c.info.GetConversationInfoContext(lookupCtx, &slack.GetConversationInfoInput{ChannelID: id})
+	if err != nil {
+		c.logger.Debug("channel-name resolve-on-miss failed", "channel", id, "error", err)
+		return "", false
+	}
+	if ch == nil {
+		return "", false
+	}
+	// A standalone canvas file conversation has no parent channel and no routable
+	// name — let routing fall through to exact-ID/default rather than caching junk.
+	if canvasFileIDFromName(ch.NameNormalized) != "" {
+		return "", false
+	}
+	name := ch.Name
+	if name == "" {
+		name = ch.NameNormalized
+	}
+	if name == "" {
+		return "", false
+	}
+	c.mu.Lock()
+	c.byID[id] = name
+	c.mu.Unlock()
+	return name, true
 }
 
 // refresh re-lists the workspace channels and replaces the cache contents. It
