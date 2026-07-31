@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -76,15 +78,15 @@ type ChatConfig struct {
 	// Defaults holds the global chat routing/reply defaults: the fallback agent,
 	// the DM agent, and the default reply strategy.
 	Defaults ChatDefaults `yaml:"defaults" json:"defaults"`
-	// Channels routes a channel to a specific agent and/or reply strategy. Each
-	// key is either an exact Slack channel ID (C…/G…, for back-compat) or a
-	// channel-NAME glob that may contain `*` (e.g. "feature-*", "*-prod"),
-	// matched against the channel's name. Precedence on a match is exact-ID,
-	// then exact-name, then longest-literal-prefix glob (see
-	// gateway.matchChannel). A matched entry whose agent is empty falls back to
+	// Channels is the ORDERED list of routing rules. Each rule's `match` is an
+	// exact Slack channel ID (C…/G…), an exact channel NAME, or a channel-name
+	// glob that may contain `*` (e.g. "feature-*", "*-prod"). The FIRST rule that
+	// matches wins (see gateway.matchChannel), so a narrow rule must be listed
+	// above a broader one. A matched rule whose agent is empty falls back to
 	// Defaults.Agent; an unset reply_on_thread falls back to
-	// Defaults.ReplyOnThread.
-	Channels map[string]ChannelConfig `yaml:"channels" json:"channels,omitempty"`
+	// Defaults.ReplyOnThread. The legacy map shape still decodes — see
+	// ChannelRules.
+	Channels ChannelRules `yaml:"channels" json:"channels,omitempty"`
 	// NoMention waives the @mention requirement for listed users (both the
 	// everywhere list and the per-channel map). It waives the mention
 	// requirement only — listed users must still pass IsAllowedUser.
@@ -107,12 +109,166 @@ type ChatDefaults struct {
 
 // ChannelConfig is a per-channel routing/reply override.
 type ChannelConfig struct {
+	// Match selects the channels this rule applies to. It is an exact Slack
+	// channel ID (C…/G…), an exact channel NAME, or a channel-name glob that
+	// contains `*` (e.g. "feature-*"). Rules are evaluated in order and the
+	// FIRST match wins, so a narrow rule must be listed above a broader one.
+	Match string `yaml:"match" json:"match"`
 	// Agent routes this channel to a specific agent; empty falls back to
 	// ChatDefaults.Agent.
 	Agent string `yaml:"agent" json:"agent"`
 	// ReplyOnThread overrides ChatDefaults.ReplyOnThread for this channel; nil
 	// (omitted) inherits the default.
 	ReplyOnThread *bool `yaml:"reply_on_thread" json:"reply_on_thread,omitempty"`
+	// AllowAnyone waives the global access.allowed_users gate for this channel's
+	// CHAT surface: any workspace user who can post here may talk to the routed
+	// agent. It is deliberately narrow — it does NOT waive the @mention
+	// requirement, and it does not extend to slash commands (including
+	// troubleshoot), interactive callbacks (including tool-approval buttons), or
+	// DMs. Those all stay on the global allowlist so opening a channel for chat
+	// never widens who can approve a tool call or pull a diagnostics bundle.
+	AllowAnyone bool `yaml:"allow_anyone" json:"allow_anyone,omitempty"`
+}
+
+// ChannelRules is the ordered list of chat.channels routing rules. Order is
+// significant: matchChannel walks it top-to-bottom and the first rule whose
+// Match selects the channel wins.
+//
+// It decodes from BOTH shapes:
+//
+//   - a LIST of rules, each carrying its own `match` — the canonical shape, where
+//     the author controls precedence directly;
+//   - a MAP of match-key → rule — the legacy shape, which has no inherent order.
+//     A map is converted to the list that reproduces the precedence the map-based
+//     matcher used to apply (exact channel IDs, then exact names, then globs by
+//     descending literal-prefix length, ties broken by key), so an existing config
+//     keeps behaving exactly as it did.
+//
+// It always MARSHALS as a list, so a legacy map is rewritten to the canonical
+// shape the first time the chat singleton is saved.
+type ChannelRules []ChannelConfig
+
+// literalPrefixLen returns the number of leading characters in pattern before
+// its first `*` (or the whole length when there is no `*`). It measures how
+// specific a glob is and is used only to order a LEGACY map into the precedence
+// the map-based matcher applied; ordered lists carry their precedence directly.
+func literalPrefixLen(pattern string) int {
+	if i := strings.IndexRune(pattern, '*'); i >= 0 {
+		return i
+	}
+	return len(pattern)
+}
+
+// channelRulesFromMap converts the legacy map shape into the equivalent ordered
+// list, reproducing the old matcher's precedence: (1) exact channel-ID keys,
+// (2) exact channel-name keys, (3) globs by descending literal-prefix length.
+// Keys break ties so the result is deterministic despite Go's map ordering.
+func channelRulesFromMap(m map[string]ChannelConfig) ChannelRules {
+	rules := make(ChannelRules, 0, len(m))
+	for key, cc := range m {
+		cc.Match = key
+		rules = append(rules, cc)
+	}
+	rank := func(match string) int {
+		switch {
+		case strings.ContainsRune(match, '*'):
+			return 2
+		case looksLikeSlackChannelID(match):
+			return 0
+		default:
+			return 1
+		}
+	}
+	sort.SliceStable(rules, func(i, j int) bool {
+		ri, rj := rank(rules[i].Match), rank(rules[j].Match)
+		if ri != rj {
+			return ri < rj
+		}
+		// Within the glob tier, the longer literal prefix is the more specific
+		// pattern and used to win the old tie-break.
+		if ri == 2 {
+			li, lj := literalPrefixLen(rules[i].Match), literalPrefixLen(rules[j].Match)
+			if li != lj {
+				return li > lj
+			}
+		}
+		return rules[i].Match < rules[j].Match
+	})
+	return rules
+}
+
+// looksLikeSlackChannelID reports whether value has the shape of a Slack
+// conversation ID (C… public, G… private, D… DM). It is used only to order a
+// legacy map; matching itself compares against the live channel ID.
+func looksLikeSlackChannelID(value string) bool {
+	if len(value) < 2 || strings.ContainsRune(value, '*') {
+		return false
+	}
+	switch value[0] {
+	case 'C', 'G', 'D':
+	default:
+		return false
+	}
+	for _, r := range value[1:] {
+		if !(r >= '0' && r <= '9') && !(r >= 'A' && r <= 'Z') {
+			return false
+		}
+	}
+	return true
+}
+
+// UnmarshalYAML accepts either the ordered list shape or the legacy map shape.
+func (r *ChannelRules) UnmarshalYAML(value *yaml.Node) error {
+	if value == nil || value.Tag == "!!null" {
+		*r = nil
+		return nil
+	}
+	switch value.Kind {
+	case yaml.SequenceNode:
+		var list []ChannelConfig
+		if err := value.Decode(&list); err != nil {
+			return err
+		}
+		*r = list
+		return nil
+	case yaml.MappingNode:
+		var m map[string]ChannelConfig
+		if err := value.Decode(&m); err != nil {
+			return err
+		}
+		*r = channelRulesFromMap(m)
+		return nil
+	default:
+		return fmt.Errorf("chat.channels must be a list of rules or a map of match→rule, got %v", value.Kind)
+	}
+}
+
+// UnmarshalJSON accepts either the ordered list shape or the legacy map shape.
+// The stored chat singleton is JSON, so this is what keeps an already-persisted
+// map-shaped config loading after the upgrade.
+func (r *ChannelRules) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		*r = nil
+		return nil
+	}
+	if trimmed[0] == '[' {
+		var list []ChannelConfig
+		if err := json.Unmarshal(trimmed, &list); err != nil {
+			return err
+		}
+		*r = list
+		return nil
+	}
+	if trimmed[0] == '{' {
+		var m map[string]ChannelConfig
+		if err := json.Unmarshal(trimmed, &m); err != nil {
+			return err
+		}
+		*r = channelRulesFromMap(m)
+		return nil
+	}
+	return fmt.Errorf("chat.channels must be a list of rules or an object of match→rule")
 }
 
 // EffectiveReplyOnThread resolves the global default reply strategy: an omitted
@@ -797,18 +953,32 @@ func (c Config) Validate() error {
 				errs = append(errs, fmt.Errorf("chat.defaults.dm_agent %q not found in agents.yaml", c.Chat.Defaults.DMAgent))
 			}
 		}
-		for channel, cc := range c.Chat.Channels {
-			// A channel entry may set only reply_on_thread (empty agent → falls
+		seenMatch := make(map[string]int, len(c.Chat.Channels))
+		for i, cc := range c.Chat.Channels {
+			channel := strings.TrimSpace(cc.Match)
+			if channel == "" {
+				errs = append(errs, fmt.Errorf("chat.channels[%d].match is required", i))
+				continue
+			}
+			// Order decides precedence, so a duplicate match is never reachable
+			// past the first occurrence — almost always a copy-paste slip rather
+			// than intent. Reject it instead of silently ignoring the later rule.
+			if first, dup := seenMatch[channel]; dup {
+				errs = append(errs, fmt.Errorf("chat.channels[%d].match %q duplicates rule %d; the later rule can never match", i, channel, first))
+				continue
+			}
+			seenMatch[channel] = i
+			// A channel rule may set only reply_on_thread (empty agent → falls
 			// back to chat.defaults.agent), so validate the agent only when set.
 			if cc.Agent != "" {
 				if _, ok := c.Agents[cc.Agent]; !ok {
 					errs = append(errs, fmt.Errorf("chat.channels[%s].agent references unknown agent %q", channel, cc.Agent))
 				}
 			}
-			// Keys may be exact channel IDs (C…/G…) or channel-NAME globs that
-			// contain `*` (e.g. "feature-*"). A glob is matched via path.Match at
-			// runtime, so reject a malformed pattern here rather than letting it
-			// silently never match.
+			// A match is an exact channel ID (C…/G…), an exact channel name, or a
+			// channel-NAME glob containing `*` (e.g. "feature-*"). A glob is matched
+			// via path.Match at runtime, so reject a malformed pattern here rather
+			// than letting it silently never match.
 			if strings.ContainsRune(channel, '*') {
 				if _, err := path.Match(channel, "probe"); err != nil {
 					errs = append(errs, fmt.Errorf("chat.channels[%s] is not a valid channel-name glob: %w", channel, err))

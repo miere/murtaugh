@@ -42,7 +42,9 @@ automations too):
   readable by anyone who can see it.
 - **A channel post is visible to everyone in the channel.** Access control gates
   *who can act*, not *who can see*. For single-recipient delivery use a DM or an
-  ephemeral message.
+  ephemeral message. This matters most in a channel opened with
+  [`allow_anyone`](configuration.md#opening-a-channel-to-everyone), where the
+  people who can act are no longer only the allowlist.
 
 ---
 

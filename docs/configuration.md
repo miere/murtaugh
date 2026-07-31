@@ -187,6 +187,38 @@ murtaugh cfg chat show
 `--default-agent` is required and every routed agent name must exist, or the
 store rejects the change. See [Slack → chat routing](slack.md).
 
+Per-channel routing lives in `chat.channels`, an **ordered list** where the
+**first matching rule wins**:
+
+```yaml
+chat:
+  channels:
+    - match: "nc-*"          # channel ID, exact name, or a `*` glob on the name
+      agent: coder
+      allow_anyone: true
+    - match: "mt-*"
+      agent: admin
+```
+
+Order is the precedence — there is no specificity scoring, so a narrow rule must
+be listed **above** the broader one it needs to beat:
+
+```yaml
+    - match: "nc-secrets"    # stays closed…
+      agent: admin
+    - match: "nc-*"          # …even though this rule would have opened it
+      agent: coder
+      allow_anyone: true
+```
+
+A rule with no `agent` still matches and falls back to `chat.defaults.agent`,
+so a rule can override the reply strategy or access alone. Duplicate `match`
+values are rejected: past the first, they could never be reached.
+
+> The older map shape (`channels: {"nc-*": {agent: coder}}`) still loads and keeps
+> its previous precedence — exact IDs, then exact names, then longest-glob-prefix.
+> It is rewritten to the ordered list the next time the chat config is saved.
+
 ### Access control
 
 ```sh
@@ -203,6 +235,54 @@ startup and **the gateway refuses to start if any entry can't be resolved**.
 
 > Access gates *who can act*, not *who can see*. A message posted to a channel is
 > visible to every member — use a DM or an ephemeral message for private replies.
+
+#### Opening a channel to everyone
+
+A `chat.channels` rule may set `allow_anyone: true` to waive the allowlist for
+that channel, letting any workspace user who can post there talk to the routed
+agent. The typical pairing is a channel whose agent carries a deliberately narrow
+toolset:
+
+```yaml
+chat:
+  channels:
+    - match: "nc-*"          # anyone can use the coding agent here
+      agent: coder
+      allow_anyone: true
+    - match: "mt-*"          # admin-only, full toolset
+      agent: admin
+```
+
+Authority follows the same ladder everywhere: `admin_user` → `allowed_users` →
+the matched channel rule's `allow_anyone`. A guest admitted by the third rung
+may do two things in that channel, and nothing else:
+
+- **talk to the routed agent** — `@mentions` and plain messages;
+- **answer the prompts that agent raises** — `ask` questions and **tool-approval
+  buttons**. A guest who may ask the agent to act may also answer what it asks
+  back; otherwise their turn would stall on a button they cannot click.
+
+The waiver does **not**:
+
+- waive the `@mention` requirement (that is `chat.no_mention`, kept separate so
+  an opened channel does not have the bot answering every message in it);
+- extend to slash commands, including `/murtaugh troubleshoot`, whose bundle can
+  carry sensitive data;
+- extend to **workflow rules**, whose configured actions can run commands and
+  delegate to other agents — their blast radius is not bounded by the channel
+  agent's toolset, so they stay allowlist-only;
+- extend to DMs, restart, or the App Home controls.
+
+Because a guest's approval authority is scoped to the channel, what an opened
+channel's agent may be *talked into* doing is bounded by that agent's `tools`,
+`mcp_servers`, and `approval` policy. Scope those deliberately: they, not the
+allowlist, are what limits an opened channel.
+
+> Approval is by **channel**, not by turn: anyone admitted in the channel can
+> answer a prompt raised there, including one from someone else's turn.
+
+> An opened channel is a spend and resource surface: anyone who joins can start
+> agent turns. There is no per-user rate limit yet — scope the glob accordingly.
 
 ### Workflow rules and unfurl rules
 
