@@ -60,7 +60,7 @@ func primedCache(t *testing.T, byID map[string]string) *channelNameCache {
 	for id, name := range byID {
 		channels = append(channels, slackclient.Channel{ID: id, Name: name})
 	}
-	cache := newChannelNameCache(&fakeChannelDirectory{channels: channels}, nil, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	cache := newChannelNameCache(&fakeChannelDirectory{channels: channels}, nil, nil, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err := cache.refresh(context.Background()); err != nil {
 		t.Fatalf("prime cache: %v", err)
 	}

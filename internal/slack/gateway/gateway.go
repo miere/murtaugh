@@ -231,8 +231,10 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 		logger.Warn("channel-name routing disabled: could not build Slack client", "error", err)
 	} else {
 		// api (a *slack.Client) provides conversations.info for the synchronous
-		// resolve-on-miss that lets canvas turns route by their channel.
-		channelCache = newChannelNameCache(channelAPI, api, 30*time.Second, logger)
+		// resolve-on-miss that lets canvas turns route by their channel, and
+		// files.info for the canvas→parent-channel hop a file-backed canvas
+		// conversation needs (its own name identifies the file, not the channel).
+		channelCache = newChannelNameCache(channelAPI, api, slackCanvasParent{api: api}, 30*time.Second, logger)
 	}
 
 	var chat *ChatHandler
