@@ -40,11 +40,16 @@ func TestSlackCanvasInfo_NoCanvasIsEmptyNotPanic(t *testing.T) {
 	}
 }
 
-// TestSlackCanvasInfo_StandaloneCanvasFromNameNormalized: a standalone canvas has
-// no `properties`; the file id is parsed from name_normalized "FC:<fileId>:<title>".
-// This is the exact shape returned by conversations.info for a live standalone
-// canvas (channel C0BKJ3RFJ10 → file F0BKJ3RFJ10).
-func TestSlackCanvasInfo_StandaloneCanvasFromNameNormalized(t *testing.T) {
+// TestSlackCanvasInfo_FileBackedCanvasFromNameNormalized: a file-backed canvas
+// conversation has no `properties`; the file id is parsed from name_normalized
+// "FC:<fileId>:<title>". This is the exact shape conversations.info returns for a
+// live canvas (channel C0BKJ3RFJ10 → file F0BKJ3RFJ10).
+//
+// The shape does NOT distinguish a standalone canvas from a channel TAB canvas —
+// reading it as "standalone, therefore no parent channel" is what made every
+// canvas turn route to the default agent. The parent comes from files.info; see
+// TestCanvasParentChannel_PrefersSharesAndIsDeterministic.
+func TestSlackCanvasInfo_FileBackedCanvasFromNameNormalized(t *testing.T) {
 	ch := &slack.Channel{}
 	ch.NameNormalized = "FC:F0BKJ3RFJ10:My Canvas"
 	r := slackCanvasInfo{api: fakeCanvasInfoAPI{channel: ch}}

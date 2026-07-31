@@ -94,6 +94,12 @@ Murtaugh connects over **Socket Mode**. In your Slack app settings, enable:
    - `app_mentions:read`, `im:history` — chat
    - `chat:write`, `chat:write.public` — sending messages
    - `files:write` — uploading the `/murtaugh troubleshoot` bundle and agent attachments
+   - `files:read` — reading canvas documents, **and routing canvas turns to the
+     right agent** (a canvas conversation cannot name its own channel; the canvas
+     file is what knows which channel it lives in). Without this, every canvas
+     mention is answered by the default agent regardless of channel rules.
+   - `canvases:read`, `canvases:write` — the `slack.canvas` tool (reading and
+     editing canvas documents)
    - `links:read` — link unfurling (only if you use it)
 4. **Event subscriptions**:
    - `app_mention`, `message.im` — AI chat
