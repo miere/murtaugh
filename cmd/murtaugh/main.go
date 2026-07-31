@@ -301,9 +301,9 @@ func openJournal(cfg config.Config, mode app.Mode, rest []string, logger *slog.L
 	if isSetupInvocation(mode, rest) {
 		return nil, journal.NopRecorder{}, func() {}
 	}
-	path := cfg.Journal.EffectivePath(cfg.BaseDir)
+	path := cfg.Journal.EffectivePath(cfg.BaseDir, cfg.BaseName)
 	store, err := journal.Open(path, cfg.Journal.RetentionByStream(),
-		journal.WithBlobDir(cfg.Journal.EffectiveBlobDir(cfg.BaseDir)))
+		journal.WithBlobDir(cfg.Journal.EffectiveBlobDir(cfg.BaseDir, cfg.BaseName)))
 	if err != nil {
 		logger.Warn("journal disabled: could not open event store", "path", path, "error", err)
 		return nil, journal.NopRecorder{}, func() {}

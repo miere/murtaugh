@@ -54,7 +54,7 @@ func Bootstrap(ctx context.Context, configPath string, setup bool) (config.Confi
 		}
 	}
 
-	s, err := Open(ctx, boot.Database, filepath.Dir(configPath))
+	s, err := Open(ctx, boot.Database, filepath.Dir(configPath), config.BaseNameOf(configPath))
 	if err != nil {
 		return config.Config{}, nil, err
 	}
@@ -131,7 +131,7 @@ func migrateFilesToStore(ctx context.Context, configPath string) error {
 
 	dir := filepath.Dir(configPath)
 	dbc := config.DatabaseConfig{Backend: config.BackendSQLite}
-	s, err := Open(ctx, dbc, dir)
+	s, err := Open(ctx, dbc, dir, config.BaseNameOf(configPath))
 	if err != nil {
 		return err
 	}

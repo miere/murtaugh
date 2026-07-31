@@ -64,9 +64,10 @@ func (t *dbMigrateTool) Invoke(ctx context.Context, args map[string]any) (any, e
 		connectDBC = config.DatabaseConfig{Backend: config.BackendPostgres, Postgres: config.PostgresConfig{DSN: dsn}}
 		fileDBC = config.DatabaseConfig{Backend: config.BackendPostgres, Postgres: config.PostgresConfig{DSN: "${" + dsnEnv + "}"}}
 	case config.BackendSQLite:
-		// An unset path defaults to `config.db` beside config.yaml; a given
-		// --sqlite-path pins it. Keep the same value in the file so a default
-		// stays a default (portable) rather than being frozen to an absolute path.
+		// An unset path defaults to `<config-basename>.db` beside the bootstrap
+		// file; a given --sqlite-path pins it. Keep the same value in the file so a
+		// default stays a default (portable) rather than being frozen to an
+		// absolute path.
 		path := strings.TrimSpace(mustString(args, "sqlite_path"))
 		connectDBC = config.DatabaseConfig{Backend: config.BackendSQLite, SQLite: config.SQLiteConfig{Path: path}}
 		fileDBC = connectDBC
@@ -78,7 +79,7 @@ func (t *dbMigrateTool) Invoke(ctx context.Context, args map[string]any) (any, e
 		return nil, fmt.Errorf("the config store is already using the %s backend", to)
 	}
 
-	target, err := store.Open(ctx, connectDBC, filepath.Dir(t.configPath))
+	target, err := store.Open(ctx, connectDBC, filepath.Dir(t.configPath), config.BaseNameOf(t.configPath))
 	if err != nil {
 		return nil, fmt.Errorf("open target store: %w", err)
 	}

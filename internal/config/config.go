@@ -21,8 +21,13 @@ const defaultJobsRelativePath = ".config/murtaugh/jobs.yaml"
 const defaultJournalRelativePath = ".config/murtaugh/journal.yaml"
 
 type Config struct {
-	BaseDir string      `yaml:"-" json:"-"`
-	OAuth   OAuthConfig `yaml:"oauth" json:"oauth"`
+	BaseDir string `yaml:"-" json:"-"`
+	// BaseName is the bootstrap file's name without its extension ("config" for
+	// config.yaml, "slack-nurturecloud" for slack-nurturecloud.yaml). It stems
+	// the sibling database filenames so that several configs can share one
+	// directory without colliding on a single config.db/journal.db pair.
+	BaseName string      `yaml:"-" json:"-"`
+	OAuth    OAuthConfig `yaml:"oauth" json:"oauth"`
 	// Database is the config-store backend selection, parsed from the bootstrap
 	// config.yaml. It is the only non-credential block that stays on disk; every
 	// other section below is sourced from the store it points at.
@@ -566,6 +571,27 @@ func DefaultJournalPath() (string, error) {
 	return filepath.Join(home, defaultJournalRelativePath), nil
 }
 
+// BaseNameOf derives the database-name stem from a bootstrap file path:
+// "…/slack-nurturecloud.yaml" → "slack-nurturecloud". A path with no usable
+// filename yields "", which the path resolvers treat as the default stem.
+func BaseNameOf(path string) string {
+	base := filepath.Base(strings.TrimSpace(path))
+	if base == "." || base == string(filepath.Separator) {
+		return ""
+	}
+	return strings.TrimSuffix(base, filepath.Ext(base))
+}
+
+// dbStem normalises a Config.BaseName into the stem for the sibling database
+// filenames. An empty base name (a caller that never recorded one) falls back to
+// "config", keeping the historical config.db for the default bootstrap file.
+func dbStem(baseName string) string {
+	if s := strings.TrimSpace(baseName); s != "" {
+		return s
+	}
+	return "config"
+}
+
 func Load(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -576,6 +602,7 @@ func Load(path string) (Config, error) {
 		return Config{}, err
 	}
 	cfg.BaseDir = filepath.Dir(path)
+	cfg.BaseName = BaseNameOf(path)
 
 	// Load <config-dir>/.env before expanding any ${VAR} references so that
 	// credentials live only in the dotenv file (or the ambient environment),

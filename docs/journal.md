@@ -116,8 +116,8 @@ murtaugh cfg journal show
 ```
 
 ```
-# path: ~/.config/murtaugh/journal.db          # default (beside config.yaml)
-# blob_dir: ~/.config/murtaugh/journal-blobs    # default (beside the DB)
+# path: ~/.config/murtaugh/config-journal.db         # default (beside config.yaml)
+# blob_dir: ~/.config/murtaugh/config-journal-blobs  # default (beside the DB)
 streams:
   gateway:     { enabled: true, retention: 168h }   # 7d
   job:         { enabled: true, retention: 720h }   # 30d
@@ -130,6 +130,12 @@ sweep:
 > event data, not configuration. `cfg journal show` reads the journal settings;
 > tuning them lives in the config store alongside the rest of `cfg`, and changes
 > apply on the next gateway restart.
+
+The default filenames are stemmed by the bootstrap file's name, so each config
+in a directory journals separately: `config.yaml` writes `config-journal.db` and
+`config-journal-blobs`, while `--config slack-nurturecloud.yaml` writes
+`slack-nurturecloud-journal.db` and `slack-nurturecloud-journal-blobs`. Setting
+`path`/`blob_dir` explicitly overrides the stem.
 
 A fresh install keeps every stream on with the defaults above. The daemon prunes
 past-retention events automatically (at startup and every `sweep.every`);

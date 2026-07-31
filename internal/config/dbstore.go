@@ -25,6 +25,7 @@ func LoadBootstrap(path string) (Config, error) {
 		return Config{}, err
 	}
 	cfg.BaseDir = filepath.Dir(path)
+	cfg.BaseName = BaseNameOf(path)
 	if err := LoadDotEnv(cfg.BaseDir); err != nil {
 		return Config{}, err
 	}
@@ -99,18 +100,23 @@ func (d DatabaseConfig) EffectiveBackend() string {
 }
 
 // EffectiveSQLitePath resolves the SQLite config-database path: the configured
-// value (with ~ expansion) or, by default, `config.db` in the config directory
-// (beside config.yaml), so the store travels with the config it belongs to.
-// configDir is the directory holding the bootstrap file; when it is empty (the
-// path is unknown) it falls back to the XDG state dir.
-func (d DatabaseConfig) EffectiveSQLitePath(configDir string) string {
+// value (with ~ expansion) or, by default, `<basename>.db` in the config
+// directory (beside the bootstrap file), so the store travels with the config it
+// belongs to. baseName is the bootstrap file's name without its extension
+// (Config.BaseName), which keeps `config.yaml` on the historical `config.db`
+// while giving `slack-nurturecloud.yaml` its own `slack-nurturecloud.db` — two
+// configs in one directory no longer share a store. configDir is the directory
+// holding the bootstrap file; when it is empty (the path is unknown) it falls
+// back to the XDG state dir.
+func (d DatabaseConfig) EffectiveSQLitePath(configDir, baseName string) string {
 	if p := strings.TrimSpace(d.SQLite.Path); p != "" {
 		return expandHome(p)
 	}
+	name := dbStem(baseName) + ".db"
 	if strings.TrimSpace(configDir) != "" {
-		return filepath.Join(configDir, "config.db")
+		return filepath.Join(configDir, name)
 	}
-	return filepath.Join(journalStateDir(), "config.db")
+	return filepath.Join(journalStateDir(), name)
 }
 
 // Sections group the collection-typed config entities in config_items. Each is
@@ -215,7 +221,7 @@ type SnapshotSingleton struct {
 }
 
 // AssembleFromRows builds a Config from raw JSON rows plus a base carrying the
-// file-sourced fields (OAuth, BaseDir, Database). It unmarshals each row into
+// file-sourced fields (OAuth, BaseDir, BaseName, Database). It unmarshals each row into
 // its typed struct, runs the standard Validate, and bakes the global
 // defaults.approval into each agent — mirroring the file loader's tail so a
 // DB-sourced Config is indistinguishable from a file-sourced one. Store
@@ -226,6 +232,7 @@ func AssembleFromRows(base Config, items map[string]map[string]json.RawMessage, 
 	// config.yaml can't leak stale values past the store.
 	cfg := Config{
 		BaseDir:  base.BaseDir,
+		BaseName: base.BaseName,
 		OAuth:    base.OAuth,
 		Database: base.Database,
 	}

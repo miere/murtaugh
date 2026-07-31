@@ -23,7 +23,7 @@ func openPostgresTestStore(t *testing.T) config.Store {
 		t.Skip("set MURTAUGH_TEST_POSTGRES_DSN (e.g. via docker compose up -d) to run Postgres tests")
 	}
 	ctx := context.Background()
-	s, err := Open(ctx, config.DatabaseConfig{Backend: config.BackendPostgres, Postgres: config.PostgresConfig{DSN: dsn}}, "")
+	s, err := Open(ctx, config.DatabaseConfig{Backend: config.BackendPostgres, Postgres: config.PostgresConfig{DSN: dsn}}, "", "")
 	if err != nil {
 		t.Fatalf("open postgres store: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestSQLiteToPostgresMigration(t *testing.T) {
 	sqliteStore, err := Open(ctx, config.DatabaseConfig{
 		Backend: config.BackendSQLite,
 		SQLite:  config.SQLiteConfig{Path: filepath.Join(t.TempDir(), "config.db")},
-	}, "")
+	}, "", "")
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}

@@ -17,7 +17,7 @@ func openTestStore(t *testing.T) config.Store {
 		Backend: config.BackendSQLite,
 		SQLite:  config.SQLiteConfig{Path: filepath.Join(t.TempDir(), "config.db")},
 	}
-	s, err := Open(context.Background(), dbc, "")
+	s, err := Open(context.Background(), dbc, "", "")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

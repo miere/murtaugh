@@ -34,7 +34,12 @@ sections below assume them.
   routing, access, journal, troubleshoot, workflow/unfurl rules, runtime
   defaults — lives in the **config store** (a SQLite DB by default at
   `~/.config/murtaugh/config.db`, or Postgres), managed with the
-  `murtaugh cfg …` commands (also exposed over MCP as `cfg.*` tools). The old
+  `murtaugh cfg …` commands (also exposed over MCP as `cfg.*` tools). The
+  store's default filename follows the config file's own name — `config.yaml`
+  uses `config.db` and `config-journal.db`, while `--config
+  slack-nurturecloud.yaml` uses `slack-nurturecloud.db` and
+  `slack-nurturecloud-journal.db` — so several configs can share a directory
+  without sharing a store. The old
   hand-edited siblings (`agents.yaml`, `jobs.yaml`, `journal.yaml`,
   `workflow-rules.yaml`, `unfurl-rules.yaml`, `troubleshoot.yaml`) no longer
   exist; on upgrade an existing set is auto-migrated into the store on first

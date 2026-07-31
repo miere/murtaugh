@@ -39,11 +39,11 @@ func TestJournalDefaultsAllStreamsOn(t *testing.T) {
 	if got := c.EffectiveSweepEvery(); got != 24*time.Hour {
 		t.Errorf("sweep every = %v, want 24h", got)
 	}
-	if c.EffectivePath("") == "" {
+	if c.EffectivePath("", "") == "" {
 		t.Errorf("EffectivePath should never be empty")
 	}
-	if !strings.HasSuffix(c.EffectivePath(""), "journal.db") {
-		t.Errorf("EffectivePath = %q, want it to end in journal.db", c.EffectivePath(""))
+	if !strings.HasSuffix(c.EffectivePath("", ""), "config-journal.db") {
+		t.Errorf("EffectivePath = %q, want it to end in config-journal.db", c.EffectivePath("", ""))
 	}
 	enabled := c.EnabledStreams()
 	for _, stream := range []string{journalStreamGateway, journalStreamJob, journalStreamACPSession} {
