@@ -17,8 +17,10 @@ oauth:
 database:
   backend: sqlite            # sqlite | postgres
   # sqlite:
-  #   # Path to the config database. Defaults to `config.db` beside this file
-  #   # (the config directory); set an absolute path to move it elsewhere.
+  #   # Path to the config database. Defaults to `<this file's name>.db` beside
+  #   # this file (so config.yaml → config.db, slack-nurturecloud.yaml →
+  #   # slack-nurturecloud.db, and two configs can share a directory safely);
+  #   # set an absolute path to move it elsewhere.
   #   path: /custom/path/config.db
   # postgres:
   #   dsn: ${MURTAUGH_DB_DSN}   # e.g. postgres://user:pass@host:5432/murtaugh

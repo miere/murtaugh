@@ -82,9 +82,11 @@ database:
 
 `database:` selects where the rest of the configuration lives:
 
-- **`backend: sqlite`** (default) — a single file, `config.db` beside
-  `config.yaml` by default (override with `sqlite.path`). Zero setup; ideal for
-  one host.
+- **`backend: sqlite`** (default) — a single file beside the bootstrap file,
+  named after it: `config.yaml` → `config.db`, `slack-nurturecloud.yaml` →
+  `slack-nurturecloud.db` (override with `sqlite.path`). Because the filename
+  follows the config, several configs can live in one directory without sharing
+  a store. Zero setup; ideal for one host.
 - **`backend: postgres`** — `postgres.dsn`, referenced as `${VAR}` so the real
   DSN stays in `.env`. Use this to share one config store across hosts.
 

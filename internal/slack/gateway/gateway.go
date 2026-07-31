@@ -373,7 +373,7 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 		// so a disabled stream writes neither rows nor transcript files.
 		var sessionLog *sessionLogger
 		if cfg.Journal.EffectiveEnabled(journal.StreamACPSession) {
-			sessionLog = newSessionLogger(recorder, cfg.Journal.EffectiveBlobDir(cfg.BaseDir), logger)
+			sessionLog = newSessionLogger(recorder, cfg.Journal.EffectiveBlobDir(cfg.BaseDir, cfg.BaseName), logger)
 		}
 		// Resolve this bot's own Slack user id once so thread backfill can mark
 		// the agent's prior replies as its own. Best-effort: a failed auth.test

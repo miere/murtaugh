@@ -65,7 +65,7 @@ func (o Options) maxLogBytes() int64 {
 // derives them from config; keeping them explicit makes the bundler testable.
 type Sources struct {
 	Version     string
-	JournalDB   string   // EffectivePath of journal.db
+	JournalDB   string   // EffectivePath of the journal DB (<config-basename>-journal.db)
 	BlobDir     string   // EffectiveBlobDir (ACP transcripts)
 	ConfigFiles []string // config.yaml, agents.yaml, jobs.yaml, journal.yaml
 	LogFiles    []string // daemon stdout/stderr logs

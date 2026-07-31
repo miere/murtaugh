@@ -103,31 +103,38 @@ func (c JournalConfig) EffectiveSweepEvery() time.Duration {
 }
 
 // EffectivePath resolves the database path: the configured value (with ~
-// expansion) or, by default, `journal.db` in the config directory (beside
-// config.yaml). configDir is the directory holding the bootstrap file; when it
-// is empty it falls back to the XDG state dir. Existing journal files at the old
-// location are not migrated — they are troubleshooting artifacts and can be
-// moved by hand if needed.
-func (c JournalConfig) EffectivePath(configDir string) string {
+// expansion) or, by default, `<basename>-journal.db` in the config directory
+// (beside the bootstrap file). baseName is the bootstrap file's name without its
+// extension (Config.BaseName), so `config.yaml` journals to `config-journal.db`
+// and `slack-nurturecloud.yaml` to `slack-nurturecloud-journal.db` — each config
+// keeps its own journal even when they share a directory. configDir is the
+// directory holding the bootstrap file; when it is empty it falls back to the
+// XDG state dir. Existing journal files at the old location are not migrated —
+// they are troubleshooting artifacts and can be moved by hand if needed.
+func (c JournalConfig) EffectivePath(configDir, baseName string) string {
 	if p := strings.TrimSpace(c.Path); p != "" {
 		return expandHome(p)
 	}
+	name := dbStem(baseName) + "-journal.db"
 	if strings.TrimSpace(configDir) != "" {
-		return filepath.Join(configDir, "journal.db")
+		return filepath.Join(configDir, name)
 	}
-	return filepath.Join(journalStateDir(), "journal.db")
+	return filepath.Join(journalStateDir(), name)
 }
 
 // EffectiveBlobDir resolves the directory for large-body blobs, defaulting
-// beside the database (in the config directory unless configured otherwise).
-func (c JournalConfig) EffectiveBlobDir(configDir string) string {
+// beside the database (in the config directory unless configured otherwise). It
+// is stemmed by baseName for the same reason as EffectivePath: the blobs are
+// referenced by the journal rows, so the two must stay paired per config.
+func (c JournalConfig) EffectiveBlobDir(configDir, baseName string) string {
 	if p := strings.TrimSpace(c.BlobDir); p != "" {
 		return expandHome(p)
 	}
+	name := dbStem(baseName) + "-journal-blobs"
 	if strings.TrimSpace(configDir) != "" {
-		return filepath.Join(configDir, "journal-blobs")
+		return filepath.Join(configDir, name)
 	}
-	return filepath.Join(journalStateDir(), "journal-blobs")
+	return filepath.Join(journalStateDir(), name)
 }
 
 // Validate checks journal.yaml: stream names must be known, durations must
