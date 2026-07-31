@@ -80,9 +80,12 @@ agents:
 #     agent: default
 #     # dm_agent: default
 #     # reply_on_thread: true    # global reply strategy (default true = threaded)
-#   # channels:                  # keys are channel IDs (or name globs), not #names
-#   #   C0ENG1:
+#   # channels:                  # ORDERED list; first matching rule wins
+#   #   - match: C0ENG1          # channel IDs or name globs, not #names
 #   #     agent: default
-#   #   support-*:
+#   #   - match: support-*
 #   #     reply_on_thread: false # reply directly in the channel
+#   #   - match: nc-*
+#   #     agent: coder
+#   #     allow_anyone: true     # waive access.allowed_users for chat here
 # ---------------------------------------------------------------------------

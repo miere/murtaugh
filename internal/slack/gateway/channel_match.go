@@ -7,79 +7,45 @@ import (
 	"github.com/miere/murtaugh/internal/config"
 )
 
-// matchChannel resolves a channel to its configured chat.channels entry. The
-// map's keys are either exact Slack channel IDs (C…/G…, for back-compat) or
-// channel-NAME globs that may contain `*` (e.g. "feature-*", "*-prod").
-// channelName may be empty when the cache has not yet learned the channel's
-// name (a brand-new channel); only the exact channel-ID rule can match in that
-// case.
+// matchChannel resolves a channel to its configured chat.channels rule. Each
+// rule's `match` is an exact Slack channel ID (C…/G…), an exact channel NAME, or
+// a channel-NAME glob that may contain `*` (e.g. "feature-*", "*-prod").
 //
-// Precedence (first hit wins, implemented by scoring rather than map
-// iteration order because Go maps are unordered):
+// Precedence is POSITIONAL: the rules are walked in the order the operator wrote
+// them and the FIRST match wins. There is no implicit specificity scoring — a
+// narrow rule that must beat a broader one has to be listed above it. This is
+// why chat.channels is an ordered list rather than a map: it makes precedence
+// something you read off the config instead of deriving.
 //
-//  1. exact channel-ID key  — an entry that equals channelID verbatim.
-//  2. exact channel-name key — an entry that equals channelName verbatim.
-//  3. longest-literal-prefix glob match on the name — among the glob keys
-//     that match channelName, the one whose literal prefix (the run of
-//     characters before its first `*`) is longest wins, so a more specific
-//     pattern like "feature-prod-*" beats a broader "feature-*".
+// channelName may be empty when the channel's name could not be resolved; only
+// exact channel-ID rules can match in that case.
 //
 // ok is false (and the zero ChannelConfig is returned) when nothing matches;
-// callers fall back to chat.defaults in that case. The single winner supplies
-// BOTH the agent and the reply strategy: the caller backfills an empty agent
-// from the default and an unset reply_on_thread from the default. The function
-// is pure — it does no I/O — so it is safe to call on the Slack socket
-// goroutine.
-func matchChannel(channelID, channelName string, channels map[string]config.ChannelConfig) (config.ChannelConfig, bool) {
-	if len(channels) == 0 {
-		return config.ChannelConfig{}, false
-	}
-	// (1) exact channel-ID key.
-	if channelID != "" {
-		if cc, hit := channels[channelID]; hit {
+// callers fall back to chat.defaults in that case. The winning rule supplies the
+// agent, the reply strategy AND the allow_anyone waiver: the caller backfills an
+// empty agent from the default and an unset reply_on_thread from the default.
+// The function is pure — it does no I/O — so it is safe to call on the Slack
+// socket goroutine.
+func matchChannel(channelID, channelName string, channels config.ChannelRules) (config.ChannelConfig, bool) {
+	for _, cc := range channels {
+		if channelKeyMatches(cc.Match, channelID, channelName) {
 			return cc, true
 		}
-	}
-	if channelName == "" {
-		return config.ChannelConfig{}, false
-	}
-	// (2) exact channel-name key.
-	if cc, hit := channels[channelName]; hit {
-		return cc, true
-	}
-	// (3) longest-literal-prefix glob match on the name.
-	best := config.ChannelConfig{}
-	bestPrefixLen := -1
-	bestFound := false
-	for key, cc := range channels {
-		if !strings.ContainsRune(key, '*') {
-			// Non-glob keys were already handled by the exact passes above.
-			continue
-		}
-		if matched, err := path.Match(key, channelName); err != nil || !matched {
-			continue
-		}
-		if n := literalPrefixLen(key); n > bestPrefixLen {
-			bestPrefixLen = n
-			best = cc
-			bestFound = true
-		}
-	}
-	if bestFound {
-		return best, true
 	}
 	return config.ChannelConfig{}, false
 }
 
-// literalPrefixLen returns the number of leading characters in pattern before
-// its first `*` (or the whole length when there is no `*`). It is the measure
-// of how specific a glob is: a longer literal prefix matches a narrower set of
-// names, so it wins the precedence-3 tie-break.
-func literalPrefixLen(pattern string) int {
-	if i := strings.IndexRune(pattern, '*'); i >= 0 {
-		return i
-	}
-	return len(pattern)
+// channelAllowsAnyone reports whether the channel's winning chat.channels rule
+// opens the chat surface to any workspace user, waiving access.allowed_users.
+//
+// It reuses matchChannel's first-match-wins semantics rather than unioning
+// across every matching rule, and that distinction is a safety property: a
+// narrow closed rule listed above a broad `allow_anyone` one keeps its channel
+// closed. Unioning would let one permissive glob silently open everything below
+// it. No match at all means no waiver, so the global allowlist stands.
+func channelAllowsAnyone(channelID, channelName string, channels config.ChannelRules) bool {
+	cc, ok := matchChannel(channelID, channelName, channels)
+	return ok && cc.AllowAnyone
 }
 
 // validChannelAgentGlob reports whether key is a syntactically valid

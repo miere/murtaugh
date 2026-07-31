@@ -96,7 +96,7 @@ func TestResolveChannelName_CanvasRoutesByParentChannel(t *testing.T) {
 	}
 
 	// The routing seam: the resolved name must now match the channel's glob.
-	cc, matched := matchChannel("C0BLEABKSCD", name, map[string]config.ChannelConfig{"nc-*": {Agent: "coder"}})
+	cc, matched := matchChannel("C0BLEABKSCD", name, config.ChannelRules{{Match: "nc-*", Agent: "coder"}})
 	if !matched || cc.Agent != "coder" {
 		t.Fatalf("matchChannel = (%+v, %v), want coder", cc, matched)
 	}
@@ -270,7 +270,7 @@ func TestResolveChannelName_NilInfoDegradesToNameFor(t *testing.T) {
 func TestResolveChannelName_UnblocksNameGlobRouting(t *testing.T) {
 	info := &countingCanvasInfo{channel: channelNamed("feature-xyz")}
 	cache := newChannelNameCache(&fakeChannelDirectory{}, info, nil, time.Second, cacheTestLogger())
-	channels := map[string]config.ChannelConfig{"feature-*": {Agent: "coder"}}
+	channels := config.ChannelRules{{Match: "feature-*", Agent: "coder"}}
 
 	if _, ok := matchChannel("C1", "", channels); ok {
 		t.Fatal("expected no name-glob match while the name is unresolved")

@@ -74,7 +74,7 @@ chat:
 	if cfg.OAuth.AppToken != "xapp-test" || cfg.OAuth.BotToken != "xoxb-test" || cfg.Access.AdminUser != "@admin" {
 		t.Fatalf("unexpected Slack config parsed")
 	}
-	if cfg.Chat.Defaults.Agent != "default" || cfg.Chat.Defaults.DMAgent != "default" || cfg.Chat.Channels["C12345"].Agent != "coding" {
+	if cfg.Chat.Defaults.Agent != "default" || cfg.Chat.Defaults.DMAgent != "default" || ruleFor(t, cfg.Chat.Channels, "C12345").Agent != "coding" {
 		t.Fatalf("unexpected chat routing parsed: %#v", cfg.Chat)
 	}
 	// An omitted reply_on_thread stays nil (→ default true); an explicit false is
@@ -82,9 +82,23 @@ chat:
 	if cfg.Chat.Defaults.ReplyOnThread != nil {
 		t.Fatalf("expected defaults.reply_on_thread to be nil when omitted, got %v", *cfg.Chat.Defaults.ReplyOnThread)
 	}
-	if rot := cfg.Chat.Channels["support-*"].ReplyOnThread; rot == nil || *rot {
+	if rot := ruleFor(t, cfg.Chat.Channels, "support-*").ReplyOnThread; rot == nil || *rot {
 		t.Fatalf("expected support-* reply_on_thread=false, got %v", rot)
 	}
+}
+
+// ruleFor returns the chat.channels rule whose match equals want, failing the
+// test when no such rule exists. Rules are an ordered list, so tests that only
+// care about one rule's contents look it up by match rather than by position.
+func ruleFor(t *testing.T, rules ChannelRules, want string) ChannelConfig {
+	t.Helper()
+	for _, cc := range rules {
+		if cc.Match == want {
+			return cc
+		}
+	}
+	t.Fatalf("no chat.channels rule matching %q in %#v", want, rules)
+	return ChannelConfig{}
 }
 
 func TestLoadACPConfigFromAgentsFile(t *testing.T) {
@@ -842,12 +856,13 @@ func TestAgentEnvOverridesNilWhenEmpty(t *testing.T) {
 }
 
 // channelAgentsValidationConfig builds a minimal ACP-enabled config whose only
-// variable is the chat.channels map, so a test can exercise the glob/agent
-// validation in isolation. Each key→agent pair becomes a ChannelConfig{Agent}.
+// variable is the chat.channels rule list, so a test can exercise the glob/agent
+// validation in isolation. Each match→agent pair becomes one rule. The input
+// stays a map for caller convenience; rule order does not affect validation.
 func channelAgentsValidationConfig(channelAgents map[string]string) Config {
-	channels := make(map[string]ChannelConfig, len(channelAgents))
+	channels := make(ChannelRules, 0, len(channelAgents))
 	for key, agent := range channelAgents {
-		channels[key] = ChannelConfig{Agent: agent}
+		channels = append(channels, ChannelConfig{Match: key, Agent: agent})
 	}
 	return Config{
 		OAuth: OAuthConfig{AppToken: "xapp-test", BotToken: "xoxb-test"},

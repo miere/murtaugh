@@ -275,12 +275,30 @@ Agent profiles and the `chat` routing config now live in the store (agents as
 
 1.  **Direct Messages**: Use `chat.defaults.dm_agent` if set, otherwise
     `chat.defaults.agent`.
-2.  **Channels**: Use the matching `chat.channels.<k>.agent` if set, otherwise
-    `chat.defaults.agent`. The matched entry's `reply_on_thread` (falling back to
+2.  **Channels**: `chat.channels` is an **ordered** rule list; the **first** rule
+    whose `match` selects the channel wins. Use its `agent` if set, otherwise
+    `chat.defaults.agent`. The matched rule's `reply_on_thread` (falling back to
     `chat.defaults.reply_on_thread`, default `true`) decides whether the reply is
-    threaded or posted directly in the channel.
+    threaded or posted directly in the channel, and its `allow_anyone` decides
+    whether the channel's chat surface is open to non-allowlisted users.
 
-`chat.defaults.agent` is required when `chat.enabled: true`.
+`chat.defaults.agent` is required when `chat.enabled: true`. The legacy map shape
+for `chat.channels` still decodes — `config.ChannelRules` converts it to the list
+reproducing the old precedence — and is rewritten as a list on the next save.
+
+Channel admission (both the `allow_anyone` waiver and the `no_mention` waiver)
+runs **off the socket goroutine**, because judging a non-allowlisted author needs
+the channel NAME and resolving an uncached one costs a `conversations.info` call.
+The socket goroutine keeps only cheap work; dedup stays after the authz checks so
+a message that is about to be dropped never consumes the slot its twin needs.
+
+Interactive callbacks share that authority ladder via `interactionAdmission`:
+`admissionAllowlisted` (admin/allowed_users) reaches the whole surface, while
+`admissionChannelGuest` (admitted only by a channel's `allow_anyone`) reaches
+just the broker prompts — the `ask` tool and the tool-approval gates, which both
+post through `internal/slack/interaction`. Built-in controls and the workflow
+engine stay allowlisted-only. The allowlisted case dispatches inline so the
+`ask` modal's short-lived `trigger_id` is never spent on a name lookup.
 
 ### Triggers and actions
 

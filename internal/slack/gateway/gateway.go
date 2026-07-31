@@ -206,6 +206,11 @@ type Gateway struct {
 	// noMentionEverywhere is the global no-mention list (chat.no_mention.everywhere).
 	// Captured from cfg.Chat at construction and resolved to IDs by resolveAllowSet.
 	noMentionEverywhere []string
+	// chatChannels is the ordered chat.channels rule list, captured at
+	// construction. handleEventsAPI consults it for the allow_anyone waiver;
+	// the chat resolver consults cfg.Chat.Channels for routing. Both use
+	// matchChannel, so a channel is judged by exactly one rule either way.
+	chatChannels config.ChannelRules
 }
 
 func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recorder journal.Recorder, broker *askbroker.Broker) *Gateway {
@@ -460,6 +465,7 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 		// re-importing the full cfg.
 		noMentionPerChannel: cfg.Chat.NoMention.ByChannel,
 		noMentionEverywhere: cfg.Chat.NoMention.Everywhere,
+		chatChannels:        cfg.Chat.Channels,
 	}
 	// The coalescer needs g's dispatch/interrupt hooks, so it is wired after the
 	// struct exists. It owns the decision of when and what to dispatch per
@@ -845,6 +851,37 @@ func (a *Gateway) notifyConnected(ctx context.Context) {
 	}()
 }
 
+// interactionAdmission is how far a clicker's authority reaches over the
+// interactive surface. It mirrors the chat surface: authority comes from the
+// global allowlist, or — one step narrower — from the channel the click happened
+// in.
+type interactionAdmission int
+
+const (
+	// admissionDenied: the click is ignored.
+	admissionDenied interactionAdmission = iota
+	// admissionChannelGuest: the clicker is NOT on access.allowed_users, but the
+	// channel's chat.channels rule sets allow_anyone, so they may talk to the
+	// routed agent here. Their authority is limited to answering prompts the
+	// agent itself raised in this conversation — `ask` questions and tool
+	// approvals. It reaches nothing else: not the App Home controls, not restart,
+	// not the workflow engine, whose actions are operator-configured and not
+	// bounded by the channel agent's toolset.
+	admissionChannelGuest
+	// admissionAllowlisted: admin_user or access.allowed_users. The full
+	// interactive surface, exactly as before allow_anyone existed.
+	admissionAllowlisted
+)
+
+// handleInteractive gates an interactive callback by the SAME authority that
+// governs the chat surface: admin_user / allowed_users, else the channel's
+// allow_anyone rule. A user who may ask the agent to do something in a channel
+// may also answer the questions that agent asks back — otherwise a guest's turn
+// would stall on an approval prompt they are not allowed to click.
+//
+// Anything beyond the agent's own prompts stays allowlist-only, so opening a
+// channel for chat still never widens who can restart the bot, install an
+// update, or fire a configured workflow rule.
 func (a *Gateway) handleInteractive(event socketmode.Event) {
 	interaction, ok := event.Data.(slack.InteractionCallback)
 	if !ok {
@@ -854,10 +891,103 @@ func (a *Gateway) handleInteractive(event socketmode.Event) {
 	}
 
 	a.ack(event)
-	if !a.cfg.IsAllowedUser(interaction.User.ID) {
-		a.logger.Info("denied interactive callback from unauthorized user", "user", interaction.User.ID, "channel", interaction.Channel.ID, "callback_id", interaction.CallbackID)
+	// Fast path: an allowlisted clicker needs no channel context, so the common
+	// case keeps running inline — this matters for the modal path below, whose
+	// trigger_id expires in seconds.
+	if a.cfg.IsAllowedUser(interaction.User.ID) {
+		a.dispatchInteractive(event, interaction, admissionAllowlisted)
 		return
 	}
+	// Otherwise the channel's rule decides, and that needs the channel NAME —
+	// possibly a Slack round-trip, so it moves off the socket goroutine. In
+	// practice the cache is already warm: a prompt only exists because a turn is
+	// running in this channel, and that turn resolved the name to route itself.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), channelChatTimeout)
+		channelName := a.resolveChannelNameFor(ctx, interaction.Channel.ID)
+		cancel()
+		if !channelAllowsAnyone(interaction.Channel.ID, channelName, a.chatChannels) {
+			a.logger.Info("denied interactive callback from unauthorized user", "user", interaction.User.ID, "channel", interaction.Channel.ID, "callback_id", interaction.CallbackID)
+			return
+		}
+		a.dispatchInteractive(event, interaction, admissionChannelGuest)
+	}()
+}
+
+// dispatchInteractive routes an already-authorized callback. admission decides
+// how much of the surface is reachable; see interactionAdmission.
+func (a *Gateway) dispatchInteractive(event socketmode.Event, interaction slack.InteractionCallback, admission interactionAdmission) {
+	if admission == admissionDenied {
+		return
+	}
+	// The binary's own built-ins. All of them are allowlist-or-better and the
+	// privileged ones (App Home update/restart, restart suggestion) additionally
+	// re-check IsAdminUser in their handlers.
+	if admission == admissionAllowlisted {
+		a.dispatchInteractiveBuiltins(interaction)
+		if a.builtinInteractionHandled(interaction) {
+			return
+		}
+	}
+	// Broker prompts — the `ask` tool AND the tool-approval gates (both the ACP
+	// PermissionGate and the native approver post through this same broker). This
+	// is the one surface a channel guest reaches: it is the agent asking a
+	// question about the turn in front of them.
+	if a.interactions != nil && askbroker.IsInteraction(interaction) {
+		if corr, decision, ok := askbroker.ParseClick(interaction); ok {
+			a.interactions.Resolve(corr, decision)
+		}
+		return
+	}
+	// Modal-form path (the `ask` tool's multi-question / multi-select / free-text
+	// mode). A click on the "Answer" button opens the modal against the click's
+	// trigger_id; a view_submission carries the answers back to the blocked
+	// AskForm. The trigger_id is short-lived, so OpenForm runs promptly.
+	if a.interactions != nil {
+		if corr, ok := askbroker.IsFormAnswerClick(interaction); ok {
+			triggerID := interaction.TriggerID
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				if err := a.interactions.OpenForm(ctx, corr, triggerID); err != nil {
+					a.logger.Error("opening ask modal failed", "error", err, "correlation", corr)
+				}
+			}()
+			return
+		}
+		if interaction.Type == slack.InteractionTypeViewSubmission {
+			if corr, resp, ok := askbroker.ParseViewSubmission(interaction); ok {
+				a.interactions.ResolveForm(corr, resp)
+				return
+			}
+		}
+	}
+	// Everything past here is the workflow engine: operator-configured rules that
+	// can run commands and delegate to agents. Their blast radius is not bounded
+	// by the channel agent's toolset, so a channel guest stops here.
+	if admission != admissionAllowlisted {
+		a.logger.Info("ignored non-prompt interactive callback from channel guest", "user", interaction.User.ID, "channel", interaction.Channel.ID, "callback_id", interaction.CallbackID)
+		return
+	}
+	a.dispatchInteractiveWorkflow(event, interaction)
+}
+
+// builtinInteractionHandled reports whether interaction was claimed by one of
+// the binary's built-in controls, so the router stops rather than handing it to
+// the broker or the workflow engine.
+func (a *Gateway) builtinInteractionHandled(interaction slack.InteractionCallback) bool {
+	return isRestartSuggestionInteraction(interaction) ||
+		isPingInteraction(interaction) ||
+		isAppHomeUpdateClick(interaction) ||
+		isAppHomeUpdateSubmit(interaction) ||
+		isAppHomeRestartClick(interaction) ||
+		isAppHomeRestartSubmit(interaction)
+}
+
+// dispatchInteractiveBuiltins runs the binary-owned controls. Each is handled
+// before the workflow engine sees the callback so a configured rule or an
+// on-disk template can never redirect them.
+func (a *Gateway) dispatchInteractiveBuiltins(interaction slack.InteractionCallback) {
 	if isRestartSuggestionInteraction(interaction) {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -909,38 +1039,11 @@ func (a *Gateway) handleInteractive(event socketmode.Event) {
 		go a.handleAppHomeRestartSubmit(interaction)
 		return
 	}
-	// Broker prompts (the `ask` tool, later the approval gate) are routed back to
-	// the blocked turn waiting on the click, before the workflow engine sees it.
-	// The blocked Ask owns editing the message to its terminal state.
-	if a.interactions != nil && askbroker.IsInteraction(interaction) {
-		if corr, decision, ok := askbroker.ParseClick(interaction); ok {
-			a.interactions.Resolve(corr, decision)
-		}
-		return
-	}
-	// Modal-form path (the `ask` tool's multi-question / multi-select / free-text
-	// mode). A click on the "Answer" button opens the modal against the click's
-	// trigger_id; a view_submission carries the answers back to the blocked
-	// AskForm. The trigger_id is short-lived, so OpenForm runs promptly.
-	if a.interactions != nil {
-		if corr, ok := askbroker.IsFormAnswerClick(interaction); ok {
-			triggerID := interaction.TriggerID
-			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer cancel()
-				if err := a.interactions.OpenForm(ctx, corr, triggerID); err != nil {
-					a.logger.Error("opening ask modal failed", "error", err, "correlation", corr)
-				}
-			}()
-			return
-		}
-		if interaction.Type == slack.InteractionTypeViewSubmission {
-			if corr, resp, ok := askbroker.ParseViewSubmission(interaction); ok {
-				a.interactions.ResolveForm(corr, resp)
-				return
-			}
-		}
-	}
+}
+
+// dispatchInteractiveWorkflow hands the callback to the configured workflow
+// rules. Allowlisted clickers only — see interactionAdmission.
+func (a *Gateway) dispatchInteractiveWorkflow(event socketmode.Event, interaction slack.InteractionCallback) {
 	// Mint a correlation id for this interaction and record its arrival. The
 	// same id is propagated into the workflow engine via the context so the
 	// match/no-match/trigger events all tie back to this one click.
@@ -1261,16 +1364,7 @@ func (a *Gateway) handleEventsAPI(event socketmode.Event) {
 		if inner.BotID != "" {
 			return
 		}
-		if !a.cfg.IsAllowedUser(inner.User) {
-			a.logger.Debug("ignored app_mention from unauthorized user", "user", inner.User, "channel", inner.Channel)
-			return
-		}
-		if a.isDuplicateEvent(eventsAPI.TeamID, inner.Channel, inner.TimeStamp) {
-			a.logger.Info("ignored duplicate app_mention", "channel", inner.Channel, "ts", inner.TimeStamp)
-			return
-		}
-		text := stripSlackMentions(inner.Text)
-		a.startChat(context.Background(), ChatRequest{TeamID: eventsAPI.TeamID, ChannelID: inner.Channel, UserID: inner.User, ThreadTS: inner.ThreadTimeStamp, MessageTS: inner.TimeStamp, Text: text, Files: inner.Files, Source: "app_mention"})
+		a.handleAppMention(eventsAPI, inner)
 	case *slackevents.MessageEvent:
 		if a.chat == nil {
 			a.logger.Debug("ignored message because chat is disabled")
@@ -1314,41 +1408,115 @@ func (a *Gateway) handleDirectMessage(eventsAPI slackevents.EventsAPIEvent, inne
 	a.startChat(context.Background(), ChatRequest{TeamID: eventsAPI.TeamID, ChannelID: inner.Channel, UserID: inner.User, ThreadTS: inner.ThreadTimeStamp, MessageTS: inner.TimeStamp, Text: inner.Text, Files: eventFiles(event), DM: true, Source: "dm"})
 }
 
+// channelChatTimeout bounds the off-socket admission work for one channel
+// message: at most one read-through conversations.info before the message is
+// admitted or dropped.
+const channelChatTimeout = 15 * time.Second
+
+// resolveChannelNameFor returns the channel's name, resolving it read-through
+// (cache → conversations.info → memoize) on a miss. It may do Slack I/O, so it
+// MUST be called off the socket goroutine.
+//
+// An unresolvable name yields "", which only ever narrows what can match: a
+// name-glob rule cannot fire, so a stranger is denied and routing falls back to
+// the default agent. The failure mode is therefore closed, and — unlike the
+// previous nameFor-only check — it is reached only on a genuine API failure
+// rather than on every first message in a channel the periodic refresh has not
+// listed yet.
+func (a *Gateway) resolveChannelNameFor(ctx context.Context, channelID string) string {
+	if a.channelCache == nil {
+		return ""
+	}
+	name, _ := a.channelCache.resolveChannelName(ctx, channelID)
+	return name
+}
+
+// mayChatInChannel reports whether userID may drive a chat turn in the given
+// channel. A user on the global allowlist always may; otherwise the channel's
+// winning chat.channels rule may waive the allowlist via allow_anyone.
+//
+// This waiver is scoped to the CHAT surface only. Slash commands, interactive
+// callbacks (tool approvals) and DMs deliberately keep calling cfg.IsAllowedUser
+// directly, so opening a channel for conversation never widens who can approve a
+// tool call, pull a diagnostics bundle, or DM the bot.
+func (a *Gateway) mayChatInChannel(userID, channelID, channelName string) bool {
+	if a.cfg.IsAllowedUser(userID) {
+		return true
+	}
+	return channelAllowsAnyone(channelID, channelName, a.chatChannels)
+}
+
+// handleAppMention answers an explicit @mention in a channel. Admission runs on
+// a goroutine because authorizing a non-allowlisted author needs the channel
+// NAME (to match an allow_anyone rule), and resolving a name the cache has not
+// learned yet costs a Slack call that must not block the socket goroutine.
+//
+// Dedup stays AFTER authorization, as it did before: isDuplicateEvent is a
+// check-and-set under one mutex, so of the twin app_mention/plain-message
+// deliveries that share a ts exactly one wins — but only among the deliveries
+// that actually passed their checks. Consuming the slot earlier would let a
+// plain-message twin that is about to fail the no-mention check swallow the
+// mention that would have been answered.
+func (a *Gateway) handleAppMention(eventsAPI slackevents.EventsAPIEvent, inner *slackevents.AppMentionEvent) {
+	teamID, channelID, user, ts := eventsAPI.TeamID, inner.Channel, inner.User, inner.TimeStamp
+	threadTS, text, files := inner.ThreadTimeStamp, inner.Text, inner.Files
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), channelChatTimeout)
+		channelName := a.resolveChannelNameFor(ctx, channelID)
+		cancel()
+		if !a.mayChatInChannel(user, channelID, channelName) {
+			a.logger.Debug("ignored app_mention from unauthorized user", "user", user, "channel", channelID)
+			return
+		}
+		if a.isDuplicateEvent(teamID, channelID, ts) {
+			a.logger.Info("ignored duplicate app_mention", "channel", channelID, "ts", ts)
+			return
+		}
+		a.startChat(context.Background(), ChatRequest{TeamID: teamID, ChannelID: channelID, UserID: user, ThreadTS: threadTS, MessageTS: ts, Text: stripSlackMentions(text), Files: files, Source: "app_mention"})
+	}()
+}
+
 // handleChannelMessage answers a plain (non-mention) message posted in a public
 // channel or private group. The bot normally only replies to explicit
 // @mentions there; this path waives the mention requirement for authors listed
-// in the effective no-mention set — the UNION of configuration.do_not_require_mention_from
-// and chat.channel_do_not_require_mention entries whose glob matches this
-// channel. The waiver is mention-only: the author must STILL pass IsAllowedUser.
+// in the effective no-mention set — the UNION of chat.no_mention.everywhere and
+// the chat.no_mention.by_channel entries whose glob matches this channel.
 //
-// The channel name is resolved from the in-memory cache (no Slack I/O on the
-// socket goroutine); a cache miss triggers a non-blocking refresh so a
-// brand-new channel's name-glob rules can match the NEXT message. Dedup relies
-// on the shared message ts: an author who DID @mention is handled by the
-// app_mention path, and isDuplicateEvent keys on (team, channel, ts), so the
-// twin plain-message delivery is dropped here rather than double-firing.
+// The two gates are independent and both must pass: mayChatInChannel decides
+// WHETHER the author may talk to the bot here (global allowlist, or the
+// channel's allow_anyone rule), and the no-mention set decides whether they may
+// do so WITHOUT an @mention. allow_anyone deliberately does not imply a mention
+// waiver — otherwise an opened channel would have the bot answering every
+// message posted in it.
+//
+// Admission runs on a goroutine so the channel name can be resolved
+// read-through; both gates then judge the message against that one resolved
+// name rather than one of them silently seeing "". See handleAppMention for why
+// dedup comes last.
 func (a *Gateway) handleChannelMessage(eventsAPI slackevents.EventsAPIEvent, inner *slackevents.MessageEvent, event socketmode.Event) {
-	if !a.cfg.IsAllowedUser(inner.User) {
-		a.logger.Debug("ignored channel message from unauthorized user", "user", inner.User, "channel", inner.Channel)
-		return
-	}
-	channelName, known := a.channelCache.nameFor(inner.Channel)
-	if !known {
-		a.channelCache.refreshAsync(context.Background())
-	}
-	allowed := usersAllowedWithoutMention(inner.Channel, channelName, a.noMentionEverywhere, a.noMentionPerChannel)
-	if !allowed[inner.User] {
-		a.logger.Debug("ignored channel message: author not waived from mention requirement", "user", inner.User, "channel", inner.Channel)
-		return
-	}
-	if a.isDuplicateEvent(eventsAPI.TeamID, inner.Channel, inner.TimeStamp) {
-		a.logger.Info("ignored duplicate channel message", "channel", inner.Channel, "ts", inner.TimeStamp)
-		return
-	}
-	// Strip any mentions so the prompt is clean whether or not the user @mentioned
-	// the bot (a listed user who also mentions is de-duped above via the shared ts).
-	text := stripSlackMentions(inner.Text)
-	a.startChat(context.Background(), ChatRequest{TeamID: eventsAPI.TeamID, ChannelID: inner.Channel, UserID: inner.User, ThreadTS: inner.ThreadTimeStamp, MessageTS: inner.TimeStamp, Text: text, Files: eventFiles(event), Source: "channel_no_mention"})
+	teamID, channelID, user, ts := eventsAPI.TeamID, inner.Channel, inner.User, inner.TimeStamp
+	threadTS, text, files := inner.ThreadTimeStamp, inner.Text, eventFiles(event)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), channelChatTimeout)
+		channelName := a.resolveChannelNameFor(ctx, channelID)
+		cancel()
+		if !a.mayChatInChannel(user, channelID, channelName) {
+			a.logger.Debug("ignored channel message from unauthorized user", "user", user, "channel", channelID)
+			return
+		}
+		allowed := usersAllowedWithoutMention(channelID, channelName, a.noMentionEverywhere, a.noMentionPerChannel)
+		if !allowed[user] {
+			a.logger.Debug("ignored channel message: author not waived from mention requirement", "user", user, "channel", channelID)
+			return
+		}
+		if a.isDuplicateEvent(teamID, channelID, ts) {
+			a.logger.Info("ignored duplicate channel message", "channel", channelID, "ts", ts)
+			return
+		}
+		// Strip any mentions so the prompt is clean whether or not the user @mentioned
+		// the bot (a listed user who also mentions is de-duped above via the shared ts).
+		a.startChat(context.Background(), ChatRequest{TeamID: teamID, ChannelID: channelID, UserID: user, ThreadTS: threadTS, MessageTS: ts, Text: stripSlackMentions(text), Files: files, Source: "channel_no_mention"})
+	}()
 }
 
 func (a *Gateway) handleLinkShared(teamID string, inner *slackevents.LinkSharedEvent) {

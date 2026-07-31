@@ -21,9 +21,9 @@ func TestBuildStartupSummary_FlagsUnavailableTargets(t *testing.T) {
 				Agent:   "default",
 				DMAgent: "support", // configured nowhere → unavailable
 			},
-			Channels: map[string]config.ChannelConfig{
-				"C0ENG1":    {Agent: "broken"},
-				"support-*": {Agent: "default"},
+			Channels: config.ChannelRules{
+				{Match: "C0ENG1", Agent: "broken"},
+				{Match: "support-*", Agent: "default"},
 			},
 		},
 	}

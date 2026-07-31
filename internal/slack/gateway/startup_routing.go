@@ -77,9 +77,11 @@ func (a *Gateway) buildStartupSummary() startupSummary {
 		}
 	}
 
-	for _, key := range sortedKeys(a.chatRouting.Channels) {
-		cc := a.chatRouting.Channels[key]
-		// An entry may set only reply_on_thread; an empty agent uses the default.
+	// Listed in config order, not sorted: chat.channels is first-match-wins, so
+	// the order IS the precedence and the summary should show it as written.
+	for _, cc := range a.chatRouting.Channels {
+		key := cc.Match
+		// A rule may set only reply_on_thread; an empty agent uses the default.
 		target := cc.Agent
 		if target == "" {
 			target = defaults.Agent
