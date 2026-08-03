@@ -139,6 +139,60 @@ Each server uses exactly one transport: a stdio child process (`--command` with
 repeatable `--arg`/`--env`) or a remote endpoint (`--url`). `--mcp-servers` on an
 agent is repeatable and additive on top of the global set.
 
+### Sandboxing an agent process (macOS)
+
+An `acp` or `claude_code` agent runs an external process on your machine with
+your permissions. `sandbox.mode: seatbelt` confines it — and every process it
+spawns — with the macOS kernel sandbox:
+
+```sh
+murtaugh cfg agent update --name code --sandbox-mode seatbelt
+```
+
+```yaml
+agents:
+  code:
+    workdir: ~/Development/miere/murtaugh
+    claude_code:
+      command: claude
+    sandbox:
+      mode: seatbelt        # off (default) | seatbelt
+```
+
+Every other key is optional. The defaults are the point — `mode: seatbelt` alone
+gives you a working box.
+
+**Writes are deny-by-default.** The agent can write to its `workdir`, `$TMPDIR`,
+`~/.claude` (Claude Code's session state) and the MCP bridge socket. Nothing
+else — not your other repos, not your dotfiles, not Murtaugh's own config, so a
+boxed agent cannot widen its own permissions for the next restart. Add more with
+repeatable `--sandbox-write <path>`.
+
+**Reads are allow-by-default, minus the credential stores.** `~/.ssh`, `~/.aws`,
+`~/.config/gcloud`, `~/.config/gh` and `~/.netrc` are blinded unless you replace
+the list with `--sandbox-deny-read <path>`. This asymmetry is deliberate: a read
+*allowlist* breaks a real coding agent in a dozen small ways (toolchains, caches,
+git objects, system headers), so the write boundary is the one doing the work.
+
+**The environment is reduced to an allowlist**: `PATH`, `HOME`, `TMPDIR`, `USER`,
+`LANG`, `SHELL`. Everything else — every cloud credential and API token in the
+daemon's environment — stops at the boundary. Add to the set with repeatable
+`--sandbox-env <NAME>`; it is additive, so you cannot accidentally drop `PATH`.
+
+You do **not** need to forward a credential for Claude Code: on macOS it
+authenticates through the login Keychain, which is reached over IPC to a system
+service outside the box. An agent that needs API-key auth instead should carry it
+in the backend's own `--env KEY=VALUE`, which is applied after the filter.
+
+Two limits worth knowing:
+
+- **Network is all-or-nothing.** The agent needs `api.anthropic.com`, and the
+  macOS sandbox cannot filter by host. A confined agent can still reach the
+  network, so confinement prevents damage to your disk, not exfiltration.
+- **macOS only, and it fails closed.** `mode: seatbelt` on a non-macOS host is a
+  startup error, never a silent downgrade to an unconfined process. Check the
+  posture at a glance in the startup log: `startup routing: agent … sandbox=…`.
+
 ---
 
 ## Routing: which agent answers

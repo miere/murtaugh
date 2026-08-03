@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/journal"
 )
 
@@ -14,6 +15,11 @@ type startupAgent struct {
 	Kind   string `json:"kind"`             // native | acp
 	Detail string `json:"detail,omitempty"` // model (native) or command (acp)
 	Ready  bool   `json:"ready"`            // built successfully (will answer)
+	// Sandbox is the confinement posture (off | seatbelt). Recorded so an
+	// operator can tell at a glance — in the log and in the troubleshoot bundle —
+	// whether an external agent is actually boxed, rather than having to infer it
+	// from config that may not be what is running.
+	Sandbox string `json:"sandbox,omitempty"`
 }
 
 // startupRoute is one channel→agent routing entry in the startup summary.
@@ -66,7 +72,13 @@ func (a *Gateway) buildStartupSummary() startupSummary {
 			detail = p.Native.Model
 		}
 		ready := built(name)
-		s.Agents = append(s.Agents, startupAgent{Name: name, Kind: string(p.ResolvedKind()), Detail: detail, Ready: ready})
+		// Native agents hold their toolset in-process; there is no spawned process
+		// to confine, so reporting a posture for them would be misleading.
+		sandbox := ""
+		if p.ResolvedKind() != config.AgentKindNative {
+			sandbox = p.ResolvedSandboxMode()
+		}
+		s.Agents = append(s.Agents, startupAgent{Name: name, Kind: string(p.ResolvedKind()), Detail: detail, Ready: ready, Sandbox: sandbox})
 		if chatEnabled && !ready {
 			s.Problems = append(s.Problems, fmt.Sprintf("agent %q is configured but failed to build — it will not answer (check its build error above)", name))
 		}
@@ -128,7 +140,7 @@ func (a *Gateway) logStartupRouting(ctx context.Context) {
 		case !ag.Ready:
 			status = "DISABLED — failed to build"
 		}
-		a.logger.Info("startup routing: agent", "name", ag.Name, "kind", ag.Kind, "detail", ag.Detail, "status", status)
+		a.logger.Info("startup routing: agent", "name", ag.Name, "kind", ag.Kind, "detail", ag.Detail, "status", status, "sandbox", ag.Sandbox)
 	}
 
 	a.logger.Info("startup routing: chat routing",
