@@ -59,6 +59,10 @@ type Options struct {
 	// surface the ACP and native backends expose. nil leaves the process with only
 	// the tools the claude CLI configures itself.
 	Aggregator agent.Aggregator
+	// Sandbox confines the spawned process and every descendant it forks (node,
+	// git, ripgrep, the mcp-bridge grandchild). nil (the default) spawns
+	// unconfined, exactly as before.
+	Sandbox agent.Sandbox
 }
 
 // Client is a Claude Code stream-json backend implementing agent.Client. Because
@@ -305,12 +309,18 @@ func (s *procSession) spawnAndHandshake(ctx context.Context, sessionArgs []strin
 func (s *procSession) start(sessionArgs []string) error {
 	args := append(append([]string{}, s.opts.Args...), s.extraArgs...)
 	args = append(args, sessionArgs...)
-	cmd := exec.Command(s.opts.Command, args...)
+	// Apply confinement HERE, after every argument layer is settled — never at the
+	// build seam. New() falls back to defaultArgs only when Args is empty and then
+	// appends --model to it; wrapping earlier would make Args non-empty and
+	// silently eat the entire stream-json launch. A nil Sandbox is a no-op.
+	command, args := agent.WrapCommand(s.opts.Sandbox, s.opts.Command, args)
+	cmd := exec.Command(command, args...)
 	cmd.Dir = s.opts.WorkDir
 	// Inherit the daemon's environment minus the nested-Claude-Code marker (so the
 	// claude CLI launches even when Murtaugh itself runs inside a Claude Code
-	// session), plus the profile's overrides.
-	cmd.Env = agent.SpawnEnv(s.opts.Env)
+	// session), plus the profile's overrides. Under a sandbox the inherited set is
+	// first reduced to that box's allowlist.
+	cmd.Env = agent.SpawnEnvFor(s.opts.Sandbox, s.opts.Env)
 	// Run in a dedicated process group so teardown kills the claude CLI AND the
 	// MCP servers it spawns (including Murtaugh's own mcp-bridge) rather than
 	// orphaning them on shutdown/restart.
