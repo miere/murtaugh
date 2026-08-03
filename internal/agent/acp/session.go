@@ -121,11 +121,16 @@ func (c *acpSession) start(ctx context.Context) error {
 	if strings.TrimSpace(c.opts.Command) == "" {
 		return errors.New("ACP command is required")
 	}
-	cmd := exec.Command(c.opts.Command, c.opts.Args...)
+	// Confinement is applied at the exec site (a nil Sandbox is a no-op) so it
+	// covers the adapter AND every grandchild it forks — seatbelt is inherited by
+	// descendants and cannot be loosened by them.
+	command, args := agent.WrapCommand(c.opts.Sandbox, c.opts.Command, c.opts.Args)
+	cmd := exec.Command(command, args...)
 	cmd.Dir = c.opts.WorkDir
 	// Inherit Murtaugh's environment (minus the nested-Claude-Code marker — see
-	// agent.SpawnEnv) plus the profile's overrides.
-	cmd.Env = agent.SpawnEnv(c.opts.Env)
+	// agent.SpawnEnv) plus the profile's overrides. Under a sandbox the inherited
+	// set is first reduced to that box's allowlist.
+	cmd.Env = agent.SpawnEnvFor(c.opts.Sandbox, c.opts.Env)
 	// Run in a dedicated process group so close() can tear down the adapter AND
 	// the grandchildren it spawns (the mcp-bridge, the claude CLI, proxied MCP
 	// servers) rather than orphaning them on shutdown/restart.

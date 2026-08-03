@@ -44,6 +44,10 @@ type ProcessOptions struct {
 	// failed with ErrToolCeiling. Zero takes defaultACPToolCeiling; a negative
 	// value disables the ceiling.
 	ToolCeiling time.Duration
+	// Sandbox confines the spawned adapter and every descendant it forks (the
+	// claude CLI, proxied MCP servers, the mcp-bridge grandchild). nil (the
+	// default) spawns unconfined, exactly as before.
+	Sandbox agent.Sandbox
 }
 
 // Client is the ACP backend: a manager that runs ONE agent process per

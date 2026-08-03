@@ -64,6 +64,17 @@ func Client(resolved ResolvedAgent, deps Deps) (agent.Client, error) {
 		logger = slog.Default()
 	}
 	profile := resolved.Profile
+
+	// Resolve the sandbox once, here, where the profile and the runtime facts it
+	// cannot know (the resolved workdir, the bridge socket path) first co-exist —
+	// the same validated-core rule the workspace root follows. A failure is fatal
+	// rather than a degrade: dropping a security boundary silently is worse than an
+	// agent that refuses to start.
+	box, err := resolveSandbox(profile, resolved, deps.Bridge)
+	if err != nil {
+		return nil, err
+	}
+
 	switch resolved.Kind {
 	case config.AgentKindNative:
 		return native.Build(profile, native.BuildDeps{
@@ -100,6 +111,7 @@ func Client(resolved ResolvedAgent, deps Deps) (agent.Client, error) {
 			// our making); read from the config/workspace dir where SOUL.md lives.
 			Persona:     native.ReadSoul(deps.WorkspaceDir),
 			ToolCeiling: deps.LongRunningToolTimeout,
+			Sandbox:     box,
 		}), nil
 	case config.AgentKindClaudeCode:
 		// Direct Claude Code stream-json backend (spec 019). Tool permissions route
@@ -133,6 +145,7 @@ func Client(resolved ResolvedAgent, deps Deps) (agent.Client, error) {
 			PermissionPolicy: profile.ResolvedACPPermission(),
 			OnBackground:     deps.BackgroundSink,
 			Aggregator:       aggregator,
+			Sandbox:          box,
 		}), nil
 	default:
 		return nil, fmt.Errorf("agentbuild: unknown agent kind %q", resolved.Kind)

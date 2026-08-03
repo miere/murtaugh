@@ -390,6 +390,50 @@ type ApprovalConfig struct {
 	Requests string `yaml:"requests" json:"requests"`
 }
 
+// Sandbox modes. Confinement is macOS-only for now: seatbelt is the one backend
+// with the properties the design needs (inherited by descendants, un-looseneable
+// by them, and expressible as allow-reads / deny-writes).
+const (
+	// SandboxModeOff spawns the agent unconfined. The default.
+	SandboxModeOff = "off"
+	// SandboxModeSeatbelt confines the agent with macOS sandbox-exec. On a
+	// non-macOS host this is a hard build error, never a silent downgrade.
+	SandboxModeSeatbelt = "seatbelt"
+)
+
+// SandboxConfig confines an external agent process (the `sandbox:` sub-block).
+// Every key is optional; `mode: seatbelt` alone yields a sane box.
+//
+// The posture is asymmetric on purpose. Writes are deny-by-default with a narrow
+// carve-out (the agent's workdir plus the handful of paths Claude Code cannot run
+// without), because write confinement is the half that actually prevents damage.
+// Reads are allow-by-default minus DenyRead, because a read allowlist breaks a
+// real coding agent in a dozen small ways — it is the weaker half, and an agent
+// that can read broadly and reach the network can still exfiltrate.
+type SandboxConfig struct {
+	// Mode is "off" (default) or "seatbelt".
+	Mode string `yaml:"mode" json:"mode"`
+	// Write lists extra writable paths on top of the always-on set (the agent's
+	// workdir, $TMPDIR, ~/.claude, and the MCP bridge socket). Optional; a leading
+	// ~ is expanded.
+	Write []string `yaml:"write" json:"write,omitempty"`
+	// DenyRead lists paths to blind the agent to. Omitted (nil) takes the built-in
+	// default — ~/.ssh, ~/.aws, ~/.config/gcloud, ~/.config/gh, ~/.netrc — so the
+	// obvious credential stores are covered without configuration. An explicitly
+	// empty list denies nothing.
+	DenyRead []string `yaml:"deny_read" json:"deny_read,omitempty"`
+	// Env names extra environment variables to inherit, ADDED to the built-in set
+	// (PATH, HOME, TMPDIR, USER, LANG, SHELL) rather than replacing it. Replacing
+	// would let a profile naming only a credential var drop PATH and kill the agent
+	// in a way that looks nothing like a config error.
+	//
+	// Note that Claude Code needs no credential here on macOS: it authenticates
+	// through the login Keychain via securityd, which runs outside the box. An
+	// agent that needs API-key auth should carry it in the backend's own `env:`
+	// map, which layers on top of this filter unconditionally.
+	Env []string `yaml:"env" json:"env,omitempty"`
+}
+
 // AgentProfile defines one agent. Shared knobs live at the top; the backend is
 // selected by which sub-block is present — exactly one of Native or ACP. There
 // is no separate `kind`: a profile carrying a `native:` block is a native
@@ -423,6 +467,10 @@ type AgentProfile struct {
 	// ProgressDisplay overrides the global rendering default for this agent.
 	// Empty inherits it (which itself defaults to simplified).
 	ProgressDisplay string `yaml:"progress_display" json:"progress_display"`
+	// Sandbox confines the spawned process for a kind:acp or kind:claude_code
+	// agent. Empty (the default) leaves the agent unconfined. Unused by native
+	// agents, which hold their toolset in-process — never an error.
+	Sandbox SandboxConfig `yaml:"sandbox" json:"sandbox"`
 
 	// Native carries the in-process backend config; non-nil selects kind native.
 	Native *NativeProfile `yaml:"native" json:"native,omitempty"`
@@ -1149,8 +1197,14 @@ func (c RuntimeDefaults) Validate() error {
 	return errors.Join(errs...)
 }
 
-// Validate checks an ACP profile (callers gate this on p.ACP != nil).
+// Validate checks an agent profile. The sandbox block is checked for every kind;
+// the remaining checks are ACP-specific.
 func (p AgentProfile) Validate() error {
+	switch p.ResolvedSandboxMode() {
+	case SandboxModeOff, SandboxModeSeatbelt:
+	default:
+		return fmt.Errorf("agent sandbox.mode must be %s or %s (got %q)", SandboxModeOff, SandboxModeSeatbelt, p.Sandbox.Mode)
+	}
 	if p.ACP == nil {
 		return nil
 	}
@@ -1163,6 +1217,15 @@ func (p AgentProfile) Validate() error {
 		return fmt.Errorf("agent approval.requests must be ask, auto-allow, or auto-deny (got %q)", p.Approval.Requests)
 	}
 	return nil
+}
+
+// ResolvedSandboxMode reports the effective sandbox mode, defaulting an empty
+// value to off. The value is lower-cased so `Seatbelt` in YAML is accepted.
+func (p AgentProfile) ResolvedSandboxMode() string {
+	if v := strings.ToLower(strings.TrimSpace(p.Sandbox.Mode)); v != "" {
+		return v
+	}
+	return SandboxModeOff
 }
 
 // ResolvedACPPermission reports the effective permission policy for an ACP agent,

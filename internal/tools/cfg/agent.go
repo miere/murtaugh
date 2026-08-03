@@ -28,6 +28,11 @@ func agentSchema(nameRequired bool) *jsonschema.Schema {
 		"approval_terminal":   {Type: "string", Description: "native terminal gate: allowlist | prompt | off"},
 		"approval_requests":   {Type: "string", Description: "acp permission answering: ask | auto-allow | auto-deny"},
 		"approval_allow":      {Type: "array", Items: &jsonschema.Schema{Type: "string"}, Description: "extra allowlisted terminal command (repeatable)"},
+		// sandbox (acp/claude_code; macOS only)
+		"sandbox_mode":      {Type: "string", Description: "process confinement: off | seatbelt (macOS only)"},
+		"sandbox_write":     {Type: "array", Items: &jsonschema.Schema{Type: "string"}, Description: "extra writable path beyond workdir/$TMPDIR/~/.claude (repeatable)"},
+		"sandbox_deny_read": {Type: "array", Items: &jsonschema.Schema{Type: "string"}, Description: "path to blind the agent to (repeatable; omitted uses the credential-store defaults)"},
+		"sandbox_env":       {Type: "array", Items: &jsonschema.Schema{Type: "string"}, Description: "extra env var to inherit, added to PATH/HOME/TMPDIR/USER/LANG/SHELL (repeatable)"},
 		// native
 		"provider":           {Type: "string", Description: "native provider: gemini | anthropic | openai"},
 		"model":              {Type: "string", Description: "model id (native/claude_code)"},
@@ -153,6 +158,19 @@ func buildAgentProfile(existing *config.AgentProfile, args map[string]any) (conf
 	}
 	if v, ok := arrayArg(args, "approval_allow"); ok {
 		p.Approval.Allow = v
+	}
+
+	if v, ok := stringArg(args, "sandbox_mode"); ok {
+		p.Sandbox.Mode = v
+	}
+	if v, ok := arrayArg(args, "sandbox_write"); ok {
+		p.Sandbox.Write = v
+	}
+	if v, ok := arrayArg(args, "sandbox_deny_read"); ok {
+		p.Sandbox.DenyRead = v
+	}
+	if v, ok := arrayArg(args, "sandbox_env"); ok {
+		p.Sandbox.Env = v
 	}
 
 	if typ, ok := stringArg(args, "type"); ok {
