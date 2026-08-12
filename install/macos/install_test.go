@@ -110,6 +110,13 @@ func writeReleaseFixture(t *testing.T, dir string) string {
 
 func runInstaller(t *testing.T, env []string) (string, error) {
 	t.Helper()
+	// These tests drive the REAL installer, which writes a dev.murtaugh plist and
+	// (absent its sandbox guard) would reach into gui/$(id -u). That is a live
+	// service on any machine hosting a gateway, so `-short` must offer a way to
+	// run the rest of the suite without it. Gating here covers every caller.
+	if testing.Short() {
+		t.Skip("skipping installer test in -short mode: it runs the real macOS installer")
+	}
 	cmd := exec.Command("bash", "./install.sh", "--yes")
 	cmd.Dir = "."
 	cmd.Env = append(os.Environ(), env...)
@@ -694,5 +701,81 @@ func TestInstallerFailsCleanlyWhenReleaseMissing(t *testing.T) {
 	}
 	if !strings.Contains(out, "could not fetch release metadata") && !strings.Contains(out, "release metadata") {
 		t.Fatalf("installer should print a clear error about the missing release, got:\n%s", out)
+	}
+}
+
+// launchdSandboxEnv is the common installer environment for the launchd-safety
+// tests: a native agent (no external binary needed) and a LaunchAgent enabled so
+// the plist exists and restart_launch_agent_if_needed reaches its guards.
+func launchdSandboxEnv(t *testing.T, home string) []string {
+	t.Helper()
+	binDir := filepath.Join(home, "bin")
+	return []string{
+		"HOME=" + home,
+		"PATH=" + binDir + ":/usr/bin:/bin:/usr/sbin:/sbin",
+		"MURTAUGH_RELEASE_JSON_PATH=" + writeReleaseFixture(t, t.TempDir()),
+		"MURTAUGH_INSTALL_ARCH=arm64",
+		"MURTAUGH_SLACK_APP_TOKEN=xapp-test-token",
+		"MURTAUGH_SLACK_BOT_TOKEN=xoxb-test-token",
+		"MURTAUGH_ADMIN_USER=@admin",
+		"MURTAUGH_CHAT_AGENT=native",
+		"MURTAUGH_NATIVE_PROVIDER=gemini",
+		"MURTAUGH_NATIVE_MODEL=gemini-2.5-pro",
+		"MURTAUGH_NATIVE_API_KEY=test-gemini-key-123",
+		"MURTAUGH_ENABLE_LAUNCH_AGENT=yes",
+		"MURTAUGH_MCP_CLIENT=skip",
+	}
+}
+
+// TestInstallerHonoursLoadLaunchAgentNo pins the answer to
+// MURTAUGH_LOAD_LAUNCH_AGENT. write_launch_agent always honoured it, but
+// restart_launch_agent_if_needed used to run unconditionally afterwards and
+// bootout+bootstrap+kickstart the agent anyway — silently overriding the "no".
+func TestInstallerHonoursLoadLaunchAgentNo(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("installer is macOS-only")
+	}
+	home := t.TempDir()
+	out, err := runInstaller(t, append(launchdSandboxEnv(t, home), "MURTAUGH_LOAD_LAUNCH_AGENT=no"))
+	if err != nil {
+		t.Fatalf("installer failed: %v\n%s", err, out)
+	}
+
+	// The plist is still written — only the loading was declined.
+	if _, err := os.Stat(filepath.Join(home, "Library", "LaunchAgents", "dev.murtaugh.plist")); err != nil {
+		t.Fatalf("LaunchAgent plist should still be written: %v", err)
+	}
+	if !strings.Contains(out, "MURTAUGH_LOAD_LAUNCH_AGENT=no") {
+		t.Fatalf("installer should report that it skipped the restart, got:\n%s", out)
+	}
+	if strings.Contains(out, "Restarted LaunchAgent dev.murtaugh") {
+		t.Fatalf("installer restarted the LaunchAgent despite MURTAUGH_LOAD_LAUNCH_AGENT=no, got:\n%s", out)
+	}
+}
+
+// TestInstallerRefusesLaunchdFromSandboxedHome is the regression guard for the
+// incident that motivated these tests: this suite runs the installer with
+// HOME=t.TempDir(), but every launchctl call targets gui/$(id -u) — the real
+// login session. The installer therefore booted out the developer's running
+// gateway and bootstrapped the temp plist in its place, leaving a daemon running
+// from a since-deleted temp binary that could never reconnect to Slack.
+//
+// Loading is requested here (the default), so the refusal must come from the
+// HOME-vs-login-home check rather than from the load choice.
+func TestInstallerRefusesLaunchdFromSandboxedHome(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("installer is macOS-only")
+	}
+	home := t.TempDir()
+	out, err := runInstaller(t, append(launchdSandboxEnv(t, home), "MURTAUGH_LOAD_LAUNCH_AGENT=yes"))
+	if err != nil {
+		t.Fatalf("installer failed: %v\n%s", err, out)
+	}
+
+	if !strings.Contains(out, "is not the login home") {
+		t.Fatalf("installer should refuse to touch launchd from a sandboxed HOME, got:\n%s", out)
+	}
+	if strings.Contains(out, "Restarted LaunchAgent dev.murtaugh") {
+		t.Fatalf("installer touched the live launchd session from a sandboxed HOME, got:\n%s", out)
 	}
 }
