@@ -29,6 +29,12 @@ LOCAL_BUILD=0
 TARGET_VERSION=""
 CUSTOM_AGENT_ARGS=()
 
+# LAUNCH_AGENT_LOAD_CHOICE records the answer to MURTAUGH_LOAD_LAUNCH_AGENT so
+# the post-install restart can honour it. Empty means the question was never
+# reached (the user declined the LaunchAgent itself), which leaves the restart
+# free to pick up a newly installed binary in an agent they already had.
+LAUNCH_AGENT_LOAD_CHOICE=""
+
 usage() {
   cat <<'EOF'
 Usage: install.sh [--yes] [--version VERSION] [--force] [--skip-config] [--reconfigure] [--dry-run] [--local-build]
@@ -487,10 +493,49 @@ collect_custom_args() {
   done < <(printf '%s' "$arg_string" | xargs -n1 printf '%s\n' 2>/dev/null)
 }
 
+# login_home prints the home directory the directory service records for the
+# current uid, or nothing when it cannot be resolved.
+login_home() {
+  dscl . -read "/Users/$(id -un)" NFSHomeDirectory 2>/dev/null \
+    | awk '/^NFSHomeDirectory:/ {print $2}'
+}
+
+# launchd_domain_is_ours reports whether $HOME actually belongs to the uid whose
+# launchd GUI domain we are about to mutate.
+#
+# Every launchctl call below targets `gui/$(id -u)` — the real login session —
+# while the plist path is derived from $HOME. When a caller overrides HOME those
+# two disagree, and the "restart" reaches OUT of the sandbox: it boots out the
+# live dev.murtaugh, then bootstraps the sandbox's plist (pointing at a binary
+# under a temp dir that is deleted moments later) into the real session. The
+# daemon then runs from a deleted inode and can never reconnect to Slack.
+#
+# That is not hypothetical: `go test ./...` runs the installer with HOME set to
+# t.TempDir(), which silently replaced a developer's running gateway for ~19
+# hours. Refusing to touch launchd unless HOME is the login home is what keeps a
+# sandboxed install sandboxed.
+launchd_domain_is_ours() {
+  local real_home
+  real_home=$(login_home)
+  [[ -n "$real_home" ]] || return 1
+  [[ "$(resolve_path "$real_home")" == "$(resolve_path "$HOME")" ]]
+}
+
 restart_launch_agent_if_needed() {
   local plist="$HOME/Library/LaunchAgents/dev.murtaugh.plist" uid
   [[ -f "$plist" ]] || return 0
   command -v launchctl >/dev/null 2>&1 || return 0
+  # An explicit "no" to MURTAUGH_LOAD_LAUNCH_AGENT means the user does not want
+  # this install touching launchd — write_launch_agent already honoured it, and
+  # restarting here would quietly override that answer.
+  if [[ "$LAUNCH_AGENT_LOAD_CHOICE" == "no" ]]; then
+    log "Not restarting LaunchAgent dev.murtaugh (MURTAUGH_LOAD_LAUNCH_AGENT=no)"
+    return 0
+  fi
+  if ! launchd_domain_is_ours; then
+    log "Not restarting LaunchAgent dev.murtaugh (HOME=${HOME} is not the login home; refusing to touch the live launchd session)"
+    return 0
+  fi
   uid=$(id -u)
   launchctl print "gui/${uid}/dev.murtaugh" >/dev/null 2>&1 || return 0
   if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -546,8 +591,17 @@ write_launch_agent() {
   enable_choice=$(prompt_choice MURTAUGH_ENABLE_LAUNCH_AGENT "Create a launchd LaunchAgent?" yes yes no)
   [[ "$enable_choice" == "yes" ]] || return 0
   load_choice=$(prompt_choice MURTAUGH_LOAD_LAUNCH_AGENT "Load the LaunchAgent now?" yes yes no)
+  LAUNCH_AGENT_LOAD_CHOICE=$load_choice
   setup_args=(setup launchd --binary-path "$bin")
-  [[ "$load_choice" == "yes" ]] && setup_args+=(--load true)
+  # `setup launchd --load` bootstraps into gui/$(id -u) while writing a plist
+  # under $HOME, so it carries the same out-of-sandbox risk as the restart path.
+  if [[ "$load_choice" == "yes" ]]; then
+    if launchd_domain_is_ours; then
+      setup_args+=(--load true)
+    else
+      log "Writing the LaunchAgent plist but not loading it (HOME=${HOME} is not the login home)"
+    fi
+  fi
   "$bin" "${setup_args[@]}" >&2
 }
 

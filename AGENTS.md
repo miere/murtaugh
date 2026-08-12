@@ -3,6 +3,55 @@
 - worktrees can be placed in the ./ignore/worktrees
 - never use "merge" branch commits - always do a rebase-merge so we keep the history linear and clean.
 - never commit against the main - upstream won't accept.
+- NEVER start, restart, or replace the Slack gateway while a healthy one is
+  already connected — see "Never clobber a live gateway" below.
+
+# Never clobber a live gateway
+
+The machine you are running on is very likely the machine hosting the live
+Murtaugh gateway — quite possibly the very process relaying your own replies to
+Slack. Taking it down cuts your only channel to the user, so you cannot report
+what you broke, and the user's first symptom is silence.
+
+**Before** running `murtaugh slack gateway`, `install/macos/install.sh`,
+`murtaugh setup launchd`, any `launchctl` verb against `dev.murtaugh`, or
+`go test ./...` (the installer tests drive the real installer), check for a live
+gateway:
+
+```sh
+launchctl print "gui/$(id -u)/dev.murtaugh" >/dev/null 2>&1 && echo "LIVE AGENT"
+pgrep -fl 'murtaugh slack gateway'
+```
+
+If either reports something, treat the gateway as live and **stop**. Do not
+start a second one: two gateways on the same bot token both receive every Slack
+event and answer twice. Ask the user to stop it, or work around it — never
+assume you may take it over.
+
+To confirm the live gateway is actually healthy rather than looping, read the
+journal instead of guessing:
+
+```sh
+sqlite3 ~/.config/murtaugh/config-journal.db \
+  "SELECT datetime(ts/1000,'unixepoch'), level, summary FROM events
+   WHERE stream='gateway' AND kind='connection' ORDER BY ts DESC LIMIT 20;"
+```
+
+A healthy gateway shows a recent `Slack socket connected`. A wall of
+`connection_error` with no `connected` means it is stuck in the reconnect loop —
+report that to the user rather than silently restarting it.
+
+Scoped commands (`go build ./...`, `go test ./internal/...`, a single `-run`)
+are safe and preferred. When you genuinely need the full suite, `go test
+-short ./...` skips the installer tests. The installer additionally refuses to
+touch `gui/$(id -u)` when `$HOME` is not the login home
+(`launchd_domain_is_ours` in `install/macos/install.sh`), but that is the last
+line of defence — not a licence to skip the check above.
+
+This rule exists because it already happened: an agent ran `go test ./...`, the
+macOS installer test bootstrapped its sandbox plist over the live
+`dev.murtaugh`, and the daemon spent ~19 hours running from a deleted temp
+binary, unable to reach Slack, with nobody able to tell the user.
 
 # Validated core
 - A hard-precondition value (one a downstream tool cannot function without) is
