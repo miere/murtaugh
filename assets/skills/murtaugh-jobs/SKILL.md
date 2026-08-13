@@ -33,14 +33,16 @@ exclusive** fields:
 Scheduled modes (`schedule`/`every`) only fire while the **`slack gateway`
 daemon** is running — it owns the in-process scheduler.
 
-**Operator-defined vs agent-defined jobs.** A job you create with `cfg job set`
-is **operator-trusted**: a scheduled one auto-runs as soon as the gateway is up,
-exactly as the table above describes. A job created by the `jobs_define` tool is
-stamped `confirmed: false` and is **held**: it is still scheduled, but on its
-**first trigger** the scheduler asks the admin (in their DM) to approve that run
-before it executes — see `reference/scheduling.md`. This exists because a defined
-job's command runs **headless and ungated**, so the agent never gets to
-define-then-auto-run a command without a human OK.
+**Every new or modified job is held.** Whichever surface writes it — `cfg job
+set` or the `jobs_define` tool, CLI or MCP — the entry is stamped
+`confirmed: false` and **held**: it is still scheduled, but on its **next
+trigger** the scheduler asks the admin (in their DM) to approve that run before
+it executes. Approving stamps `confirmed: true`, which persists, so a gateway
+restart does not re-ask; editing the job stamps it back to `false`, so the
+approval never carries over to a changed command — see
+`reference/scheduling.md`. This exists because a defined job's command runs
+**headless and ungated**, so nothing gets to define-then-auto-run a command
+without a human OK.
 
 ## Read the right file (don't load everything)
 
@@ -64,9 +66,10 @@ define-then-auto-run a command without a human OK.
   App Home tab).
 - **`jobs_define` requires approval.** Defining a job via the agent tool is never a
   silent write — it always prompts a human, showing the rendered command +
-  schedule, and stamps the new/updated entry `confirmed: false` so its first
+  schedule, and stamps the new/updated entry `confirmed: false` so its next
   scheduled run is held until the admin confirms it (see `reference/running.md` and
-  `reference/scheduling.md`). `cfg job set` is the operator path and is trusted.
+  `reference/scheduling.md`). `cfg job set` skips the write-time prompt, but stamps
+  the same mark, so its jobs are held for that first-run confirmation too.
 - **`--command` should be an absolute path** (or a binary on `PATH`); a relative
   command resolves against the job's `--workdir`, which defaults to the workspace
   (`~/.config/murtaugh`).

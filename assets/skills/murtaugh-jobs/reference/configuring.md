@@ -35,12 +35,14 @@ murtaugh cfg job set --name code-review-job \
 | `--schedule` | no | Cron expression for automatic runs. Mutually exclusive with `--every`. → `scheduling.md` |
 | `--every` | no | Interval duration for automatic runs. Mutually exclusive with `--schedule`. → `scheduling.md` |
 
-The first-run gate — a job's `confirmed` flag — is **not** a `cfg` flag. A job you
-create with `cfg job set` is operator-trusted and auto-runs. The `jobs_define`
-agent tool instead writes every entry `confirmed: false` and is itself
-approval-gated (it prompts a human, showing the rendered command + schedule,
-before writing), so an agent-defined scheduled job is **held** until the admin
-confirms its first run — see `scheduling.md` and `running.md`.
+The first-run gate — a job's `confirmed` flag — is **not** a `cfg` flag; you
+cannot set it directly. Every write stamps it `false`, so a job created **or
+edited** with `cfg job set` is **held** until the admin approves its next
+scheduled run, and so is one written by the `jobs_define` agent tool (which is
+additionally approval-gated at write time, prompting a human with the rendered
+command + schedule). The only way to clear the hold is to approve the job in the
+admin DM. An approval covers that exact entry: edit the job and it is held again,
+however small the change. See `scheduling.md` and `running.md`.
 
 ## Agent jobs
 

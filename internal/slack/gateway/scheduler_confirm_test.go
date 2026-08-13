@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -83,8 +84,64 @@ func TestConfirmHeldJob_ApprovedRunsAndRemembers(t *testing.T) {
 	}
 }
 
+// The approval must outlive the process, otherwise every restart re-prompts for
+// jobs the admin already signed off on.
+func TestConfirmHeldJob_ApprovedPersistsConfirmation(t *testing.T) {
+	a, sig, broker := newConfirmGateway(t)
+	persisted := make(chan string, 1)
+	a.persistJobConfirmation = func(_ context.Context, name string) error {
+		persisted <- name
+		return nil
+	}
+
+	out := make(chan bool, 1)
+	go func() { out <- a.confirmHeldJob(context.Background(), "myjob", heldJob()) }()
+
+	posted := <-sig.posted
+	broker.Resolve(corrFromBlocks(t, posted.Blocks), interaction.Decision{OptionID: "approve", UserID: "UADMIN"})
+
+	if !<-out {
+		t.Fatal("approval should return true (run the job)")
+	}
+	select {
+	case name := <-persisted:
+		if name != "myjob" {
+			t.Fatalf("persisted confirmation for %q, want myjob", name)
+		}
+	default:
+		t.Fatal("approval was not persisted to the config store")
+	}
+}
+
+// A store that cannot be written must not block the run the admin just
+// approved: it degrades to the old session-scoped behaviour.
+func TestConfirmHeldJob_PersistFailureStillRuns(t *testing.T) {
+	a, sig, broker := newConfirmGateway(t)
+	a.persistJobConfirmation = func(context.Context, string) error {
+		return errors.New("store is read-only")
+	}
+
+	out := make(chan bool, 1)
+	go func() { out <- a.confirmHeldJob(context.Background(), "myjob", heldJob()) }()
+
+	posted := <-sig.posted
+	broker.Resolve(corrFromBlocks(t, posted.Blocks), interaction.Decision{OptionID: "approve", UserID: "UADMIN"})
+
+	if !<-out {
+		t.Fatal("a failed confirmation write must not cancel an approved run")
+	}
+	if !a.isJobConfirmed("myjob") {
+		t.Fatal("approval should still hold for this session")
+	}
+}
+
 func TestConfirmHeldJob_DeniedDoesNotRun(t *testing.T) {
 	a, sig, broker := newConfirmGateway(t)
+	denyPersisted := false
+	a.persistJobConfirmation = func(context.Context, string) error {
+		denyPersisted = true
+		return nil
+	}
 
 	out := make(chan bool, 1)
 	go func() { out <- a.confirmHeldJob(context.Background(), "myjob", heldJob()) }()
@@ -97,6 +154,9 @@ func TestConfirmHeldJob_DeniedDoesNotRun(t *testing.T) {
 	}
 	if a.isJobConfirmed("myjob") {
 		t.Fatal("denied job must not be marked confirmed")
+	}
+	if denyPersisted {
+		t.Fatal("denied job must not be persisted as confirmed")
 	}
 }
 

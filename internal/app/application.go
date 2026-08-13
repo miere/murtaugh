@@ -6,6 +6,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -163,6 +164,13 @@ func (a *Application) Run(ctx context.Context) error {
 		// exit-code handling). Output streams to the daemon's stdout/stderr,
 		// which launchd captures into the Murtaugh log files.
 		gw = gw.WithScheduledRunner(newScheduledRunner(a.cfg, a.recorder, a.registry))
+		// Approving a held job's first run writes `confirmed: true` back to the
+		// store, so the prompt is not repeated after every restart. The gate
+		// still re-arms on change: every job write surface (jobs.define,
+		// cfg.job.set) stamps the entry unconfirmed again.
+		if a.cfgStore != nil {
+			gw = gw.WithJobConfirmer(newJobConfirmer(a.cfgStore))
+		}
 		if a.journalSweep != nil {
 			gw = gw.WithJournalSweeper(a.journalSweep, a.journalSweepEvery)
 		}
@@ -494,6 +502,30 @@ func newScheduledRunner(cfg config.Config, recorder journal.Recorder, registry *
 			return fmt.Errorf("exited with code %d", r.ExitCode)
 		}
 		return nil
+	}
+}
+
+// newJobConfirmer builds the writer the gateway uses to make a held job's
+// approval durable: it stamps the stored entry `confirmed: true` so the next
+// daemon loads the job already confirmed and never re-prompts. Only this flag
+// is touched — the rest of the entry is read back and rewritten verbatim, so a
+// concurrent edit is not clobbered by a stale snapshot.
+func newJobConfirmer(store config.Store) gateway.JobConfirmer {
+	return func(ctx context.Context, name string) error {
+		body, ok, err := store.GetItem(ctx, config.SectionJob, name)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("job %q not found in the config store", name)
+		}
+		var job config.JobProfile
+		if err := json.Unmarshal(body, &job); err != nil {
+			return fmt.Errorf("decode job %q: %w", name, err)
+		}
+		confirmed := true
+		job.Confirmed = &confirmed
+		return store.UpsertItem(ctx, config.SectionJob, name, job)
 	}
 }
 

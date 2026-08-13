@@ -59,9 +59,10 @@ murtaugh jobs define --name hourly-sync \
   human gets, because a defined job's command later runs **headless** via the
   scheduler / `jobs_run` path.
 - **Writes the entry `confirmed: false`.** Every job `jobs_define` creates or
-  updates is stamped `confirmed: false`, which holds its first scheduled run
-  until the admin confirms it (see `scheduling.md`). Hand-editing `jobs.yaml`
-  omits the field, leaving the job operator-trusted.
+  updates is stamped `confirmed: false`, which holds its next scheduled run
+  until the admin confirms it (see `scheduling.md`). `cfg job set` stamps the
+  same mark, so no write surface can leave a modified job auto-running on an
+  approval given for an older definition.
 - **Required:** `--name` and `--command`.
 - **Optional:** `--args` (repeatable — once per argument, e.g.
   `--args --full --args /data`), `--workdir`, `--timeout` (Go duration like

@@ -49,15 +49,16 @@ The first run happens one interval after the gateway starts (not immediately).
 
 ## First-run confirmation for agent-defined jobs
 
-A job stamped `confirmed: false` — the mark `jobs_define` applies to every job it
-writes (see `reference/running.md`) — is **held**. It is still registered with
+A job stamped `confirmed: false` — the mark **every** write applies, whether it
+came from `jobs_define` or `cfg job set` (see `reference/running.md` and
+`reference/configuring.md`) — is **held**. It is still registered with
 the scheduler, but the **first time** its trigger fires the scheduler does not
 run it blindly: it posts an **Approve / Deny** prompt to the **admin's DM**,
 showing the actual command (with args) and the schedule, and runs the job only if
 the admin approves.
 
-- **Approve** → the job runs, and the approval is remembered for the rest of this
-  daemon's lifetime, so later triggers run without asking again.
+- **Approve** → the job runs, and the entry is stamped `confirmed: true` in the
+  config store, so later triggers — and later daemons — run without asking again.
 - **Deny** → the job does **not** run; the scheduler asks again on the **next**
   trigger.
 - **No broker / no admin DM available** → the job does **not** run (and is
@@ -68,9 +69,13 @@ job skip all of this and auto-run as described above.
 
 Two details worth knowing:
 
-- **Confirmation is session-scoped.** The approval is held in memory only — it is
-  **not** written back to `jobs.yaml`. A gateway restart re-asks on the next
-  trigger (a deliberately safe default).
+- **Confirmation survives a restart, but not an edit.** The approval is written
+  back to the config store, so a gateway restart does **not** re-ask. It is an
+  approval of that exact entry, though: every write through `jobs_define` or
+  `cfg job set` re-stamps `confirmed: false`, so a modified job is held again and
+  must be re-approved — however small the edit. (A confirmation the store rejects
+  is logged and degrades to session-scoped: the approved run still happens, and a
+  restart asks again.)
 - **At most one prompt per job at a time.** While the scheduler is blocked
   waiting for the admin's decision, gocron's singleton mode (`LimitModeReschedule`)
   **drops** any triggers that fire in the meantime, so a held job never stacks up

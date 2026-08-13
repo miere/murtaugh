@@ -142,6 +142,10 @@ set` is the equivalent under the unified `cfg` surface.)
 - `--schedule` and `--every` are **mutually exclusive**; set at most one.
 - A scheduled job only fires while `murtaugh slack gateway` is running.
 - `--timeout` and `--every` must be valid Go durations; `--every` must be > 0.
+- Every write stamps the entry `confirmed: false`, so a new **or edited** job is
+  held: the scheduler asks the admin to approve its next run before executing it.
+  Approving persists (a restart does not re-ask); the next edit re-arms the gate.
+  `cfg job set` behaves identically.
 
 ```
 murtaugh jobs define --name nightly-backup \
@@ -380,7 +384,9 @@ murtaugh cfg job delete --name <n>
 ```
 
 `cfg job set` is the store-native equivalent of `jobs define`; `jobs run`
-executes a job by name.
+executes a job by name. Like `jobs define`, `cfg job set` stamps every entry it
+writes `confirmed: false`, holding a new or edited job until the admin approves
+its next scheduled run.
 
 ### Chat routing (`cfg chat`) — singleton
 

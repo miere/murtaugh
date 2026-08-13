@@ -19,6 +19,13 @@ import (
 // and the gateway stays free of any dependency on the tools layer.
 type ScheduledRunner func(ctx context.Context, name string) error
 
+// JobConfirmer records an approved job's confirmation durably — it stamps the
+// entry `confirmed: true` in the config store. The composition root injects a
+// closure over the store so the gateway stays free of any dependency on the
+// tools layer. It returns a non-nil error when the write fails; the caller
+// treats that as non-fatal (the approval still stands for this process).
+type JobConfirmer func(ctx context.Context, name string) error
+
 // startScheduler builds and starts the gocron scheduler for every job whose
 // profile carries a cron `schedule` or interval `every`. It is a no-op — and
 // pays no cost — when no runner is wired (CLI/MCP and most tests) or when no
@@ -109,9 +116,11 @@ func (a *Gateway) runScheduledJob(ctx context.Context, name string) {
 }
 
 // isJobConfirmed reports whether a held job has been approved for its first run
-// during this daemon lifetime. Confirmation is session-scoped — it is not
-// written back to jobs.yaml, so a restart re-asks (a deliberately safe default;
-// persisting it is a follow-up).
+// during this daemon lifetime. This is only the in-process half of the answer:
+// an approval is also persisted to the store (see markJobConfirmed), so after a
+// restart the job loads with Confirmed true and is never held in the first
+// place. The map still matters within a process, because the job snapshot is
+// captured at construction and is not re-read after the store is written.
 func (a *Gateway) isJobConfirmed(name string) bool {
 	a.confirmedJobsMu.Lock()
 	defer a.confirmedJobsMu.Unlock()
@@ -129,9 +138,10 @@ func (a *Gateway) markJobConfirmed(name string) {
 
 // confirmHeldJob asks the admin (in their DM) to approve a held job's first run,
 // showing the actual command and schedule, and blocks until they answer. It
-// returns true only on approval, recording the confirmation for this process so
-// later triggers run without asking again. With no broker or no admin DM
-// available the job is not run (and is re-asked on the next trigger).
+// returns true only on approval, recording the confirmation both for this
+// process and (when a JobConfirmer is wired) in the config store, so later
+// triggers and later daemons run without asking again. With no broker or no
+// admin DM available the job is not run (and is re-asked on the next trigger).
 func (a *Gateway) confirmHeldJob(ctx context.Context, name string, job config.JobProfile) bool {
 	if a.interactions == nil {
 		a.logger.Info("held scheduled job cannot be confirmed: no interaction broker; not run", "job", name)
@@ -158,6 +168,14 @@ func (a *Gateway) confirmHeldJob(ctx context.Context, name string, job config.Jo
 	}
 	if decision.OptionID == "approve" {
 		a.markJobConfirmed(name)
+		// Persist the approval so a restart does not re-ask. A failed write is
+		// not fatal: the job is approved and runs now, and the worst case is
+		// the old behaviour — being asked again after a restart.
+		if a.persistJobConfirmation != nil {
+			if err := a.persistJobConfirmation(ctx, name); err != nil {
+				a.logger.Warn("scheduled job approved but confirmation could not be persisted; a restart will ask again", "job", name, "error", err)
+			}
+		}
 		a.logger.Info("scheduled job approved for first run", "job", name, "user", decision.UserID)
 		return true
 	}
