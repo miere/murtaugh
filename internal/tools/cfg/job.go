@@ -15,11 +15,14 @@ import (
 // plain command (--command/--arg) or an agent delegation (--agent/--prompt),
 // optionally scheduled (--schedule cron or --every duration); Validate enforces
 // the exclusivity, so upsertItemValidated rejects an invalid combination.
+//
+// Every write stamps the entry unconfirmed, so a modified job is held for
+// re-approval before its next scheduled run (see Invoke).
 type jobSetTool struct{ p Provider }
 
 func (t *jobSetTool) Name() string { return "cfg.job.set" }
 func (t *jobSetTool) Description() string {
-	return "Create or update a job (e.g. `cfg job set --name nightly --command ./backup.sh --schedule '0 2 * * *'`)."
+	return "Create or update a job (e.g. `cfg job set --name nightly --command ./backup.sh --schedule '0 2 * * *'`). Any change re-arms first-run approval: the scheduler holds the job until the admin confirms it again."
 }
 func (t *jobSetTool) InputSchema() *jsonschema.Schema {
 	return &jsonschema.Schema{
@@ -78,7 +81,13 @@ func (t *jobSetTool) Invoke(ctx context.Context, args map[string]any) (any, erro
 	if v, ok := stringArg(args, "every"); ok {
 		job.Every = v
 	}
-	// Leave Confirmed nil — an operator-defined job is trusted and auto-runs.
+	// Re-arm the first-run gate on every modification. A job's approval is
+	// granted against a specific command and schedule, so any change to the
+	// entry invalidates it and the scheduler must ask again before running.
+	// jobs.define stamps the same mark, so both write surfaces (CLI and MCP)
+	// behave identically no matter who edited the job.
+	unconfirmed := false
+	job.Confirmed = &unconfirmed
 	if err := upsertItemValidated(ctx, s, config.SectionJob, name, job); err != nil {
 		return nil, err
 	}

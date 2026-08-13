@@ -98,20 +98,26 @@ reference, including the repeatable `--args` form and the
 
 ---
 
-## Trusted vs held jobs
+## Held jobs and first-run confirmation
 
-How a scheduled job's first run is treated depends on **who wrote it**:
+Every write to a job — `cfg job set` or the `jobs.define` tool, over the CLI or
+MCP — stamps the entry `confirmed: false`, which **holds** it: the job is still
+scheduled, but on its next trigger the scheduler DMs the admin to approve that
+run before it executes.
 
-- A job **you author** with `cfg job set` is **trusted**: a scheduled one
-  auto-runs as soon as the gateway is up.
-- A job created by the **`jobs.define` tool** is stamped `confirmed: false` and
-  **held**: it is still scheduled, but on its **first trigger** the scheduler
-  DMs the admin to approve that run before it executes.
+- **Approve** → the job runs, and `confirmed: true` is written back to the config
+  store. Later triggers run straight through, and a gateway restart does not
+  re-ask.
+- **Edit the job afterwards** → the write stamps `confirmed: false` again, so the
+  changed command is held for a fresh approval. An approval covers the exact
+  definition it was shown, nothing else.
 
-This exists because a defined job's command runs headless and ungated — so an
-agent can never define-then-auto-run a command without a human OK. `jobs.define`
-also always prompts a human at definition time, showing the rendered command and
-schedule.
+This exists because a job's command runs headless and ungated — so nothing can
+define-then-auto-run a command without a human OK. `jobs.define` additionally
+prompts a human at definition time, showing the rendered command and schedule.
+
+Jobs migrated from a hand-written `jobs.yaml` carry no `confirmed` field at all
+and stay operator-trusted until something writes to them.
 
 ---
 

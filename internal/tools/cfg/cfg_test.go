@@ -2,6 +2,7 @@ package cfg
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -144,5 +145,62 @@ func TestCfgRejectsInvalidCreate(t *testing.T) {
 	res, _ := invoke(t, find(t, agents, "cfg.agent.list"), nil)
 	if len(res.(listResult).Names) != 0 {
 		t.Fatalf("rolled-back create left rows: %+v", res)
+	}
+}
+
+// readJob decodes one stored job entry.
+func readJob(t *testing.T, p Provider, name string) config.JobProfile {
+	t.Helper()
+	s, err := p()
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	body, ok, err := s.GetItem(context.Background(), config.SectionJob, name)
+	if err != nil || !ok {
+		t.Fatalf("get job %q: ok=%v err=%v", name, ok, err)
+	}
+	var job config.JobProfile
+	if err := json.Unmarshal(body, &job); err != nil {
+		t.Fatalf("decode job %q: %v", name, err)
+	}
+	return job
+}
+
+// A job's first-run approval is granted against a specific command and
+// schedule, so every write through cfg.job.set — create or update, and however
+// small the edit — must re-arm the gate rather than inherit the old approval.
+func TestCfgJobSetAlwaysHoldsForConfirmation(t *testing.T) {
+	p := testProvider(t)
+	jobs := JobTools(p)
+	set := find(t, jobs, "cfg.job.set")
+
+	if _, err := invoke(t, set, map[string]any{
+		"name": "nightly", "command": "/bin/echo", "every": "1h",
+	}); err != nil {
+		t.Fatalf("job set: %v", err)
+	}
+	if job := readJob(t, p, "nightly"); !job.AwaitingConfirmation() {
+		t.Fatalf("new job AwaitingConfirmation() = false, want true (Confirmed=%v)", job.Confirmed)
+	}
+
+	// Simulate the admin approving the first run, as the gateway does.
+	s, _ := p()
+	approved := readJob(t, p, "nightly")
+	yes := true
+	approved.Confirmed = &yes
+	if err := s.UpsertItem(context.Background(), config.SectionJob, "nightly", approved); err != nil {
+		t.Fatalf("mark confirmed: %v", err)
+	}
+
+	// The smallest possible edit still invalidates that approval.
+	if _, err := invoke(t, set, map[string]any{"name": "nightly", "timeout": "5m"}); err != nil {
+		t.Fatalf("job update: %v", err)
+	}
+	job := readJob(t, p, "nightly")
+	if !job.AwaitingConfirmation() {
+		t.Fatalf("edited job AwaitingConfirmation() = false, want true (Confirmed=%v)", job.Confirmed)
+	}
+	if job.Command != "/bin/echo" || job.Timeout != "5m" {
+		t.Fatalf("update did not merge fields: %+v", job)
 	}
 }

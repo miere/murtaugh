@@ -144,10 +144,17 @@ type Gateway struct {
 	// is cron/every; manual jobs are ignored. Empty disables scheduling.
 	scheduledJobs map[string]config.JobProfile
 	// confirmedJobs records which held (agent-defined, unconfirmed) jobs have
-	// been approved for their first run during this process. Session-scoped and
-	// guarded by confirmedJobsMu; not persisted, so a restart re-asks.
+	// been approved for their first run during this process. Guarded by
+	// confirmedJobsMu. It is the in-process half of the approval: persistJobConfirmation
+	// writes the durable half so a restart does not re-ask.
 	confirmedJobs   map[string]bool
 	confirmedJobsMu sync.Mutex
+	// persistJobConfirmation stamps an approved job `confirmed: true` in the
+	// config store, so the approval outlives this process. Wired by the
+	// composition root (WithJobConfirmer) as a closure over the store. nil
+	// keeps the approval session-scoped — the job still runs now, but a
+	// restart re-asks. Safe to leave nil in CLI/MCP and tests.
+	persistJobConfirmation JobConfirmer
 	// runJob executes a job by name to completion. Injected by the
 	// composition root (WithScheduledRunner) as a closure over the jobs.run
 	// tool. nil disables the scheduler, so CLI/MCP and tests never pay for
@@ -572,6 +579,15 @@ func (a *Gateway) WithUpdateChecker(checker *updates.Checker, install func(ctx c
 // scheduler is disabled entirely, so CLI/MCP modes and tests never start it.
 func (a *Gateway) WithScheduledRunner(runner ScheduledRunner) *Gateway {
 	a.runJob = runner
+	return a
+}
+
+// WithJobConfirmer attaches the writer that persists a held job's approval back
+// to the config store, so the scheduler does not re-ask after a restart. nil
+// (the default) leaves approvals session-scoped. Returns the receiver for
+// fluent wiring.
+func (a *Gateway) WithJobConfirmer(confirm JobConfirmer) *Gateway {
+	a.persistJobConfirmation = confirm
 	return a
 }
 
