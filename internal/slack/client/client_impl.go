@@ -3,7 +3,6 @@ package client
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 
@@ -11,20 +10,20 @@ import (
 )
 
 // PostMessage posts a message via chat.postMessage. When Blocks is non-empty
-// it's parsed as a Block Kit payload and forwarded alongside Text (which
-// Slack uses as the notification/fallback string). Returns the resolved
-// channel ID and the message timestamp.
+// it's forwarded verbatim (see DecodeBlocks) alongside Text, which Slack uses
+// as the notification/fallback string. Returns the resolved channel ID and the
+// message timestamp.
 func (c *SlackClient) PostMessage(ctx context.Context, p PostMessageParams) (PostMessageResult, error) {
 	opts := []slackgo.MsgOption{slackgo.MsgOptionText(p.Text, false)}
 	if p.ThreadTS != "" {
 		opts = append(opts, slackgo.MsgOptionTS(p.ThreadTS))
 	}
 	if len(p.Blocks) > 0 {
-		var blocks slackgo.Blocks
-		if err := json.Unmarshal(p.Blocks, &blocks); err != nil {
-			return PostMessageResult{}, fmt.Errorf("Error parsing blocks JSON: %s", err.Error())
+		blocks, err := DecodeBlocks(p.Blocks)
+		if err != nil {
+			return PostMessageResult{}, err
 		}
-		opts = append(opts, slackgo.MsgOptionBlocks(blocks.BlockSet...))
+		opts = append(opts, slackgo.MsgOptionBlocks(blocks...))
 	}
 	channel, ts, err := c.api.PostMessageContext(ctx, p.ChannelID, opts...)
 	if err != nil {
@@ -68,11 +67,11 @@ func (c *SlackClient) UploadFile(ctx context.Context, p UploadFileParams) (PostM
 func (c *SlackClient) UpdateMessage(ctx context.Context, p UpdateMessageParams) (PostMessageResult, error) {
 	opts := []slackgo.MsgOption{slackgo.MsgOptionText(p.Text, false)}
 	if len(p.Blocks) > 0 {
-		var blocks slackgo.Blocks
-		if err := json.Unmarshal(p.Blocks, &blocks); err != nil {
-			return PostMessageResult{}, fmt.Errorf("Error parsing blocks JSON: %s", err.Error())
+		blocks, err := DecodeBlocks(p.Blocks)
+		if err != nil {
+			return PostMessageResult{}, err
 		}
-		opts = append(opts, slackgo.MsgOptionBlocks(blocks.BlockSet...))
+		opts = append(opts, slackgo.MsgOptionBlocks(blocks...))
 	}
 	channel, ts, _, err := c.api.UpdateMessageContext(ctx, p.ChannelID, p.TS, opts...)
 	if err != nil {

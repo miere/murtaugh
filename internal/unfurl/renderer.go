@@ -7,11 +7,53 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"text/template"
 
 	"github.com/miere/murtaugh/assets"
 	"github.com/slack-go/slack"
 )
+
+// templateFuncs are available to every unfurl template and prompt.
+//
+// Templates are JSON documents rendered with text/template, which performs no
+// escaping whatsoever. Interpolating a value straight into a JSON string
+// literal is therefore unsafe: a value containing a double quote produces
+// malformed JSON (caught by ParseAttachment, so it fails closed), but a value
+// crafted to close the string and open new keys produces *valid* JSON with
+// attacker-chosen block structure, which no validity check will catch.
+//
+// Use these instead of bare {{ .Field }} anywhere a value lands inside JSON:
+//
+//	"text": {{ json .URL }}                    // whole value, quotes included
+//	"text": "PR #{{ jsonstr .Captures.number }}" // inside a larger string
+var templateFuncs = template.FuncMap{
+	"json":    jsonValue,
+	"jsonstr": jsonInner,
+}
+
+// jsonValue renders v as a complete JSON value, quotes and all.
+func jsonValue(v any) (string, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	// Slack payloads are not HTML; escaping <, > and & to \u00xx would still
+	// decode correctly but makes rendered templates needlessly unreadable.
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return "", err
+	}
+	return strings.TrimRight(buf.String(), "\n"), nil
+}
+
+// jsonInner renders v as JSON-escaped text with no surrounding quotes, for
+// interpolation inside a larger JSON string literal.
+func jsonInner(v any) (string, error) {
+	encoded, err := jsonValue(fmt.Sprint(v))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(encoded, `"`), `"`), nil
+}
 
 // Data is the context exposed to unfurl templates and passed as JSON on stdin
 // to `run` handlers. Field names are intentionally exported and stable.
@@ -53,7 +95,7 @@ func (r *Renderer) Render(path string, data Data) (slack.Attachment, error) {
 	if err != nil {
 		return slack.Attachment{}, fmt.Errorf("read template: %w", err)
 	}
-	tpl, err := template.New(filepath.Base(resolved)).Option("missingkey=error").Parse(string(content))
+	tpl, err := template.New(filepath.Base(resolved)).Funcs(templateFuncs).Option("missingkey=error").Parse(string(content))
 	if err != nil {
 		return slack.Attachment{}, fmt.Errorf("parse template: %w", err)
 	}
@@ -69,7 +111,7 @@ func (r *Renderer) Render(path string, data Data) (slack.Attachment, error) {
 // using missingkey=error so a typo'd placeholder fails loudly rather than
 // sending the agent a half-rendered prompt.
 func RenderPrompt(promptTemplate string, data Data) (string, error) {
-	tpl, err := template.New("prompt").Option("missingkey=error").Parse(promptTemplate)
+	tpl, err := template.New("prompt").Funcs(templateFuncs).Option("missingkey=error").Parse(promptTemplate)
 	if err != nil {
 		return "", fmt.Errorf("parse prompt template: %w", err)
 	}
