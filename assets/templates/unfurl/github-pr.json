@@ -4,7 +4,7 @@
       "type": "section",
       "text": {
         "type": "mrkdwn",
-        "text": "*<{{ .URL }}|Pull Request #{{ .Captures.number }}>*\n`{{ .Captures.owner }}/{{ .Captures.repo }}`"
+        "text": "*<{{ jsonstr .URL }}|Pull Request #{{ jsonstr .Captures.number }}>*\n`{{ jsonstr .Captures.owner }}/{{ jsonstr .Captures.repo }}`"
       }
     }
   ]
