@@ -1,0 +1,52 @@
+{
+	"blocks": [
+		{
+			"type": "container",
+			"block_id": "murtaugh_auth_requester",
+			"icon": {
+				"type": "image",
+				"image_url": "https://img.icons8.com/stickers/100/palm-scan.png",
+				"alt_text": "Authentication Required icon"
+			},
+			"title": {
+				"type": "plain_text",
+				"text": "Authentication Required"
+			},
+			"subtitle": {
+				"type": "plain_text",
+				"text": "The tool '{{ jsonstr .ToolName }}' requires authentication"
+			},
+			"is_collapsible": false,
+			"default_collapsed": false,
+			"has_header_divider": true,
+			"width": "full",
+			"child_blocks": [
+				{
+					"type": "rich_text",
+					"block_id": "murtaugh_auth_requester_status",
+					"elements": [
+						{
+							"type": "rich_text_section",
+							"elements": [
+								{
+									"type": "text",
+									"text": {{ if eq .State "pending" }}"Your admin user has been notified to finish the authentication."{{ else if eq .State "success" }}"Your admin completed the authentication. Carrying on."{{ else if eq .State "denied" }}"Your admin declined this authentication request."{{ else if eq .State "timeout" }}"This authentication request expired before your admin answered."{{ else }}"The authentication attempt failed."{{ end }}
+								}
+							]
+						}
+					]
+				},
+				{
+					"type": "context",
+					"block_id": "murtaugh_auth_requester_context",
+					"elements": [
+						{
+							"type": "mrkdwn",
+							"text": "Authentication attempt at: {{ jsonstr .AttemptAt }}"
+						}
+					]
+				}
+			]
+		}
+	]
+}
