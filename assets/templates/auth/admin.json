@@ -1,0 +1,118 @@
+{
+	"blocks": [
+		{
+			"type": "container",
+			"block_id": "murtaugh_auth_admin",
+			"icon": {
+				"type": "image",
+				"image_url": "https://img.icons8.com/stickers/100/palm-scan.png",
+				"alt_text": "Authentication Required icon"
+			},
+			"title": {
+				"type": "plain_text",
+				"text": "Authentication Required"
+			},
+			"subtitle": {
+				"type": "plain_text",
+				"text": "The tool '{{ jsonstr .ToolName }}' requires authentication"
+			},
+			"is_collapsible": false,
+			"default_collapsed": false,
+			"has_header_divider": true,
+			"width": "full",
+			"child_blocks": [
+				{
+					"type": "rich_text",
+					"block_id": "murtaugh_auth_admin_status",
+					"elements": [
+						{
+							"type": "rich_text_section",
+							"elements": [
+								{
+									"type": "text",
+									"text": {{ if eq .State "pending" }}{{ if .NeedsCode }}"Open the link, approve the request, then paste the verification code back here."{{ else }}"Open the link and finish signing in. This card completes on its own once the browser flow is done."{{ end }}{{ else if eq .State "working" }}{{ if .NeedsCode }}"Waiting for the verification code."{{ else }}"Waiting for the browser sign-in to complete."{{ end }}{{ else if eq .State "success" }}"Authentication succeeded."{{ else if eq .State "denied" }}"You declined this authentication request."{{ else if eq .State "timeout" }}"This request expired before it was completed."{{ else }}"The authentication attempt failed."{{ end }}
+								}
+							]
+						}
+					]
+				}{{ if .ShowRequester }},
+				{
+					"type": "context",
+					"block_id": "murtaugh_auth_admin_requester",
+					"elements": [
+						{
+							"type": "mrkdwn",
+							"text": "Requested by <@{{ jsonstr .RequesterUserID }}> · profile `{{ jsonstr .ProfileName }}`"
+						}
+					]
+				}{{ end }}{{ if .Reason }},
+				{
+					"type": "context",
+					"block_id": "murtaugh_auth_admin_reason",
+					"elements": [
+						{
+							"type": "mrkdwn",
+							"text": {{ json .Reason }}
+						}
+					]
+				}{{ end }}{{ if .ShowActions }},
+				{
+					"type": "actions",
+					"block_id": "murtaugh_auth",
+					"elements": [
+						{{ if .NeedsCode }}{
+							"type": "button",
+							"action_id": {{ json .ActionPrimary }},
+							"style": "primary",
+							"text": {
+								"type": "plain_text",
+								"text": "Enter Code"
+							},
+							"value": "enter_code"
+						},
+						{
+							"type": "button",
+							"action_id": {{ json .ActionOpen }},
+							"url": {{ json .URL }},
+							"text": {
+								"type": "plain_text",
+								"text": "Open In Browser"
+							},
+							"value": "open"
+						}{{ else }}{
+							"type": "button",
+							"action_id": {{ json .ActionPrimary }},
+							"style": "primary",
+							"url": {{ json .URL }},
+							"text": {
+								"type": "plain_text",
+								"text": "Open In Browser"
+							},
+							"value": "open"
+						}{{ end }},
+						{
+							"type": "button",
+							"action_id": {{ json .ActionDeny }},
+							"style": "danger",
+							"text": {
+								"type": "plain_text",
+								"text": "Deny"
+							},
+							"value": "deny"
+						}
+					]
+				}{{ end }}{{ if .ShowFooter }},
+				{
+					"type": "context",
+					"block_id": "murtaugh_auth_admin_context",
+					"elements": [
+						{
+							"type": "mrkdwn",
+							"text": "Authentication attempt at: {{ jsonstr .AttemptAt }}"
+						}
+					]
+				}{{ end }}
+			]
+		}
+	]
+}
