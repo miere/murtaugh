@@ -101,9 +101,18 @@ capabilities an agent may call. Values are native tool **groups** plus registry
 | `ask` | Put a question with options to you as clickable buttons, and **wait** for the answer. |
 | `present_plan` | Show a plan with Proceed / Revise / Cancel and **wait** for sign-off. |
 | `attach` | Return a workspace file (report, image, export) as a real Slack upload; confined to `workdir`. |
+| `auth.request` | Ask the **admin** for credentials the agent lacks, and **wait** until they grant or refuse them. |
 
 `ask` and `present_plan` are recommended — they let the agent get a real answer
 instead of guessing. See [Slack → Asking the user](slack.md#asking-the-user).
+
+`auth.request` is the one tool that does **not** ask the person in the thread.
+Credentials belong to the admin, so the request always goes to
+`configuration.admin_user`; the requester only sees a notice that their admin
+has been asked. It fails closed — a denial, a timeout or a failed sign-in all
+return an error — so the agent stops rather than retrying a call it still has no
+credentials for. With no admin configured, nothing is posted and the request is
+refused. See `murtaugh help auth request`.
 
 ### The approval gate
 

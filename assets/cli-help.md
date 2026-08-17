@@ -642,6 +642,60 @@ murtaugh troubleshoot bundle --note "bot goes silent on action requests" --inclu
 murtaugh troubleshoot bundle --out /tmp/murtaugh-diag.zip --max-log-bytes 1048576
 ```
 
+## murtaugh auth request
+
+Request credentials the agent does not have, and block until the configured
+admin grants them. The command never authenticates anything itself: it posts a
+card to the admin's DM and waits for them to complete the sign-in, deny it, or
+let it expire.
+
+Two people are involved. Whoever triggered the turn gets a short notice in their
+own thread ("your admin has been notified") and nothing else — no buttons, no
+command output. The admin gets the card that does the work. When the requester
+*is* the admin, or there is no thread at all (CLI/MCP), the two collapse into a
+single card.
+
+Flags:
+
+- `--tool` (required) — the capability that needs authentication, named as the
+  user knows it (e.g. `gcp-mcp`, `postgres-mcp`). Name the **directly affected**
+  tool, not the helper binary it shells out to underneath: an admin approving
+  "the tool 'gcloud' requires authentication" has no idea what they are
+  approving. Name the helper only when it is being invoked directly.
+- `--profile` (required) — which workflow to run:
+  - `gcloud` — `gcloud auth login`, signing in the user credential. Finishes
+    with a verification code.
+  - `gcloud-adc` — `gcloud auth application-default login`, writing the
+    application-default credentials that client libraries and MCP servers
+    usually read. Finishes with a verification code.
+  - `custom` — run `--command` in the background. For flows Murtaugh does not
+    ship a profile for.
+  - (`aws` is named in the design but not implemented yet, and is rejected.)
+- `--command` — only with `--profile custom`: the command line to run. Passing
+  it alongside a built-in profile is an error rather than a silent no-op.
+- `--needs-code` — only with `--profile custom`: `true` when the flow completes
+  by pasting a verification code back, `false` when the whole exchange happens
+  in the browser. Defaults to `false`. Booleans need an explicit value on the
+  CLI (`--needs-code true`).
+
+The card layout follows from the flow. A code flow shows **Enter Code** as the
+primary button with **Open In Browser** beside it; a browser-only flow shows
+**Open In Browser** as the primary and no code button. The primary button is a
+single attempt: clicking it retires the whole button bar and reveals the footer,
+and the request then runs to completion on its own.
+
+Fails closed, always. A denial, a timeout, a failed sign-in, no configured
+admin, or an undeliverable card all return an error — never a partial success —
+so the caller stops rather than retrying the call that lacked credentials.
+
+Requires `configuration.admin_user` to be set; with no admin nobody can approve,
+and the request is refused before anything is posted.
+
+```
+murtaugh auth request --tool gcp-mcp --profile gcloud-adc
+murtaugh auth request --tool vendor-mcp --profile custom --command "vendor-cli login --headless" --needs-code false
+```
+
 ## murtaugh version
 
 Print the binary's version string (e.g. `v0.4.1` or `dev`). Takes no flags.

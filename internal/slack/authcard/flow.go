@@ -131,7 +131,8 @@ func (s *session) submitCode(code string) error {
 // cancelled turn — all of them return a non-authenticated Outcome (or an
 // error), never a hopeful one. Success requires the process to exit cleanly.
 func (f *Flow) Run(ctx context.Context, req Request) (Outcome, error) {
-	if f.admin == "" {
+	admin := f.adminUser()
+	if admin == "" {
 		return Outcome{}, errors.New("authcard: no admin user is configured, so nobody can approve an authentication request")
 	}
 	api, err := f.client.Get()
@@ -185,7 +186,7 @@ func (f *Flow) Run(ctx context.Context, req Request) (Outcome, error) {
 		return o, nil
 	}
 
-	adminChannel, err = api.OpenDM(ctx, f.admin)
+	adminChannel, err = api.OpenDM(ctx, admin)
 	if err != nil {
 		return finish(Outcome{}, StateFailed, "could not open a DM with the admin: "+err.Error())
 	}
@@ -418,15 +419,45 @@ func (f *Flow) HandleCodeSubmission(corr, code, userID string) error {
 	return s.submitCode(strings.TrimSpace(code))
 }
 
+// SetAdmin installs the resolved admin identity.
+//
+// The gateway resolves configuration.admin_user from a handle ("@miere") to a
+// Slack user ID at startup and rewrites its own copy of the access config; the
+// value this Flow was constructed with is the unresolved one. Without this the
+// DM would be opened against a handle and fail. The gateway calls it once
+// resolution has happened; empty/nil arguments are ignored so a lockdown
+// configuration cannot accidentally clear a good value.
+func (f *Flow) SetAdmin(userID string, isAdmin func(string) bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if u := strings.TrimSpace(userID); u != "" {
+		f.admin = u
+	}
+	if isAdmin != nil {
+		f.isAdmin = isAdmin
+	}
+}
+
+// adminUser returns the resolved admin, or "" when none is configured.
+func (f *Flow) adminUser() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.admin
+}
+
 func (f *Flow) isAdminUser(userID string) bool {
 	userID = strings.TrimSpace(userID)
 	if userID == "" {
 		return false
 	}
-	if f.isAdmin != nil {
-		return f.isAdmin(userID)
+	f.mu.Lock()
+	predicate, admin := f.isAdmin, f.admin
+	f.mu.Unlock()
+
+	if predicate != nil {
+		return predicate(userID)
 	}
-	return userID == f.admin
+	return userID == admin
 }
 
 func (f *Flow) register(corr string, s *session) {
