@@ -8,15 +8,13 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"sort"
-	"text/template"
 
 	"github.com/miere/murtaugh/assets"
 	"github.com/miere/murtaugh/internal/agentdelegate"
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/journal"
+	"github.com/miere/murtaugh/internal/jsontemplate"
 	"github.com/slack-go/slack"
 )
 
@@ -64,15 +62,18 @@ type chatTarget struct {
 }
 
 type Engine struct {
-	rules       []Rule
-	poster      ResponsePoster
-	runner      CommandRunner
-	delegator   AgentDelegator
-	chat        ChatStarter
-	templateDir string
-	templateFS  fs.FS
-	logger      *slog.Logger
-	recorder    journal.Recorder
+	rules     []Rule
+	poster    ResponsePoster
+	runner    CommandRunner
+	delegator AgentDelegator
+	chat      ChatStarter
+	// templates resolves a rule's `template:` reference (config dir first, then
+	// the embedded assets tree) and renders it against the interaction payload.
+	// It carries the json/jsonstr escaping funcs — see the note on
+	// renderTemplate about interpolating payload values.
+	templates *jsontemplate.Renderer
+	logger    *slog.Logger
+	recorder  journal.Recorder
 }
 
 // SetChatStarter wires the chat pipeline used by delegate-to-agent triggers.
@@ -142,7 +143,7 @@ func NewEngine(cfg config.Config, opts Options) *Engine {
 		recorder = journal.NopRecorder{}
 	}
 
-	return &Engine{rules: rules, poster: poster, runner: runner, delegator: opts.Delegator, templateDir: templateDir, templateFS: templateFS, logger: logger, recorder: recorder}
+	return &Engine{rules: rules, poster: poster, runner: runner, delegator: opts.Delegator, templates: jsontemplate.New(templateDir, templateFS), logger: logger, recorder: recorder}
 }
 
 // Execute matches interaction against the configured rules and runs the
@@ -302,6 +303,23 @@ func (e *Engine) delegate(ctx context.Context, cfg config.DelegateToAgentConfig,
 	})
 }
 
+// renderReply produces the JSON body a reply-to-slack trigger posts, from
+// whichever source the rule configures: a `run` command's stdout, an agent
+// delegation, or a `template:` file.
+//
+// On the template path, values from the Slack interaction payload are
+// interpolated into a JSON document. That payload is user-influenced (message
+// text, action values, profile fields), so a rule that interpolates one bare —
+// `"text": "{{ .Payload.message.text }}"` — is injectable: a crafted value
+// closes the string literal and appends sibling blocks, producing *valid* JSON
+// that validJSON below cannot distinguish from an intended one. Rule templates
+// must use the escaping funcs the renderer provides:
+//
+//	"text": {{ json .Payload.message.text }}
+//	"text": "from {{ jsonstr .Payload.user.name }}"
+//
+// Rule templates are operator-authored and live outside the binary, so this is
+// a contract with the operator rather than something the engine can enforce.
 func (e *Engine) renderReply(ctx context.Context, trigger config.ReplyToSlackTriggerConfig, payload map[string]any, runStdin []byte) ([]byte, error) {
 	if trigger.Run != nil {
 		runCfg, err := renderRunConfig(*trigger.Run, payload)
@@ -329,43 +347,11 @@ func (e *Engine) renderReply(ctx context.Context, trigger config.ReplyToSlackTri
 		return e.delegator.RunForJSON(ctx, trigger.DelegateToAgent.Agent, prompt)
 	}
 
-	path := e.templatePath(trigger.Template)
-	content, err := e.readTemplate(trigger.Template, path)
+	rendered, err := e.templates.Render(trigger.Template, map[string]any{"Payload": payload})
 	if err != nil {
-		return nil, fmt.Errorf("read template: %w", err)
-	}
-	tpl, err := template.New(filepath.Base(path)).Option("missingkey=error").Parse(string(content))
-	if err != nil {
-		return nil, fmt.Errorf("parse template: %w", err)
-	}
-
-	var rendered bytes.Buffer
-	data := map[string]any{"Payload": payload}
-	if err := tpl.Execute(&rendered, data); err != nil {
-		return nil, fmt.Errorf("execute template: %w", err)
-	}
-	return validJSON(rendered.Bytes())
-}
-
-func (e *Engine) templatePath(path string) string {
-	if filepath.IsAbs(path) {
-		return path
-	}
-	return filepath.Join(e.templateDir, path)
-}
-
-func (e *Engine) readTemplate(templatePath string, resolvedPath string) ([]byte, error) {
-	content, err := os.ReadFile(resolvedPath)
-	if err == nil {
-		return content, nil
-	}
-	if err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
-	if e.templateFS != nil && !filepath.IsAbs(templatePath) {
-		return fs.ReadFile(e.templateFS, filepath.ToSlash(templatePath))
-	}
-	return nil, err
+	return validJSON(rendered)
 }
 
 func blockActionIDs(actions []*slack.BlockAction) []string {
@@ -414,15 +400,11 @@ func renderRunConfig(cfg config.RunTriggerConfig, payload map[string]any) (confi
 // using missingkey=error so a typo'd placeholder fails loudly rather than
 // sending the agent a half-rendered prompt.
 func renderPrompt(promptTemplate string, data map[string]any) (string, error) {
-	tpl, err := template.New("prompt").Option("missingkey=error").Parse(promptTemplate)
+	out, err := jsontemplate.Execute("prompt", []byte(promptTemplate), data)
 	if err != nil {
-		return "", fmt.Errorf("parse prompt template: %w", err)
+		return "", err
 	}
-	var buf bytes.Buffer
-	if err := tpl.Execute(&buf, data); err != nil {
-		return "", fmt.Errorf("execute prompt template: %w", err)
-	}
-	return buf.String(), nil
+	return string(out), nil
 }
 
 func validJSON(body []byte) ([]byte, error) {

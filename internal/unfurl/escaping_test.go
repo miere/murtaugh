@@ -77,27 +77,9 @@ func TestJsonRendersCompleteValueWithQuotes(t *testing.T) {
 	}
 }
 
-// Slack payloads are not HTML; &, < and > should stay literal rather than
-// becoming & and friends.
-func TestJsonValueDoesNotHTMLEscape(t *testing.T) {
-	got, err := jsonValue(`a&b<c>d`)
-	if err != nil {
-		t.Fatalf("jsonValue: %v", err)
-	}
-	if want := `"a&b<c>d"`; got != want {
-		t.Fatalf("jsonValue = %s, want %s", got, want)
-	}
-}
-
-func TestJsonInnerStripsSurroundingQuotes(t *testing.T) {
-	got, err := jsonInner(`say "hi"`)
-	if err != nil {
-		t.Fatalf("jsonInner: %v", err)
-	}
-	if want := `say \"hi\"`; got != want {
-		t.Fatalf("jsonInner = %s, want %s", got, want)
-	}
-}
+// The func-level behaviour of json/jsonstr is covered in internal/jsontemplate,
+// which now owns them. What stays here is the integration: that an unfurl
+// template rendered through this package actually gets them.
 
 // The shipped template must actually use the escaping funcs, or the fix is
 // inert for the one unfurl Murtaugh ships.
