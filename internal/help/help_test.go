@@ -75,6 +75,7 @@ func TestRender(t *testing.T) {
 func TestEveryCommandDocumented(t *testing.T) {
 	commands := []string{
 		"ping",
+		"auth request",
 		"jobs run", "jobs define",
 		"journal query", "journal stats", "journal prune",
 		"slack send-msg", "slack create-channel", "slack fetch-msgs", "slack fetch-reactions", "slack update-msg",

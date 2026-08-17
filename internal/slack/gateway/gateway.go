@@ -22,6 +22,7 @@ import (
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/journal"
 	"github.com/miere/murtaugh/internal/mcpbridge"
+	"github.com/miere/murtaugh/internal/slack/authcard"
 	slackclient "github.com/miere/murtaugh/internal/slack/client"
 	askbroker "github.com/miere/murtaugh/internal/slack/interaction"
 	"github.com/miere/murtaugh/internal/tools"
@@ -66,6 +67,11 @@ type Gateway struct {
 	// approval gate) back to the blocked turn. nil leaves broker prompts
 	// unrouted (CLI/MCP, or a gateway built without it).
 	interactions *askbroker.Broker
+
+	// auth routes `auth.request` card clicks and code submissions back to the
+	// blocked request. nil leaves auth requests unroutable, which the tool
+	// reports rather than hanging.
+	auth *authcard.Flow
 	// bridge is the shared per-agent MCP aggregator. ACP agents are handed a
 	// `murtaugh mcp-bridge` stdio server that proxies to it, so they can reach
 	// Murtaugh's own tools. nil when ACP chat is disabled. Started in Run.
@@ -220,7 +226,7 @@ type Gateway struct {
 	chatChannels config.ChannelRules
 }
 
-func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recorder journal.Recorder, broker *askbroker.Broker) *Gateway {
+func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recorder journal.Recorder, broker *askbroker.Broker, authFlow *authcard.Flow) *Gateway {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -448,6 +454,7 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 		handler:           NewDefaultSlashCommandHandler(),
 		workflow:          workflow.NewEngine(cfg, workflow.Options{Logger: logger, Delegator: workflowDelegator, Recorder: recorder}),
 		interactions:      broker,
+		auth:              authFlow,
 		bridge:            bridge,
 		chat:              chat,
 		chatSessions:      sessions,
@@ -622,6 +629,12 @@ func (a *Gateway) Run(ctx context.Context) error {
 	cancel()
 	if err != nil {
 		return fmt.Errorf("resolve allowed users: %w", err)
+	}
+	// resolveAllowSet rewrites a.cfg with IDs; hand the resolved admin to the
+	// auth flow, which was constructed with the raw (possibly handle) value and
+	// would otherwise open a DM against "@someone".
+	if a.auth != nil {
+		a.auth.SetAdmin(a.cfg.AdminUser, a.cfg.IsAdminUser)
 	}
 
 	a.startBridge(ctx)
@@ -945,6 +958,36 @@ func (a *Gateway) dispatchInteractive(event socketmode.Event, interaction slack.
 			return
 		}
 	}
+	// Authentication cards. Routed before the broker because the namespaces are
+	// distinct and this one is admin-only: the Flow re-checks IsAdminUser itself
+	// rather than trusting the router, so a guest reaching this branch is
+	// rejected there rather than here.
+	if a.auth != nil {
+		if corr, action, ok := authcard.IsAuthInteraction(interaction); ok {
+			triggerID := interaction.TriggerID
+			user := interaction.User.ID
+			// The primary button may need to open a modal, and Slack expires a
+			// trigger_id within seconds, so this runs promptly on its own
+			// goroutine rather than behind the rest of the dispatch.
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				if err := a.auth.HandleClick(ctx, corr, action, user, triggerID); err != nil {
+					a.logger.Warn("auth card click not applied", "error", err, "correlation", corr, "action", string(action))
+				}
+			}()
+			return
+		}
+		if interaction.Type == slack.InteractionTypeViewSubmission {
+			if corr, code, ok := authcard.ParseCodeSubmission(interaction); ok {
+				if err := a.auth.HandleCodeSubmission(corr, code, interaction.User.ID); err != nil {
+					a.logger.Warn("auth code submission not applied", "error", err, "correlation", corr)
+				}
+				return
+			}
+		}
+	}
+
 	// Broker prompts — the `ask` tool AND the tool-approval gates (both the ACP
 	// PermissionGate and the native approver post through this same broker). This
 	// is the one surface a channel guest reaches: it is the agent asking a
