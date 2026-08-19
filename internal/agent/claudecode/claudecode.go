@@ -586,16 +586,29 @@ func (s *procSession) handleControlRequest(msg *streamMessage) {
 	}
 }
 
+// denyFallback is used when a deny path reports no reason of its own. The CLI
+// rejects a deny carrying no message at all, so there is always something to say.
+const denyFallback = "Murtaugh denied this tool call."
+
 func (s *procSession) answerPermission(reqID string, msg *streamMessage) {
 	toolName, input := parseCanUseTool(msg.Request)
-	allow := s.decidePermission(toolName, input)
-	behavior := "deny"
+	allow, reason := s.decidePermission(toolName, input)
+	var inner map[string]any
 	if allow {
-		behavior = "allow"
-	}
-	inner := map[string]any{"behavior": behavior}
-	if allow && len(input) > 0 {
-		inner["updatedInput"] = json.RawMessage(input)
+		inner = map[string]any{"behavior": "allow"}
+		if len(input) > 0 {
+			inner["updatedInput"] = json.RawMessage(input)
+		}
+	} else {
+		// A deny MUST carry a message. The CLI validates the shape and rejects a
+		// message-less deny outright ("The canUseTool callback returned an invalid
+		// permission result"), which fails the whole turn rather than just the one
+		// tool call. The message is model-facing — it becomes the tool_result the
+		// model reads — so it explains why instead of only saying no.
+		if strings.TrimSpace(reason) == "" {
+			reason = denyFallback
+		}
+		inner = map[string]any{"behavior": "deny", "message": reason}
 	}
 	s.writeJSON(map[string]any{
 		"type": "control_response",
@@ -611,12 +624,17 @@ func (s *procSession) answerPermission(reqID string, msg *streamMessage) {
 // without a human; the default ("ask") raises an EventPermission on the active
 // turn — reusing the chat handler's approval card exactly like the ACP path — and
 // blocks on the human's decision. No active turn or a dead process denies.
-func (s *procSession) decidePermission(toolName string, input json.RawMessage) bool {
+//
+// Every deny returns a reason alongside it. The reason is not diagnostics: it is
+// handed to the model as the denied call's result, so each path says which of the
+// several quite different denials this was — a policy, a missing conversation, or
+// an actual human saying no.
+func (s *procSession) decidePermission(toolName string, input json.RawMessage) (bool, string) {
 	switch s.policy {
 	case "auto-allow":
-		return true
+		return true, ""
 	case "auto-deny":
-		return false
+		return false, "Murtaugh is configured to deny every tool call in this session."
 	default: // ask
 		s.mu.Lock()
 		sub := s.active
@@ -624,7 +642,7 @@ func (s *procSession) decidePermission(toolName string, input json.RawMessage) b
 		s.mu.Unlock()
 		if sub == nil {
 			s.log.Warn("claudecode: permission request with no active turn; denying", "tool", toolName)
-			return false
+			return false, "There is no active Slack conversation to ask for approval in, so this call was denied. Do not retry it."
 		}
 		decision := make(chan string, 1)
 		prompt := &agent.PermissionPrompt{
@@ -639,13 +657,23 @@ func (s *procSession) decidePermission(toolName string, input json.RawMessage) b
 			Decision: decision,
 		}
 		if !sendEvent(sub, agent.Event{Type: agent.EventPermission, Permission: prompt}) {
-			return false
+			return false, "The turn ended before approval could be requested, so this call was denied."
 		}
 		select {
 		case optionID := <-decision:
-			return optionID == "allow"
+			switch optionID {
+			case "allow":
+				return true, ""
+			case "deny":
+				return false, "The user denied this tool call. Do not retry it — ask them how they would like to proceed."
+			default:
+				// The prompt resolved without a choice: dismissed, or timed out.
+				// Worth distinguishing from a deliberate no, because the right
+				// next move differs — nobody has actually refused anything.
+				return false, "The approval request was dismissed without an answer, so this call was denied."
+			}
 		case <-done:
-			return false
+			return false, "The session ended before the user answered the approval request, so this call was denied."
 		}
 	}
 }
