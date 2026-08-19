@@ -32,6 +32,7 @@ type streamMessage struct {
 	// result fields
 	StopReason string `json:"stop_reason"`
 	Result     string `json:"result"`
+	IsError    bool   `json:"is_error"`
 
 	// control fields (see client.go for handling)
 	RequestID json.RawMessage `json:"request_id"`
@@ -94,6 +95,31 @@ func (m *streamMessage) isControl() bool {
 
 // isResult reports whether this message ends the current turn.
 func (m *streamMessage) isResult() bool { return m.Type == "result" }
+
+// isAbortedResult reports whether this result ended the turn *abnormally* — the
+// CLI's own signal that execution stopped mid-flight rather than the model
+// finishing. An interrupt is the common cause, and it is indistinguishable from
+// a completion by stop reason alone: the CLI reports whatever the last assistant
+// message carried, so a mid-tool interrupt reads `tool_use` and one landing
+// between tools reads `end_turn`. The subtype is the only field that knows.
+//
+// `error_max_turns` is deliberately NOT an abort: that turn ended on a rule the
+// agent was configured with, having very possibly produced a full reply first.
+func (m *streamMessage) isAbortedResult() bool {
+	if !m.isResult() {
+		return false
+	}
+	switch m.Subtype {
+	case "error_during_execution":
+		return true
+	case "", "success", "error_max_turns":
+		return false
+	default:
+		// An error subtype we do not know yet: trust is_error rather than assume
+		// the turn completed normally, which is the failure this guards against.
+		return m.IsError
+	}
+}
 
 // toEvents maps a (non-control, non-result) message to zero or more agent.Events
 // in emission order. Unknown/ignored messages (thinking_tokens, rate_limit_event,

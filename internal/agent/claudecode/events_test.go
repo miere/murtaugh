@@ -31,6 +31,37 @@ func TestDecodeAndClassify(t *testing.T) {
 	}
 }
 
+// TestAbortedResultClassification pins which results end a turn abnormally. The
+// stop reason is deliberately varied and deliberately ignored: an interrupt
+// reports whatever the last assistant message carried, so it proves nothing.
+func TestAbortedResultClassification(t *testing.T) {
+	cases := []struct {
+		name    string
+		line    string
+		aborted bool
+	}{
+		{"interrupt mid-tool", `{"type":"result","subtype":"error_during_execution","is_error":true,"stop_reason":"tool_use"}`, true},
+		{"interrupt between tools", `{"type":"result","subtype":"error_during_execution","is_error":true,"stop_reason":"end_turn"}`, true},
+		{"plain success", `{"type":"result","subtype":"success","stop_reason":"end_turn"}`, false},
+		{"success mid-tool stop reason", `{"type":"result","subtype":"success","stop_reason":"tool_use"}`, false},
+		{"max turns is a legitimate end", `{"type":"result","subtype":"error_max_turns","is_error":true}`, false},
+		{"unknown error subtype trusts is_error", `{"type":"result","subtype":"error_something_new","is_error":true}`, true},
+		{"unknown benign subtype", `{"type":"result","subtype":"error_something_new","is_error":false}`, false},
+		{"not a result", `{"type":"assistant","subtype":"error_during_execution","message":{"role":"assistant","content":[]}}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, err := decodeMessage([]byte(tc.line))
+			if err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if got := m.isAbortedResult(); got != tc.aborted {
+				t.Errorf("isAbortedResult() = %v, want %v", got, tc.aborted)
+			}
+		})
+	}
+}
+
 func TestAssistantEventsTextAndToolUse(t *testing.T) {
 	line := `{"type":"assistant","parent_tool_use_id":null,"message":{"role":"assistant","content":[
 		{"type":"thinking","thinking":"hmm"},

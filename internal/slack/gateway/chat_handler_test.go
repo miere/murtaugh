@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -559,6 +560,80 @@ func TestChatHandlerDoesNotFailTasksOnInterrupt(t *testing.T) {
 			if task.Status == slack.TaskCardStatusError {
 				t.Fatalf("interrupted task was painted error: %+v", task)
 			}
+		}
+	}
+}
+
+// backendCancelSessions reports a cancelled turn the way the claude_code
+// backend does: an EventError carrying context.Canceled, while the handler's own
+// ctx is still very much alive. The interrupt closure asks the session to stop
+// and only cancels ctx after a grace period, so the backend's answer routinely
+// arrives first — the race that used to turn an interrupt into "the agent
+// finished and said nothing".
+func TestChatHandlerRendersInterruptFromBackendCancellation(t *testing.T) {
+	// The cancellation as the claude_code backend reports it: an EventError
+	// carrying context.Canceled.
+	cancelled := agent.Event{Type: agent.EventError, Error: fmt.Errorf("claudecode: turn interrupted: %w", context.Canceled)}
+	toolRan := agent.Event{Type: agent.EventTask, Task: &agent.TaskEvent{ID: "t1", Title: "Bash", Status: agent.TaskStatusInProgress}}
+	cases := []struct {
+		name       string
+		events     []agent.Event
+		wantMarker bool
+	}{
+		// The reported case: cut off mid-tool having said nothing. The whole fix is
+		// that this posts NO warning — the user's follow-up is already on its way.
+		{"silent turn", []agent.Event{toolRan, cancelled}, false},
+		// Cut off mid-sentence: the reply section is still open, so it gets the
+		// marker rather than trailing off.
+		{"mid-sentence", []agent.Event{{Type: agent.EventText, Text: "Good idea — trying that"}, cancelled}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			api := &fakeStreamAPI{}
+			sessions := scriptedSessions{id: "s1", events: tc.events}
+			handler := NewChatHandler(api, map[string]ChatSessionManager{"default": sessions},
+				func(ChatRequest) ChatRoute { return ChatRoute{Agent: "default", ReplyOnThread: true} }, time.Millisecond, 1, discardLogger())
+
+			// Note the live context: nothing here cancels it. The cancellation is
+			// known only to the backend, and must be honoured all the same.
+			if err := handler.handleResolving(context.Background(), ChatRequest{ChannelID: "C1", MessageTS: "1.1", Text: "hi", Source: "dm"}); err != nil {
+				t.Fatalf("interrupt must not surface as a handler error: %v", err)
+			}
+
+			var posted string
+			for _, opts := range append(api.startOptions, api.appendOptions...) {
+				if text, err := extractMarkdownTextFromOptions(opts...); err == nil {
+					posted += text
+				}
+			}
+			if strings.Contains(posted, "without a reply") {
+				t.Fatalf("an interrupted turn must not be reported as an empty reply, got %q", posted)
+			}
+			if got := strings.Contains(posted, "_interrupted_"); got != tc.wantMarker {
+				t.Fatalf("interrupt marker present = %v, want %v (posted %q)", got, tc.wantMarker, posted)
+			}
+		})
+	}
+}
+
+func TestEmptyReplyNoteStatesWhatTheTurnDid(t *testing.T) {
+	cases := []struct {
+		toolsRun int
+		want     string
+	}{
+		{0, "The agent finished without a reply."},
+		{1, "The agent ran one tool and finished without a reply."},
+		{3, "The agent ran 3 tools and finished without a reply."},
+	}
+	for _, tc := range cases {
+		got := emptyReplyNote(tc.toolsRun)
+		if !strings.Contains(got, tc.want) {
+			t.Errorf("emptyReplyNote(%d) = %q, want it to contain %q", tc.toolsRun, got, tc.want)
+		}
+		// No advice: the right next move depends on why the turn was silent, and
+		// the handler does not know. Saying nothing beats saying the wrong thing.
+		if strings.Contains(got, "Nudge") || strings.Contains(got, "Try rephrasing") {
+			t.Errorf("emptyReplyNote(%d) should not prescribe a remedy, got %q", tc.toolsRun, got)
 		}
 	}
 }

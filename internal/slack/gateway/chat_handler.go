@@ -458,6 +458,9 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest, route ChatRou
 		turnErr    error
 		sessionID  string
 		stopReason string
+		// toolsRun counts the distinct tool calls seen on the stream, so a turn
+		// that ends without a reply can say what it did instead of guessing.
+		toolsRun = map[string]struct{}{}
 	)
 	if h.sessionLog != nil {
 		defer func() {
@@ -467,7 +470,7 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest, route ChatRou
 			// timeout take precedence as they are not failures of the agent.
 			outcome := turnCompleted
 			switch {
-			case errors.Is(context.Cause(ctx), context.Canceled):
+			case errors.Is(context.Cause(ctx), context.Canceled), errors.Is(turnErr, context.Canceled):
 				outcome = turnInterrupted
 			case timedOut:
 				outcome = turnTimedOut
@@ -531,8 +534,14 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest, route ChatRou
 	// bubbling the cancellation up as an error. Timeout-driven cancellations
 	// (DeadlineExceeded) still surface as errors so operators notice stalls. Fresh
 	// context, since the request ctx is cancelled on this path.
+	//
+	// retErr is checked too, because the backend can report the cancellation
+	// before our own ctx carries it: the interrupt closure asks the session to
+	// stop and only cancels ctx after a grace period, so the agent's aborted-turn
+	// event routinely wins that race. Both are the same event — the turn was
+	// cancelled — and must render the same marker.
 	defer func() {
-		if !errors.Is(context.Cause(ctx), context.Canceled) {
+		if !errors.Is(context.Cause(ctx), context.Canceled) && !errors.Is(retErr, context.Canceled) {
 			return
 		}
 		ictx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -603,8 +612,8 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest, route ChatRou
 		// A turn that delivered a file but no prose is not empty — suppress the
 		// note so an attachment-only reply does not look like a failed turn.
 		if byteSeen == 0 && attachSeen == 0 {
-			emptyNote = emptyReplyNote(stopReason)
-			h.logger.Warn("agent turn completed with no agent text", "source", req.Source, "channel", req.ChannelID, "stop_reason", stopReason)
+			emptyNote = emptyReplyNote(len(toolsRun))
+			h.logger.Warn("agent turn completed with no agent text", "source", req.Source, "channel", req.ChannelID, "stop_reason", stopReason, "tools_run", len(toolsRun))
 		}
 		if err := renderer.Finish(ctx, emptyNote); err != nil {
 			return err
@@ -683,6 +692,11 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest, route ChatRou
 				if event.Task == nil {
 					continue
 				}
+				// Plan entries are the agent's task list, not work it ran — only tool
+				// calls count towards what an empty turn actually did.
+				if event.Task.Kind != agent.TaskKindPlan && event.Task.ID != "" {
+					toolsRun[event.Task.ID] = struct{}{}
+				}
 				if err := renderer.Task(ctx, event.Task); err != nil {
 					return err
 				}
@@ -716,6 +730,10 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest, route ChatRou
 					event.Permission.Decision <- decision
 				}
 			case agent.EventError:
+				// Recorded first so every exit below reports the same cause — including
+				// the cancellation path, which the session log reads as an interrupt
+				// even when our own ctx has not been cancelled yet (the grace period).
+				turnErr = event.Error
 				// A caller interrupt (new message / /stop) surfaces here as a context
 				// cancellation, not an agent failure: return it and let the deferred
 				// interrupt handler render the "_interrupted_" marker without painting
@@ -723,7 +741,6 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest, route ChatRou
 				if errors.Is(event.Error, context.Canceled) || errors.Is(context.Cause(ctx), context.Canceled) {
 					return event.Error
 				}
-				turnErr = event.Error
 				if errors.Is(event.Error, agent.ErrToolCeiling) {
 					// A tool blew past its ceiling. The backend may still be running it
 					// and (lacking session/cancel) cannot be stopped, so drop the session
@@ -763,14 +780,29 @@ func (h *ChatHandler) askPermission(ctx context.Context, req ChatRequest, thread
 	return optionID
 }
 
-// emptyReplyNote builds the message shown when a turn produced no agent text.
-// A non-"end_turn" stop reason (max_tokens, refusal, …) is the likely cause and
-// is named; otherwise the note nudges the user to retry.
-func emptyReplyNote(stopReason string) string {
-	if stopReason != "" && stopReason != "end_turn" {
-		return fmt.Sprintf(":warning: _The agent ended the turn without a reply (stop reason: `%s`). Try rephrasing or asking again._", stopReason)
+// emptyReplyNote builds the message shown when a turn genuinely produced no
+// reply: it states what the turn did and stops there.
+//
+// It deliberately neither hedges nor prescribes. It does not hedge because the
+// turn's tool activity is counted rather than guessed at — the old "it may have
+// only run tools" was the handler admitting it had not looked. It does not
+// prescribe because there is no remedy that is right in every case: an
+// interrupted turn never reaches here (it renders the interrupt marker instead),
+// and an agent that answered through its Slack tool has already delivered its
+// reply, so "nudge it to continue" would be wrong advice in both.
+//
+// The stop reason is left to the log line beside it: `tool_use` means nothing to
+// a reader, and it does not identify the failure anyway — the same cancellation
+// reports `tool_use` or `end_turn` purely by where in the tool loop it landed.
+func emptyReplyNote(toolsRun int) string {
+	switch {
+	case toolsRun == 1:
+		return ":warning: _The agent ran one tool and finished without a reply._"
+	case toolsRun > 1:
+		return fmt.Sprintf(":warning: _The agent ran %d tools and finished without a reply._", toolsRun)
+	default:
+		return ":warning: _The agent finished without a reply._"
 	}
-	return ":warning: _The agent finished without a text reply — it may have only run tools. Nudge it with another message to continue._"
 }
 
 func (h *ChatHandler) refreshAssistantStatus(ctx context.Context, channelID, threadTS, status string, done chan<- struct{}) {

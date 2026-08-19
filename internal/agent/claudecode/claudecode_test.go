@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -230,8 +231,67 @@ func TestCancelInterruptsTurn(t *testing.T) {
 	}()
 	got := drain(t, ch, 5*time.Second)
 	last := got[len(got)-1]
-	if last.Type != agent.EventComplete || last.StopReason != "interrupted" {
-		t.Fatalf("expected interrupted completion, got %+v", got)
+	// A cancelled turn must NOT arrive as a completion. The CLI answers an
+	// interrupt with a result that carries no reply text, so completing the turn
+	// would hand the relay "the agent finished and said nothing" — and earn the
+	// user a warning about an agent that did exactly as it was told.
+	if last.Type != agent.EventError {
+		t.Fatalf("expected a terminal EventError for an interrupted turn, got %+v", got)
+	}
+	if !errors.Is(last.Error, context.Canceled) {
+		t.Fatalf("interrupt must surface as a cancellation, got %v", last.Error)
+	}
+}
+
+// TestAbortedTurnWithoutCancelIsAFailure guards the other half of the branch: an
+// abnormal end nobody asked for is a real failure and must be reported as one,
+// not quietly swallowed as a cancellation (which the relay renders as a benign
+// "_interrupted_").
+func TestAbortedTurnWithoutCancelIsAFailure(t *testing.T) {
+	c := newHelperClient(t, "abort", Options{})
+	ctx := context.Background()
+	if err := c.Initialize(ctx); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	sess, err := c.NewSession(ctx, agent.SessionMetadata{})
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	ch, err := c.Prompt(ctx, sess.ID, agent.PromptRequest{Text: "go"})
+	if err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	got := drain(t, ch, 5*time.Second)
+	last := got[len(got)-1]
+	if last.Type != agent.EventError {
+		t.Fatalf("expected a terminal EventError, got %+v", got)
+	}
+	if errors.Is(last.Error, context.Canceled) {
+		t.Fatalf("an uncancelled abort must not masquerade as a cancellation: %v", last.Error)
+	}
+}
+
+// TestMaxTurnsStillCompletes pins the exclusion: `error_max_turns` carries
+// is_error too, but that turn ended on a rule the agent was configured with,
+// having very possibly replied first. It must stay a completion.
+func TestMaxTurnsStillCompletes(t *testing.T) {
+	c := newHelperClient(t, "maxturns", Options{})
+	ctx := context.Background()
+	if err := c.Initialize(ctx); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	sess, err := c.NewSession(ctx, agent.SessionMetadata{})
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	ch, err := c.Prompt(ctx, sess.ID, agent.PromptRequest{Text: "go"})
+	if err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	got := drain(t, ch, 5*time.Second)
+	last := got[len(got)-1]
+	if last.Type != agent.EventComplete || last.StopReason != "end_turn" {
+		t.Fatalf("expected a completion, got %+v", got)
 	}
 }
 
@@ -284,7 +344,7 @@ func runFakeClaude(mode string) {
 				emit(controlSuccess(reqID, map[string]any{}))
 			case "interrupt":
 				emit(controlSuccess(reqID, map[string]any{"still_queued": []any{}}))
-				emit(resultMsg("interrupted"))
+				emit(abortedResultMsg())
 			}
 		case "user":
 			switch mode {
@@ -301,6 +361,15 @@ func runFakeClaude(mode string) {
 				})
 			case "hang":
 				// Never completes on its own — the test must Cancel.
+			case "abort":
+				// Ends abnormally without anyone asking it to: a crash mid-turn,
+				// not a cancellation.
+				emit(abortedResultMsg())
+			case "maxturns":
+				// Ends on the configured turn limit — an error subtype, but a
+				// legitimate end of turn that may well have produced a reply.
+				emit(assistantText("as far as I got"))
+				emit(map[string]any{"type": "result", "subtype": "error_max_turns", "is_error": true, "stop_reason": "end_turn"})
 			default:
 				emit(assistantText("hello from fake"))
 				emit(resultMsg("end_turn"))
@@ -349,6 +418,22 @@ func assistantText(text string) map[string]any {
 
 func resultMsg(stop string) map[string]any {
 	return map[string]any{"type": "result", "subtype": "success", "stop_reason": stop, "result": ""}
+}
+
+// abortedResultMsg is the result the real CLI (verified against 2.1.229) sends
+// when a turn stops mid-execution — chiefly the answer to an interrupt. Note the
+// stop reason: it is whatever the last assistant message carried, so an
+// interrupt mid-tool reports `tool_use` and one between tools reports
+// `end_turn`. Only the subtype distinguishes it from a completion, which is why
+// the client must read that and not the stop reason.
+func abortedResultMsg() map[string]any {
+	return map[string]any{
+		"type":        "result",
+		"subtype":     "error_during_execution",
+		"is_error":    true,
+		"stop_reason": "tool_use",
+		"result":      nil,
+	}
 }
 
 // The claude CLI's own AskUserQuestion renders in the terminal UI, which a
