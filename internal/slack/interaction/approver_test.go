@@ -30,7 +30,7 @@ func TestGateApprover_Outcome(t *testing.T) {
 
 			done := make(chan struct{})
 			go func() {
-				NewApprover(broker, nil, false).Approve(ctx, "terminal", "rm -rf x")
+				NewApprover(broker, nil, false, NewGrants()).Approve(ctx, "terminal", "rm -rf x")
 				close(done)
 			}()
 
@@ -58,7 +58,7 @@ func TestGateApprover_Outcome(t *testing.T) {
 
 func TestGateApprover_NoLocationProceeds(t *testing.T) {
 	broker, _ := newSignalingBroker(t)
-	allowed, note := NewApprover(broker, nil, false).Approve(context.Background(), "terminal", "rm -rf x")
+	allowed, note := NewApprover(broker, nil, false, NewGrants()).Approve(context.Background(), "terminal", "rm -rf x")
 	if !allowed || note != "" {
 		t.Fatalf("headless (no Slack location) should proceed ungated, got allowed=%v note=%q", allowed, note)
 	}
@@ -74,7 +74,7 @@ func TestGateApprover_Approved(t *testing.T) {
 	}
 	out := make(chan res, 1)
 	go func() {
-		a, n := NewApprover(broker, nil, false).Approve(ctx, "terminal", "rm -rf x")
+		a, n := NewApprover(broker, nil, false, NewGrants()).Approve(ctx, "terminal", "rm -rf x")
 		out <- res{a, n}
 	}()
 
@@ -93,7 +93,7 @@ func TestGateApprover_Denied(t *testing.T) {
 
 	out := make(chan bool, 1)
 	go func() {
-		allowed, _ := NewApprover(broker, nil, false).Approve(ctx, "terminal", "rm -rf x")
+		allowed, _ := NewApprover(broker, nil, false, NewGrants()).Approve(ctx, "terminal", "rm -rf x")
 		out <- allowed
 	}()
 
@@ -111,7 +111,7 @@ func TestGateApprover_Denied(t *testing.T) {
 func TestGateApprover_AlwaysAllow(t *testing.T) {
 	broker, sig := newSignalingBroker(t)
 	ctx := agent.WithTurnLocation(context.Background(), agent.TurnLocation{ChannelID: "C1", ThreadTS: "t1"})
-	approver := NewApprover(broker, nil, false)
+	approver := NewApprover(broker, nil, false, NewGrants())
 
 	// First call: the user chooses "always allow".
 	out := make(chan bool, 1)
@@ -143,7 +143,7 @@ func TestGateApprover_AlwaysAllow(t *testing.T) {
 func TestGateApprover_AlwaysAllowIsExact(t *testing.T) {
 	broker, sig := newSignalingBroker(t)
 	ctx := agent.WithTurnLocation(context.Background(), agent.TurnLocation{ChannelID: "C1", ThreadTS: "t1"})
-	approver := NewApprover(broker, nil, false)
+	approver := NewApprover(broker, nil, false, NewGrants())
 
 	// Remember "rm -rf x".
 	out := make(chan bool, 1)

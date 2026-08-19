@@ -23,12 +23,17 @@ type PermissionGate struct {
 	// deleting it after the broker's TTL. It is this agent's
 	// approval.keep_resolved, which is why a gate is built per agent.
 	keepResolved bool
+	// grants is the always-allow set, shared with this agent's GateApprover. It is
+	// only ever *read* here: the options on this path belong to the agent, so this
+	// gate offers no way to create a grant — see AskPermission.
+	grants *Grants
 }
 
 // NewPermissionGate builds a PermissionGate over the shared broker, rendering
-// with cards and honouring the agent's keep_resolved setting.
-func NewPermissionGate(broker *Broker, cards *approvalcard.Renderer, keepResolved bool) *PermissionGate {
-	return &PermissionGate{broker: broker, cards: cards, keepResolved: keepResolved}
+// with cards, honouring the agent's keep_resolved setting, and honouring the
+// always-allow choices recorded in grants (shared with the agent's approver).
+func NewPermissionGate(broker *Broker, cards *approvalcard.Renderer, keepResolved bool, grants *Grants) *PermissionGate {
+	return &PermissionGate{broker: broker, cards: cards, keepResolved: keepResolved, grants: grants}
 }
 
 // AskPermission posts the agent's offered options as buttons in loc's thread and
@@ -53,13 +58,25 @@ func (g *PermissionGate) AskPermission(ctx context.Context, loc agent.TurnLocati
 	if len(options) == 0 {
 		return "", nil
 	}
+	// The options above are the agent's, copied through untouched — Murtaugh adds
+	// none of its own here. On this path the agent owns the vocabulary: it will
+	// only understand an optionId it declared, and an agent that already offers
+	// allow_always is doing its own bookkeeping, so a second Murtaugh-flavoured
+	// button would be both unroutable and a lie about who is remembering what.
+	//
+	// What Murtaugh can do is decline to ask a question already answered: if this
+	// call matches a grant the user made through Murtaugh's own gate, answer it
+	// with the agent's own allow option and post nothing.
+	name := friendlyToolName(req.ToolKind)
+	detail := strings.TrimRight(req.ToolTitle, "\n")
+	if id := allowOptionID(req.Options); id != "" && g.grants.Allowed(GrantKey(name, detail)) {
+		return id, nil
+	}
 	// Mirror the native approval gate: name the tool concisely and, when the agent
 	// supplied a title (for an execute call, the command line), render it in a
 	// language-hinted fenced code block via Slack's markdown block — the same
 	// syntax-highlighted treatment the agent's own code output gets — rather than
 	// echoing the whole command inline.
-	name := friendlyToolName(req.ToolKind)
-	detail := strings.TrimRight(req.ToolTitle, "\n")
 	question := fmt.Sprintf("The agent wants to use the `%s` tool. Allow?", name)
 	if detail != "" {
 		question = fmt.Sprintf("The agent wants to use the `%s` tool:\n\n```%s\n%s\n```\n\nAllow?", name, codeLang(name), detail)
@@ -99,6 +116,31 @@ func (g *PermissionGate) approvalCards(name, detail string, kindByID map[string]
 		},
 		outcome: permissionCardOutcome(kindByID),
 	}
+}
+
+// allowOptionID picks the option to answer a pre-granted call with, preferring
+// allow_once over allow_always. The preference is deliberate and matches what
+// the ACP client does when auto-allowing: a grant recorded on Murtaugh's side is
+// Murtaugh's to remember, and answering with allow_always would additionally ask
+// the agent to remember it — escalating a local grant into a standing permission
+// on the far side of a boundary Murtaugh does not control.
+//
+// It returns "" when the agent offered no allow option at all, which leaves the
+// caller to ask the human as usual rather than inventing an answer.
+func allowOptionID(options []agent.PermissionOption) string {
+	var fallback string
+	for _, o := range options {
+		if !strings.HasPrefix(o.Kind, "allow") {
+			continue
+		}
+		if o.Kind == "allow_once" {
+			return o.ID
+		}
+		if fallback == "" {
+			fallback = o.ID
+		}
+	}
+	return fallback
 }
 
 // permissionOutcome renders the terminal line an ACP permission prompt is

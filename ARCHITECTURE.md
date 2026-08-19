@@ -543,6 +543,28 @@ Two consequences worth knowing before editing either:
 - The button row's `block_id` is passed *into* the renderer rather than fixed in
   it, because it is the gateway router's constant, not the card's.
 
+### The two approval paths
+
+There are two, and they are not interchangeable:
+
+- **Murtaugh's gate** (`GateApprover`) — tool calls Murtaugh can see: the native
+  loop's, and the registry tools an ACP/claude_code agent reaches over the MCP
+  bridge (`agentbuild` wraps the same approver as `mcpApprover`). Murtaugh owns
+  the options, so it offers "Approve & always allow". Governed by
+  `approval.terminal`/`approval.allow`.
+- **Reflecting the agent's intent** (`PermissionGate`) — the agent asks about one
+  of *its own* tools. The options are the agent's: it will only understand an
+  `optionId` it declared, so Murtaugh renders them and adds none of its own.
+  Governed by `approval.requests`, which is a routing policy for an inbound
+  question, not a gate Murtaugh imposes.
+
+`Grants` is the one thing they share — an always-allow set built per agent and
+handed to both. Only the gate can create a grant; the reflection path reads it,
+so a command already allowed through Murtaugh's own tools is not asked about
+again when the agent runs it itself. `GrantKey` keys a shell call on the command
+line alone precisely so it crosses the two paths, where the same command arrives
+under different tool names (`terminal`, `execute`, `Bash`).
+
 ## Custom link unfurling (`internal/unfurl` + `slack/gateway/link_unfurl_handler.go`)
 
 - `Matcher` compiles rules once (sorted-key order). `Match(url, domain, channel)`
