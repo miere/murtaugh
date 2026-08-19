@@ -743,14 +743,14 @@ func (s *procSession) decidePermission(toolName string, input json.RawMessage) (
 			return false, "There is no active Slack conversation to ask for approval in, so this call was denied. Do not retry it."
 		}
 		decision := make(chan string, 1)
+		// No options of our own: can_use_tool is a bare allow/deny, so the whole
+		// decision is Murtaugh's, and it supplies the buttons it wants to offer —
+		// including "always allow", which a hardcoded pair here could never grow.
 		prompt := &agent.PermissionPrompt{
 			Request: agent.PermissionRequest{
-				ToolKind:  toolName,
-				ToolTitle: permissionTitle(input),
-				Options: []agent.PermissionOption{
-					{ID: "allow", Name: "Allow", Kind: "allow_once"},
-					{ID: "deny", Name: "Deny", Kind: "reject_once"},
-				},
+				ToolKind:    toolName,
+				ToolTitle:   permissionTitle(input),
+				PolicyOwned: true,
 			},
 			Decision: decision,
 		}
@@ -760,9 +760,9 @@ func (s *procSession) decidePermission(toolName string, input json.RawMessage) (
 		select {
 		case optionID := <-decision:
 			switch optionID {
-			case "allow":
+			case agent.PermissionAllow:
 				return true, ""
-			case "deny":
+			case agent.PermissionDeny:
 				return false, "The user denied this tool call. Do not retry it — ask them how they would like to proceed."
 			default:
 				// The prompt resolved without a choice: dismissed, or timed out.

@@ -157,9 +157,26 @@ workspace — the files tools are confined to `workdir`):
 - `--approval-allow` extends the built-in read-only allowlist with extra command
   keys: an argv0 (`kubectl`) or a `binary subcommand` pair (`"docker ps"`).
 
-**ACP permission** (`--approval-requests`) decides how an ACP agent's own
-permission prompts are answered: `ask` (default — surface them to the user),
-`auto-allow`, or `auto-deny`.
+**ACP permission** (`--approval-requests`) decides how an ACP or claude_code
+agent's own permission prompts are answered: `ask` (default — surface them to the
+user), `auto-allow`, or `auto-deny`.
+
+It governs a *different surface* from `--approval-terminal`, which is worth
+keeping straight:
+
+- `--approval-terminal` gates **Murtaugh's** tools — the native loop's, and the
+  registry tools an ACP/claude_code agent reaches over the MCP bridge.
+- `--approval-requests` decides what happens when **the agent** asks about one of
+  **its own** tools (Claude's `Bash`, `Edit`, `Read`).
+
+On `ask`, an ACP agent's own buttons are shown as the agent declared them. A
+backend with no options of its own — Claude Code, whose protocol is a bare
+allow/deny — gets Murtaugh's set instead: **Approve**, **Approve & always allow**,
+**Deny**. An always-allow granted there is shared with the terminal gate, so the
+same command is not asked about twice because it arrived through a different tool.
+
+Murtaugh can only gate what it is told about: anything the agent's own harness
+auto-approves internally never produces a request, and no value here changes that.
 
 The terminal gate is only active in a **live Slack chat** (where there's a human
 to ask); headless runs — scheduled jobs and delegated agents — are never gated.

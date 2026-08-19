@@ -558,6 +558,19 @@ There are two, and they are not interchangeable:
   Governed by `approval.requests`, which is a routing policy for an inbound
   question, not a gate Murtaugh imposes.
 
+A backend with no options of its own sets `PermissionRequest.PolicyOwned` instead
+of inventing some, and `PermissionGate` then supplies Murtaugh's own set —
+approve / approve & always allow / deny — making that request a Murtaugh gate
+decision wearing the reflection path's plumbing. Claude Code's `can_use_tool` is
+the case that needs it: a bare allow/deny with no option list. The gate maps its
+own option ids back to `agent.PermissionAllow`/`PermissionDeny` before answering,
+so a delegating backend's vocabulary stays allow, deny and "nobody chose", and
+nothing about always-allow crosses the boundary.
+
+The limit is worth stating: Murtaugh can only gate what it is told about.
+Anything an agent's harness auto-approves internally never produces a request,
+and no setting here changes that.
+
 `Grants` is the one thing they share — an always-allow set built per agent and
 handed to both. Only the gate can create a grant; the reflection path reads it,
 so a command already allowed through Murtaugh's own tools is not asked about
