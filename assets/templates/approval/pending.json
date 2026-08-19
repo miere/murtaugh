@@ -1,0 +1,59 @@
+{
+	"blocks": [
+		{
+			"type": "container",
+			"block_id": "murtaugh_approval_card",
+			"icon": {
+				"type": "image",
+				"image_url": {{ json .IconURL }},
+				"alt_text": "Approval icon"
+			},
+			"title": {
+				"type": "plain_text",
+				"text": {{ json .Title }}
+			},
+			"subtitle": {
+				"type": "plain_text",
+				"text": {{ json .Subtitle }}
+			},
+			"is_collapsible": false,
+			"default_collapsed": false,
+			"has_header_divider": true,
+			"width": "wide",
+			"child_blocks": [
+				{{ if .Detail }}{
+					"type": "rich_text",
+					"elements": [
+						{
+							"type": "rich_text_preformatted",
+							{{ if .Language }}"language": {{ json .Language }},
+							{{ end }}"elements": [
+								{
+									"type": "text",
+									"text": {{ json .Detail }}
+								}
+							]
+						}
+					]
+				},
+				{{ end }}{
+					"type": "actions",
+					"block_id": {{ json .ActionsBlockID }},
+					"elements": [
+						{{ range $i, $o := .Options }}{{ if $i }},
+						{{ end }}{
+							"type": "button",
+							"action_id": {{ json $o.ActionID }},
+							"value": {{ json $o.Value }},
+							{{ if $o.Style }}"style": {{ json $o.Style }},
+							{{ end }}"text": {
+								"type": "plain_text",
+								"text": {{ json $o.Label }}
+							}
+						}{{ end }}
+					]
+				}
+			]
+		}
+	]
+}

@@ -82,6 +82,9 @@ internal/slack/       Slack subsystem:
                       answered in place, from templates/ask/*.json.
   authcard/           Two-party authentication card (requester + admin),
                       rendered from templates/auth/*.json.
+  approvalcard/       The tool-approval card, from templates/approval/*.json.
+                      Rendering only — the interaction broker keeps the
+                      lifecycle and calls in through its CardRenderer hook.
 internal/agent/       Agent backend interface, session manager, protocol types,
                       and the shared tool watcher / execution ceiling.
   native/             In-process LLM agent loop (kind: native): conversation,
@@ -521,6 +524,24 @@ Conventions that fall out of it:
 over `jsontemplate`, a `State` enum whose terminal values stop further edits,
 correlation carried in the buttons' `action_id` namespace, and a `Flow` that
 posts, blocks on a rendezvous, and rewrites the card to its terminal state.
+
+`internal/slack/approvalcard` is the other shape: **rendering without a
+lifecycle**. The interaction broker already posted, correlated, timed out and
+optionally deleted the pre-card approval prompts for all three gates, so the card
+package owns none of that — it implements the broker's `CardRenderer` hook
+(`Pending`/`Resolved`/`Fallback`) and the broker calls in at the two points where
+blocks are needed. Reach for this shape when a lifecycle already exists and only
+the looks are changing; reach for authcard's when there is no lifecycle yet.
+
+Two consequences worth knowing before editing either:
+
+- The broker mints the `action_id` and the click `value`, and hands them to the
+  card as `CardOption`. A card template **must** emit both verbatim; a button that
+  rewrites either one is a dead button. Slack does report `action_id` for a button
+  nested inside a `container`'s `child_blocks` — both the ask and approval cards
+  depend on this.
+- The button row's `block_id` is passed *into* the renderer rather than fixed in
+  it, because it is the gateway router's constant, not the card's.
 
 ## Custom link unfurling (`internal/unfurl` + `slack/gateway/link_unfurl_handler.go`)
 

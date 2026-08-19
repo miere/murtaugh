@@ -63,6 +63,7 @@ defaults for one agent; to retune the rest, `cfg export` the config, edit the
 | `acp.cancel_grace_period` | `2s` | After asking the agent to cancel, how long to let trailing chunks flush before hard-cancelling. |
 | `approval.terminal` | `allowlist` | Global default terminal-tool gate (see `--approval-terminal` below); per-agent `--approval-terminal` overrides it. |
 | `approval.requests` | `ask` | Global default for how an ACP agent's own permission prompts are answered; per-agent `--approval-requests` overrides it. |
+| `approval.keep_resolved` | `false` | Global default for whether a settled approval card stays in the thread; per-agent `--approval-keep-resolved` overrides it either way. |
 
 > The chat on/off switch is **not** here — it's `cfg chat set --enabled`, which
 > gates only the Slack chat surface (DMs + @mentions). Agent delegation (jobs,
@@ -96,6 +97,7 @@ see the `murtaugh-setup` skill's `setup_env`).
 | `--export-skills-to-fs` | no | Bundled (`murtaugh-*`) skills to write into this agent's `workdir` so a filesystem-discovering backend (e.g. a Claude Code agent) can load them. **Repeat the flag**; `all` exports every bundled skill. Empty (default) keeps the bundled skills in-binary only — readable solely through the gated `skills` tool, never by `files`/`terminal`. See below. |
 | `--mcp-servers` | no | Names of `cfg mcp` entries to attach — **repeat the flag**. Each contributes its remote tools. |
 | `--approval-terminal` / `--approval-allow` / `--approval-requests` | no | Human-approval gate for side-effecting tool calls (see below). Defaults to gating on (`allowlist`). |
+| `--approval-keep-resolved` | no | Keep settled approval cards in the thread instead of clearing them a few seconds after the decision. Defaults to clearing. |
 | `--progress-display` | no | Override `defaults.rendering.progress_display` for this agent (`simplified` / `tasks`). |
 
 A workspace `AGENTS.md` (in the agent's `workdir`) is auto-loaded into the system
@@ -161,6 +163,19 @@ permission prompts are answered: `ask` (default — surface them to the user),
 
 The terminal gate is only active in a **live Slack chat** (where there's a human
 to ask); headless runs — scheduled jobs and delegated agents — are never gated.
+
+**Keeping the card** (`--approval-keep-resolved`) decides what happens to an
+approval card after it settles. By default the card rewrites itself to its
+outcome, waits a few seconds, and deletes itself — so a long run doesn't bury the
+thread in spent approvals. Set the flag and the settled card stays put instead,
+collapsed, naming the tool and who decided: a durable record of who allowed what.
+
+It applies to **every** settled state, not just approved. A denial or a timeout is
+equally part of that record, and a flag that kept some outcomes and swept others
+would leave a misleading trail.
+
+Because it is three-state (`unset` / `true` / `false`), an agent can opt out of a
+`defaults.approval.keep_resolved: true` as well as into it.
 
 ## Claude Code profiles (`--type claude_code`)
 
