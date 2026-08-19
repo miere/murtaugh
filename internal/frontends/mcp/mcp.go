@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -73,7 +74,7 @@ func (f *Frontend) Server() *mcpsdk.Server {
 	// whose tools collide with a built-in), not a runtime condition.
 	seen := make(map[string]string, len(f.tools))
 	for _, t := range f.tools {
-		published := mcpToolName(t.Name())
+		published := publishedName(t)
 		if prior, dup := seen[published]; dup {
 			panic(fmt.Sprintf("mcp: tool name collision: %q and %q both publish as %q", prior, t.Name(), published))
 		}
@@ -100,6 +101,33 @@ var invalidMCPNameChar = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
 // matches and invokes the captured tool directly.
 func mcpToolName(name string) string {
 	return invalidMCPNameChar.ReplaceAllString(name, "_")
+}
+
+// MCPNamer is the optional interface a tool implements to publish under a name
+// other than its registry key. Same idiom as tools.ApprovalClassifier: opt-in,
+// checked with a type assertion, ignored by every tool that does not need it.
+//
+// It exists for tools that stand in for a name the model already knows. The
+// `ask` tool publishes as AskUserQuestion so a Claude Code agent — whose
+// built-in of that name is suppressed because it cannot render headlessly —
+// reaches for the replacement by reflex instead of having to be taught a new
+// one. The registry key stays `ask`, so `murtaugh ask` and the dotted-key
+// convention are unaffected.
+type MCPNamer interface {
+	MCPName() string
+}
+
+// publishedName is the LLM-facing id for a tool: its MCPName override when it
+// declares one, otherwise its sanitised registry key. An override is sanitised
+// too — a tool does not get to bypass the character rules by implementing an
+// interface.
+func publishedName(t tools.Tool) string {
+	if namer, ok := t.(MCPNamer); ok {
+		if name := strings.TrimSpace(namer.MCPName()); name != "" {
+			return mcpToolName(name)
+		}
+	}
+	return mcpToolName(t.Name())
 }
 
 // Serve runs the MCP server over a stdio transport. It blocks until the
@@ -145,7 +173,7 @@ func registerTool(s *mcpsdk.Server, t tools.Tool, approver Approver) {
 		}, nil
 	}
 	s.AddTool(&mcpsdk.Tool{
-		Name:        mcpToolName(t.Name()),
+		Name:        publishedName(t),
 		Description: t.Description(),
 		InputSchema: schema,
 	}, handler)
@@ -165,7 +193,7 @@ func gate(ctx context.Context, t tools.Tool, args map[string]any, approver Appro
 	if !ok || !classifier.RequiresApproval(args) {
 		return false, ""
 	}
-	summary := mcpToolName(t.Name())
+	summary := publishedName(t)
 	if summarizer, ok := t.(tools.ApprovalSummarizer); ok {
 		summary = summarizer.ApprovalSummary(args)
 	}

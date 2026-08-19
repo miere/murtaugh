@@ -320,3 +320,176 @@ func corrFrom(t *testing.T, raw []byte) string {
 	t.Fatal("no broker button in posted blocks")
 	return ""
 }
+
+// --- the Claude-facing surface ---------------------------------------------
+
+// The advertised schema IS Claude's AskUserQuestion payload. This test is the
+// contract: if it drifts, a Claude Code agent reaching for the tool it already
+// knows starts getting argument errors, and the substitution stops being
+// invisible. Every assertion below mirrors a field of Claude's own schema.
+func TestInputSchemaMatchesClaudesPayload(t *testing.T) {
+	schema := New(nil, nil).InputSchema()
+
+	if schema.Type != "object" {
+		t.Fatalf("root type = %q, want object", schema.Type)
+	}
+	if len(schema.Required) != 1 || schema.Required[0] != "questions" {
+		t.Fatalf("root required = %v, want [questions]", schema.Required)
+	}
+	// The legacy single-question shape must not be advertised: Invoke still
+	// accepts it, but the model-facing contract is Claude's alone.
+	for _, gone := range []string{"question", "options", "title"} {
+		if _, ok := schema.Properties[gone]; ok {
+			t.Errorf("schema advertises %q; the published shape must be Claude's only", gone)
+		}
+	}
+
+	questions, ok := schema.Properties["questions"]
+	if !ok {
+		t.Fatal("no questions property")
+	}
+	if questions.MinItems == nil || *questions.MinItems != 1 {
+		t.Error("questions should require at least 1")
+	}
+	if questions.MaxItems == nil || *questions.MaxItems != 4 {
+		t.Error("questions should cap at 4, as Claude's does")
+	}
+
+	q := questions.Items
+	wantRequired := map[string]bool{"header": true, "question": true, "options": true}
+	if len(q.Required) != len(wantRequired) {
+		t.Errorf("question required = %v, want header/question/options", q.Required)
+	}
+	for _, name := range q.Required {
+		if !wantRequired[name] {
+			t.Errorf("unexpected required field %q", name)
+		}
+	}
+	if h := q.Properties["header"]; h == nil || h.MaxLength == nil || *h.MaxLength != 12 {
+		t.Error("header should cap at 12 characters, as Claude's does")
+	}
+	if _, ok := q.Properties["multiSelect"]; !ok {
+		t.Error("no multiSelect property")
+	}
+	if _, ok := q.Properties["freeText"]; ok {
+		t.Error("freeText is not part of Claude's payload and must not be advertised")
+	}
+
+	opts := q.Properties["options"]
+	if opts == nil {
+		t.Fatal("no options property")
+	}
+	if opts.MinItems == nil || *opts.MinItems != 2 {
+		t.Error("options should require at least 2")
+	}
+	if opts.MaxItems == nil || *opts.MaxItems != 4 {
+		t.Error("options should cap at 4, as Claude's does")
+	}
+	// Options are objects, not bare strings — this is the shape change that
+	// carries the per-option description onto the card.
+	if opts.Items.Type != "object" {
+		t.Fatalf("option type = %q, want object", opts.Items.Type)
+	}
+	for _, want := range []string{"label", "description"} {
+		if _, ok := opts.Items.Properties[want]; !ok {
+			t.Errorf("option has no %q property", want)
+		}
+	}
+}
+
+func TestMCPNameIsAskUserQuestion(t *testing.T) {
+	if got := New(nil, nil).MCPName(); got != "AskUserQuestion" {
+		t.Errorf("MCPName() = %q, want AskUserQuestion", got)
+	}
+	// The registry key is deliberately unchanged: the CLI and the dotted-key
+	// convention still key on `ask`.
+	if got := New(nil, nil).Name(); got != "ask" {
+		t.Errorf("Name() = %q, want ask", got)
+	}
+}
+
+// Claude sends options as objects with a description. The description has to
+// survive into the card, since it is doing the explanatory work the label cannot.
+func TestParseOptionsAcceptsClaudeObjects(t *testing.T) {
+	got := parseOptions([]any{
+		map[string]any{"label": "PostgreSQL", "description": "Our existing transactional database."},
+		map[string]any{"label": "Redis"},
+		map[string]any{"description": "no label, unpickable"},
+	})
+	if len(got) != 2 {
+		t.Fatalf("got %d options, want the 2 with labels: %+v", len(got), got)
+	}
+	if got[0].Label != "PostgreSQL" || got[0].Description != "Our existing transactional database." {
+		t.Errorf("option 0 = %+v", got[0])
+	}
+	if got[0].ID != "PostgreSQL" {
+		t.Errorf("option ID should round-trip the label; got %q", got[0].ID)
+	}
+	if got[1].Description != "" {
+		t.Errorf("option 1 should have no description; got %q", got[1].Description)
+	}
+}
+
+// The older bare-string shape still parses, so prompts written before the
+// switch keep working even though the schema no longer advertises it.
+func TestParseOptionsStillAcceptsBareStrings(t *testing.T) {
+	got := parseOptions([]any{"Yes", "  ", "No"})
+	if len(got) != 2 || got[0].Label != "Yes" || got[1].Label != "No" {
+		t.Fatalf("got %+v, want Yes/No with the blank dropped", got)
+	}
+}
+
+// `question` is Claude's field name and `label` the older one; both must reach
+// the card, or the advertised schema and the parser disagree.
+func TestParseQuestionsAcceptsBothFieldNames(t *testing.T) {
+	got := parseQuestions([]any{
+		map[string]any{
+			"header":      "Storage",
+			"question":    "Which engine?",
+			"multiSelect": true,
+			"options":     []any{map[string]any{"label": "PostgreSQL"}, map[string]any{"label": "Redis"}},
+		},
+		map[string]any{"label": "Legacy phrasing?", "options": []any{"a", "b"}},
+		map[string]any{"options": []any{"a", "b"}}, // no text at all: dropped
+	})
+	if len(got) != 2 {
+		t.Fatalf("got %d questions, want 2: %+v", len(got), got)
+	}
+	if got[0].Header != "Storage" || got[0].Label != "Which engine?" || !got[0].MultiSelect {
+		t.Errorf("question 0 = %+v", got[0])
+	}
+	if got[1].Label != "Legacy phrasing?" {
+		t.Errorf("question 1 = %+v", got[1])
+	}
+	// Keys are positional, which is what makes the card's validation message
+	// name the right question numbers.
+	if got[0].Key != "q0" || got[1].Key != "q1" {
+		t.Errorf("keys = %q/%q, want q0/q1", got[0].Key, got[1].Key)
+	}
+}
+
+// A header, or an option description, means the button path cannot render the
+// question faithfully — both must route to the card.
+func TestNeedsFormForClaudeShapedQuestions(t *testing.T) {
+	withHeader := parseQuestions([]any{
+		map[string]any{"header": "Env", "question": "Which?", "options": []any{"a", "b"}},
+	})
+	if !needsForm(withHeader) {
+		t.Error("a question with a header must use the card: a button has nowhere to show it")
+	}
+	withDescription := parseQuestions([]any{
+		map[string]any{"question": "Which?", "options": []any{
+			map[string]any{"label": "a", "description": "the long explanation"},
+			map[string]any{"label": "b"},
+		}},
+	})
+	if !needsForm(withDescription) {
+		t.Error("an option description must use the card: a button has nowhere to show it")
+	}
+	plain := parseQuestions([]any{
+		map[string]any{"question": "Ship?", "options": []any{"Yes", "No"}},
+	})
+	if needsForm(plain) {
+		t.Error("a lone plain question should still ride the cheaper button path")
+	}
+}

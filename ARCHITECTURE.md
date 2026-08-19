@@ -125,7 +125,16 @@ type Tool interface {
 
 - `Name` is the registry key. A `.`-separated name (e.g. `jobs.run`) declares
   the tool as belonging to a namespace; the CLI frontend resolves
-  `murtaugh jobs run` to the registered name `jobs.run`.
+  `murtaugh jobs run` to the registered name `jobs.run`. The MCP frontend
+  sanitises it to `[A-Za-z0-9_-]` for the LLM-facing id (`jobs.run` →
+  `jobs_run`), because stricter providers reject a dotted name outright.
+- A tool may additionally implement the optional `mcp.MCPNamer` interface to
+  publish under a *different* name than its registry key. This is not for
+  cosmetics: it exists so a tool can stand in for a name the model already
+  knows. `ask` publishes as `AskUserQuestion`, matching the Claude Code built-in
+  the claudecode backend suppresses (that built-in needs a terminal UI and so
+  fails headlessly), and its `InputSchema` is that built-in's payload field for
+  field. Overrides are sanitised and collision-checked like any other name.
 - `Description` is a one-line human-readable hint used by MCP clients.
 - `InputSchema` returns the JSON Schema that documents and validates the
   tool's parameters. Returning `nil` means the tool takes no parameters.

@@ -26,12 +26,21 @@ import (
 // the CLI to ask the controlling process for tool permission via a can_use_tool
 // control_request instead of auto-denying. Verified against 2.1.216 — without it
 // a headless turn silently denies every gated tool (spec 019 §6).
+//
+// `--disallowedTools AskUserQuestion` removes Claude Code's own
+// question-asking built-in. It renders in the terminal UI, which a headless
+// session does not have, so every call to it fails and the model is left
+// unable to ask anything. Murtaugh publishes a replacement over MCP under the
+// same name (internal/tools/ask, via MCPName), so hiding the built-in is what
+// makes the model reach for the one that works — with the payload it already
+// knows. Without this flag the built-in shadows it.
 var defaultArgs = []string{
 	"-p",
 	"--input-format", "stream-json",
 	"--output-format", "stream-json",
 	"--verbose",
 	"--permission-prompt-tool", "stdio",
+	"--disallowedTools", "AskUserQuestion",
 }
 
 // Options configures a Client. Command is required. Args defaults to defaultArgs
