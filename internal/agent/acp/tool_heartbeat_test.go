@@ -29,43 +29,13 @@ func (c *fakeClock) advance(d time.Duration) {
 	c.t = c.t.Add(d)
 }
 
-func TestToolWatcherTracksInFlightTools(t *testing.T) {
-	clk := &fakeClock{t: time.Unix(0, 0)}
-	w := newToolWatcher(clk.now)
-
-	if active, _, _ := w.snapshot(); active != 0 {
-		t.Fatalf("empty watcher: active = %d, want 0", active)
-	}
-
-	w.observe("t1", "go test", agent.TaskStatusInProgress)
-	clk.advance(90 * time.Second)
-	w.observe("t2", "grep", agent.TaskStatusInProgress)
-
-	active, title, oldest := w.snapshot()
-	if active != 2 {
-		t.Fatalf("active = %d, want 2", active)
-	}
-	if title != "go test" || oldest != 90*time.Second {
-		t.Fatalf("oldest = (%q, %s), want (go test, 1m30s)", title, oldest)
-	}
-
-	// A terminal status retires the tool.
-	w.observe("t1", "", agent.TaskStatusComplete)
-	if active, title, _ = w.snapshot(); active != 1 || title != "grep" {
-		t.Fatalf("after complete: active=%d title=%q, want 1/grep", active, title)
-	}
-
-	// The start time is stamped once: a later title-only refinement keeps the age.
-	clk.advance(10 * time.Second)
-	w.observe("t2", "grep -r", "")
-	if _, title, oldest = w.snapshot(); title != "grep -r" || oldest != 10*time.Second {
-		t.Fatalf("after refine: (%q, %s), want (grep -r, 10s)", title, oldest)
-	}
-}
+// The watcher's own behaviour is covered in internal/agent (toolwatch_test.go),
+// where the type now lives. What remains here is ACP's use of it: the heartbeat's
+// emissions, its ceiling, and its shutdown.
 
 // runHeartbeat starts c.heartbeat and returns its cancel cause func and channels so
 // a test can assert its emissions and shut it down.
-func runHeartbeat(c *acpSession, w *toolWatcher) (chan agent.Event, context.Context, context.CancelCauseFunc, chan struct{}, chan struct{}) {
+func runHeartbeat(c *acpSession, w *agent.ToolWatcher) (chan agent.Event, context.Context, context.CancelCauseFunc, chan struct{}, chan struct{}) {
 	events := make(chan agent.Event, 8)
 	ctx, cancel := context.WithCancelCause(context.Background())
 	stop := make(chan struct{})
@@ -76,8 +46,8 @@ func runHeartbeat(c *acpSession, w *toolWatcher) (chan agent.Event, context.Cont
 
 func TestHeartbeatEmitsKeepAliveWhileToolRuns(t *testing.T) {
 	clk := &fakeClock{t: time.Unix(0, 0)}
-	w := newToolWatcher(clk.now)
-	w.observe("t1", "go test", agent.TaskStatusInProgress)
+	w := agent.NewToolWatcher(clk.now)
+	w.Observe("t1", "go test", agent.TaskStatusInProgress)
 
 	c := newACPSession(ProcessOptions{ToolHeartbeatInterval: time.Millisecond, ToolCeiling: time.Hour})
 	events, _, cancel, stop, done := runHeartbeat(c, w)
@@ -97,8 +67,8 @@ func TestHeartbeatEmitsKeepAliveWhileToolRuns(t *testing.T) {
 
 func TestHeartbeatCeilingCancelsTurn(t *testing.T) {
 	clk := &fakeClock{t: time.Unix(0, 0)}
-	w := newToolWatcher(clk.now)
-	w.observe("t1", "go test", agent.TaskStatusInProgress)
+	w := agent.NewToolWatcher(clk.now)
+	w.Observe("t1", "go test", agent.TaskStatusInProgress)
 	clk.advance(20 * time.Minute) // past the ceiling
 
 	c := newACPSession(ProcessOptions{ToolHeartbeatInterval: time.Millisecond, ToolCeiling: 10 * time.Minute})
@@ -124,7 +94,7 @@ func TestHeartbeatCeilingCancelsTurn(t *testing.T) {
 }
 
 func TestHeartbeatSilentWhenNoToolRunning(t *testing.T) {
-	w := newToolWatcher(nil) // no tools in flight
+	w := agent.NewToolWatcher(nil) // no tools in flight
 
 	c := newACPSession(ProcessOptions{ToolHeartbeatInterval: time.Millisecond, ToolCeiling: time.Hour})
 	events, ctx, cancel, stop, done := runHeartbeat(c, w)
