@@ -112,9 +112,9 @@ func TestPermissionAskRoutesToHuman(t *testing.T) {
 		decision string // the option id a "human" picks
 		want     string
 	}{
-		{"allow", "allow", "permitted:allow"},
-		{"deny", "deny", "permitted:deny"},
-		{"dismiss-denies", "", "permitted:deny"},
+		{"allow", "allow", "permitted:allow|"},
+		{"deny", "deny", "permitted:deny|The user denied this tool call. Do not retry it — ask them how they would like to proceed."},
+		{"dismiss-denies", "", "permitted:deny|The approval request was dismissed without an answer, so this call was denied."},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -175,8 +175,8 @@ func TestPermissionAutoPolicies(t *testing.T) {
 		policy string
 		want   string
 	}{
-		{"auto-allow", "permitted:allow"},
-		{"auto-deny", "permitted:deny"},
+		{"auto-allow", "permitted:allow|"},
+		{"auto-deny", "permitted:deny|Murtaugh is configured to deny every tool call in this session."},
 	}
 	for _, tc := range cases {
 		t.Run(tc.policy, func(t *testing.T) {
@@ -306,16 +306,21 @@ func runFakeClaude(mode string) {
 				emit(resultMsg("end_turn"))
 			}
 		case "control_response":
-			// The client's answer to our can_use_tool ask.
+			// The client's answer to our can_use_tool ask. Both the behavior and
+			// the deny message are echoed: the real CLI rejects a deny that
+			// carries no message, so the message is part of the contract, not
+			// decoration.
 			behavior := "deny"
+			var message string
 			if resp, ok := msg["response"].(map[string]any); ok {
 				if inner, ok := resp["response"].(map[string]any); ok {
 					if b, ok := inner["behavior"].(string); ok {
 						behavior = b
 					}
+					message, _ = inner["message"].(string)
 				}
 			}
-			emit(assistantText("permitted:" + behavior))
+			emit(assistantText("permitted:" + behavior + "|" + message))
 			emit(resultMsg("end_turn"))
 		}
 	}
