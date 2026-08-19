@@ -317,3 +317,59 @@ func TestAggregator_NoApproverNeverGates(t *testing.T) {
 		t.Fatal("Invoke did not run when no approver is configured")
 	}
 }
+
+// --- MCPName override -------------------------------------------------------
+
+type namedTool struct {
+	tools.Tool
+	name      string
+	published string
+}
+
+func (t namedTool) Name() string        { return t.name }
+func (t namedTool) Description() string { return "a tool" }
+func (t namedTool) InputSchema() *jsonschema.Schema {
+	return &jsonschema.Schema{Type: "object"}
+}
+func (t namedTool) MCPName() string { return t.published }
+func (t namedTool) Invoke(context.Context, map[string]any) (any, error) {
+	return "ok", nil
+}
+
+func TestPublishedNameUsesTheOverride(t *testing.T) {
+	got := publishedName(namedTool{name: "ask", published: "AskUserQuestion"})
+	if got != "AskUserQuestion" {
+		t.Errorf("publishedName = %q, want AskUserQuestion", got)
+	}
+}
+
+// An empty override is ignored rather than publishing a nameless tool.
+func TestPublishedNameFallsBackToTheRegistryKey(t *testing.T) {
+	if got := publishedName(namedTool{name: "jobs.define", published: ""}); got != "jobs_define" {
+		t.Errorf("publishedName = %q, want jobs_define", got)
+	}
+}
+
+// An override is sanitised like any other name: implementing an interface must
+// not be a way to smuggle characters a provider will reject.
+func TestPublishedNameSanitisesTheOverride(t *testing.T) {
+	if got := publishedName(namedTool{name: "ask", published: "Ask.User Question"}); got != "Ask_User_Question" {
+		t.Errorf("publishedName = %q, want the override sanitised", got)
+	}
+}
+
+// The collision guard has to see overrides too. Without this, a tool could
+// quietly shadow another by publishing under its name — and the MCP SDK shadows
+// duplicates silently rather than erroring.
+func TestOverrideCollisionPanics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected a panic when an override collides with another tool")
+		}
+	}()
+	f := NewFromTools([]tools.Tool{
+		namedTool{name: "ask", published: "ping"},
+		namedTool{name: "ping", published: ""},
+	}, nil)
+	f.Server()
+}

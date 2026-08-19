@@ -43,56 +43,95 @@ func New(broker *interaction.Broker, cards *askcard.Flow) *Tool {
 // Name returns the registry key.
 func (t *Tool) Name() string { return "ask" }
 
+// MCPName publishes this tool to LLM clients as AskUserQuestion rather than
+// `ask`.
+//
+// Claude Code ships a built-in of that name which cannot render in a headless
+// session — the claudecode backend suppresses it with --disallowedTools. A model
+// that has learned to reach for AskUserQuestion then finds one, with the payload
+// it already knows, and never has to be told the substitution happened. The
+// registry key stays `ask`, so `murtaugh ask` and the CLI are untouched.
+func (t *Tool) MCPName() string { return "AskUserQuestion" }
+
 // Description is the model-facing summary. It is deliberately explicit that the
 // tool blocks for a real answer and must not be second-guessed.
 func (t *Tool) Description() string {
-	return "Ask the user one or more questions in the current Slack conversation and WAIT for " +
-		"their answer. Use this whenever you need a decision, confirmation, or input before " +
-		"acting — never assume the answer or treat silence as approval. For a single quick " +
-		"choice, pass `question` + `options` (rendered as clickable buttons). For several " +
-		"questions at once, or multi-select / free-text answers, pass `questions` (rendered as " +
-		"a form behind an Answer button). Returns what the user chose or typed, or a note that " +
-		"they did not respond. Only works inside a Slack conversation."
+	return "Ask the user one or more questions and WAIT for their answer. Use this whenever " +
+		"you need a decision, confirmation, or input before acting — never assume the answer " +
+		"or treat silence as approval. The questions are posted to the user's chat as a card " +
+		"of multiple-choice inputs they fill in and submit. Returns what they chose. The user " +
+		"may instead ask to discuss the questions, in which case you get their question back " +
+		"and should talk it through before deciding. Only works inside a chat conversation."
 }
 
-// InputSchema declares two interchangeable shapes: the simple single-question
-// button form (`question` + `options`), and the richer modal form (`questions`,
-// each single-select / multi-select / free-text). Either may be supplied; when
-// both are present the richer `questions` form wins.
+// InputSchema is Claude's AskUserQuestion payload, field for field.
+//
+// That is the whole point rather than a coincidence: the claudecode backend hides
+// Claude Code's built-in of the same name (it cannot render headlessly) and this
+// tool stands in for it. A model reaching for the tool it already knows must find
+// the arguments it already knows, or the substitution leaks into every prompt.
+//
+// Invoke still accepts the older `question`/`options` shape, but it is not
+// advertised here — the native agent's existing prompts keep working while the
+// model-facing contract stays exactly Claude's.
 func (t *Tool) InputSchema() *jsonschema.Schema {
 	return &jsonschema.Schema{
-		Type: "object",
+		Type:        "object",
+		Description: "Ask the user up to 4 multiple-choice questions at once.",
 		Properties: map[string]*jsonschema.Schema{
-			"question": {Type: "string", Description: "A single question to ask (button form). Provide with `options`."},
-			"options": {
-				Type:        "array",
-				Description: "The answer options for `question`, shown as buttons (provide at least two).",
-				Items:       &jsonschema.Schema{Type: "string"},
-			},
-			"title": {Type: "string", Description: "Optional short heading shown above the question(s)."},
 			"questions": {
-				Type: "array",
-				Description: "Two or more questions, or any multi-select / free-text question, collected " +
-					"in one modal form with a Submit button. Use instead of `question`/`options` for " +
-					"richer prompts.",
+				Type:        "array",
+				Description: "The questions to ask. Keep them few and genuinely load-bearing.",
+				MinItems:    ptr(1),
+				MaxItems:    ptr(4),
 				Items: &jsonschema.Schema{
 					Type: "object",
 					Properties: map[string]*jsonschema.Schema{
-						"label": {Type: "string", Description: "The question text shown above the input."},
+						"header": {
+							Type:        "string",
+							Description: "Short category label for the question (at most 12 characters).",
+							MaxLength:   ptr(12),
+						},
+						"question": {
+							Type:        "string",
+							Description: "The question to ask the user.",
+						},
+						"multiSelect": {
+							Type:        "boolean",
+							Description: "Allow selecting more than one option.",
+						},
 						"options": {
 							Type:        "array",
-							Description: "Choices for a select question (omit for free-text).",
-							Items:       &jsonschema.Schema{Type: "string"},
+							Description: "The answer options to offer.",
+							MinItems:    ptr(2),
+							MaxItems:    ptr(4),
+							Items: &jsonschema.Schema{
+								Type: "object",
+								Properties: map[string]*jsonschema.Schema{
+									"label": {
+										Type:        "string",
+										Description: "A short label for the option.",
+									},
+									"description": {
+										Type:        "string",
+										Description: "A longer explanation of what choosing this option means.",
+									},
+								},
+								Required: []string{"label"},
+							},
 						},
-						"multiSelect": {Type: "boolean", Description: "Allow choosing more than one option (checkboxes instead of radio)."},
-						"freeText":    {Type: "boolean", Description: "Render a free-text input instead of a list of options."},
 					},
-					Required: []string{"label"},
+					Required: []string{"header", "question", "options"},
 				},
 			},
 		},
+		Required: []string{"questions"},
 	}
 }
+
+// ptr is the usual helper for the pointer-valued numeric/length constraints in
+// jsonschema.Schema.
+func ptr[T any](v T) *T { return &v }
 
 // Result is the structured outcome. The MCP frontend JSON-marshals it; the loop
 // and CLI render it via String().
@@ -296,7 +335,11 @@ func needsForm(questions []interaction.Question) bool {
 }
 
 // parseQuestions reads the `questions` array into interaction.Question values.
-// Each gets a stable key (q0, q1, …) so answers round-trip through the modal.
+// Each gets a stable key (q0, q1, …) so answers round-trip through the card.
+//
+// The question text is read from `question` (Claude's field) or `label` (the
+// older Murtaugh one). Accepting both is what lets the advertised schema be
+// exactly Claude's without breaking prompts already written against `label`.
 func parseQuestions(raw any) []interaction.Question {
 	list, ok := raw.([]any)
 	if !ok {
@@ -308,12 +351,16 @@ func parseQuestions(raw any) []interaction.Question {
 		if !ok {
 			continue
 		}
-		label := strings.TrimSpace(stringArg(m, "label"))
+		label := strings.TrimSpace(stringArg(m, "question"))
+		if label == "" {
+			label = strings.TrimSpace(stringArg(m, "label"))
+		}
 		if label == "" {
 			continue
 		}
 		out = append(out, interaction.Question{
 			Key:         fmt.Sprintf("q%d", i),
+			Header:      strings.TrimSpace(stringArg(m, "header")),
 			Label:       label,
 			Options:     parseOptions(m["options"]),
 			MultiSelect: boolArg(m, "multiSelect"),
@@ -337,6 +384,9 @@ func optionLabelsAny(opts []interaction.Option) []any {
 	return out
 }
 
+// parseOptions reads an options array in either shape: Claude's objects
+// ({label, description}) or the older bare strings. An object without a usable
+// label is dropped rather than rendering a blank, unpickable choice.
 func parseOptions(raw any) []interaction.Option {
 	list, ok := raw.([]any)
 	if !ok {
@@ -344,14 +394,22 @@ func parseOptions(raw any) []interaction.Option {
 	}
 	out := make([]interaction.Option, 0, len(list))
 	for _, v := range list {
-		s, ok := v.(string)
-		if !ok {
-			continue
+		switch opt := v.(type) {
+		case string:
+			if s := strings.TrimSpace(opt); s != "" {
+				out = append(out, interaction.Option{ID: s, Label: s})
+			}
+		case map[string]any:
+			label := strings.TrimSpace(stringArg(opt, "label"))
+			if label == "" {
+				continue
+			}
+			out = append(out, interaction.Option{
+				ID:          label,
+				Label:       label,
+				Description: strings.TrimSpace(stringArg(opt, "description")),
+			})
 		}
-		if s = strings.TrimSpace(s); s == "" {
-			continue
-		}
-		out = append(out, interaction.Option{ID: s, Label: s})
 	}
 	return out
 }

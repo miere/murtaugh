@@ -350,3 +350,27 @@ func assistantText(text string) map[string]any {
 func resultMsg(stop string) map[string]any {
 	return map[string]any{"type": "result", "subtype": "success", "stop_reason": stop, "result": ""}
 }
+
+// The claude CLI's own AskUserQuestion renders in the terminal UI, which a
+// headless session has not got, so it fails every time it is called. Murtaugh
+// publishes a working replacement over MCP under the same name; suppressing the
+// built-in is what lets the model find it. Drop this flag and the built-in
+// shadows the replacement again.
+func TestDefaultArgsSuppressTheBuiltInAskUserQuestion(t *testing.T) {
+	var found bool
+	for i, arg := range defaultArgs {
+		if arg != "--disallowedTools" {
+			continue
+		}
+		if i+1 >= len(defaultArgs) {
+			t.Fatal("--disallowedTools has no value")
+		}
+		if defaultArgs[i+1] != "AskUserQuestion" {
+			t.Fatalf("--disallowedTools %q, want AskUserQuestion", defaultArgs[i+1])
+		}
+		found = true
+	}
+	if !found {
+		t.Fatal("defaultArgs no longer suppresses the built-in AskUserQuestion")
+	}
+}
