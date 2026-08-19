@@ -179,6 +179,26 @@ func IsAskInteraction(ic slackgo.InteractionCallback) (corr string, action Actio
 	return "", "", false
 }
 
+// IsCardInput reports whether ic is a user touching one of the card's inputs
+// rather than pressing a button.
+//
+// Slack fires a block_actions callback for every radio pick and every checkbox
+// tick, not just for the Submit button. Those callbacks carry no decision and
+// need no handling — but without recognising them the router walks the whole
+// chain and hands each one to the workflow engine, where an operator's rule
+// could match a half-filled form. The gateway uses this to swallow them.
+func IsCardInput(ic slackgo.InteractionCallback) bool {
+	if ic.Type != slackgo.InteractionTypeBlockActions {
+		return false
+	}
+	for _, a := range ic.ActionCallback.BlockActions {
+		if a != nil && strings.HasPrefix(a.ActionID, inputPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // ParseSubmission reads the selected option values out of a block_actions
 // payload, keyed by question key.
 //

@@ -28,7 +28,7 @@ func New(client *slacklib.LazyClient, cards *Renderer) *Flow {
 
 // session is the per-ask rendezvous a click resolves into. It holds the spec so
 // an incomplete submit can be validated and the card re-rendered without the
-// gateway having to carry any of it.
+// gateway having to carry any of it, and it accumulates the answers given so far.
 type session struct {
 	spec    Spec
 	channel string
@@ -36,7 +36,49 @@ type session struct {
 
 	mu       sync.Mutex
 	resolved bool
-	done     chan Response
+	// answers is every answer the user has given across all submissions, not
+	// just the last one. See absorb.
+	answers map[string][]string
+	done    chan Response
+}
+
+// absorb folds one submission's answers into the running set and returns the
+// merged result.
+//
+// A submission is a DELTA, not the whole picture. After the validation
+// re-render, Slack does not necessarily report the state of inputs the user has
+// not touched since that update — the pre-ticked options are visibly there, but
+// they need not come back in state.values. Treating each submit as complete
+// therefore lost every earlier answer, so filling in the one missing question
+// and pressing Submit again reported the *other* questions as missing: an
+// unwinnable form that rejected the user no matter what they did.
+//
+// Merging also makes the flow correct if Slack does report the full state — the
+// merge is then simply idempotent — so it does not depend on which behaviour is
+// in play.
+//
+// Only non-empty answers overwrite. An input that arrives with nothing selected
+// is indistinguishable from one that was not reported at all, so the prior
+// answer is kept rather than silently cleared; a radio button cannot be cleared
+// by hand anyway, and for checkboxes keeping the earlier answer is the kinder
+// failure.
+func (s *session) absorb(submitted map[string][]string) map[string][]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.answers == nil {
+		s.answers = make(map[string][]string, len(submitted))
+	}
+	for key, choices := range submitted {
+		if len(choices) == 0 {
+			continue
+		}
+		s.answers[key] = choices
+	}
+	merged := make(map[string][]string, len(s.answers))
+	for key, choices := range s.answers {
+		merged[key] = append([]string(nil), choices...)
+	}
+	return merged
 }
 
 // resolve delivers a response once. Later clicks on an already-answered card —
@@ -168,10 +210,13 @@ func (f *Flow) HandleClick(ctx context.Context, corr string, action Action, user
 		return nil
 
 	case ActionSubmit:
-		if missing := unanswered(s.spec.Questions, answers); len(missing) > 0 {
-			return f.reprompt(ctx, corr, s, answers, missing)
+		// Merge before validating: what the user has told us is the accumulation
+		// of every submission, not whatever this one happened to carry.
+		merged := s.absorb(answers)
+		if missing := unanswered(s.spec.Questions, merged); len(missing) > 0 {
+			return f.reprompt(ctx, corr, s, merged, missing)
 		}
-		s.resolve(Response{Submitted: true, UserID: userID, Answers: answers})
+		s.resolve(Response{Submitted: true, UserID: userID, Answers: merged})
 		return nil
 	}
 	return fmt.Errorf("askcard: unknown ask action %q", action)
