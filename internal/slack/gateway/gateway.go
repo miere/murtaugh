@@ -1006,6 +1006,12 @@ func (a *Gateway) dispatchInteractive(event socketmode.Event, interaction slack.
 	// its inputs inline: the click that presses Submit brings every input's state
 	// with it, so there is no modal to open and no view_submission to wait for.
 	if a.askCards != nil {
+		// A radio pick or checkbox tick fires its own callback. It carries no
+		// decision — the state rides along with the eventual Submit — so it is
+		// swallowed here rather than falling through to the workflow engine.
+		if askcard.IsCardInput(interaction) {
+			return
+		}
 		if corr, action, ok := askcard.IsAskInteraction(interaction); ok {
 			answers := askcard.ParseSubmission(interaction)
 			userID := interaction.User.ID

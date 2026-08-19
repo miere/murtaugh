@@ -341,3 +341,150 @@ func assertTerminalCard(t *testing.T, update slacklib.UpdateMessageParams) {
 		t.Error("terminal card has no fallback text")
 	}
 }
+
+// threeQuestions is the shape that exposed the bug: enough questions to leave
+// one blank and still have something to preserve.
+func threeQuestions() Spec {
+	s := twoQuestions()
+	s.Questions = append(s.Questions, Question{
+		Key:      "q2",
+		Header:   "Rollout",
+		Question: "How should we roll this out?",
+		Options: []Option{
+			{Label: "All at once", Description: "Flip everyone over in one go."},
+			{Label: "Staged", Description: "Ten percent, then the rest."},
+		},
+	})
+	return s
+}
+
+// TestCorrectingAMissedQuestionResolves is the reported bug, end to end.
+//
+// Answer 2 of 3 → rejected, correctly. Then answer only the missing one and
+// submit again. Slack need not re-report the two inputs the user has not
+// touched since the re-render, so the second submission arrives carrying just
+// q2. Before the fix that read as "q0 and q1 are missing" and the form became
+// unwinnable: every correction was rejected for the answers it did not mention.
+func TestCorrectingAMissedQuestionResolves(t *testing.T) {
+	api := newSyncAPI()
+	f := newTestFlow(api)
+	done := askInBackground(t, f, threeQuestions())
+	api.awaitPosts(t, 1)
+	corr := theOnlyCorrelation(t, f)
+
+	// First submission: two of three.
+	first := map[string][]string{"q0": {"Redis"}, "q1": {"Hard delete"}}
+	if err := f.HandleClick(context.Background(), corr, ActionSubmit, "U7", first); err != nil {
+		t.Fatalf("first submit: %v", err)
+	}
+	select {
+	case resp := <-done:
+		t.Fatalf("an incomplete submit resolved the ask: %+v", resp)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Second submission carries ONLY the corrected question, as Slack sends it.
+	second := map[string][]string{"q2": {"Staged"}}
+	if err := f.HandleClick(context.Background(), corr, ActionSubmit, "U7", second); err != nil {
+		t.Fatalf("second submit: %v", err)
+	}
+
+	select {
+	case resp := <-done:
+		if !resp.Answered() {
+			t.Fatalf("correcting the missing question did not resolve: %+v", resp)
+		}
+		// Every answer survives, not just the last one submitted.
+		for key, want := range map[string]string{"q0": "Redis", "q1": "Hard delete", "q2": "Staged"} {
+			got := resp.Answers[key]
+			if len(got) != 1 || got[0] != want {
+				t.Errorf("%s = %v, want [%s]", key, got, want)
+			}
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the ask never resolved after the missing question was answered")
+	}
+}
+
+// The re-prompt after a partial submit must show the accumulated answers, not
+// only the ones in the most recent submission — otherwise the second callout
+// wipes what the first one preserved.
+func TestRepromptShowsAccumulatedAnswers(t *testing.T) {
+	api := newSyncAPI()
+	f := newTestFlow(api)
+	done := askInBackground(t, f, threeQuestions())
+	api.awaitPosts(t, 1)
+	corr := theOnlyCorrelation(t, f)
+
+	if err := f.HandleClick(context.Background(), corr, ActionSubmit, "U7",
+		map[string][]string{"q0": {"Redis"}}); err != nil {
+		t.Fatalf("first submit: %v", err)
+	}
+	// Second partial submit mentions only q1; q0 must still come back pre-ticked.
+	if err := f.HandleClick(context.Background(), corr, ActionSubmit, "U7",
+		map[string][]string{"q1": {"Hard delete"}}); err != nil {
+		t.Fatalf("second submit: %v", err)
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(api.lastUpdate(t).Blocks, &doc); err != nil {
+		t.Fatalf("re-render is not valid JSON: %v", err)
+	}
+	inputs := blocksOfType(childBlocks(t, doc), "input")
+	if _, ok := inputs[0]["element"].(map[string]any)["initial_option"]; !ok {
+		t.Error("q0's earlier answer was dropped from the second re-prompt")
+	}
+	if _, ok := inputs[1]["element"].(map[string]any)["initial_options"]; !ok {
+		t.Error("q1's answer was dropped from the second re-prompt")
+	}
+	// And the callout now names only the one still outstanding.
+	callouts := blocksOfType(childBlocks(t, doc), "callout")
+	if len(callouts) != 1 {
+		t.Fatalf("got %d callouts, want 1", len(callouts))
+	}
+	// Release the still-blocked Ask so the goroutine does not outlive the test.
+	if err := f.HandleClick(context.Background(), corr, ActionChat, "U7", nil); err != nil {
+		t.Fatalf("releasing the ask: %v", err)
+	}
+	<-done
+}
+
+// Answers already given are not cleared by a later submission that omits them
+// (or reports them empty), since an untouched input and a deliberately emptied
+// one are indistinguishable on the wire.
+func TestAbsorbKeepsEarlierAnswers(t *testing.T) {
+	s := &session{}
+	s.absorb(map[string][]string{"q0": {"Redis"}, "q1": {"Hard delete"}})
+	merged := s.absorb(map[string][]string{"q1": {}, "q2": {"Staged"}})
+
+	if got := merged["q0"]; len(got) != 1 || got[0] != "Redis" {
+		t.Errorf("q0 = %v, want it preserved", got)
+	}
+	if got := merged["q1"]; len(got) != 1 || got[0] != "Hard delete" {
+		t.Errorf("q1 = %v, want the earlier answer kept over an empty one", got)
+	}
+	if got := merged["q2"]; len(got) != 1 || got[0] != "Staged" {
+		t.Errorf("q2 = %v, want the new answer", got)
+	}
+}
+
+// A later submission that changes an answer wins.
+func TestAbsorbOverwritesWithANewChoice(t *testing.T) {
+	s := &session{}
+	s.absorb(map[string][]string{"q0": {"Redis"}})
+	merged := s.absorb(map[string][]string{"q0": {"PostgreSQL"}})
+	if got := merged["q0"]; len(got) != 1 || got[0] != "PostgreSQL" {
+		t.Errorf("q0 = %v, want the changed answer", got)
+	}
+}
+
+// The merged map handed to a caller must not alias the session's own state.
+func TestAbsorbReturnsACopy(t *testing.T) {
+	s := &session{}
+	merged := s.absorb(map[string][]string{"q0": {"Redis"}})
+	merged["q0"][0] = "mutated"
+	again := s.absorb(nil)
+	if got := again["q0"]; got[0] != "Redis" {
+		t.Errorf("session state was mutated through the returned map: %v", got)
+	}
+}
