@@ -76,10 +76,19 @@ internal/journal/     Event journal: SQLite store, async recorder, query/stats/p
 internal/slack/       Slack subsystem:
   gateway/            Socket Mode gateway, event loop, all Slack event handlers.
   client/             Slack Web API client wrapper used by the slack.* tools.
-internal/agent/       Agent backend interface, session manager, protocol types.
+  interaction/        Human-in-the-loop broker: option buttons and the forms
+                      behind the `ask` tool and the tool-approval gates.
+  authcard/           Two-party authentication card (requester + admin),
+                      rendered from templates/auth/*.json.
+internal/agent/       Agent backend interface, session manager, protocol types,
+                      and the shared tool watcher / execution ceiling.
   native/             In-process LLM agent loop (kind: native): conversation,
                       turn loop, system prompt, recovery.
-internal/agentbuild/  Kind-aware backend builder (native vs ACP ProcessClient).
+  acp/                External ACP agent over a subprocess (kind: acp).
+  claudecode/         Claude Code stream-json backend (kind: claude_code).
+internal/agentbuild/  Kind-aware backend builder (native / ACP / claude_code).
+internal/jsontemplate/ JSON-document templating with JSON-safe escaping funcs.
+                      The single renderer behind every Block Kit template.
 internal/llm/         Provider-agnostic LLM boundary over litellm (gemini /
                       anthropic-compat / openai-compat).
 internal/toolset/     Per-agent toolset resolver (native tools + registry + MCP).
@@ -92,7 +101,9 @@ assets/               Embedded reference config, JSON templates, agent skills.
 
 `internal/*` is private to this module. Cross-package dependencies flow in one
 direction: `slack/gateway` orchestrates `config`, `acp`, `agentdelegate`,
-`workflow`, and `unfurl`; those packages do not import `slack/gateway`. The
+`workflow`, `unfurl`, `slack/interaction`, and `slack/authcard`; those packages
+do not import `slack/gateway`. `jsontemplate` sits at the bottom — it knows
+nothing of Slack and is imported by every template renderer above it. The
 `agentdelegate` runner builds on `acp` and backs every delegate-to-agent
 surface (the `workflow` engine, the `unfurl` handler, and the `jobs.run`
 tool consume it through small local interfaces). Tool packages depend on
@@ -450,17 +461,69 @@ external-process contract. `OSCommandRunner` enforces a timeout (default 30s),
 pipes stdin in, and captures stdout. **Convention: handlers read a JSON object on
 stdin and print a single JSON object on stdout.**
 
+## Block Kit rendering (`internal/jsontemplate` + `slack/client.DecodeBlocks`)
+
+**Never build a Slack message's blocks with slack-go's typed builders when the
+payload uses a block type newer than the pinned release** — today that means
+`container`, `card`, `child_blocks`, `callout`, and `rich_text`. Render a JSON
+template instead and let the client pass the bytes through untouched.
+
+This is not a style preference. slack-go decodes recognised block types into
+typed structs, and `encoding/json` silently discards any field those structs do
+not declare. A payload using a newer Block Kit feature therefore loses those
+fields on the way out **with no error at all** — the message simply arrives
+missing pieces. (Wholly unrecognised block *types* are safe: slack-go keeps them
+verbatim in `UnknownBlock`. It is the partially-known types that lose data.) The
+rationale is restated at the `rawBlock` declaration in `slack/client/blocks.go`.
+
+The path is:
+
+```
+assets/templates/<area>/<state>.json     ← the document, structure and all
+        │  jsontemplate.Renderer.Render  ← config dir first, then assets.FS
+        ▼
+   rendered []byte
+        │  slacklib.PostMessageParams.Blocks / UpdateMessageParams.Blocks
+        ▼
+   client.DecodeBlocks → rawBlock        ← marshals back byte-identical
+```
+
+Conventions that fall out of it:
+
+- **The template owns the structure**, including conditionals and repetition.
+  `templates/auth/admin.json` is the reference: nested `{{ if }}` emitting
+  comma-correct JSON, `{{ json .Field }}` for whole values. Do not assemble
+  `child_blocks` in Go and inject them as one blob — the point of a template is
+  that an operator can restyle the card without a rebuild.
+- **Every interpolated value goes through `json` or `jsonstr`.** `text/template`
+  performs no escaping, so a bare `{{ .Field }}` inside a JSON string literal
+  lets a crafted value close the string and append sibling blocks — producing
+  *valid* JSON with attacker-chosen structure that no validity check can catch.
+  Agent-supplied text (tool names, questions, option labels) is untrusted.
+- Templates parse with `missingkey=error`, so a typo'd placeholder fails loudly
+  rather than rendering a half-built document.
+- **Modals are the exception**: `views.open` takes a typed `ModalViewRequest`, a
+  different API surface from the raw-blocks message path, so those stay
+  slack-go-typed (see `authcard.CodeModal`).
+
+`internal/slack/authcard` is the worked example of a card package: a `Renderer`
+over `jsontemplate`, a `State` enum whose terminal values stop further edits,
+correlation carried in the buttons' `action_id` namespace, and a `Flow` that
+posts, blocks on a rendezvous, and rewrites the card to its terminal state.
+
 ## Custom link unfurling (`internal/unfurl` + `slack/gateway/link_unfurl_handler.go`)
 
 - `Matcher` compiles rules once (sorted-key order). `Match(url, domain, channel)`
   returns the first rule whose optional channel allowlist, domain (exact or
   subdomain suffix), `url_prefix`, and RE2 `url_pattern` all match. Named regex
   groups are returned as `Captures`.
-- `Renderer` turns a Block Kit JSON template into a `slack.Attachment`, resolving
-  the path against the config dir first, then the embedded `assets.FS`. The
-  template/`run` data is the exported `Data` struct (`URL`, `Domain`, `Channel`,
-  `User`, `MessageTS`, `ThreadTS`, `TeamID`, `Captures`). `ParseAttachment`
-  rejects non-JSON output.
+- `Renderer` turns a Block Kit JSON template into a `slack.Attachment`. Lookup,
+  escaping and execution are delegated to `internal/jsontemplate` (config dir
+  first, then the embedded `assets.FS`); this package only decodes the result.
+  The template/`run` data is the exported `Data` struct (`URL`, `Domain`,
+  `Channel`, `User`, `MessageTS`, `ThreadTS`, `TeamID`, `Captures`).
+  `ParseAttachment` rejects non-JSON output — that decode *is* the validity
+  check, which is why `jsontemplate.Render` returns unvalidated bytes.
 - `LinkUnfurlHandler.Handle` skips composer-mode events (non-numeric timestamp)
   and the bot's own links, dedupes URLs, caps at 10, builds each preview
   (`run` → JSON stdin/stdout, or `template` → render), isolates per-link
@@ -523,8 +586,10 @@ filtered queries. Two lanes, never conflated.
 The embedded `config.yaml` is the slim bootstrap default (`oauth:` +
 `database:`); the former YAML siblings are no longer embedded or seeded, since
 that configuration now lives in the config store.
-Block Kit templates live under `templates/` (`unfurl/`); the ping → pong card is
-built in Go (`internal/slack/pingcard`), not a template. Bundled agent skills
+Block Kit templates live under `templates/` (`unfurl/`, `auth/`) — see "Block Kit
+rendering" above for why a card is a template rather than Go builders. The
+ping → pong card is built in Go (`internal/slack/pingcard`), not a template:
+its blocks are all types the pinned slack-go models. Bundled agent skills
 live under `skills/`, each a `SKILL.md` + `reference/` + `examples/` tree.
 `cli-help.md` is the canonical command reference (see "CLI/MCP command
 reference" above). The `templates` and `skills` directories are embedded
