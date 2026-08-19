@@ -70,7 +70,7 @@ func TestGateApprover_PostsCardAndCorrelates(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		NewApprover(broker, testCards(), false).Approve(ctx, "terminal", "rm -rf x")
+		NewApprover(broker, testCards(), false, NewGrants()).Approve(ctx, "terminal", "rm -rf x")
 		close(done)
 	}()
 
@@ -107,7 +107,7 @@ func TestGateApprover_CardCarriesTheCommand(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		NewApprover(broker, testCards(), false).Approve(ctx, "terminal", "kubectl delete ns prod")
+		NewApprover(broker, testCards(), false, NewGrants()).Approve(ctx, "terminal", "kubectl delete ns prod")
 		close(done)
 	}()
 	posted := <-sig.posted
@@ -140,7 +140,7 @@ func TestGateApprover_KeepResolvedSuppressesDelete(t *testing.T) {
 
 			done := make(chan struct{})
 			go func() {
-				NewApprover(broker, testCards(), tc.keepResolved).Approve(ctx, "terminal", "ls")
+				NewApprover(broker, testCards(), tc.keepResolved, NewGrants()).Approve(ctx, "terminal", "ls")
 				close(done)
 			}()
 			posted := <-sig.posted
@@ -177,7 +177,7 @@ func waitForDelete(sig *signalingAPI, within time.Duration) bool {
 func TestPermissionGate_PostsCard(t *testing.T) {
 	broker, sig := newSignalingBroker(t)
 	broker.outcomeTTL = 0
-	gate := NewPermissionGate(broker, testCards(), false)
+	gate := NewPermissionGate(broker, testCards(), false, NewGrants())
 
 	done := make(chan struct{})
 	go func() {
@@ -287,7 +287,7 @@ func TestGateApprover_NilCardsFallsBackToPlainPrompt(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		NewApprover(broker, nil, false).Approve(ctx, "terminal", "ls")
+		NewApprover(broker, nil, false, NewGrants()).Approve(ctx, "terminal", "ls")
 		close(done)
 	}()
 	posted := <-sig.posted

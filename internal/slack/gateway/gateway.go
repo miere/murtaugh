@@ -301,14 +301,19 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 			var approver native.Approver
 			if broker != nil {
 				keepResolved := profile.Approval.KeepsResolved()
-				approver = askbroker.NewApprover(broker, approvalCards, keepResolved)
+				// One always-allow set per agent, shared by both of that agent's
+				// approval paths: the gate below records a grant, and the permission
+				// gate honours it rather than re-asking about a call the user has
+				// already allowed through Murtaugh's own tools.
+				grants := askbroker.NewGrants()
+				approver = askbroker.NewApprover(broker, approvalCards, keepResolved, grants)
 				// ACP agents' permission requests are resolved through the same broker:
 				// the ACP client raises an EventPermission on the turn's event stream and
 				// the chat handler asks here, posting the card in the thread (ordered with
 				// the reply, like the native approver). A missing entry (headless) leaves
 				// ACP agents to their auto-allow/deny policy. Set only on this
 				// interactive path.
-				acpPermissionAskers[name] = askbroker.NewPermissionGate(broker, approvalCards, keepResolved)
+				acpPermissionAskers[name] = askbroker.NewPermissionGate(broker, approvalCards, keepResolved, grants)
 			}
 			// Resolve the agent's workspace once (workdir → base dir fallback),
 			// validated here at the build seam. Any workdir-rooted tool that

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync"
 
 	"github.com/miere/murtaugh/internal/agent"
 	"github.com/miere/murtaugh/internal/slack/approvalcard"
@@ -15,12 +14,12 @@ import (
 // own conversation. It satisfies the native loop's Approver interface
 // structurally, so the native package stays free of any Slack dependency.
 //
-// It also keeps an in-memory "always allow" set: when the user picks
-// "Approve & always allow", the exact summary string is remembered and every
-// later call with the same summary is approved silently, without re-prompting.
-// The set is session-scoped — it lives on the GateApprover and resets when the
-// daemon restarts; nothing is persisted to config. Matching is exact (after
-// trimming surrounding whitespace), with no fuzzy/normalizing comparison.
+// When the user picks "Approve & always allow", the call is recorded in the
+// agent's shared Grants set and every later call with the same key is approved
+// silently, without re-prompting. The set is shared with the agent's
+// PermissionGate, so a command allowed here is not asked about again when the
+// agent runs it through its own harness. See Grants for the scope and matching
+// rules.
 type GateApprover struct {
 	broker *Broker
 	// cards renders the approval container card. nil falls back to the broker's
@@ -30,19 +29,21 @@ type GateApprover struct {
 	// deleting it after the broker's TTL. It is this agent's
 	// approval.keep_resolved, which is why an approver is built per agent.
 	keepResolved bool
-
-	mu      sync.Mutex
-	allowed map[string]bool // summaries the user chose to always allow this run
+	// grants is the always-allow set, shared with this agent's PermissionGate so
+	// a grant made here is honoured when the agent asks about the same call
+	// through its own harness. nil disables always-allow entirely.
+	grants *Grants
 }
 
-// NewApprover builds a GateApprover over the shared broker, rendering with cards
-// and honouring the agent's keep_resolved setting.
-func NewApprover(broker *Broker, cards *approvalcard.Renderer, keepResolved bool) *GateApprover {
+// NewApprover builds a GateApprover over the shared broker, rendering with cards,
+// honouring the agent's keep_resolved setting, and recording always-allow
+// choices in grants (shared with the agent's permission gate).
+func NewApprover(broker *Broker, cards *approvalcard.Renderer, keepResolved bool, grants *Grants) *GateApprover {
 	return &GateApprover{
 		broker:       broker,
 		cards:        cards,
 		keepResolved: keepResolved,
-		allowed:      make(map[string]bool),
+		grants:       grants,
 	}
 }
 
@@ -51,10 +52,9 @@ func NewApprover(broker *Broker, cards *approvalcard.Renderer, keepResolved bool
 // thread and blocking until they answer. It returns whether to run the tool and,
 // when not, a note for the model.
 //
-// If the (trimmed) summary was previously marked "always allow" this run, the
-// call is approved immediately with no prompt. The always-allow set is
-// session-scoped and matched exactly on the summary string (for the terminal
-// tool, that is the command line).
+// If this call was previously marked "always allow" this run — here or on the
+// agent's own permission path, which shares the set — it is approved immediately
+// with no prompt. See GrantKey for how a call is identified.
 //
 // When there is no Slack conversation on the context (a headless/delegated run),
 // the call is NOT gated — the run was arranged without a human to ask, so it
@@ -69,8 +69,8 @@ func (g *GateApprover) Approve(ctx context.Context, toolName, summary string) (b
 		return true, ""
 	}
 
-	key := strings.TrimSpace(summary)
-	if g.isAllowed(key) {
+	key := GrantKey(toolName, summary)
+	if g.grants.Allowed(key) {
 		return true, ""
 	}
 
@@ -99,7 +99,7 @@ func (g *GateApprover) Approve(ctx context.Context, toolName, summary string) (b
 	}
 	switch {
 	case decision.OptionID == "approve_always":
-		g.remember(key)
+		g.grants.Remember(key)
 		return true, ""
 	case decision.OptionID == "approve":
 		return true, ""
@@ -181,18 +181,4 @@ func decidedBy(userID string) string {
 		return ""
 	}
 	return fmt.Sprintf(" by <@%s>", userID)
-}
-
-// isAllowed reports whether key is in the session-scoped always-allow set.
-func (g *GateApprover) isAllowed(key string) bool {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.allowed[key]
-}
-
-// remember adds key to the always-allow set for the rest of this run.
-func (g *GateApprover) remember(key string) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.allowed[key] = true
 }
