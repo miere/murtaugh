@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/miere/murtaugh/internal/llm"
 	"github.com/slack-go/slack"
 )
 
@@ -61,8 +62,22 @@ func isChannelTypeUnsupported(err error) bool {
 // streamFailMessage is the notice painted on the reply surface when a turn errors.
 // Shared by StreamWriter.Fail and the sinks so streamed and buffered failures read
 // identically.
+//
+// A provider failure (any agent backed by internal/llm) is classified and painted
+// as a headline plus the provider's own sentence, so "Gemini is overloaded (503)"
+// reaches the user instead of a wrapped Go error chain wrapped around a JSON body.
+// Everything else — ACP transport faults, spawn failures, our own bugs — keeps the
+// generic notice with the raw error, which is the useful thing to see for those.
 func streamFailMessage(err error) string {
-	message := "\n\n:warning: Murtaugh hit an error while talking to the ACP agent."
+	if failure, ok := llm.Classify(err); ok {
+		message := "\n\n:warning: *Agent is not available* — " + failure.String()
+		if detail := sanitizeSlackInline(failure.Message); detail != "" {
+			message += "\n" + detail
+		}
+		return message
+	}
+
+	message := "\n\n:warning: Murtaugh hit an error while talking to the agent."
 	if err != nil {
 		message += "\n`" + sanitizeSlackInline(err.Error()) + "`"
 	}

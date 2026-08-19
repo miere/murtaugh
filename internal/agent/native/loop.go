@@ -222,7 +222,7 @@ func (l *Loop) runTurn(ctx context.Context, conv *Conversation, system string, e
 		Tools:          l.toolSpecs(),
 		CacheRetention: l.cacheRetention,
 	}
-	stream, err := l.provider.Stream(ctx, req)
+	stream, err := l.openStream(ctx, req, emit)
 	if err != nil {
 		return turnResult{}, fmt.Errorf("native: provider stream: %w", err)
 	}
@@ -247,6 +247,41 @@ func (l *Loop) runTurn(ctx context.Context, conv *Conversation, system string, e
 		}
 	}
 	return res, nil
+}
+
+// providerRetryBackoff is the wait before each successive retry of a transient
+// provider failure — one short, one longer. Its length also bounds the number of
+// retries. A package var so tests can shrink it.
+var providerRetryBackoff = []time.Duration{time.Second, 3 * time.Second}
+
+// openStream opens the provider stream, retrying a transient failure (an
+// overloaded provider, a rate limit, a network blip — whatever llm.Classify
+// marks retryable) before giving up. A demand spike on the provider's side is the
+// common case and it clears in seconds; without this the first 503 kills the turn
+// and the user sees an error where a short pause would have done.
+//
+// Only the pre-stream call is retried. Once the stream is open, deltas have
+// already been emitted to Slack, so re-asking would duplicate the reply — a
+// mid-stream failure stays fatal to the turn.
+func (l *Loop) openStream(ctx context.Context, req llm.Request, emit func(agent.Event)) (<-chan llm.StreamEvent, error) {
+	for attempt := 0; ; attempt++ {
+		stream, err := l.provider.Stream(ctx, req)
+		if err == nil {
+			return stream, nil
+		}
+
+		failure, ok := llm.Classify(err)
+		if !ok || !failure.Retryable || attempt >= len(providerRetryBackoff) {
+			return nil, err
+		}
+
+		emit(eventStatus(failure.String() + "; retrying"))
+		select {
+		case <-time.After(providerRetryBackoff[attempt]):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 }
 
 // appendAndRunTools records the assistant's tool-call turn, then executes each
