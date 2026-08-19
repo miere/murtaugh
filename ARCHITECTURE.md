@@ -76,8 +76,10 @@ internal/journal/     Event journal: SQLite store, async recorder, query/stats/p
 internal/slack/       Slack subsystem:
   gateway/            Socket Mode gateway, event loop, all Slack event handlers.
   client/             Slack Web API client wrapper used by the slack.* tools.
-  interaction/        Human-in-the-loop broker: option buttons and the forms
-                      behind the `ask` tool and the tool-approval gates.
+  interaction/        Human-in-the-loop broker: the single-choice option buttons
+                      behind a quick `ask` and the tool-approval gates.
+  askcard/            The `ask` tool's multi-question card: inline inputs,
+                      answered in place, from templates/ask/*.json.
   authcard/           Two-party authentication card (requester + admin),
                       rendered from templates/auth/*.json.
 internal/agent/       Agent backend interface, session manager, protocol types,
@@ -586,7 +588,7 @@ filtered queries. Two lanes, never conflated.
 The embedded `config.yaml` is the slim bootstrap default (`oauth:` +
 `database:`); the former YAML siblings are no longer embedded or seeded, since
 that configuration now lives in the config store.
-Block Kit templates live under `templates/` (`unfurl/`, `auth/`) — see "Block Kit
+Block Kit templates live under `templates/` (`unfurl/`, `auth/`, `ask/`) — see "Block Kit
 rendering" above for why a card is a template rather than Go builders. The
 ping → pong card is built in Go (`internal/slack/pingcard`), not a template:
 its blocks are all types the pinned slack-go models. Bundled agent skills

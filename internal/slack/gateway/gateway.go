@@ -22,6 +22,7 @@ import (
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/journal"
 	"github.com/miere/murtaugh/internal/mcpbridge"
+	"github.com/miere/murtaugh/internal/slack/askcard"
 	"github.com/miere/murtaugh/internal/slack/authcard"
 	slackclient "github.com/miere/murtaugh/internal/slack/client"
 	askbroker "github.com/miere/murtaugh/internal/slack/interaction"
@@ -72,6 +73,8 @@ type Gateway struct {
 	// blocked request. nil leaves auth requests unroutable, which the tool
 	// reports rather than hanging.
 	auth *authcard.Flow
+	// askCards routes ask-card clicks back into the blocked `ask` tool call.
+	askCards *askcard.Flow
 	// bridge is the shared per-agent MCP aggregator. ACP agents are handed a
 	// `murtaugh mcp-bridge` stdio server that proxies to it, so they can reach
 	// Murtaugh's own tools. nil when ACP chat is disabled. Started in Run.
@@ -226,7 +229,7 @@ type Gateway struct {
 	chatChannels config.ChannelRules
 }
 
-func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recorder journal.Recorder, broker *askbroker.Broker, authFlow *authcard.Flow) *Gateway {
+func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recorder journal.Recorder, broker *askbroker.Broker, authFlow *authcard.Flow, askFlow *askcard.Flow) *Gateway {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -455,6 +458,7 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 		workflow:          workflow.NewEngine(cfg, workflow.Options{Logger: logger, Delegator: workflowDelegator, Recorder: recorder}),
 		interactions:      broker,
 		auth:              authFlow,
+		askCards:          askFlow,
 		bridge:            bridge,
 		chat:              chat,
 		chatSessions:      sessions,
@@ -998,27 +1002,21 @@ func (a *Gateway) dispatchInteractive(event socketmode.Event, interaction slack.
 		}
 		return
 	}
-	// Modal-form path (the `ask` tool's multi-question / multi-select / free-text
-	// mode). A click on the "Answer" button opens the modal against the click's
-	// trigger_id; a view_submission carries the answers back to the blocked
-	// AskForm. The trigger_id is short-lived, so OpenForm runs promptly.
-	if a.interactions != nil {
-		if corr, ok := askbroker.IsFormAnswerClick(interaction); ok {
-			triggerID := interaction.TriggerID
+	// The `ask` tool's multi-question card. One branch, because the card carries
+	// its inputs inline: the click that presses Submit brings every input's state
+	// with it, so there is no modal to open and no view_submission to wait for.
+	if a.askCards != nil {
+		if corr, action, ok := askcard.IsAskInteraction(interaction); ok {
+			answers := askcard.ParseSubmission(interaction)
+			userID := interaction.User.ID
 			go func() {
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()
-				if err := a.interactions.OpenForm(ctx, corr, triggerID); err != nil {
-					a.logger.Error("opening ask modal failed", "error", err, "correlation", corr)
+				if err := a.askCards.HandleClick(ctx, corr, action, userID, answers); err != nil {
+					a.logger.Error("handling ask card click failed", "error", err, "correlation", corr, "action", string(action))
 				}
 			}()
 			return
-		}
-		if interaction.Type == slack.InteractionTypeViewSubmission {
-			if corr, resp, ok := askbroker.ParseViewSubmission(interaction); ok {
-				a.interactions.ResolveForm(corr, resp)
-				return
-			}
 		}
 	}
 	// Everything past here is the workflow engine: operator-configured rules that

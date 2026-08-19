@@ -18,19 +18,27 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 
 	"github.com/miere/murtaugh/internal/agent"
+	"github.com/miere/murtaugh/internal/slack/askcard"
 	"github.com/miere/murtaugh/internal/slack/interaction"
 )
 
 // Tool is the `ask` capability.
+//
+// It has two transports. A single quick choice rides the interaction broker's
+// button prompt; anything richer — several questions, or a multi-select — goes
+// to the askcard Flow, which posts one card carrying every question as an inline
+// input. Both are inert when nil, which is the right behaviour in CLI/MCP
+// processes that have no gateway to route a click back.
 type Tool struct {
 	broker *interaction.Broker
+	cards  *askcard.Flow
 }
 
-// New constructs an ask Tool against the shared interaction broker. A nil broker
-// leaves the tool registered but inert (it returns an error when invoked), which
-// is the right behaviour in CLI/MCP processes that have no gateway to route the
-// click back.
-func New(broker *interaction.Broker) *Tool { return &Tool{broker: broker} }
+// New constructs an ask Tool against the shared interaction broker and ask card
+// flow.
+func New(broker *interaction.Broker, cards *askcard.Flow) *Tool {
+	return &Tool{broker: broker, cards: cards}
+}
 
 // Name returns the registry key.
 func (t *Tool) Name() string { return "ask" }
@@ -97,6 +105,10 @@ type Result struct {
 	Choice   string       `json:"choice,omitempty"`
 	Answers  []FormAnswer `json:"answers,omitempty"`
 	Note     string       `json:"note,omitempty"`
+	// UserID is who answered. Worth carrying: in a shared channel the person who
+	// answers is not always the person who asked, and the model should be able to
+	// attribute the decision.
+	UserID string `json:"user_id,omitempty"`
 }
 
 // FormAnswer is one question's answer in a modal-form Result. Choices holds the
@@ -193,10 +205,14 @@ func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 	}
 }
 
-// invokeForm runs the modal-form path: build a FormSpec, block on AskForm, and
-// shape the submission into a Result listing each question's answer(s).
+// invokeForm runs the card path: build a Spec, block on the flow, and shape the
+// outcome into a Result listing each question's answer(s).
 func (t *Tool) invokeForm(ctx context.Context, dest interaction.Destination, title string, questions []interaction.Question) (any, error) {
-	resp, err := t.broker.AskForm(ctx, dest, interaction.FormSpec{Title: title, Questions: questions})
+	if t.cards == nil {
+		return nil, fmt.Errorf("Error: interactive questions are not available in this context")
+	}
+	spec := askcard.Spec{Title: title, Questions: cardQuestions(questions)}
+	resp, err := t.cards.Ask(ctx, askcard.Destination{ChannelID: dest.ChannelID, ThreadTS: dest.ThreadTS}, spec)
 	if err != nil {
 		return nil, err
 	}
@@ -204,19 +220,53 @@ func (t *Tool) invokeForm(ctx context.Context, dest interaction.Destination, tit
 	case resp.TimedOut:
 		return Result{Answered: false, Note: "The user did not respond in time. Do not assume an answer — ask again or stop and wait."}, nil
 	case resp.Cancelled:
-		return Result{Answered: false, Note: "The form was dismissed before the user answered."}, nil
+		return Result{Answered: false, Note: "The questions were dismissed before the user answered."}, nil
+	case resp.Chat:
+		// The escape hatch. This is NOT a refusal, and must not read like one: the
+		// user is declining the offered options and asking to talk it through, so
+		// the note is phrased as their question back to the model.
+		return Result{Answered: false, Note: chatNote(questions)}, nil
 	}
 	answers := make([]FormAnswer, 0, len(questions))
 	for _, q := range questions {
-		fa := FormAnswer{Question: q.Label}
-		if q.FreeText {
-			fa.Text = resp.FreeText[q.Key]
-		} else {
-			fa.Choices = resp.Answers[q.Key]
-		}
-		answers = append(answers, fa)
+		answers = append(answers, FormAnswer{Question: q.Label, Choices: resp.Answers[q.Key]})
 	}
-	return Result{Answered: true, Answers: answers}, nil
+	return Result{Answered: true, Answers: answers, UserID: resp.UserID}, nil
+}
+
+// chatNote is what the model reads when the user presses "Chat About This". It
+// restates the questions so the model can open the discussion without having to
+// scroll its own transcript for what it asked.
+func chatNote(questions []interaction.Question) string {
+	var b strings.Builder
+	b.WriteString("The user would rather talk this through than pick from the options. They asked: ")
+	b.WriteString("\"Can we chat about this?\"\n\nDiscuss these with them before deciding:")
+	for _, q := range questions {
+		b.WriteString("\n- ")
+		b.WriteString(q.Label)
+	}
+	return b.String()
+}
+
+// cardQuestions maps the tool's parsed questions onto the card's own types. The
+// card package deliberately does not share types with the interaction broker:
+// they answer different shapes (a card of inputs vs a row of buttons).
+func cardQuestions(questions []interaction.Question) []askcard.Question {
+	out := make([]askcard.Question, 0, len(questions))
+	for _, q := range questions {
+		opts := make([]askcard.Option, 0, len(q.Options))
+		for _, o := range q.Options {
+			opts = append(opts, askcard.Option{Label: o.Label, Description: o.Description})
+		}
+		out = append(out, askcard.Question{
+			Key:         q.Key,
+			Header:      q.Header,
+			Question:    q.Label,
+			Options:     opts,
+			MultiSelect: q.MultiSelect,
+		})
+	}
+	return out
 }
 
 func stringArg(args map[string]any, key string) string {
@@ -224,16 +274,22 @@ func stringArg(args map[string]any, key string) string {
 	return s
 }
 
-// needsForm reports whether the questions require the modal: more than one
-// question, or any multi-select / free-text answer. A lone plain single-select
-// question can still ride the simpler button path.
+// needsForm reports whether the questions require the card: more than one
+// question, any multi-select, or any option carrying a description (which a
+// button has nowhere to show). A lone plain single-select question can still ride
+// the simpler button path.
 func needsForm(questions []interaction.Question) bool {
 	if len(questions) > 1 {
 		return true
 	}
 	for _, q := range questions {
-		if q.MultiSelect || q.FreeText {
+		if q.MultiSelect || q.Header != "" {
 			return true
+		}
+		for _, o := range q.Options {
+			if o.Description != "" {
+				return true
+			}
 		}
 	}
 	return false
@@ -261,7 +317,6 @@ func parseQuestions(raw any) []interaction.Question {
 			Label:       label,
 			Options:     parseOptions(m["options"]),
 			MultiSelect: boolArg(m, "multiSelect"),
-			FreeText:    boolArg(m, "freeText"),
 		})
 	}
 	return out
