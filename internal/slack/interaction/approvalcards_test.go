@@ -11,6 +11,7 @@ import (
 	"github.com/miere/murtaugh/assets"
 	"github.com/miere/murtaugh/internal/agent"
 	"github.com/miere/murtaugh/internal/slack/approvalcard"
+	slacklib "github.com/miere/murtaugh/internal/slack/client"
 )
 
 func testCards() *approvalcard.Renderer { return approvalcard.NewRenderer("", assets.FS) }
@@ -134,8 +135,11 @@ func TestGateApprover_KeepResolvedSuppressesDelete(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			broker, sig := newSignalingBroker(t)
-			// Short enough that the delete, if scheduled, lands inside the poll below.
+			// Short enough that the delete, if scheduled, lands well inside the wait
+			// below. The signal channel is what the wait blocks on — the delete runs
+			// on its own goroutine, so the fake's slice must not be read directly.
 			broker.outcomeTTL = time.Millisecond
+			sig.deleted = make(chan slacklib.DeleteMessageParams, 1)
 			ctx := agent.WithTurnLocation(context.Background(), agent.TurnLocation{ChannelID: "C1", ThreadTS: "t1"})
 
 			done := make(chan struct{})
@@ -147,7 +151,7 @@ func TestGateApprover_KeepResolvedSuppressesDelete(t *testing.T) {
 			broker.Resolve(cardCorr(t, posted.Blocks), Decision{OptionID: "approve", Label: "Approve", UserID: "U1"})
 			<-done
 
-			deleted := waitForDelete(sig, 500*time.Millisecond)
+			deleted := awaitDelete(sig, 500*time.Millisecond)
 			if deleted != tc.wantDeleted {
 				t.Fatalf("card deleted = %v, want %v", deleted, tc.wantDeleted)
 			}
@@ -159,17 +163,20 @@ func TestGateApprover_KeepResolvedSuppressesDelete(t *testing.T) {
 	}
 }
 
-// waitForDelete polls for a chat.delete until the deadline. A negative result
-// costs the full wait — which is the price of proving an absence.
-func waitForDelete(sig *signalingAPI, within time.Duration) bool {
-	deadline := time.Now().Add(within)
-	for time.Now().Before(deadline) {
-		if len(sig.Deleted) > 0 {
-			return true
-		}
-		time.Sleep(5 * time.Millisecond)
+// awaitDelete reports whether a chat.delete arrived within the deadline.
+//
+// It waits on the fake's signal channel rather than polling its recorded slice:
+// the delete fires from the broker's own detached goroutine, so reading the slice
+// from the test goroutine is a data race — one the race detector catches even
+// when the assertion happens to pass. A negative result costs the full wait,
+// which is the price of proving an absence.
+func awaitDelete(sig *signalingAPI, within time.Duration) bool {
+	select {
+	case <-sig.deleted:
+		return true
+	case <-time.After(within):
+		return false
 	}
-	return len(sig.Deleted) > 0
 }
 
 // An ACP agent's permission request renders through the same card, with whatever
