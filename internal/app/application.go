@@ -24,6 +24,7 @@ import (
 	"github.com/miere/murtaugh/internal/frontends/cli"
 	"github.com/miere/murtaugh/internal/frontends/mcp"
 	"github.com/miere/murtaugh/internal/journal"
+	"github.com/miere/murtaugh/internal/slack/askcard"
 	"github.com/miere/murtaugh/internal/slack/authcard"
 	slacklib "github.com/miere/murtaugh/internal/slack/client"
 	gateway "github.com/miere/murtaugh/internal/slack/gateway"
@@ -93,6 +94,9 @@ type Application struct {
 	// which routes the admin's click back into the blocked request and installs
 	// the resolved admin identity once the allow-set has been resolved.
 	authFlow *authcard.Flow
+	// askFlow backs the `ask` tool's multi-question card and is shared with the
+	// gateway, which routes the answerer's clicks back into the blocked call.
+	askFlow *askcard.Flow
 	// restart is the optional graceful-restart coordinator. Only the
 	// gateway path attaches one; CLI and MCP modes leave it nil.
 	restart *RestartCoordinator
@@ -137,7 +141,13 @@ func New(mode Mode, args []string, cfg config.Config, cfgStore config.Store, con
 		cfg.Access.AdminUser,
 		cfg.Access.IsAdminUser,
 	)
-	reg := buildRegistry(cfg, cfgStore, configPath, version, recorder, broker, authFlow)
+	// The ask card flow is shared the same way again: the `ask` tool blocks on it
+	// while the gateway routes the answerer's clicks back in.
+	askFlow := askcard.New(
+		slacklib.NewLazyClient(cfg.OAuth.BotToken),
+		askcard.NewRenderer(baseDirFor(cfg, configPath), assets.FS),
+	)
+	reg := buildRegistry(cfg, cfgStore, configPath, version, recorder, broker, authFlow, askFlow)
 	return &Application{
 		mode:              mode,
 		args:              args,
@@ -149,6 +159,7 @@ func New(mode Mode, args []string, cfg config.Config, cfgStore config.Store, con
 		registry:          reg,
 		interactionBroker: broker,
 		authFlow:          authFlow,
+		askFlow:           askFlow,
 		recorder:          recorder,
 	}
 }
@@ -161,7 +172,7 @@ func (a *Application) Run(ctx context.Context) error {
 	case ModeMCP:
 		return mcp.New(a.registry).Serve(ctx)
 	case ModeGateway:
-		gw := gateway.New(a.cfg, a.registry, a.logger, a.recorder, a.interactionBroker, a.authFlow)
+		gw := gateway.New(a.cfg, a.registry, a.logger, a.recorder, a.interactionBroker, a.authFlow, a.askFlow)
 		if rc := a.restart; rc != nil {
 			// Adapt the coordinator's Request method into the gateway's
 			// stringly-typed trigger so the gateway package stays free
@@ -358,7 +369,7 @@ func (a *Application) WithJournalSweeper(sweep func(context.Context) error, ever
 
 // buildRegistry wires every tool Murtaugh ships with. New tools must be
 // registered here so they appear in both the CLI and MCP frontends.
-func buildRegistry(cfg config.Config, cfgStore config.Store, configPath, version string, recorder journal.Recorder, broker *interaction.Broker, authFlow *authcard.Flow) *tools.Registry {
+func buildRegistry(cfg config.Config, cfgStore config.Store, configPath, version string, recorder journal.Recorder, broker *interaction.Broker, authFlow *authcard.Flow, askFlow *askcard.Flow) *tools.Registry {
 	reg := tools.NewRegistry()
 	reg.Register(ping.New())
 	reg.Register(versiontool.New(version))
@@ -453,7 +464,7 @@ func buildRegistry(cfg config.Config, cfgStore config.Store, configPath, version
 	// Slack buttons and wait for the answer, instead of assuming one. It shares
 	// the interaction broker with the gateway (which routes the click back). An
 	// agent opts in by adding `ask` to its `tools:` list.
-	reg.Register(ask.New(broker))
+	reg.Register(ask.New(broker, askFlow))
 
 	// `present_plan` lets an agent lay a plan in front of the user with
 	// Proceed / Revise / Cancel buttons and WAIT for sign-off before doing

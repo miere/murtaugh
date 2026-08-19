@@ -1,0 +1,112 @@
+{
+	"blocks": [
+		{
+			"type": "container",
+			"block_id": "murtaugh_ask_card",
+			"icon": {
+				"type": "image",
+				"image_url": "https://img.icons8.com/external-flaticons-lineal-color-flat-icons/64/external-idea-gamification-flaticons-lineal-color-flat-icons.png",
+				"alt_text": "Question icon"
+			},
+			"title": {
+				"type": "plain_text",
+				"text": "{{ jsonstr .Title }}"
+			},
+			"subtitle": {
+				"type": "plain_text",
+				"text": "{{ jsonstr .Subtitle }}"
+			},
+			"is_collapsible": false,
+			"default_collapsed": false,
+			"has_header_divider": true,
+			"width": "wide",
+			"child_blocks": [
+				{{ if .ValidationError }}{
+					"type": "callout",
+					"background_color": "pink",
+					"child_blocks": [
+						{
+							"type": "rich_text",
+							"elements": [
+								{
+									"type": "rich_text_section",
+									"elements": [
+										{
+											"type": "text",
+											"text": {{ json .ValidationError }}
+										}
+									]
+								}
+							]
+						}
+					]
+				},
+				{{ end }}{{ range $i, $q := .Questions }}{
+					"type": "input",
+					"block_id": {{ json $q.BlockID }},
+					"label": {
+						"type": "plain_text",
+						"text": {{ json $q.Label }}
+					},
+					"optional": false,
+					"element": {
+						"type": {{ if $q.MultiSelect }}"checkboxes"{{ else }}"radio_buttons"{{ end }},
+						"action_id": {{ json $q.ActionID }},
+						{{ $selected := false }}{{ range $q.Options }}{{ if .Selected }}{{ $selected = true }}{{ end }}{{ end }}{{ if $selected }}{{ if $q.MultiSelect }}"initial_options": [
+							{{ $first := true }}{{ range $q.Options }}{{ if .Selected }}{{ if not $first }},
+							{{ end }}{{ $first = false }}{
+								"text": {
+									"type": "mrkdwn",
+									"text": {{ json .Text }}
+								},
+								"value": {{ json .Value }}
+							}{{ end }}{{ end }}
+						],
+						{{ else }}{{ range $q.Options }}{{ if .Selected }}"initial_option": {
+							"text": {
+								"type": "mrkdwn",
+								"text": {{ json .Text }}
+							},
+							"value": {{ json .Value }}
+						},
+						{{ end }}{{ end }}{{ end }}{{ end }}"options": [
+							{{ range $j, $o := $q.Options }}{{ if $j }},
+							{{ end }}{
+								"text": {
+									"type": "mrkdwn",
+									"text": {{ json $o.Text }}
+								},
+								"value": {{ json $o.Value }}
+							}{{ end }}
+						]
+					}
+				},
+				{{ end }}{{ if .ShowActions }}{
+					"type": "actions",
+					"block_id": "murtaugh_ask",
+					"elements": [
+						{
+							"type": "button",
+							"action_id": {{ json .ActionSubmit }},
+							"style": "primary",
+							"value": "submit",
+							"text": {
+								"type": "plain_text",
+								"text": "Submit Answers"
+							}
+						},
+						{
+							"type": "button",
+							"action_id": {{ json .ActionChat }},
+							"value": "chat",
+							"text": {
+								"type": "plain_text",
+								"text": "Chat About This"
+							}
+						}
+					]
+				}{{ end }}
+			]
+		}
+	]
+}

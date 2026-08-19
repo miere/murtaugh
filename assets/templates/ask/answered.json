@@ -1,0 +1,44 @@
+{
+	"blocks": [
+		{
+			"type": "container",
+			"block_id": "murtaugh_ask_card",
+			"icon": {
+				"type": "image",
+				"image_url": "https://img.icons8.com/external-flaticons-lineal-color-flat-icons/64/external-idea-gamification-flaticons-lineal-color-flat-icons.png",
+				"alt_text": "Question icon"
+			},
+			"title": {
+				"type": "plain_text",
+				"text": "{{ jsonstr .Title }}"
+			},
+			"subtitle": {
+				"type": "plain_text",
+				"text": "{{ jsonstr .Subtitle }}"
+			},
+			"is_collapsible": true,
+			"default_collapsed": true,
+			"has_header_divider": false,
+			"width": "wide",
+			"child_blocks": [
+				{{ range $i, $q := .Questions }}{{ if $i }},
+				{{ end }}{
+					"type": "section",
+					"text": {
+						"type": "mrkdwn",
+						"text": "*{{ jsonstr $q.Label }}*{{ range $q.Answers }}\n*✓* {{ jsonstr . }}{{ end }}"
+					}
+				}{{ end }}{{ if .AnsweredBy }},
+				{
+					"type": "context",
+					"elements": [
+						{
+							"type": "mrkdwn",
+							"text": "Answered by <@{{ jsonstr .AnsweredBy }}>"
+						}
+					]
+				}{{ end }}
+			]
+		}
+	]
+}

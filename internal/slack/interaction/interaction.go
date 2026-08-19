@@ -3,10 +3,13 @@
 // calling turn until the user clicks one (or the wait times out, or the turn is
 // cancelled).
 //
-// It is the shared transport behind the `ask` tool (the agent asks the user a
-// question) and — in a later PR — the tool-approval gate. The broker is agnostic
-// about *why* it is asking: a caller hands it a PromptSpec and reads back a
-// Decision.
+// It is the shared transport behind single-choice prompts: the `ask` tool's quick
+// yes/no, the native loop's tool-approval gate, and the ACP permission gate. The
+// broker is agnostic about *why* it is asking: a caller hands it a PromptSpec and
+// reads back a Decision.
+//
+// Multi-question prompts are NOT here. They need inputs rather than buttons, and
+// live in internal/slack/askcard as a templated card.
 //
 // Correlation is by a random id minted per Ask and carried in the buttons'
 // action_id namespace. The running gateway recognizes that namespace, routes the
@@ -58,9 +61,23 @@ type Option struct {
 	ID    string // returned in Decision.OptionID; defaults to Label when empty
 	Label string // button text
 	Style string // "", "primary", or "danger"
+	// Description is the longer explanation shown beneath the label on a card.
+	// Buttons have nowhere to put it, so the button path ignores it.
+	Description string
 }
 
-// PromptSpec describes a single-question prompt. Multi-question, multi-select,
+// Question is one prompt of a multi-question ask. It is declared here because
+// the `ask` tool parses into it before choosing a transport; the card package
+// converts it to its own type.
+type Question struct {
+	Key         string   // stable identifier; answers are keyed by it
+	Header      string   // short category label shown ahead of the question
+	Label       string   // the question text
+	Options     []Option // choices offered for it
+	MultiSelect bool     // render checkboxes instead of radio buttons
+}
+
+// PromptSpec describes a single-question prompt.
 // and free-text answers are a later, modal-based extension; v1 is one question
 // with a single pick.
 type PromptSpec struct {
@@ -125,11 +142,6 @@ type Broker struct {
 
 	mu      sync.Mutex
 	pending map[string]chan Decision
-	// forms/formPending back the modal-based AskForm flow (see form.go): forms
-	// holds the spec a pending "Answer" click will open into a modal, and
-	// formPending is the rendezvous a submission resolves. Both are guarded by mu.
-	forms       map[string]FormSpec
-	formPending map[string]chan FormResponse
 }
 
 // New builds a Broker that posts with the given Slack bot token.
@@ -144,11 +156,9 @@ func NewWith(client *slacklib.LazyClient) *Broker {
 
 func newBroker(client *slacklib.LazyClient) *Broker {
 	return &Broker{
-		client:      client,
-		outcomeTTL:  defaultOutcomeTTL,
-		pending:     make(map[string]chan Decision),
-		forms:       make(map[string]FormSpec),
-		formPending: make(map[string]chan FormResponse),
+		client:     client,
+		outcomeTTL: defaultOutcomeTTL,
+		pending:    make(map[string]chan Decision),
 	}
 }
 
