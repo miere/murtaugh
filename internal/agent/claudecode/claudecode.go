@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/miere/murtaugh/internal/agent"
 )
@@ -63,6 +64,17 @@ type Options struct {
 	// git, ripgrep, the mcp-bridge grandchild). nil (the default) spawns
 	// unconfined, exactly as before.
 	Sandbox agent.Sandbox
+	// ToolHeartbeatInterval is how often a still-running tool emits a keep-alive
+	// status event, so the gateway's idle watchdog does not read an output-silent
+	// tool as a stalled turn. Zero takes agent.DefaultToolHeartbeatInterval.
+	ToolHeartbeatInterval time.Duration
+	// ToolCeiling bounds how long one tool may hold a turn; past it the turn is
+	// failed with agent.ErrToolCeiling. Zero takes agent.DefaultToolCeiling; a
+	// negative value disables the ceiling. Mirrors the ACP option of the same name.
+	ToolCeiling time.Duration
+	// Now is the clock the tool watcher ages tools against. nil uses time.Now;
+	// tests inject a fake so the ceiling can be driven without waiting on one.
+	Now func() time.Time
 }
 
 // Client is a Claude Code stream-json backend implementing agent.Client. Because
@@ -243,8 +255,18 @@ func (c *Client) Close() error {
 
 // --- procSession: one process == one session ------------------------------
 
+// subscription is one open turn: the event channel handed to the caller, plus the
+// tool bookkeeping that keeps the turn alive while a tool runs (see heartbeat.go).
 type subscription struct {
 	events chan agent.Event
+
+	// watcher tracks the turn's in-flight tool calls, fed from the same task
+	// events the caller sees. hbStop/hbDone/hbOnce are the heartbeat's shutdown
+	// handshake; nil hbStop means no heartbeat was started.
+	watcher *agent.ToolWatcher
+	hbStop  chan struct{}
+	hbDone  chan struct{}
+	hbOnce  sync.Once
 }
 
 type procSession struct {
@@ -268,15 +290,22 @@ type procSession struct {
 	active  *subscription
 	pending map[string]chan *streamMessage
 	reqSeq  atomic.Int64
+	// now is the session's clock, resolved once from Options.Now.
+	now func() time.Time
 }
 
 func newProcSession(id string, opts Options) *procSession {
+	now := opts.Now
+	if now == nil {
+		now = time.Now
+	}
 	return &procSession{
 		id:      id,
 		log:     opts.Logger.With("session", id),
 		opts:    opts,
 		policy:  strings.ToLower(strings.TrimSpace(opts.PermissionPolicy)),
 		pending: make(map[string]chan *streamMessage),
+		now:     now,
 	}
 }
 
@@ -390,7 +419,12 @@ func composePrompt(req agent.PromptRequest) string {
 }
 
 func (s *procSession) prompt(req agent.PromptRequest) (<-chan agent.Event, error) {
-	sub := &subscription{events: make(chan agent.Event, 64)}
+	sub := &subscription{
+		events:  make(chan agent.Event, 64),
+		watcher: agent.NewToolWatcher(s.now),
+		hbStop:  make(chan struct{}),
+		hbDone:  make(chan struct{}),
+	}
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -403,9 +437,14 @@ func (s *procSession) prompt(req agent.PromptRequest) (<-chan agent.Event, error
 		s.mu.Lock()
 		s.active = nil
 		s.mu.Unlock()
+		// The heartbeat never started, so close its done channel to keep the
+		// subscription's invariant (hbDone is always closed once the turn is over)
+		// rather than leaving a later stopHeartbeat to block on it.
+		close(sub.hbDone)
 		close(sub.events)
 		return nil, err
 	}
+	go s.heartbeat(sub)
 	return sub.events, nil
 }
 
@@ -481,6 +520,13 @@ func (s *procSession) emit(ev agent.Event) {
 	sub := s.active
 	s.mu.Unlock()
 	if sub != nil {
+		// Fold task events into the turn's watcher before delivering them. A
+		// `tool_use` block opens a tool and the matching `tool_result` retires it,
+		// which is the only signal the stream gives that a silent stretch is a
+		// tool running rather than the agent stalling.
+		if ev.Type == agent.EventTask && ev.Task != nil && sub.watcher != nil {
+			sub.watcher.Observe(ev.Task.ID, ev.Task.Title, ev.Task.Status)
+		}
 		sub.events <- ev
 		return
 	}
@@ -504,6 +550,9 @@ func (s *procSession) completeActive(stopReason string) {
 		}
 		return
 	}
+	// Stop the heartbeat and wait for it before touching the channel: it is the
+	// other writer, and closing underneath it would panic on a send.
+	sub.stopHeartbeat()
 	sub.events <- agent.Event{Type: agent.EventComplete, StopReason: stopReason}
 	close(sub.events)
 }
@@ -516,6 +565,7 @@ func (s *procSession) failActive(err error) {
 	if sub == nil {
 		return
 	}
+	sub.stopHeartbeat()
 	sub.events <- agent.Event{Type: agent.EventError, Error: err}
 	close(sub.events)
 }
