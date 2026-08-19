@@ -130,6 +130,12 @@ The gate is **only** active in live chat; scheduled and delegated runs are never
 gated. For an ACP agent, `--approval-requests <ask|auto-allow|auto-deny>` decides
 how the agent's own permission prompts are answered.
 
+By default a settled approval card clears itself a few seconds after the
+decision, so a long run doesn't bury the thread in spent approvals. Pass
+`--approval-keep-resolved` to leave it in place instead — collapsed, naming the
+tool and who decided — for agents where who-allowed-what is worth keeping. It
+applies to every outcome, including denials and timeouts.
+
 ### External MCP servers
 
 A native agent can attach to external MCP servers, defined once with

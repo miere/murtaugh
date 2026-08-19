@@ -388,6 +388,28 @@ type ApprovalConfig struct {
 	// callers have no human, so "ask" there denies; set "auto-allow" for
 	// unattended ACP automation. Unused by native agents.
 	Requests string `yaml:"requests" json:"requests"`
+	// KeepResolved leaves a settled approval card in the conversation instead of
+	// deleting it a few seconds after the decision. Unset (nil) inherits
+	// defaults.approval, which itself defaults to sweeping: the card acknowledges
+	// the decision and clears itself, so a long agent run does not bury the thread
+	// in spent approvals. Set it for an agent whose approvals are worth keeping as
+	// a record of who allowed what.
+	//
+	// It covers every settled state, not just approved: a denial or a timeout is
+	// equally part of that record, and a flag that kept some outcomes and swept
+	// others would leave a misleading trail.
+	//
+	// It is a *bool rather than a bool for the same reason ACPProfile.Interruptible
+	// is: EffectiveApproval bakes defaults.approval into every agent, and a plain
+	// false is indistinguishable from "not set" — so an operator who turned it on
+	// globally could never exempt one noisy agent.
+	KeepResolved *bool `yaml:"keep_resolved" json:"keep_resolved,omitempty"`
+}
+
+// KeepsResolved reports whether a settled approval card should be left in the
+// conversation. Unset means no, which is the pre-flag behaviour.
+func (a ApprovalConfig) KeepsResolved() bool {
+	return a.KeepResolved != nil && *a.KeepResolved
 }
 
 // Sandbox modes. Confinement is macOS-only for now: seatbelt is the one backend
@@ -1321,6 +1343,9 @@ func (c Config) EffectiveApproval(profile AgentProfile) ApprovalConfig {
 	}
 	if r := strings.TrimSpace(profile.Approval.Requests); r != "" {
 		out.Requests = profile.Approval.Requests
+	}
+	if profile.Approval.KeepResolved != nil {
+		out.KeepResolved = profile.Approval.KeepResolved
 	}
 	return out
 }

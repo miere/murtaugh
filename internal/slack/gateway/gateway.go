@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/miere/murtaugh/assets"
 	"github.com/miere/murtaugh/internal/agent"
 	"github.com/miere/murtaugh/internal/agent/native"
 	"github.com/miere/murtaugh/internal/agentbuild"
@@ -22,6 +23,7 @@ import (
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/journal"
 	"github.com/miere/murtaugh/internal/mcpbridge"
+	"github.com/miere/murtaugh/internal/slack/approvalcard"
 	"github.com/miere/murtaugh/internal/slack/askcard"
 	"github.com/miere/murtaugh/internal/slack/authcard"
 	slackclient "github.com/miere/murtaugh/internal/slack/client"
@@ -282,18 +284,32 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 		// Chat agents are gated: a side-effecting tool call asks the user for
 		// approval in the thread. nil broker leaves them ungated. Headless and
 		// delegated agents (built elsewhere) never get an approver.
-		var approver native.Approver
-		var acpPermissionAsker agent.PermissionAsker
-		if broker != nil {
-			approver = askbroker.NewApprover(broker)
-			// ACP agents' permission requests are resolved through the same broker:
-			// the ACP client raises an EventPermission on the turn's event stream and
-			// the chat handler asks here, posting buttons in the thread (ordered with
-			// the reply, like the native approver). nil (headless) leaves ACP agents
-			// to their auto-allow/deny policy. Set only on this interactive path.
-			acpPermissionAsker = askbroker.NewPermissionGate(broker)
-		}
+		//
+		// Both gates are built per agent, inside the loop below, because each
+		// carries that agent's approval settings — approval.keep_resolved decides
+		// whether its settled cards are kept or swept, and one shared gate could
+		// only ever honour one agent's choice. profile.Approval is already the
+		// resolved policy: both config loaders bake defaults.approval into every
+		// agent before this point.
+		//
+		// One renderer serves all of them: it is stateless, and it reads card
+		// templates from the config dir first so an operator can restyle them
+		// without a rebuild, falling back to the embedded assets tree.
+		approvalCards := approvalcard.NewRenderer(cfg.BaseDir, assets.FS)
+		acpPermissionAskers := make(map[string]agent.PermissionAsker, len(cfg.Agents))
 		for name, profile := range cfg.Agents {
+			var approver native.Approver
+			if broker != nil {
+				keepResolved := profile.Approval.KeepsResolved()
+				approver = askbroker.NewApprover(broker, approvalCards, keepResolved)
+				// ACP agents' permission requests are resolved through the same broker:
+				// the ACP client raises an EventPermission on the turn's event stream and
+				// the chat handler asks here, posting the card in the thread (ordered with
+				// the reply, like the native approver). A missing entry (headless) leaves
+				// ACP agents to their auto-allow/deny policy. Set only on this
+				// interactive path.
+				acpPermissionAskers[name] = askbroker.NewPermissionGate(broker, approvalCards, keepResolved)
+			}
 			// Resolve the agent's workspace once (workdir → base dir fallback),
 			// validated here at the build seam. Any workdir-rooted tool that
 			// cannot be rooted is dropped (degraded) rather than failing the
@@ -421,7 +437,7 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 			WithCanvasInfo(slackCanvasInfo{api: api}).
 			WithFileFetcher(api).
 			WithUploader(slackAttachmentUploader{api: api}).
-			WithPermissionAsker(acpPermissionAsker).
+			WithPermissionAskers(acpPermissionAskers).
 			WithBackgroundEventsRouter(bgRouter)
 		// The router renders background turns through the chat handler's own renderer,
 		// so a background reply looks exactly like a foreground one.

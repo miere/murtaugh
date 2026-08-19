@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/miere/murtaugh/internal/agent"
+	"github.com/miere/murtaugh/internal/slack/approvalcard"
 )
 
 // PermissionGate answers an ACP agent's session/request_permission by posting the
@@ -15,11 +16,19 @@ import (
 // GateApprover (which gates the native loop's tool calls) over the same broker.
 type PermissionGate struct {
 	broker *Broker
+	// cards renders the approval container card. nil falls back to the broker's
+	// plain button-row rendering, which is what the tests exercise.
+	cards *approvalcard.Renderer
+	// keepResolved leaves the settled card in the conversation instead of
+	// deleting it after the broker's TTL. It is this agent's
+	// approval.keep_resolved, which is why a gate is built per agent.
+	keepResolved bool
 }
 
-// NewPermissionGate builds a PermissionGate over the shared broker.
-func NewPermissionGate(broker *Broker) *PermissionGate {
-	return &PermissionGate{broker: broker}
+// NewPermissionGate builds a PermissionGate over the shared broker, rendering
+// with cards and honouring the agent's keep_resolved setting.
+func NewPermissionGate(broker *Broker, cards *approvalcard.Renderer, keepResolved bool) *PermissionGate {
+	return &PermissionGate{broker: broker, cards: cards, keepResolved: keepResolved}
 }
 
 // AskPermission posts the agent's offered options as buttons in loc's thread and
@@ -61,7 +70,10 @@ func (g *PermissionGate) AskPermission(ctx context.Context, loc agent.TurnLocati
 		Markdown:    true,
 		Options:     options,
 		OutcomeText: permissionOutcome(name, kindByID),
-		AutoDismiss: true,
+		// The settled card is deleted after the broker's TTL unless this agent
+		// asked to keep it.
+		AutoDismiss: !g.keepResolved,
+		Cards:       g.approvalCards(name, detail, kindByID),
 	})
 	if err != nil {
 		return "", err
@@ -70,6 +82,23 @@ func (g *PermissionGate) AskPermission(ctx context.Context, loc agent.TurnLocati
 		return decision.OptionID, nil
 	}
 	return "", nil
+}
+
+// approvalCards builds the renderer hook for one permission request, or nil when
+// this gate has no card renderer (the plain-prompt path the tests use).
+func (g *PermissionGate) approvalCards(name, detail string, kindByID map[string]string) CardRenderer {
+	if g.cards == nil {
+		return nil
+	}
+	return approvalCards{
+		cards: g.cards,
+		spec: approvalcard.Spec{
+			ToolName: name,
+			Detail:   detail,
+			Language: codeLang(name),
+		},
+		outcome: permissionCardOutcome(kindByID),
+	}
 }
 
 // permissionOutcome renders the terminal line an ACP permission prompt is

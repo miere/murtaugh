@@ -107,6 +107,47 @@ type PromptSpec struct {
 	// briefly and then clears itself; the generic ask/plan flows leave it false so
 	// their answers stay in the conversation.
 	AutoDismiss bool
+
+	// Cards, when set, renders the prompt as a Block Kit card instead of the
+	// broker's default section/markdown blocks. The approval and permission gates
+	// set it so a gated tool call renders as the approval container card; ask,
+	// plan and the scheduler leave it nil and keep the button-row rendering.
+	//
+	// It is a rendering hook only. Correlation, the timeout, cancellation, the
+	// terminal rewrite and the optional chat.delete stay here, so a card-rendered
+	// prompt behaves identically to a plain one in every respect but its looks.
+	Cards CardRenderer
+}
+
+// CardRenderer renders a prompt's two visual states. The broker owns the
+// lifecycle and calls in at the two points where blocks are needed.
+type CardRenderer interface {
+	// Pending renders the prompt awaiting a decision. opts carries one entry per
+	// spec.Option, already addressed with the action_id and value this broker
+	// will correlate a click by — an implementation must emit both verbatim or
+	// the click cannot be routed back to the blocked caller.
+	Pending(spec PromptSpec, opts []CardOption) ([]byte, error)
+	// Resolved renders the terminal, button-less state for a settled prompt.
+	Resolved(spec PromptSpec, d Decision) ([]byte, error)
+	// Fallback is the message's notification text, shown where blocks cannot
+	// render. "" falls back to the broker's default.
+	Fallback(spec PromptSpec) string
+}
+
+// CardOption is one of a prompt's options as the broker has addressed it, so a
+// CardRenderer can lay the buttons out itself without having to know how
+// action_ids are namespaced or how a click's value is encoded.
+type CardOption struct {
+	// ActionID is "murtaugh_interaction:<corr>:<idx>" — what ParseClick reads the
+	// correlation id out of.
+	ActionID string
+	// Value is the JSON clickValue payload ParseClick decodes the chosen option's
+	// id and label from.
+	Value string
+	// Label is the button text, already clamped to Slack's limit.
+	Label string
+	// Style is "", "primary", or "danger".
+	Style string
 }
 
 // Decision is the outcome of an Ask.
@@ -186,9 +227,9 @@ func (b *Broker) Ask(ctx context.Context, dest Destination, spec PromptSpec) (De
 	if err != nil {
 		return Decision{}, err
 	}
-	blocks, err := json.Marshal(slackgo.Blocks{BlockSet: buildPromptBlocks(corr, spec)})
+	blocks, err := renderPrompt(corr, spec)
 	if err != nil {
-		return Decision{}, fmt.Errorf("interaction: encode prompt: %w", err)
+		return Decision{}, err
 	}
 
 	ch := make(chan Decision, 1)
@@ -269,7 +310,7 @@ func (b *Broker) editOutcome(api slacklib.SlackAPI, channel, ts string, spec Pro
 	if channel == "" || ts == "" {
 		return
 	}
-	blocks, err := json.Marshal(slackgo.Blocks{BlockSet: buildOutcomeBlocks(spec, d)})
+	blocks, err := renderOutcome(spec, d)
 	if err != nil {
 		return
 	}
@@ -337,6 +378,62 @@ func ParseClick(ic slackgo.InteractionCallback) (corr string, d Decision, ok boo
 		return corr, Decision{OptionID: cv.ID, Label: cv.Label, UserID: ic.User.ID}, true
 	}
 	return "", Decision{}, false
+}
+
+// renderPrompt produces the blocks for a prompt awaiting a decision: the
+// caller's card when the spec supplies one, otherwise the built-in button row.
+func renderPrompt(corr string, spec PromptSpec) ([]byte, error) {
+	if spec.Cards != nil {
+		blocks, err := spec.Cards.Pending(spec, cardOptions(corr, spec))
+		if err != nil {
+			return nil, fmt.Errorf("interaction: render prompt card: %w", err)
+		}
+		return blocks, nil
+	}
+	blocks, err := json.Marshal(slackgo.Blocks{BlockSet: buildPromptBlocks(corr, spec)})
+	if err != nil {
+		return nil, fmt.Errorf("interaction: encode prompt: %w", err)
+	}
+	return blocks, nil
+}
+
+// renderOutcome produces the blocks for a settled prompt, mirroring
+// renderPrompt's choice of renderer.
+func renderOutcome(spec PromptSpec, d Decision) ([]byte, error) {
+	if spec.Cards != nil {
+		blocks, err := spec.Cards.Resolved(spec, d)
+		if err != nil {
+			return nil, fmt.Errorf("interaction: render outcome card: %w", err)
+		}
+		return blocks, nil
+	}
+	blocks, err := json.Marshal(slackgo.Blocks{BlockSet: buildOutcomeBlocks(spec, d)})
+	if err != nil {
+		return nil, fmt.Errorf("interaction: encode outcome: %w", err)
+	}
+	return blocks, nil
+}
+
+// cardOptions addresses each of the spec's options the way a click will arrive:
+// the action_id carrying the correlation id and the option's index, and the
+// clickValue payload ParseClick decodes. Built here, next to buildPromptBlocks,
+// so the two renderers cannot drift on the wire format.
+func cardOptions(corr string, spec PromptSpec) []CardOption {
+	opts := make([]CardOption, 0, len(spec.Options))
+	for i, opt := range spec.Options {
+		id := opt.ID
+		if id == "" {
+			id = opt.Label
+		}
+		value, _ := json.Marshal(clickValue{ID: id, Label: opt.Label})
+		opts = append(opts, CardOption{
+			ActionID: fmt.Sprintf("%s%s:%d", ActionPrefix, corr, i),
+			Value:    string(value),
+			Label:    clampButtonLabel(opt.Label),
+			Style:    opt.Style,
+		})
+	}
+	return opts
 }
 
 func buildPromptBlocks(corr string, spec PromptSpec) []slackgo.Block {
@@ -460,6 +557,11 @@ func outcomeText(spec PromptSpec, d Decision) string {
 }
 
 func promptFallback(spec PromptSpec) string {
+	if spec.Cards != nil {
+		if s := strings.TrimSpace(spec.Cards.Fallback(spec)); s != "" {
+			return s
+		}
+	}
 	if t := strings.TrimSpace(spec.Title); t != "" {
 		return t
 	}

@@ -86,13 +86,18 @@ type ChatHandler struct {
 	// turn's thread. nil disables outbound attachments (tests that do not wire
 	// Slack); the gateway always supplies it in production.
 	uploader attachmentUploader
-	// permissionAsker resolves an ACP agent's EventPermission with a human (Slack
-	// approval buttons). It is consulted on the turn's own event loop so the
-	// approval card is ordered with the reply — the chat handler settles any open
-	// reply text first, exactly as the native loop's inline approval is ordered.
-	// nil denies every ACP permission request (no human wired), which keeps a
-	// headless turn from hanging.
-	permissionAsker agent.PermissionAsker
+	// permissionAskers resolves an ACP agent's EventPermission with a human (Slack
+	// approval buttons), keyed by the agent the turn is running as. It is consulted
+	// on the turn's own event loop so the approval card is ordered with the reply —
+	// the chat handler settles any open reply text first, exactly as the native
+	// loop's inline approval is ordered. A missing entry denies every ACP
+	// permission request (no human wired), which keeps a headless turn from
+	// hanging.
+	//
+	// It is keyed per agent rather than one shared gate because the gate carries
+	// that agent's approval settings — today, whether a settled card is kept or
+	// swept.
+	permissionAskers map[string]agent.PermissionAsker
 	// backgroundEventsRouter renders a claude_code background completion (a subagent
 	// finishing after its turn ended) into the conversation's thread. Handle
 	// registers each turn's thread with it so the router knows where to post. nil
@@ -248,14 +253,15 @@ func (h *ChatHandler) WithUploader(u attachmentUploader) *ChatHandler {
 	return h
 }
 
-// WithPermissionAsker wires the gate that resolves an ACP agent's permission
-// requests (EventPermission) with a human. Returns the handler for chaining. nil
-// (the default) leaves the handler denying every ACP permission request.
-func (h *ChatHandler) WithPermissionAsker(a agent.PermissionAsker) *ChatHandler {
-	if a == nil {
+// WithPermissionAskers wires the per-agent gates that resolve an ACP agent's
+// permission requests (EventPermission) with a human. Returns the handler for
+// chaining. nil/empty (the default) leaves the handler denying every ACP
+// permission request.
+func (h *ChatHandler) WithPermissionAskers(askers map[string]agent.PermissionAsker) *ChatHandler {
+	if len(askers) == 0 {
 		return h
 	}
-	h.permissionAsker = a
+	h.permissionAskers = askers
 	return h
 }
 
@@ -711,7 +717,7 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest, route ChatRou
 				if event.Permission == nil {
 					continue
 				}
-				decision := h.askPermission(ctx, req, streamThreadTS, renderer, event.Permission.Request)
+				decision := h.askPermission(ctx, req, route.Agent, streamThreadTS, renderer, event.Permission.Request)
 				if event.Permission.Decision != nil {
 					event.Permission.Decision <- decision
 				}
@@ -748,14 +754,15 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest, route ChatRou
 // in-flight stream, then asks the human via the wired gate in the turn's own
 // thread. A nil gate (no human wired) or an ask error denies — the turn must not
 // hang waiting on an answer that can never come.
-func (h *ChatHandler) askPermission(ctx context.Context, req ChatRequest, threadTS string, renderer chatRenderer, pr agent.PermissionRequest) string {
+func (h *ChatHandler) askPermission(ctx context.Context, req ChatRequest, agentName, threadTS string, renderer chatRenderer, pr agent.PermissionRequest) string {
 	renderer.BeginInterjection(ctx)
-	if h.permissionAsker == nil {
-		h.logger.Warn("agent permission request but no asker wired; denying", "channel", req.ChannelID, "tool_kind", pr.ToolKind)
+	asker := h.permissionAskers[agentName]
+	if asker == nil {
+		h.logger.Warn("agent permission request but no asker wired; denying", "channel", req.ChannelID, "agent", agentName, "tool_kind", pr.ToolKind)
 		return ""
 	}
 	loc := agent.TurnLocation{ChannelID: req.ChannelID, ThreadTS: threadTS, UserID: req.UserID}
-	optionID, err := h.permissionAsker.AskPermission(ctx, loc, pr)
+	optionID, err := asker.AskPermission(ctx, loc, pr)
 	if err != nil {
 		h.logger.Warn("agent permission ask failed; denying", "channel", req.ChannelID, "error", err)
 		return ""

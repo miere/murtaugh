@@ -26,7 +26,7 @@ func TestPermissionGate_Outcome(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			broker, sig := newSignalingBroker(t)
 			broker.outcomeTTL = 0 // assert on the single outcome write; skip the async delete
-			gate := NewPermissionGate(broker)
+			gate := NewPermissionGate(broker, nil, false)
 			loc := agent.TurnLocation{ChannelID: "C1", ThreadTS: "t1", UserID: "U1"}
 			req := agent.PermissionRequest{
 				ToolKind:  "execute", // surfaced to the human as "terminal"

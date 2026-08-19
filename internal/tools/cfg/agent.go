@@ -18,16 +18,17 @@ import (
 // follow the CLI convention (--flag true; repeat --arg for lists).
 func agentSchema(nameRequired bool) *jsonschema.Schema {
 	props := map[string]*jsonschema.Schema{
-		"name":                {Type: "string", Description: "agent name (the key it is stored under)"},
-		"type":                {Type: "string", Description: "backend: native | acp | claude_code"},
-		"workdir":             {Type: "string", Description: "agent working directory"},
-		"tools":               {Type: "array", Items: &jsonschema.Schema{Type: "string"}, Description: "tool group to expose (repeatable)"},
-		"mcp_servers":         {Type: "array", Items: &jsonschema.Schema{Type: "string"}, Description: "extra MCP server to attach (repeatable)"},
-		"export_skills_to_fs": {Type: "array", Items: &jsonschema.Schema{Type: "string"}, Description: "bundled skill to export to the workdir (repeatable; 'all' for every one)"},
-		"progress_display":    {Type: "string", Description: "simplified | tasks"},
-		"approval_terminal":   {Type: "string", Description: "native terminal gate: allowlist | prompt | off"},
-		"approval_requests":   {Type: "string", Description: "acp permission answering: ask | auto-allow | auto-deny"},
-		"approval_allow":      {Type: "array", Items: &jsonschema.Schema{Type: "string"}, Description: "extra allowlisted terminal command (repeatable)"},
+		"name":                   {Type: "string", Description: "agent name (the key it is stored under)"},
+		"type":                   {Type: "string", Description: "backend: native | acp | claude_code"},
+		"workdir":                {Type: "string", Description: "agent working directory"},
+		"tools":                  {Type: "array", Items: &jsonschema.Schema{Type: "string"}, Description: "tool group to expose (repeatable)"},
+		"mcp_servers":            {Type: "array", Items: &jsonschema.Schema{Type: "string"}, Description: "extra MCP server to attach (repeatable)"},
+		"export_skills_to_fs":    {Type: "array", Items: &jsonschema.Schema{Type: "string"}, Description: "bundled skill to export to the workdir (repeatable; 'all' for every one)"},
+		"progress_display":       {Type: "string", Description: "simplified | tasks"},
+		"approval_terminal":      {Type: "string", Description: "native terminal gate: allowlist | prompt | off"},
+		"approval_requests":      {Type: "string", Description: "acp permission answering: ask | auto-allow | auto-deny"},
+		"approval_allow":         {Type: "array", Items: &jsonschema.Schema{Type: "string"}, Description: "extra allowlisted terminal command (repeatable)"},
+		"approval_keep_resolved": {Type: "boolean", Description: "keep settled approval cards in the thread instead of clearing them"},
 		// sandbox (acp/claude_code; macOS only)
 		"sandbox_mode":      {Type: "string", Description: "process confinement: off | seatbelt (macOS only)"},
 		"sandbox_write":     {Type: "array", Items: &jsonschema.Schema{Type: "string"}, Description: "extra writable path beyond workdir/$TMPDIR/~/.claude (repeatable)"},
@@ -158,6 +159,9 @@ func buildAgentProfile(existing *config.AgentProfile, args map[string]any) (conf
 	}
 	if v, ok := arrayArg(args, "approval_allow"); ok {
 		p.Approval.Allow = v
+	}
+	if v, ok := boolArg(args, "approval_keep_resolved"); ok {
+		p.Approval.KeepResolved = &v
 	}
 
 	if v, ok := stringArg(args, "sandbox_mode"); ok {

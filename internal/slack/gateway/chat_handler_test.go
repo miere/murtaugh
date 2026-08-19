@@ -262,7 +262,7 @@ func TestChatHandlerResolvesACPPermissionInOrder(t *testing.T) {
 	f := &fakeChatSessionsWithPermission{gotDecision: make(chan string, 1)}
 	sessions := map[string]ChatSessionManager{"default": f}
 	handler := NewChatHandler(api, sessions, func(ChatRequest) ChatRoute { return ChatRoute{Agent: "default", ReplyOnThread: true} }, time.Hour, 5, nil).
-		WithPermissionAsker(asker)
+		WithPermissionAskers(map[string]agent.PermissionAsker{"default": asker})
 	if err := handler.handleResolving(context.Background(), ChatRequest{TeamID: "T1", ChannelID: "C1", UserID: "U1", MessageTS: "123.4", Text: "hi", Source: "test"}); err != nil {
 		t.Fatalf("Handle returned error: %v", err)
 	}

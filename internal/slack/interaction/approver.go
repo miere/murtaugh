@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/miere/murtaugh/internal/agent"
+	"github.com/miere/murtaugh/internal/slack/approvalcard"
 )
 
 // GateApprover is the Slack-backed approval gate: it asks the user to confirm a
@@ -22,14 +23,27 @@ import (
 // trimming surrounding whitespace), with no fuzzy/normalizing comparison.
 type GateApprover struct {
 	broker *Broker
+	// cards renders the approval container card. nil falls back to the broker's
+	// plain button-row rendering, which is what the tests exercise.
+	cards *approvalcard.Renderer
+	// keepResolved leaves the settled card in the conversation instead of
+	// deleting it after the broker's TTL. It is this agent's
+	// approval.keep_resolved, which is why an approver is built per agent.
+	keepResolved bool
 
 	mu      sync.Mutex
 	allowed map[string]bool // summaries the user chose to always allow this run
 }
 
-// NewApprover builds a GateApprover over the shared broker.
-func NewApprover(broker *Broker) *GateApprover {
-	return &GateApprover{broker: broker, allowed: make(map[string]bool)}
+// NewApprover builds a GateApprover over the shared broker, rendering with cards
+// and honouring the agent's keep_resolved setting.
+func NewApprover(broker *Broker, cards *approvalcard.Renderer, keepResolved bool) *GateApprover {
+	return &GateApprover{
+		broker:       broker,
+		cards:        cards,
+		keepResolved: keepResolved,
+		allowed:      make(map[string]bool),
+	}
 }
 
 // Approve asks the user to confirm running toolName with the given summary,
@@ -75,7 +89,10 @@ func (g *GateApprover) Approve(ctx context.Context, toolName, summary string) (b
 			{ID: "deny", Label: "Deny", Style: "danger"},
 		},
 		OutcomeText: approvalOutcome(toolName),
-		AutoDismiss: true,
+		// The settled card is deleted after the broker's TTL unless this agent
+		// asked to keep it.
+		AutoDismiss: !g.keepResolved,
+		Cards:       g.approvalCards(toolName, summary),
 	})
 	if err != nil {
 		return false, fmt.Sprintf("Skipped: couldn't ask for approval (%v). Not run.", err)
@@ -114,14 +131,48 @@ func approvalOutcome(toolName string) func(Decision) string {
 	}
 }
 
-// codeLang picks the fenced-code-block language hint for a tool's summary so
-// Slack's markdown block syntax-highlights it. The terminal tool's summary is a
-// shell command line; other tools get no hint (a plain, un-highlighted block).
+// approvalCards builds the renderer hook for one gated call, or nil when this
+// approver has no card renderer (the plain-prompt path the tests use).
+func (g *GateApprover) approvalCards(toolName, summary string) CardRenderer {
+	if g.cards == nil {
+		return nil
+	}
+	return approvalCards{
+		cards: g.cards,
+		spec: approvalcard.Spec{
+			ToolName: toolName,
+			Detail:   strings.TrimRight(summary, "\n"),
+			Language: codeLang(toolName),
+		},
+		outcome: nativeOutcome,
+	}
+}
+
+// codeLang picks the syntax-highlighting language for a tool's summary, used for
+// both the fenced code block of the plain prompt and the card's preformatted
+// block. A shell-running tool's summary is a command line; every other tool gets
+// no hint (a plain, un-highlighted block).
 func codeLang(toolName string) string {
-	if toolName == "terminal" {
+	if isShellTool(toolName) {
 		return "bash"
 	}
 	return ""
+}
+
+// isShellTool reports whether toolName runs a shell command line. Murtaugh's own
+// native tool is called "terminal" and ACP calls the kind "execute", but a
+// backend is free to name it whatever it likes — Claude Code's is literally
+// "bash" — and a command line that loses its highlighting because of the name it
+// arrived under is a display bug, not a policy decision. Matching is
+// case-insensitive: the ACP kind is lowercased upstream, but a tool name from a
+// backend's own vocabulary is not.
+func isShellTool(toolName string) bool {
+	switch strings.ToLower(strings.TrimSpace(toolName)) {
+	case "terminal", "bash", "execute", "shell":
+		return true
+	default:
+		return false
+	}
 }
 
 // decidedBy renders the " by <@user>" suffix, or "" when the user is unknown.
