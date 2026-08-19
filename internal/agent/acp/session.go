@@ -68,7 +68,7 @@ type acpSession struct {
 	// and the permission handler.
 	scope promptScope
 	// watcher feeds the current turn's heartbeat/ceiling; nil between turns.
-	watcher *toolWatcher
+	watcher *agent.ToolWatcher
 	// sessionID is the agent-assigned id from session/new.
 	sessionID string
 	// release drops this session's aggregator registration; nil when there is no

@@ -53,7 +53,7 @@ func (c *acpSession) deliverNotification(notification rpcNotification) {
 		w := c.watcher
 		c.mu.Unlock()
 		if w != nil {
-			w.observe(task.ID, task.Title, task.Status)
+			w.Observe(task.ID, task.Title, task.Status)
 		}
 		// Block on the send: dropping task or text notifications truncates the
 		// agent response in the consumer (chat handler). The readLoop is back-

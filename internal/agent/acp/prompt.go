@@ -80,7 +80,7 @@ func (c *acpSession) prompt(ctx context.Context, request agent.PromptRequest) (<
 	sub := &subscription{events: make(chan agent.Event, 32)}
 	events := sub.events
 	sawText := &atomic.Bool{}
-	watcher := newToolWatcher(c.now)
+	watcher := agent.NewToolWatcher(c.now)
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -154,7 +154,7 @@ func (c *acpSession) closeSubscription(sub *subscription) {
 }
 
 // clearToolWatch retracts this turn's tool watcher if it is still the live one.
-func (c *acpSession) clearToolWatch(w *toolWatcher) {
+func (c *acpSession) clearToolWatch(w *agent.ToolWatcher) {
 	c.mu.Lock()
 	if c.watcher == w {
 		c.watcher = nil

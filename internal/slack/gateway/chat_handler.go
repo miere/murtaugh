@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/miere/murtaugh/internal/agent"
-	"github.com/miere/murtaugh/internal/agent/acp"
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/slack-go/slack"
 )
@@ -725,10 +724,12 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest, route ChatRou
 					return event.Error
 				}
 				turnErr = event.Error
-				if errors.Is(event.Error, acp.ErrToolCeiling) {
-					// A tool blew past its ceiling. The ACP agent may still be running it
+				if errors.Is(event.Error, agent.ErrToolCeiling) {
+					// A tool blew past its ceiling. The backend may still be running it
 					// and (lacking session/cancel) cannot be stopped, so drop the session
 					// binding like the idle path — the next message opens a fresh session.
+					// Matched on the backend-neutral error: any backend that grows a
+					// ceiling gets this handling without touching the relay.
 					discardSession(sessions, key)
 					h.logger.Warn("dropped agent session after tool ceiling", "source", req.Source, "channel", req.ChannelID, "session_id", sessionID)
 				}
