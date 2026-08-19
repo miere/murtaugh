@@ -43,8 +43,10 @@ type Deps struct {
 	// ACP agent with no Murtaugh tools, as before. Ignored for native agents,
 	// which hold their toolset in-process.
 	Bridge *mcpbridge.Server
-	// LongRunningToolTimeout is the per-tool ceiling passed to an ACP agent (see
-	// SessionDefaults.LongRunningToolTimeout). Zero leaves the ProcessClient
+	// LongRunningToolTimeout is the per-tool ceiling passed to an ACP or
+	// claude_code agent (see SessionDefaults.LongRunningToolTimeout) — both honour
+	// it identically, so the operator's setting does not depend on which backend
+	// answers. Zero leaves the ProcessClient
 	// default. Ignored for native agents.
 	LongRunningToolTimeout time.Duration
 	// BackgroundSink receives events a claude_code session emits with no active
@@ -146,6 +148,7 @@ func Client(resolved ResolvedAgent, deps Deps) (agent.Client, error) {
 			OnBackground:     deps.BackgroundSink,
 			Aggregator:       aggregator,
 			Sandbox:          box,
+			ToolCeiling:      deps.LongRunningToolTimeout,
 		}), nil
 	default:
 		return nil, fmt.Errorf("agentbuild: unknown agent kind %q", resolved.Kind)
