@@ -45,32 +45,32 @@ func (g *PermissionGate) AskPermission(ctx context.Context, loc agent.TurnLocati
 	if g == nil || g.broker == nil || loc.ChannelID == "" {
 		return "", nil
 	}
-	options := make([]Option, 0, len(req.Options))
-	kindByID := make(map[string]string, len(req.Options))
-	for _, o := range req.Options {
-		label := o.Name
-		if label == "" {
-			label = o.ID
-		}
-		options = append(options, Option{ID: o.ID, Label: label, Style: styleForPermissionKind(o.Kind)})
-		kindByID[o.ID] = o.Kind
+	// Two quite different situations arrive here. Either the agent declared its own
+	// options — then Murtaugh reflects them and adds nothing, because the agent
+	// will only understand an optionId it declared, and one already offering
+	// allow_always is doing its own bookkeeping — or the backend delegated the
+	// whole decision, and Murtaugh supplies the set it would offer for any tool
+	// call of its own, always-allow included.
+	options, kindByID := reflectedOptions(req.Options)
+	if req.PolicyOwned {
+		options, kindByID = policyOptions()
 	}
 	if len(options) == 0 {
 		return "", nil
 	}
-	// The options above are the agent's, copied through untouched — Murtaugh adds
-	// none of its own here. On this path the agent owns the vocabulary: it will
-	// only understand an optionId it declared, and an agent that already offers
-	// allow_always is doing its own bookkeeping, so a second Murtaugh-flavoured
-	// button would be both unroutable and a lie about who is remembering what.
-	//
-	// What Murtaugh can do is decline to ask a question already answered: if this
-	// call matches a grant the user made through Murtaugh's own gate, answer it
-	// with the agent's own allow option and post nothing.
 	name := friendlyToolName(req.ToolKind)
 	detail := strings.TrimRight(req.ToolTitle, "\n")
-	if id := allowOptionID(req.Options); id != "" && g.grants.Allowed(GrantKey(name, detail)) {
-		return id, nil
+
+	// Either way, decline to ask a question already answered: a call matching a
+	// grant is allowed silently, with nothing posted.
+	key := GrantKey(name, detail)
+	if g.grants.Allowed(key) {
+		if req.PolicyOwned {
+			return agent.PermissionAllow, nil
+		}
+		if id := allowOptionID(req.Options); id != "" {
+			return id, nil
+		}
 	}
 	// Mirror the native approval gate: name the tool concisely and, when the agent
 	// supplied a title (for an execute call, the command line), render it in a
@@ -95,10 +95,35 @@ func (g *PermissionGate) AskPermission(ctx context.Context, loc agent.TurnLocati
 	if err != nil {
 		return "", err
 	}
-	if decision.Answered() {
-		return decision.OptionID, nil
+	if !decision.Answered() {
+		return "", nil
 	}
-	return "", nil
+	if req.PolicyOwned {
+		return g.settlePolicyDecision(decision.OptionID, key), nil
+	}
+	return decision.OptionID, nil
+}
+
+// settlePolicyDecision translates a click on Murtaugh's own option set into the
+// answer the delegating backend understands, recording the grant when the user
+// asked for one.
+//
+// The "always" choice is deliberately not a distinct answer to the backend: the
+// grant is Murtaugh's to remember, and the call it is answering right now is
+// simply allowed. That keeps a delegating backend's vocabulary to allow, deny and
+// "nobody chose" — nothing about always-allow leaks across the boundary.
+func (g *PermissionGate) settlePolicyDecision(optionID, key string) string {
+	switch optionID {
+	case policyOptionAlways:
+		g.grants.Remember(key)
+		return agent.PermissionAllow
+	case policyOptionApprove:
+		return agent.PermissionAllow
+	case policyOptionDeny:
+		return agent.PermissionDeny
+	default:
+		return ""
+	}
 }
 
 // approvalCards builds the renderer hook for one permission request, or nil when
@@ -116,6 +141,48 @@ func (g *PermissionGate) approvalCards(name, detail string, kindByID map[string]
 		},
 		outcome: permissionCardOutcome(kindByID),
 	}
+}
+
+// The option IDs Murtaugh offers when a backend delegates the decision. They are
+// this package's own, never seen by the backend: settlePolicyDecision maps them
+// to agent.Permission* before answering. The kinds are the ACP vocabulary so the
+// button styling, the outcome line and the card's outcome all key off them
+// exactly as they do for a real ACP agent's options.
+const (
+	policyOptionApprove = "approve"
+	policyOptionAlways  = "approve_always"
+	policyOptionDeny    = "deny"
+)
+
+// policyOptions is the set Murtaugh offers for a call a backend has delegated
+// wholesale. It mirrors GateApprover's buttons, because it is the same decision:
+// Murtaugh asking a human whether a tool call it is mediating should run.
+func policyOptions() ([]Option, map[string]string) {
+	return []Option{
+			{ID: policyOptionApprove, Label: "Approve", Style: "primary"},
+			{ID: policyOptionAlways, Label: "Approve & always allow", Style: "primary"},
+			{ID: policyOptionDeny, Label: "Deny", Style: "danger"},
+		}, map[string]string{
+			policyOptionApprove: "allow_once",
+			policyOptionAlways:  "allow_always",
+			policyOptionDeny:    "reject_once",
+		}
+}
+
+// reflectedOptions copies an agent's own options through, adding nothing. A
+// missing name falls back to the id so a button is never blank.
+func reflectedOptions(offered []agent.PermissionOption) ([]Option, map[string]string) {
+	options := make([]Option, 0, len(offered))
+	kindByID := make(map[string]string, len(offered))
+	for _, o := range offered {
+		label := o.Name
+		if label == "" {
+			label = o.ID
+		}
+		options = append(options, Option{ID: o.ID, Label: label, Style: styleForPermissionKind(o.Kind)})
+		kindByID[o.ID] = o.Kind
+	}
+	return options, kindByID
 }
 
 // allowOptionID picks the option to answer a pre-granted call with, preferring

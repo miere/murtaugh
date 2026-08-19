@@ -239,7 +239,32 @@ type PermissionRequest struct {
 	ToolKind  string
 	ToolTitle string
 	Options   []PermissionOption
+
+	// PolicyOwned says the backend has no options of its own and is delegating the
+	// whole decision to Murtaugh, which then supplies its own set (approve /
+	// approve & always allow / deny) and answers with one of the Permission*
+	// constants below.
+	//
+	// It exists because this struct is ACP-shaped, and only ACP actually carries
+	// options on the wire. Claude Code's can_use_tool is a bare allow/deny with no
+	// option list, so its backend used to invent a two-item one purely to satisfy
+	// the shape — a constant dressed as protocol, which is why Murtaugh's own
+	// always-allow could never appear there. Setting this instead keeps the
+	// vocabulary where the policy is.
+	//
+	// Options must be empty when this is set: there is nothing to reflect.
+	PolicyOwned bool
 }
+
+// The option IDs Murtaugh answers a PolicyOwned request with. A backend that
+// delegates the decision understands these three and nothing else; "" keeps its
+// existing meaning of "nobody chose" (a timeout or a dismissal), which is a
+// different outcome from a deliberate refusal and usually deserves a different
+// message to the model.
+const (
+	PermissionAllow = "allow"
+	PermissionDeny  = "deny"
+)
 
 // PermissionAsker resolves an ACP permission request by getting a human decision
 // (e.g. via Slack buttons). It returns the chosen option's ID, or "" when no option
