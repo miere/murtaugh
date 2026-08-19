@@ -257,6 +257,11 @@ trailing chunks, then hard-cancels. The interrupted reply is sealed with an
 `_interrupted_` marker so partial output stays visible. To stop without sending a
 follow-up, run `/stop` (or `/murtaugh stop`) from the thread or DM.
 
+An interrupted turn is never reported as a failure or as an empty reply — you
+asked for it, and your follow-up is already being answered below it. The
+"finished without a reply" note is reserved for a turn that genuinely ran to the
+end with nothing to say.
+
 ---
 
 ## Runtime defaults

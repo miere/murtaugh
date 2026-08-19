@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -113,7 +114,7 @@ func TestChatHandlerRecordsErroredTurn(t *testing.T) {
 	}
 }
 
-func TestChatHandlerSurfacesEmptyReplyWithStopReason(t *testing.T) {
+func TestChatHandlerSurfacesEmptyReplyWithoutStopReason(t *testing.T) {
 	blobDir := t.TempDir()
 	rec := &journalSpy{}
 	// A turn that streams no text and completes with a non-end_turn stop reason
@@ -130,7 +131,10 @@ func TestChatHandlerSurfacesEmptyReplyWithStopReason(t *testing.T) {
 		t.Fatalf("Handle: %v", err)
 	}
 
-	// The user must see a note rather than silence, naming the stop reason.
+	// The user must see a note rather than silence — but not a stop reason. It is
+	// jargon to a reader, and it does not even identify the case: the same
+	// cancellation reports `tool_use` or `end_turn` purely by where in the tool
+	// loop it landed. It stays on the journal row below, for whoever is debugging.
 	if api.appends == 0 {
 		t.Fatalf("expected a fallback note to be appended for an empty reply")
 	}
@@ -138,8 +142,11 @@ func TestChatHandlerSurfacesEmptyReplyWithStopReason(t *testing.T) {
 	if err != nil {
 		t.Fatalf("extract note: %v", err)
 	}
-	if !strings.Contains(note, "max_tokens") {
-		t.Fatalf("fallback note should name the stop reason, got %q", note)
+	if strings.Contains(note, "max_tokens") {
+		t.Fatalf("the note must not leak the stop reason to the reader, got %q", note)
+	}
+	if !strings.Contains(note, "finished without a reply") {
+		t.Fatalf("the note should state what the turn did, got %q", note)
 	}
 
 	// The journal turn records the empty outcome + stop reason.
@@ -150,6 +157,34 @@ func TestChatHandlerSurfacesEmptyReplyWithStopReason(t *testing.T) {
 	payload := turns[0].Payload.(map[string]any)
 	if payload["bytes"] != 0 || payload["stop_reason"] != "max_tokens" {
 		t.Fatalf("unexpected payload: %+v", payload)
+	}
+}
+
+// TestChatHandlerRecordsBackendCancellationAsInterrupted keeps the journal
+// honest about the case that started all this: the backend reports the
+// cancellation before our own ctx carries it, and the row must still read
+// "interrupted" rather than the "completed" that made the turn look like an
+// agent that had nothing to say.
+func TestChatHandlerRecordsBackendCancellationAsInterrupted(t *testing.T) {
+	blobDir := t.TempDir()
+	rec := &journalSpy{}
+	sessions := scriptedSessions{id: "sess-int", events: []agent.Event{
+		{Type: agent.EventError, Error: fmt.Errorf("claudecode: turn interrupted: %w", context.Canceled)},
+	}}
+	handler := NewChatHandler(&fakeStreamAPI{}, map[string]ChatSessionManager{"default": sessions},
+		func(ChatRequest) ChatRoute { return ChatRoute{Agent: "default", ReplyOnThread: true} }, time.Hour, 1, discardLogger()).
+		WithSessionLogger(newSessionLogger(rec, blobDir, discardLogger()))
+
+	if err := handler.handleResolving(context.Background(), ChatRequest{ChannelID: "C1", MessageTS: "1.1", Text: "hi", Source: "dm"}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	turns := rec.byKind("session.turn")
+	if len(turns) != 1 {
+		t.Fatalf("expected one session.turn, got %d", len(turns))
+	}
+	if got := turns[0].Payload.(map[string]any)["outcome"]; got != turnInterrupted {
+		t.Fatalf("outcome = %v, want %v", got, turnInterrupted)
 	}
 }
 

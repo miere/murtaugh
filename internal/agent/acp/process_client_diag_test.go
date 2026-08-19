@@ -21,6 +21,27 @@ func TestExtractStopReason(t *testing.T) {
 	}
 }
 
+// TestIsCancelledStopReason pins which prompt results count as a cancelled turn
+// rather than a completion — the ACP half of the backend-parity contract that a
+// cancelled turn never reaches the empty-reply path.
+func TestIsCancelledStopReason(t *testing.T) {
+	cases := map[string]bool{
+		"cancelled":  true,
+		"canceled":   true, // an adapter using the American spelling
+		"Cancelled":  true,
+		" cancelled": true,
+		"end_turn":   false,
+		"refusal":    false,
+		"max_tokens": false,
+		"":           false,
+	}
+	for reason, want := range cases {
+		if got := isCancelledStopReason(reason); got != want {
+			t.Errorf("isCancelledStopReason(%q) = %v, want %v", reason, got, want)
+		}
+	}
+}
+
 func TestSessionUpdateKind(t *testing.T) {
 	cases := map[string]string{
 		`{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk"}}`: "agent_message_chunk",

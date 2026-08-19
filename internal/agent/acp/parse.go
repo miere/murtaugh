@@ -176,6 +176,18 @@ func extractStopReason(raw json.RawMessage) string {
 	return ""
 }
 
+// isCancelledStopReason reports whether a prompt result ended because the turn
+// was cancelled. ACP spells it "cancelled"; the American spelling is accepted
+// too, since the value crosses a process boundary from an adapter we do not
+// control and getting it wrong reads as a normal completion.
+func isCancelledStopReason(stopReason string) bool {
+	switch strings.ToLower(strings.TrimSpace(stopReason)) {
+	case "cancelled", "canceled":
+		return true
+	}
+	return false
+}
+
 // sessionUpdateKind returns the update.sessionUpdate discriminator of a
 // session/update notification, or "" when absent. Used for diagnostics.
 func sessionUpdateKind(raw json.RawMessage) string {

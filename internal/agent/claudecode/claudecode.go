@@ -276,6 +276,11 @@ type subscription struct {
 	hbStop  chan struct{}
 	hbDone  chan struct{}
 	hbOnce  sync.Once
+
+	// interrupted records that this turn was cancelled by us (session/cancel),
+	// so the abnormal `result` the CLI sends back is read as a cancellation
+	// rather than as an agent failure. Set by cancel, read by abortActive.
+	interrupted atomic.Bool
 }
 
 type procSession struct {
@@ -458,6 +463,15 @@ func (s *procSession) prompt(req agent.PromptRequest) (<-chan agent.Event, error
 }
 
 func (s *procSession) cancel(ctx context.Context) error {
+	// Mark the turn before asking the CLI to stop: the abnormal `result` that
+	// answers the interrupt is what abortActive has to classify, and it can
+	// arrive before this call has even returned.
+	s.mu.Lock()
+	sub := s.active
+	s.mu.Unlock()
+	if sub != nil {
+		sub.interrupted.Store(true)
+	}
 	_, err := s.sendControl(ctx, map[string]any{"subtype": "interrupt"})
 	return err
 }
@@ -509,6 +523,8 @@ func (s *procSession) dispatch(msg *streamMessage) {
 		s.deliverControlResponse(msg)
 	case msg.Type == "control_request":
 		go s.handleControlRequest(msg)
+	case msg.isAbortedResult():
+		s.abortActive(msg.Subtype)
 	case msg.isResult():
 		stop := msg.StopReason
 		if stop == "" {
@@ -564,6 +580,29 @@ func (s *procSession) completeActive(stopReason string) {
 	sub.stopHeartbeat()
 	sub.events <- agent.Event{Type: agent.EventComplete, StopReason: stopReason}
 	close(sub.events)
+}
+
+// abortActive ends a turn the CLI reported as aborted mid-execution. It must
+// never reach completeActive: an aborted turn typically carries no reply text,
+// so a completion would hand the gateway the exact shape of "the agent finished
+// and said nothing" and earn the user a warning about an agent that did nothing
+// wrong.
+//
+// When the abort answers our own interrupt it is a cancellation, not a failure,
+// and is raised as context.Canceled so the relay renders its interrupt marker —
+// the same treatment a caller-cancelled turn gets on every other backend.
+// Anything else really is a failure and is surfaced as one.
+func (s *procSession) abortActive(subtype string) {
+	s.mu.Lock()
+	sub := s.active
+	s.mu.Unlock()
+	if sub != nil && sub.interrupted.Load() {
+		s.log.Debug("claudecode: turn aborted by interrupt", "session", s.id, "subtype", subtype)
+		s.failActive(fmt.Errorf("claudecode: turn interrupted: %w", context.Canceled))
+		return
+	}
+	s.log.Warn("claudecode: turn aborted mid-execution", "session", s.id, "subtype", subtype)
+	s.failActive(fmt.Errorf("claudecode: turn aborted mid-execution (%s)", subtype))
 }
 
 func (s *procSession) failActive(err error) {

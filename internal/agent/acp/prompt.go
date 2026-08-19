@@ -131,6 +131,16 @@ func (c *acpSession) prompt(ctx context.Context, request agent.PromptRequest) (<
 		if text != "" && !sawText.Load() {
 			events <- agent.Event{Type: agent.EventText, Text: text}
 		}
+		// A cancelled turn is not a completion. The caller interrupted it, and the
+		// result it left behind carries no reply — so completing it would hand the
+		// relay "the agent finished and said nothing" and earn the user a warning
+		// about an agent that did as it was told. Raised as a cancellation instead,
+		// exactly as the claudecode backend does with its aborted-turn result, so
+		// both backends render the same interrupt marker.
+		if isCancelledStopReason(stopReason) {
+			events <- agent.Event{Type: agent.EventError, Error: fmt.Errorf("acp: turn interrupted: %w", context.Canceled)}
+			return
+		}
 		events <- agent.Event{Type: agent.EventComplete, StopReason: stopReason}
 	}()
 	return events, nil
