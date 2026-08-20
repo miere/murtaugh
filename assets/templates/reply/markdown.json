@@ -1,0 +1,28 @@
+{
+  "blocks": [
+    { "type": "markdown", "text": {{ json .Text }} }
+    {{- if .Mentions }},
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {{- range .Mentions }}
+            {{- if eq .Kind "broadcast" }}
+            { "type": "broadcast", "range": {{ json .ID }} },
+            {{- else if eq .Kind "usergroup" }}
+            { "type": "usergroup", "usergroup_id": {{ json .ID }} },
+            {{- else }}
+            { "type": "user", "user_id": {{ json .ID }} },
+            {{- end }}
+            { "type": "text", "text": " " },
+            {{- end }}
+            { "type": "emoji", "name": "point_up" }
+          ]
+        }
+      ]
+    }
+    {{- end }}
+  ]
+}

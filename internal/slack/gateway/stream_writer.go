@@ -51,6 +51,18 @@ type StreamWriterOptions struct {
 	Interval time.Duration
 	MinChars int
 	Logger   *slog.Logger
+	// TemplateDir and ResolveUserName serve the buffered transport only —
+	// StreamWriter ignores both. They live here because the two sinks are built
+	// from one options value (see newDefaultSlackSink), and splitting the bag in
+	// two would push the same choice onto every construction site.
+	//
+	// TemplateDir is where the reply block template is looked up before falling
+	// back to the embedded assets tree; empty means the working directory.
+	TemplateDir string
+	// ResolveUserName maps a Slack user id to a display name for the buffered
+	// reply's mention rewrite. nil (and "" results) fail soft — the raw id shows
+	// instead of a name, and the mention is still emitted.
+	ResolveUserName func(ctx context.Context, userID string) string
 }
 
 func (w *StreamWriter) Start(ctx context.Context) error {

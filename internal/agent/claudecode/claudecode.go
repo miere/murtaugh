@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/miere/murtaugh/assets"
 	"github.com/miere/murtaugh/internal/agent"
 )
 
@@ -34,6 +35,14 @@ import (
 // same name (internal/tools/ask, via MCPName), so hiding the built-in is what
 // makes the model reach for the one that works — with the payload it already
 // knows. Without this flag the built-in shadows it.
+// `--append-system-prompt` carries Murtaugh's Slack formatting rules. Unlike
+// the native and ACP backends, a claude_code session never sees
+// assets/system-prompt.md — the CLI owns its own system prompt — so without
+// this flag the only formatting guidance it gets is whatever CLAUDE.md happens
+// to sit in its workdir tree, competing with the CLI's own "output
+// GitHub-flavored markdown for a terminal" instruction. Which one won decided
+// the dialect per turn, which is exactly how the same agent produced correct
+// bold in one reply and raw `**` in the next.
 var defaultArgs = []string{
 	"-p",
 	"--input-format", "stream-json",
@@ -41,6 +50,7 @@ var defaultArgs = []string{
 	"--verbose",
 	"--permission-prompt-tool", "stdio",
 	"--disallowedTools", "AskUserQuestion",
+	"--append-system-prompt", strings.TrimSpace(assets.SlackFormat()),
 }
 
 // Options configures a Client. Command is required. Args defaults to defaultArgs

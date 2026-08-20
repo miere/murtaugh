@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -457,5 +458,30 @@ func TestDefaultArgsSuppressTheBuiltInAskUserQuestion(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("defaultArgs no longer suppresses the built-in AskUserQuestion")
+	}
+}
+
+// A claude_code session never reads assets/system-prompt.md, so this flag is
+// the only channel Murtaugh has for the Slack dialect rules. Without it the
+// model falls back to the CLI's own "GitHub-flavored markdown for a terminal"
+// instruction and mrkdwn surfaces show raw metacharacters.
+func TestDefaultArgsAppendTheSlackFormattingRules(t *testing.T) {
+	var value string
+	for i, arg := range defaultArgs {
+		if arg != "--append-system-prompt" {
+			continue
+		}
+		if i+1 >= len(defaultArgs) {
+			t.Fatal("--append-system-prompt has no value")
+		}
+		value = defaultArgs[i+1]
+	}
+	if value == "" {
+		t.Fatal("defaultArgs no longer appends the Slack formatting rules")
+	}
+	for _, want := range []string{"standard Markdown", "mrkdwn"} {
+		if !strings.Contains(value, want) {
+			t.Fatalf("appended prompt does not mention %q:\n%s", want, value)
+		}
 	}
 }

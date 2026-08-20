@@ -19,8 +19,27 @@ import (
 // that configuration lives in the database now and is authored via `murtaugh
 // cfg …`, so there is nothing to seed.
 //
-//go:embed config.yaml env.example system-prompt.md AGENTS.md cli-help.md templates skills troubleshoot
+//go:embed config.yaml env.example system-prompt.md slack-format.md AGENTS.md cli-help.md templates skills troubleshoot
 var FS embed.FS
+
+// slackFormatFile holds the Slack formatting dialect rules.
+const slackFormatFile = "slack-format.md"
+
+// SlackFormat returns the canonical Slack formatting rules, appended to every
+// agent's system prompt regardless of backend.
+//
+// It is a separate file rather than a paragraph inside system-prompt.md because
+// the two backends reach it differently — native folds it into the resolved
+// prompt, claude_code passes it as --append-system-prompt — and because it is a
+// fact about the transport, not a persona choice. An operator who replaces the
+// whole system prompt should still get correct formatting.
+func SlackFormat() string {
+	data, err := FS.ReadFile(slackFormatFile)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
 
 // skillsRoot is the embedded directory holding one subdirectory per bundled
 // (murtaugh-*) skill.

@@ -4,6 +4,7 @@ description: Everything Slack on Murtaugh — post/update/read messages and reac
 requires: [slack, ask, present_plan, manage]
 templated: true
 files:
+  reference/formatting.md:     { requires: [slack],            summary: "the two dialects — standard Markdown vs Slack mrkdwn, and mentions" }
   reference/messaging.md:      { requires: [slack],            summary: "post, update, and read messages & reactions" }
   reference/canvas.md:         { requires: [slack],            summary: "read & edit a Slack canvas document (Markdown in and out)" }
   reference/asking.md:         { requires: [ask, present_plan], summary: "ask the user a question / get plan sign-off and block for the answer" }

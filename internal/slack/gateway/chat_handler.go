@@ -65,6 +65,14 @@ type ChatHandler struct {
 	// progressDisplay resolves the per-agent progress rendering. nil defaults
 	// every agent to the simplified single-line view.
 	progressDisplay func(agent string) config.ProgressDisplay
+	// templateDir is where the buffered reply's Block Kit template is looked up
+	// before the embedded assets tree, so an operator can restyle it without a
+	// rebuild. Empty means the working directory (the embedded default wins).
+	templateDir string
+	// userNames resolves a Slack user id to a display name when the buffered
+	// transport rewrites mentions out of the reply prose. A nil cache resolves
+	// nothing and the raw id is shown — cosmetic only; the mention still fires.
+	userNames *userNameCache
 	// statusMessenger lets the simplified renderer post/edit/delete its own
 	// context-block message. nil makes the simplified line a no-op (tests that
 	// do not wire Slack); the gateway always supplies it in production.
@@ -250,6 +258,19 @@ func (h *ChatHandler) WithUploader(u attachmentUploader) *ChatHandler {
 		return h
 	}
 	h.uploader = u
+	return h
+}
+
+// WithReplyBlocks wires what the buffered reply transport needs to render its
+// Block Kit document: the operator template directory (empty means the embedded
+// default) and the Slack surface used to turn a tagged user id into a name.
+// Returns the handler for chaining. A nil api leaves names unresolved, which is
+// cosmetic — mentions still notify.
+func (h *ChatHandler) WithReplyBlocks(templateDir string, api userInfoAPI) *ChatHandler {
+	h.templateDir = templateDir
+	if api != nil {
+		h.userNames = newUserNameCache(api, h.logger)
+	}
 	return h
 }
 
@@ -512,7 +533,11 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest, route ChatRou
 		teamID, userID = "", ""
 	}
 	progressMode := h.resolveProgressDisplay(agentName)
-	streamOpts := StreamWriterOptions{ThreadTS: streamThreadTS, TeamID: teamID, UserID: userID, Interval: h.interval, MinChars: h.minChars, Logger: h.logger}
+	streamOpts := StreamWriterOptions{
+		ThreadTS: streamThreadTS, TeamID: teamID, UserID: userID,
+		Interval: h.interval, MinChars: h.minChars, Logger: h.logger,
+		TemplateDir: h.templateDir, ResolveUserName: h.userNames.Name,
+	}
 	renderer := h.newChatRenderer(progressMode, req.ChannelID, streamThreadTS, streamOpts)
 	// Tell the background events router where this conversation renders, so a subagent that
 	// finishes after this turn ends is posted into the same thread. Keyed by the

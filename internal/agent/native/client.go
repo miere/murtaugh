@@ -158,6 +158,10 @@ func Build(profile config.AgentProfile, deps BuildDeps) (*Client, error) {
 	// static system prompt so it stays in the cacheable prefix. It is the same
 	// persona an ACP agent gets injected, keeping the two backends' voice aligned.
 	systemPrompt = PrependPersona(ReadSoul(deps.WorkspaceDir), systemPrompt)
+	// The Slack formatting dialect is appended last, and unconditionally: it
+	// describes the transport, not the agent, so it must survive an operator who
+	// replaces the whole system prompt with their own.
+	systemPrompt = AppendSlackFormat(systemPrompt)
 	// The agent workdir is resolved upstream (the seam) into deps.Root; an absent
 	// root means no workspace (the workdir-rooted tools were already pruned).
 	var workDir string
@@ -440,6 +444,23 @@ func ReadSoul(dir string) string {
 		return ""
 	}
 	return string(data)
+}
+
+// AppendSlackFormat appends the canonical Slack formatting rules to base,
+// returning base unchanged if the rules are unavailable (a malformed embed,
+// which never happens in practice). Exported because the claude_code backend
+// needs the same text for --append-system-prompt: one dialect rule, both
+// backends, no drift.
+func AppendSlackFormat(base string) string {
+	rules := strings.TrimSpace(assets.SlackFormat())
+	if rules == "" {
+		return base
+	}
+	base = strings.TrimRight(base, "\n")
+	if base == "" {
+		return rules
+	}
+	return base + "\n\n" + rules
 }
 
 // PrependPersona wraps soul in a <persona> block and prepends it to base,
