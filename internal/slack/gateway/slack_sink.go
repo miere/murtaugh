@@ -47,9 +47,13 @@ type messagePoster interface {
 const slackChannelTypeUnsupported = "channel_type_not_supported"
 
 // maxBufferedPostChars bounds a single buffered chat.postMessage. A longer reply is
-// split across ordered messages (streaming handles length via rollover; buffered
-// has no rollover, so it splits explicitly). Conservative relative to Slack's hard
-// text limit so a reply is never truncated.
+// split across ordered messages. Conservative relative to Slack's hard text limit
+// so a reply is never truncated.
+//
+// The streaming transport has the same problem and solves it the same way, at
+// maxStreamMessageChars — see StreamWriter.paint. The two limits differ because
+// Slack's do (a posted message and a streaming message are not capped alike), so
+// they stay as separate constants rather than one shared number.
 const maxBufferedPostChars = 3900
 
 // isChannelTypeUnsupported reports whether err is Slack rejecting a stream because

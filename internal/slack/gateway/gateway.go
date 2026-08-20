@@ -1730,6 +1730,16 @@ func (a *Gateway) dispatchTurn(parent context.Context, key agent.ConversationKey
 		}
 		if err != nil {
 			a.logger.Error("agent chat failed", "source", req.Source, "channel", req.ChannelID, "error", err)
+			// Journal it too. A failed turn is exactly what someone debugging
+			// "Murtaugh said it replied but nothing arrived" comes looking for, and
+			// stderr is the one place they cannot filter. Recorded on a fresh
+			// context carrying the turn's correlation id, because ctx is cancelled
+			// the moment this goroutine returns.
+			a.record(journal.WithCorrID(context.Background(), journal.CorrIDFromContext(ctx)),
+				"chat.failed", journal.LevelError,
+				"agent chat failed: "+truncateForSummary(err.Error(), 160),
+				journal.Keys{TeamID: req.TeamID, ChannelID: req.ChannelID, ThreadTS: key.ThreadTS, UserID: req.UserID},
+				map[string]any{"source": req.Source, "agent": agentName, "error": err.Error()})
 		}
 	}()
 }
