@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/slack-go/slack"
 )
@@ -31,6 +33,20 @@ type fakeStreamAPI struct {
 	// a surface that cannot stream (e.g. a canvas → channel_type_not_supported).
 	startErr error
 
+	// charBudget, when > 0, makes the fake enforce Slack's real per-message
+	// character cap: an append that would push the *current message total* past it
+	// is refused with msg_too_long. Measured behaviour, not a guess — see
+	// maxStreamMessageChars.
+	charBudget int
+	charsUsed  int
+	// rejectAppend, when set, makes every append fail with it — used to hold text
+	// in the writer's buffer so a test can exercise what happens next.
+	rejectAppend error
+	// messages accumulates the text painted onto each streaming message, in the
+	// order StartStreamContext opened them. Grouping by message rather than by
+	// append is what lets a test assert *where* a rollover fell.
+	messages [][]string
+
 	// rejectCanceledStatus makes SetAssistantThreadsStatusContext fail when
 	// invoked with an already-cancelled context, mirroring Slack rejecting a
 	// request made on a dead context. Used to prove the final status clear runs
@@ -50,6 +66,8 @@ func (f *fakeStreamAPI) StartStreamContext(_ context.Context, channelID string, 
 		return "", "", f.startErr
 	}
 	f.finalizeUntilStart = false
+	f.charsUsed = 0
+	f.messages = append(f.messages, nil)
 	ts := "stream-ts"
 	if f.nextStreamTS != "" {
 		ts, f.nextStreamTS = f.nextStreamTS, ""
@@ -61,9 +79,47 @@ func (f *fakeStreamAPI) AppendStreamContext(_ context.Context, _ string, _ strin
 	if f.finalizeUntilStart {
 		return "", "", slack.SlackErrorResponse{Err: streamFinalizedError}
 	}
+	if f.rejectAppend != nil {
+		return "", "", f.rejectAppend
+	}
+	text := chunkTextOf(options...)
+	if f.charBudget > 0 && f.charsUsed+utf8.RuneCountInString(text) > f.charBudget {
+		return "", "", slack.SlackErrorResponse{Err: streamTooLongError}
+	}
+	f.charsUsed += utf8.RuneCountInString(text)
+	if len(f.messages) > 0 {
+		f.messages[len(f.messages)-1] = append(f.messages[len(f.messages)-1], text)
+	}
 	f.appends++
 	f.appendOptions = append(f.appendOptions, options)
 	return "C1", "stream-ts", nil
+}
+
+// messageTexts returns the full text of each streaming message the fake opened,
+// in order. Messages the writer opened but never painted come back as "".
+func (f *fakeStreamAPI) messageTexts() []string {
+	out := make([]string, 0, len(f.messages))
+	for _, parts := range f.messages {
+		out = append(out, strings.Join(parts, ""))
+	}
+	return out
+}
+
+// chunkTextOf decodes the markdown text carried by append options, best-effort:
+// it runs on every fake append, including ones a test never inspects, so a decode
+// failure returns "" rather than needing a *testing.T.
+func chunkTextOf(options ...slack.MsgOption) string {
+	chunks, err := extractChunksFromOptions(options...)
+	if err != nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, chunk := range chunks {
+		if md, ok := chunk.(slack.MarkdownTextChunk); ok {
+			b.WriteString(md.Text)
+		}
+	}
+	return b.String()
 }
 
 func (f *fakeStreamAPI) StopStreamContext(_ context.Context, _ string, _ string, _ ...slack.MsgOption) (string, string, error) {

@@ -6,9 +6,30 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/slack-go/slack"
 )
+
+// maxStreamMessageChars is Slack's hard limit on one streaming message. It counts
+// *characters* and applies to the message *total*, not to each append — three
+// 4000-char appends fill it exactly as one 12000-char append does.
+//
+// Both facts were measured against the real API (ignore/streamprobe), because
+// getting either wrong changes the fix: 12000 was accepted and 12001 returned
+// msg_too_long; 4000+4000+4000 was accepted and a fourth append on the same
+// message was refused; 6000 em-dashes (18000 bytes) was accepted, so the unit is
+// runes, not bytes.
+const maxStreamMessageChars = 12000
+
+// streamMessageBudget is what we actually spend of maxStreamMessageChars, holding
+// back enough room to close an open code fence on the way out of a message.
+const streamMessageBudget = maxStreamMessageChars - 64
+
+// streamMinRoom is the smallest tail of a message worth filling. Below it we roll
+// over early rather than cram a few words in, which would break a paragraph
+// across two messages to save space nobody wanted.
+const streamMinRoom = 512
 
 type StreamWriter struct {
 	api       StreamAPI
@@ -28,6 +49,13 @@ type StreamWriter struct {
 	bytesFlushed  int
 	started       bool
 	stopped       bool
+	// spent is how much of streamMessageBudget the *current* message has used, in
+	// runes. Reset on rollover; distinct from bytesFlushed, which stays cumulative
+	// across rollovers because it reports the size of the whole reply.
+	spent int
+	// fence follows code-fence state so a rollover can close and reopen a code
+	// block that spans the boundary.
+	fence fenceTracker
 }
 
 func NewStreamWriter(api StreamAPI, channelID string, opts StreamWriterOptions) *StreamWriter {
@@ -155,7 +183,7 @@ func (w *StreamWriter) emit(ctx context.Context, n int) error {
 	}
 	text := w.pending[:n]
 	startedAt := time.Now()
-	if err := w.append(ctx, text); err != nil {
+	if err := w.paint(ctx, text); err != nil {
 		return err
 	}
 	w.pending = w.pending[n:]
@@ -166,21 +194,95 @@ func (w *StreamWriter) emit(ctx context.Context, n int) error {
 	return nil
 }
 
+// paint puts text on the wire, spanning as many streaming messages as it takes.
+//
+// A streaming message holds maxStreamMessageChars in *total*, so a long reply
+// cannot be delivered by one message however finely we chop the appends — it has
+// to continue in a new one. paint therefore owns two decisions the caller should
+// not have to think about: where to cut (the widest boundary that fits, via
+// splitAtBudget) and when to roll over (before the cut, so no append is ever sent
+// that we expect Slack to refuse).
+//
+// This is the pre-emptive half of the size story. append keeps a reactive half
+// for the case where our accounting and Slack's disagree.
+func (w *StreamWriter) paint(ctx context.Context, text string) error {
+	for text != "" {
+		// Roll over early on a nearly-full message rather than wedge a fragment
+		// into the tail. Guarded on spent > 0 so a fresh message always takes
+		// text, which is what keeps this loop finite.
+		if w.spent > 0 && streamMessageBudget-w.spent < streamMinRoom {
+			if err := w.rollover(ctx); err != nil {
+				return err
+			}
+		}
+		piece, rest := splitAtBudget(text, streamMessageBudget-w.spent)
+		if err := w.append(ctx, piece); err != nil {
+			return err
+		}
+		w.spent += utf8.RuneCountInString(piece)
+		w.fence.consume(piece)
+		text = rest
+	}
+	return nil
+}
+
+// splitAtBudget cuts text so the first piece fits in room characters, preferring
+// the widest boundary that fits: a blank line (paragraph), then a line end, then a
+// word break. A run with none of those — a minified file, a base64 payload — is
+// cut at the budget on a rune boundary. Ugly, but it moves, which beats the reply
+// vanishing.
+//
+// Byte indexes taken from window are valid in text because window is a prefix of
+// it; only the final hard cut needs the rune slice, to avoid splitting a
+// multi-byte character in half.
+func splitAtBudget(text string, room int) (piece, rest string) {
+	if room <= 0 {
+		return "", text
+	}
+	runes := []rune(text)
+	if len(runes) <= room {
+		return text, ""
+	}
+	window := string(runes[:room])
+	if i := strings.LastIndex(window, "\n\n"); i > 0 {
+		return text[:i+2], text[i+2:]
+	}
+	if i := strings.LastIndexByte(window, '\n'); i > 0 {
+		return text[:i+1], text[i+1:]
+	}
+	if i := strings.LastIndexByte(window, ' '); i > 0 {
+		return text[:i+1], text[i+1:]
+	}
+	return window, string(runes[room:])
+}
+
 // append paints text onto the live streaming message, transparently rolling over
-// to a fresh message when Slack has finalized the current one. Slack caps how
-// long a streaming message stays open; a long turn (a coding agent reading,
-// planning, and writing for several minutes) routinely outlives that window, and
-// the next append is rejected with message_not_in_streaming_state. Rather than
-// fail the turn — leaving the user with a half-sentence and no error — we continue
-// in a new message. The text carries across, so the reply simply spans two
-// messages instead of being lost.
+// to a fresh message when Slack refuses it for a reason a new message would cure.
+// There are two:
+//
+//   - message_not_in_streaming_state — the message got too *old*. Slack caps how
+//     long a streaming message stays open, and a long turn (a coding agent
+//     reading, planning, and writing for several minutes) routinely outlives it.
+//   - msg_too_long — the message got too *full*. paint's budget should mean we
+//     never send one of these; this is the net for when Slack moves the number or
+//     counts something we do not, and it is deliberately not fatal.
+//
+// Either way, failing the turn would leave the user with a half-sentence and no
+// error, so we continue in a new message instead. The text carries across, so the
+// reply simply spans two messages rather than being lost.
 func (w *StreamWriter) append(ctx context.Context, text string) error {
 	_, _, err := w.api.AppendStreamContext(ctx, w.streamChannel, w.streamTS, slack.MsgOptionChunks(slack.NewMarkdownTextChunk(text)))
-	if !isStreamFinalized(err) {
-		if err != nil {
-			return fmt.Errorf("append Slack stream: %w", err)
-		}
+	if err == nil {
 		return nil
+	}
+	if !isStreamFinalized(err) && !isMessageTooLong(err) {
+		return fmt.Errorf("append Slack stream: %w", err)
+	}
+	if isMessageTooLong(err) {
+		// Worth a warning rather than silence: it means streamMessageBudget no
+		// longer matches reality and the constant needs re-measuring.
+		w.logger.Warn("Slack refused a stream append as too long despite the size budget; rolling over",
+			"chars", utf8.RuneCountInString(text), "spent", w.spent, "budget", streamMessageBudget)
 	}
 	if rerr := w.rollover(ctx); rerr != nil {
 		return rerr
@@ -191,24 +293,122 @@ func (w *StreamWriter) append(ctx context.Context, text string) error {
 	return nil
 }
 
-// rollover abandons a streaming message Slack has finalized and opens a fresh one
-// in its place, so a turn that outlives Slack's streaming window keeps rendering
+// rollover leaves the current streaming message and opens a fresh one in its
+// place, so a turn that outgrows one message — in age or in size — keeps rendering
 // rather than dying. Callers are responsible for re-emitting whatever content the
-// finalized message rejected (see append and TaskCardWriter.Update).
+// old message rejected (see append and TaskCardWriter.Update).
+//
+// Two pieces of housekeeping on the way out, both best-effort because the message
+// we are leaving may already be finalized, and neither is worth failing a turn the
+// agent has finished:
+//
+//   - close an open code fence, and reopen it on the new message. Without this a
+//     code block spanning the boundary renders as code on one half and raw
+//     backticked prose on the other. This used to be a rarity that only long-lived
+//     turns hit; with a size budget it is on the main path for any long reply.
+//   - stop the old message, so it does not sit in streaming state (still showing
+//     as generating) until Slack's window elapses on its own.
 func (w *StreamWriter) rollover(ctx context.Context) error {
 	prev := w.streamTS
+	reopen := w.fence.reopen()
+	if closer := w.fence.closer(); closer != "" {
+		if _, _, err := w.api.AppendStreamContext(ctx, w.streamChannel, w.streamTS, slack.MsgOptionChunks(slack.NewMarkdownTextChunk(closer))); err != nil {
+			w.logger.Debug("could not close the code fence before rollover", "error", err)
+		}
+	}
+	if _, _, err := w.api.StopStreamContext(ctx, w.streamChannel, w.streamTS); err != nil && !isStreamFinalized(err) {
+		w.logger.Debug("could not stop the streaming message before rollover", "error", err)
+	}
 	w.started = false
 	w.stopped = false
 	w.streamChannel = ""
 	w.streamTS = ""
+	w.spent = 0
+	w.fence.rolledOver()
 	if err := w.Start(ctx); err != nil {
 		return err
 	}
-	w.logger.Info("rolled over finalized Slack stream", "prev_ts", prev, "new_ts", w.streamTS)
+	w.logger.Info("rolled over Slack stream", "prev_ts", prev, "new_ts", w.streamTS, "in_fence", reopen != "")
+	if reopen != "" {
+		if _, _, err := w.api.AppendStreamContext(ctx, w.streamChannel, w.streamTS, slack.MsgOptionChunks(slack.NewMarkdownTextChunk(reopen))); err != nil {
+			return fmt.Errorf("reopen code fence after rollover: %w", err)
+		}
+		w.spent += utf8.RuneCountInString(reopen)
+	}
 	return nil
 }
 
+// fenceTracker follows fenced-code-block state across arbitrary chunk boundaries,
+// so rollover can tell whether the message it is leaving ends mid-code-block.
+// Chunks do not arrive line-aligned, hence the partial-line carry.
+type fenceTracker struct {
+	partial string // text since the last newline
+	opener  string // the opening delimiter line ("```go"); empty when outside a fence
+}
+
+func (f *fenceTracker) consume(text string) {
+	f.partial += text
+	for {
+		i := strings.IndexByte(f.partial, '\n')
+		if i < 0 {
+			return
+		}
+		line := strings.TrimSpace(f.partial[:i])
+		f.partial = f.partial[i+1:]
+		switch {
+		case f.opener == "" && isFenceDelimiter(line):
+			f.opener = line
+		case f.opener != "" && strings.HasPrefix(line, f.opener[:3]):
+			f.opener = ""
+		}
+	}
+}
+
+// closer is what to append to the message being left so its code block terminates.
+// The leading newline covers a chunk that ended mid-line.
+func (f *fenceTracker) closer() string {
+	if f.opener == "" {
+		return ""
+	}
+	return "\n" + f.opener[:3] + "\n"
+}
+
+// reopen is what to prepend to the new message so the code block continues, with
+// the same info string (and so the same syntax highlighting) as the original.
+func (f *fenceTracker) reopen() string {
+	if f.opener == "" {
+		return ""
+	}
+	return f.opener + "\n"
+}
+
+// rolledOver notes that closer()/reopen() have been painted: the carried partial
+// line was terminated by the closer, but we are still logically inside the fence,
+// so opener stands.
+func (f *fenceTracker) rolledOver() { f.partial = "" }
+
+func isFenceDelimiter(line string) bool {
+	return strings.HasPrefix(line, "```") || strings.HasPrefix(line, "~~~")
+}
+
+// Fail paints the failure notice and seals the message. The notice is the user's
+// only signal that a turn died, so it must land even when the buffered text
+// cannot: we try to paint what is pending, then drop it regardless and paint the
+// notice on a clean buffer.
+//
+// Dropping is the whole point. emit deliberately retains pending on error so a
+// transient failure never loses text — but that retention is poison here, because
+// the pending text is often *why* we are failing. Painting the notice on top of it
+// re-sent the same rejected bytes, failed identically, and returned before Stop —
+// so the reply, the notice and the error all disappeared, leaving an empty
+// streaming message and one line in stderr. That is how msg_too_long stayed
+// invisible for three days.
 func (w *StreamWriter) Fail(ctx context.Context, err error) error {
+	if flushErr := w.Flush(ctx); flushErr != nil {
+		w.logger.Warn("dropping unpainted reply text so the failure notice can land",
+			"chars", utf8.RuneCountInString(w.pending), "error", flushErr)
+	}
+	w.pending = ""
 	if appendErr := w.Append(ctx, streamFailMessage(err)); appendErr != nil {
 		return appendErr
 	}
@@ -244,12 +444,23 @@ func (w *StreamWriter) Stop(ctx context.Context) error {
 // Slack's maximum streaming lifetime while a long turn was still in flight.
 const streamFinalizedError = "message_not_in_streaming_state"
 
+// streamTooLongError is the Slack API error returned when an append would push a
+// streaming message past maxStreamMessageChars.
+const streamTooLongError = "msg_too_long"
+
 // isStreamFinalized reports whether err is Slack rejecting a stream operation
 // because the message is no longer in streaming state. This is an expected,
 // recoverable condition on long turns (roll over to a fresh message), never a
 // reason to fail the turn.
 func isStreamFinalized(err error) bool {
 	return err != nil && strings.Contains(err.Error(), streamFinalizedError)
+}
+
+// isMessageTooLong reports whether err is Slack refusing an append because the
+// message is full. Like isStreamFinalized, it is cured by a fresh message, not by
+// failing the turn.
+func isMessageTooLong(err error) bool {
+	return err != nil && strings.Contains(err.Error(), streamTooLongError)
 }
 
 func sanitizeSlackInline(text string) string {
