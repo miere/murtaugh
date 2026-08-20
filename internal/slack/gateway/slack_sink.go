@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/miere/murtaugh/internal/llm"
+	slackclient "github.com/miere/murtaugh/internal/slack/client"
+	"github.com/miere/murtaugh/internal/slack/replyblock"
 	"github.com/slack-go/slack"
 )
 
@@ -92,11 +94,17 @@ func streamFailMessage(err error) string {
 // the time we post, so buffering loses only the incremental paint, never content.
 // It never reports channel_type_not_supported — posting works everywhere streaming
 // does not.
+// The reply is delivered as a Block Kit `markdown` block rather than in
+// chat.postMessage's `text` field, so the buffered transport reads the same
+// standard-Markdown dialect the streaming one does — see internal/slack/
+// replyblock for why that mattered and what it costs in mention fidelity.
 type bufferedSink struct {
-	poster    messagePoster
-	channelID string
-	threadTS  string
-	logger    *slog.Logger
+	poster      messagePoster
+	channelID   string
+	threadTS    string
+	logger      *slog.Logger
+	blocks      *replyblock.Renderer
+	resolveName func(ctx context.Context, userID string) string
 
 	buf     strings.Builder
 	started bool
@@ -108,7 +116,14 @@ func newBufferedSink(poster messagePoster, channelID string, opts StreamWriterOp
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &bufferedSink{poster: poster, channelID: channelID, threadTS: opts.ThreadTS, logger: logger}
+	return &bufferedSink{
+		poster:      poster,
+		channelID:   channelID,
+		threadTS:    opts.ThreadTS,
+		logger:      logger,
+		blocks:      replyblock.NewRenderer(opts.TemplateDir, nil),
+		resolveName: opts.ResolveUserName,
+	}
 }
 
 // Append buffers a delta. Unlike streaming it paints nothing yet — the message is
@@ -155,10 +170,15 @@ func (b *bufferedSink) post(ctx context.Context, text string) error {
 		b.logger.Warn("buffered Slack sink has no poster; dropping reply", "channel", b.channelID)
 		return nil
 	}
+	// Split first, then rewrite each piece: mentions are scoped to the message
+	// they appear in, so a long reply's first post does not ping someone named
+	// only in its third. (splitForSlack breaks on newline or space, and a bare
+	// `<@U123>` contains neither, so a reference cannot be severed in half. The
+	// labelled `<@U123|some name>` form could be, but agents do not emit it.)
 	for _, chunk := range splitForSlack(text, maxBufferedPostChars) {
-		options := []slack.MsgOption{slack.MsgOptionText(chunk, false)}
-		if b.threadTS != "" {
-			options = append(options, slack.MsgOptionTS(b.threadTS))
+		options, err := b.postOptions(ctx, chunk)
+		if err != nil {
+			return err
 		}
 		if _, _, err := b.poster.PostMessageContext(ctx, b.channelID, options...); err != nil {
 			return fmt.Errorf("post buffered Slack message: %w", err)
@@ -166,6 +186,60 @@ func (b *bufferedSink) post(ctx context.Context, text string) error {
 	}
 	b.logger.Info("posted buffered Slack reply", "channel", b.channelID, "bytes", len(text))
 	return nil
+}
+
+// postOptions builds the chat.postMessage options for one chunk: the rendered
+// markdown block (plus a mention footer when the chunk tagged anyone), and the
+// chunk's raw text as the notification fallback.
+//
+// Keeping MsgOptionText alongside the blocks is not redundancy. Slack renders
+// the blocks but reads `text` for the push notification and the channel-list
+// preview; dropping it degrades every mobile notification to "this content
+// can't be displayed".
+//
+// A render or decode failure falls back to posting the text alone. That is the
+// pre-block behaviour — imperfect formatting, but the reply still arrives, which
+// beats failing a turn the agent has already finished.
+func (b *bufferedSink) postOptions(ctx context.Context, chunk string) ([]slack.MsgOption, error) {
+	options := []slack.MsgOption{slack.MsgOptionText(chunk, false)}
+	if b.threadTS != "" {
+		options = append(options, slack.MsgOptionTS(b.threadTS))
+	}
+
+	document := b.replyDocument(ctx, chunk)
+	if document == nil {
+		return options, nil
+	}
+	blocks, err := slackclient.DecodeBlocks(document)
+	if err != nil {
+		b.logger.Warn("could not decode buffered reply blocks; posting plain text", "channel", b.channelID, "error", err)
+		return options, nil
+	}
+	return append(options, slack.MsgOptionBlocks(blocks...)), nil
+}
+
+// replyDocument renders one chunk into the raw Block Kit JSON that will be
+// posted, or nil if it cannot be rendered. It is the seam the buffered
+// transport's tests assert on: slack-go only folds blocks into the request at
+// build time, so the document is not observable from a captured MsgOption.
+func (b *bufferedSink) replyDocument(ctx context.Context, chunk string) []byte {
+	rendered, mentions := replyblock.Rewrite(chunk, b.nameResolver(ctx))
+	document, err := b.blocks.Render(rendered, mentions)
+	if err != nil {
+		b.logger.Warn("could not render buffered reply as blocks; posting plain text", "channel", b.channelID, "error", err)
+		return nil
+	}
+	return document
+}
+
+// nameResolver adapts the configured resolver to the signature Rewrite wants,
+// binding the turn's context. nil stays nil so Rewrite takes its no-resolver
+// path rather than calling through a wrapper that always answers "".
+func (b *bufferedSink) nameResolver(ctx context.Context) func(string) string {
+	if b.resolveName == nil {
+		return nil
+	}
+	return func(userID string) string { return b.resolveName(ctx, userID) }
 }
 
 // splitForSlack splits text into ordered pieces of at most max runes, preferring a

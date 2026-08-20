@@ -23,20 +23,25 @@ type postedMessage struct {
 	channelID string
 	text      string
 	threadTS  string
+	blocks    string
 }
 
 func (p *fakePoster) PostMessageContext(_ context.Context, channelID string, options ...slack.MsgOption) (string, string, error) {
 	if p.postErr != nil {
 		return "", "", p.postErr
 	}
-	// Compose the options exactly as slack-go would, then read back the text and
-	// thread_ts from the resulting request values — the only fields these tests
-	// assert on.
+	// Compose the options exactly as slack-go would, then read back the fields
+	// these tests assert on from the resulting request values.
 	_, values, err := slack.UnsafeApplyMsgOptions("token", channelID, "https://slack.test/api/", options...)
 	if err != nil {
 		return "", "", err
 	}
-	p.posts = append(p.posts, postedMessage{channelID: channelID, text: values.Get("text"), threadTS: values.Get("thread_ts")})
+	p.posts = append(p.posts, postedMessage{
+		channelID: channelID,
+		text:      values.Get("text"),
+		threadTS:  values.Get("thread_ts"),
+		blocks:    values.Get("blocks"),
+	})
 	p.nextTS++
 	return channelID, "ts-" + strings.Repeat("x", p.nextTS), nil
 }

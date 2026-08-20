@@ -443,6 +443,7 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 			WithFileFetcher(api).
 			WithUploader(slackAttachmentUploader{api: api}).
 			WithPermissionAskers(acpPermissionAskers).
+			WithReplyBlocks(cfg.BaseDir, api).
 			WithBackgroundEventsRouter(bgRouter)
 		// The router renders background turns through the chat handler's own renderer,
 		// so a background reply looks exactly like a foreground one.
