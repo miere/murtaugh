@@ -31,6 +31,38 @@ func TestDecodeAndClassify(t *testing.T) {
 	}
 }
 
+// TestStrayResultClassification pins which results belong to a prompt the CLI
+// queued for itself rather than the one we sent. The discriminator is that no
+// model turn ran: `num_turns: 0` with no stop reason. Everything that did work —
+// including a turn that legitimately ended with nothing to say — must stay out,
+// or a real turn gets left hanging until the idle watchdog kills it.
+func TestStrayResultClassification(t *testing.T) {
+	cases := []struct {
+		name  string
+		line  string
+		stray bool
+	}{
+		{"queue drained on resume", `{"type":"result","subtype":"success","is_error":false,"num_turns":0,"result":""}`, true},
+		{"explicit null stop reason", `{"type":"result","subtype":"success","stop_reason":null,"num_turns":0}`, true},
+		{"real turn", `{"type":"result","subtype":"success","stop_reason":"end_turn","num_turns":1,"result":"hi"}`, false},
+		{"real turn with no reply text", `{"type":"result","subtype":"success","stop_reason":"end_turn","num_turns":1,"result":""}`, false},
+		{"aborted results are classified elsewhere", `{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":0}`, false},
+		{"max turns is not stray", `{"type":"result","subtype":"error_max_turns","is_error":true}`, false},
+		{"not a result", `{"type":"system","subtype":"success"}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, err := decodeMessage([]byte(tc.line))
+			if err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if got := m.isStrayResult(); got != tc.stray {
+				t.Errorf("isStrayResult() = %v, want %v", got, tc.stray)
+			}
+		})
+	}
+}
+
 // TestAbortedResultClassification pins which results end a turn abnormally. The
 // stop reason is deliberately varied and deliberately ignored: an interrupt
 // reports whatever the last assistant message carried, so it proves nothing.

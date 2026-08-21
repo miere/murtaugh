@@ -535,6 +535,10 @@ func (s *procSession) dispatch(msg *streamMessage) {
 		go s.handleControlRequest(msg)
 	case msg.isAbortedResult():
 		s.abortActive(msg.Subtype)
+	case msg.isStrayResult():
+		// Not ours to act on: the CLI drained a prompt of its own. Leave the active
+		// turn alone and keep reading — ours is still coming.
+		s.log.Debug("claudecode: ignoring stray result from a CLI-queued prompt", "session", s.id, "subtype", msg.Subtype)
 	case msg.isResult():
 		stop := msg.StopReason
 		if stop == "" {
