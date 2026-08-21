@@ -12,6 +12,7 @@ import (
 
 	"github.com/miere/murtaugh/internal/agent"
 	"github.com/miere/murtaugh/internal/config"
+	"github.com/miere/murtaugh/internal/slack/alertcard"
 )
 
 // handleResolving resolves the route via the handler's own resolver and runs
@@ -616,7 +617,7 @@ func TestChatHandlerRendersInterruptFromBackendCancellation(t *testing.T) {
 	}
 }
 
-func TestEmptyReplyNoteStatesWhatTheTurnDid(t *testing.T) {
+func TestEmptyReplySpecStatesWhatTheTurnDid(t *testing.T) {
 	cases := []struct {
 		toolsRun int
 		want     string
@@ -626,14 +627,21 @@ func TestEmptyReplyNoteStatesWhatTheTurnDid(t *testing.T) {
 		{3, "The agent ran 3 tools and finished without a reply."},
 	}
 	for _, tc := range cases {
-		got := emptyReplyNote(tc.toolsRun)
-		if !strings.Contains(got, tc.want) {
-			t.Errorf("emptyReplyNote(%d) = %q, want it to contain %q", tc.toolsRun, got, tc.want)
+		spec := emptyReplySpec(tc.toolsRun)
+		// The subtitle carries the whole message, because it is what stays
+		// visible while the card is collapsed.
+		if spec.Subtitle != tc.want {
+			t.Errorf("emptyReplySpec(%d).Subtitle = %q, want %q", tc.toolsRun, spec.Subtitle, tc.want)
 		}
 		// No advice: the right next move depends on why the turn was silent, and
 		// the handler does not know. Saying nothing beats saying the wrong thing.
-		if strings.Contains(got, "Nudge") || strings.Contains(got, "Try rephrasing") {
-			t.Errorf("emptyReplyNote(%d) should not prescribe a remedy, got %q", tc.toolsRun, got)
+		body := alertcard.PlainText(spec)
+		if strings.Contains(body, "Nudge") || strings.Contains(body, "Try rephrasing") {
+			t.Errorf("emptyReplySpec(%d) should not prescribe a remedy, got %q", tc.toolsRun, body)
+		}
+		// Nothing broke — silence is a warning, not a failure.
+		if spec.Level != alertcard.LevelWarn {
+			t.Errorf("emptyReplySpec(%d).Level = %q, want warn", tc.toolsRun, spec.Level)
 		}
 	}
 }

@@ -6,6 +6,7 @@ import (
 
 	"github.com/miere/murtaugh/internal/agent"
 	"github.com/miere/murtaugh/internal/config"
+	"github.com/miere/murtaugh/internal/slack/alertcard"
 )
 
 // recordingRenderer is a chatRenderer that records what it was driven with.
@@ -23,10 +24,13 @@ func (r *recordingRenderer) Text(context.Context, string) error {
 func (r *recordingRenderer) Task(context.Context, *agent.TaskEvent) error             { r.tasks++; return nil }
 func (r *recordingRenderer) Attachment(context.Context, *agent.AttachmentEvent) error { return nil }
 func (r *recordingRenderer) BeginInterjection(context.Context)                        {}
-func (r *recordingRenderer) Finish(context.Context, string) error                     { r.finished = true; return nil }
-func (r *recordingRenderer) Fail(_ context.Context, err error) error                  { r.failed = err; return nil }
-func (r *recordingRenderer) Interrupted(context.Context)                              {}
-func (r *recordingRenderer) EnsureStopped(context.Context)                            { r.stopped = true }
+func (r *recordingRenderer) Finish(context.Context, *alertcard.Spec) error {
+	r.finished = true
+	return nil
+}
+func (r *recordingRenderer) Fail(_ context.Context, err error) error { r.failed = err; return nil }
+func (r *recordingRenderer) Interrupted(context.Context)             {}
+func (r *recordingRenderer) EnsureStopped(context.Context)           { r.stopped = true }
 
 func TestBackgroundSinkRendersRegisteredSession(t *testing.T) {
 	sink := newBackgroundEventsRouter(nil)

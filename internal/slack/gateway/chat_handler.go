@@ -8,8 +8,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/miere/murtaugh/assets"
 	"github.com/miere/murtaugh/internal/agent"
 	"github.com/miere/murtaugh/internal/config"
+	"github.com/miere/murtaugh/internal/slack/alertcard"
 	"github.com/slack-go/slack"
 )
 
@@ -111,6 +113,12 @@ type ChatHandler struct {
 	// registers each turn's thread with it so the router knows where to post. nil
 	// disables background rendering (tests, non-claude_code deploys).
 	backgroundEventsRouter *backgroundEventsRouter
+	// alertCards renders the turn-ending alerts (a failure, an empty reply) as
+	// collapsed cards, and alertAPI posts them. Both nil (tests that do not wire
+	// Slack) makes the renderer paint those alerts as text on the reply surface
+	// instead — the same fallback a failed post takes.
+	alertCards *alertcard.Renderer
+	alertAPI   alertMessagePoster
 }
 
 // threadBackfiller renders a Slack thread into a transcript block for a cold
@@ -294,6 +302,16 @@ func (h *ChatHandler) WithBackgroundEventsRouter(s *backgroundEventsRouter) *Cha
 	return h
 }
 
+// WithAlerts wires the alert-card renderer and the client that posts it. dir is
+// looked up before the embedded assets tree, so an operator can restyle alerts
+// without a rebuild. A nil api leaves alerts as text on the reply surface.
+// Returns the handler for chaining.
+func (h *ChatHandler) WithAlerts(dir string, api alertMessagePoster) *ChatHandler {
+	h.alertCards = alertcard.NewRenderer(dir, assets.FS)
+	h.alertAPI = api
+	return h
+}
+
 // resolveProgressDisplay returns the configured mode for the agent, defaulting
 // to simplified when no resolver is wired or it returns an empty value.
 func (h *ChatHandler) resolveProgressDisplay(agent string) config.ProgressDisplay {
@@ -330,6 +348,7 @@ func (h *ChatHandler) newChatRenderer(mode config.ProgressDisplay, channelID, th
 		func() SlackSink { return newDefaultSlackSink(h.api, h.statusMessenger, channelID, opts, h.logger) },
 		newBlock,
 		h.uploader,
+		newAlertPoster(h.alertAPI, h.alertCards, channelID, threadTS),
 		channelID,
 		threadTS,
 		h.logger,
@@ -639,14 +658,15 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest, route ChatRou
 	// the turn produced no reply text, surfaces an empty-reply note so silence is
 	// legible. Shared by the explicit EventComplete and channel-closed paths.
 	finish := func() error {
-		emptyNote := ""
+		var empty *alertcard.Spec
 		// A turn that delivered a file but no prose is not empty — suppress the
 		// note so an attachment-only reply does not look like a failed turn.
 		if byteSeen == 0 && attachSeen == 0 {
-			emptyNote = emptyReplyNote(len(toolsRun))
+			spec := emptyReplySpec(len(toolsRun))
+			empty = &spec
 			h.logger.Warn("agent turn completed with no agent text", "source", req.Source, "channel", req.ChannelID, "stop_reason", stopReason, "tools_run", len(toolsRun))
 		}
-		if err := renderer.Finish(ctx, emptyNote); err != nil {
+		if err := renderer.Finish(ctx, empty); err != nil {
 			return err
 		}
 		h.logger.Info("completed agent chat response", "source", req.Source, "channel", req.ChannelID, "duration", time.Since(startedAt), "chunks", chunkSeen, "bytes", byteSeen, "attachments", attachSeen, "stop_reason", stopReason)
@@ -810,31 +830,6 @@ func (h *ChatHandler) askPermission(ctx context.Context, req ChatRequest, agentN
 		return ""
 	}
 	return optionID
-}
-
-// emptyReplyNote builds the message shown when a turn genuinely produced no
-// reply: it states what the turn did and stops there.
-//
-// It deliberately neither hedges nor prescribes. It does not hedge because the
-// turn's tool activity is counted rather than guessed at — the old "it may have
-// only run tools" was the handler admitting it had not looked. It does not
-// prescribe because there is no remedy that is right in every case: an
-// interrupted turn never reaches here (it renders the interrupt marker instead),
-// and an agent that answered through its Slack tool has already delivered its
-// reply, so "nudge it to continue" would be wrong advice in both.
-//
-// The stop reason is left to the log line beside it: `tool_use` means nothing to
-// a reader, and it does not identify the failure anyway — the same cancellation
-// reports `tool_use` or `end_turn` purely by where in the tool loop it landed.
-func emptyReplyNote(toolsRun int) string {
-	switch {
-	case toolsRun == 1:
-		return ":warning: _The agent ran one tool and finished without a reply._"
-	case toolsRun > 1:
-		return fmt.Sprintf(":warning: _The agent ran %d tools and finished without a reply._", toolsRun)
-	default:
-		return ":warning: _The agent finished without a reply._"
-	}
 }
 
 func (h *ChatHandler) refreshAssistantStatus(ctx context.Context, channelID, threadTS, status string, done chan<- struct{}) {

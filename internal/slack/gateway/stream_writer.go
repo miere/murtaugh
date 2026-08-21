@@ -391,30 +391,6 @@ func isFenceDelimiter(line string) bool {
 	return strings.HasPrefix(line, "```") || strings.HasPrefix(line, "~~~")
 }
 
-// Fail paints the failure notice and seals the message. The notice is the user's
-// only signal that a turn died, so it must land even when the buffered text
-// cannot: we try to paint what is pending, then drop it regardless and paint the
-// notice on a clean buffer.
-//
-// Dropping is the whole point. emit deliberately retains pending on error so a
-// transient failure never loses text — but that retention is poison here, because
-// the pending text is often *why* we are failing. Painting the notice on top of it
-// re-sent the same rejected bytes, failed identically, and returned before Stop —
-// so the reply, the notice and the error all disappeared, leaving an empty
-// streaming message and one line in stderr. That is how msg_too_long stayed
-// invisible for three days.
-func (w *StreamWriter) Fail(ctx context.Context, err error) error {
-	if flushErr := w.Flush(ctx); flushErr != nil {
-		w.logger.Warn("dropping unpainted reply text so the failure notice can land",
-			"chars", utf8.RuneCountInString(w.pending), "error", flushErr)
-	}
-	w.pending = ""
-	if appendErr := w.Append(ctx, streamFailMessage(err)); appendErr != nil {
-		return appendErr
-	}
-	return w.Stop(ctx)
-}
-
 func (w *StreamWriter) Stop(ctx context.Context) error {
 	if err := w.Flush(ctx); err != nil {
 		return err

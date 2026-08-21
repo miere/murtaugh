@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/miere/murtaugh/internal/llm"
 	slackclient "github.com/miere/murtaugh/internal/slack/client"
 	"github.com/miere/murtaugh/internal/slack/replyblock"
 	"github.com/slack-go/slack"
@@ -27,9 +26,12 @@ import (
 // today only the reply-text path routes through this seam, which fixes the canvas
 // bug for the default (simplified) progress mode. Tasks-mode tool cards still
 // stream — that is the next slice (buffered PlanBlock cards).
+//
+// A sink has no Fail verb. A turn's failure is an alert card posted below the
+// sealed reply (see sectionRenderer.postAlert), not text painted into it, so the
+// sink only ever carries the agent's own words.
 type SlackSink interface {
 	Append(ctx context.Context, text string) error
-	Fail(ctx context.Context, err error) error
 	Stop(ctx context.Context) error
 	Started() bool
 	Stopped() bool
@@ -63,31 +65,6 @@ const maxBufferedPostChars = 3900
 func isChannelTypeUnsupported(err error) bool {
 	var se slack.SlackErrorResponse
 	return errors.As(err, &se) && se.Err == slackChannelTypeUnsupported
-}
-
-// streamFailMessage is the notice painted on the reply surface when a turn errors.
-// Shared by StreamWriter.Fail and the sinks so streamed and buffered failures read
-// identically.
-//
-// A provider failure (any agent backed by internal/llm) is classified and painted
-// as a headline plus the provider's own sentence, so "Gemini is overloaded (503)"
-// reaches the user instead of a wrapped Go error chain wrapped around a JSON body.
-// Everything else — ACP transport faults, spawn failures, our own bugs — keeps the
-// generic notice with the raw error, which is the useful thing to see for those.
-func streamFailMessage(err error) string {
-	if failure, ok := llm.Classify(err); ok {
-		message := "\n\n:warning: *Agent is not available* — " + failure.String()
-		if detail := sanitizeSlackInline(failure.Message); detail != "" {
-			message += "\n" + detail
-		}
-		return message
-	}
-
-	message := "\n\n:warning: Murtaugh hit an error while talking to the agent."
-	if err != nil {
-		message += "\n`" + sanitizeSlackInline(err.Error()) + "`"
-	}
-	return message
 }
 
 // --- bufferedSink -----------------------------------------------------------
@@ -140,13 +117,6 @@ func (b *bufferedSink) Append(_ context.Context, text string) error {
 	b.started = true
 	b.buf.WriteString(text)
 	return nil
-}
-
-func (b *bufferedSink) Fail(ctx context.Context, err error) error {
-	if appendErr := b.Append(ctx, streamFailMessage(err)); appendErr != nil {
-		return appendErr
-	}
-	return b.Stop(ctx)
 }
 
 // Stop posts the accumulated reply. A section that buffered nothing (an empty text
@@ -317,16 +287,6 @@ func (s *defaultSlackSink) Append(ctx context.Context, text string) error {
 		return s.active.Append(ctx, text)
 	}
 	return err
-}
-
-// Fail routes the failure notice through the downgrade-aware Append so a canvas
-// surface switches to buffered posting before we paint, rather than a fresh
-// stream-open erroring a second time. Otherwise mirrors StreamWriter.Fail.
-func (s *defaultSlackSink) Fail(ctx context.Context, cause error) error {
-	if err := s.Append(ctx, streamFailMessage(cause)); err != nil {
-		return err
-	}
-	return s.Stop(ctx)
 }
 
 func (s *defaultSlackSink) Stop(ctx context.Context) error { return s.current().Stop(ctx) }

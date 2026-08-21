@@ -2,10 +2,12 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 
 	"github.com/miere/murtaugh/internal/agent"
+	"github.com/miere/murtaugh/internal/slack/alertcard"
 )
 
 // chatRenderer turns an agent's event stream into Slack UI. The ChatHandler
@@ -43,10 +45,13 @@ type chatRenderer interface {
 	// event opens a fresh reply section after it. It does not disturb an open tool
 	// block — a tool awaiting approval stays visible, as it does for native.
 	BeginInterjection(ctx context.Context)
-	// Finish finalises a successful turn, closing every open section. emptyNote,
-	// when non-empty, is posted because the turn produced no reply text.
-	Finish(ctx context.Context, emptyNote string) error
-	// Fail finalises a turn that errored, surfacing err on the reply surface.
+	// Finish finalises a successful turn, closing every open section. empty,
+	// when non-nil, is posted as an alert below the sealed reply because the
+	// turn produced no reply text.
+	Finish(ctx context.Context, empty *alertcard.Spec) error
+	// Fail finalises a turn that errored, posting err as an alert card below the
+	// sealed reply. It reports an error only when the alert reached the user by
+	// neither route — card nor text.
 	Fail(ctx context.Context, err error) error
 	// Interrupted finalises a caller-cancelled turn: a best-effort "_interrupted_"
 	// marker on the reply surface plus closing any open tool block. Never paints a
@@ -149,6 +154,10 @@ type sectionRenderer struct {
 	channelID string
 	threadTS  string
 	logger    *slog.Logger
+	// alert posts a failure or empty-reply alert as its own card below the
+	// sealed reply. nil falls back to painting the alert as text on the reply
+	// surface — see postAlert.
+	alert alertPoster
 
 	mode   sectionMode
 	text   SlackSink
@@ -168,12 +177,12 @@ type sectionRenderer struct {
 	planRendered bool
 }
 
-func newSectionRenderer(newText func() SlackSink, newBlock func() toolBlock, uploader attachmentUploader, channelID, threadTS string, logger *slog.Logger) *sectionRenderer {
+func newSectionRenderer(newText func() SlackSink, newBlock func() toolBlock, uploader attachmentUploader, alert alertPoster, channelID, threadTS string, logger *slog.Logger) *sectionRenderer {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &sectionRenderer{
-		newText: newText, newBlock: newBlock, uploader: uploader,
+		newText: newText, newBlock: newBlock, uploader: uploader, alert: alert,
 		channelID: channelID, threadTS: threadTS, logger: logger,
 		seenTools: map[string]bool{}, planIndex: map[string]int{},
 	}
@@ -294,25 +303,54 @@ func (r *sectionRenderer) BeginInterjection(ctx context.Context) {
 	r.closeText(ctx)
 }
 
-func (r *sectionRenderer) Finish(ctx context.Context, emptyNote string) error {
-	if emptyNote != "" {
-		if err := r.Text(ctx, emptyNote); err != nil {
-			return err
-		}
-	}
+func (r *sectionRenderer) Finish(ctx context.Context, empty *alertcard.Spec) error {
 	r.closeText(ctx)
 	r.flushUnrenderedPlan(ctx)
 	r.closeBlock(ctx)
+	if empty != nil {
+		return r.postAlert(ctx, *empty)
+	}
 	return nil
 }
 
 func (r *sectionRenderer) Fail(ctx context.Context, err error) error {
+	r.closeText(ctx)
 	r.closeBlock(ctx)
+	return r.postAlert(ctx, failSpec(err))
+}
+
+// postAlert delivers an alert as its own message below the sealed reply, and
+// falls back to painting it on the reply surface when there is no poster wired
+// or the post fails.
+//
+// The fallback matters more than it looks: these fire on the paths where
+// something has already gone wrong, so an alert that cannot be delivered as a
+// card must still reach the user rather than leaving the turn ending in silence.
+// It also covers the surface question the card cannot answer for itself — if a
+// canvas turns out to reject Block Kit, the post errors and the text lands
+// instead.
+//
+// It reports an error only when BOTH routes failed, which is the caller's signal
+// that the user was told nothing at all. A card that failed but whose text
+// landed is a success: the message arrived, just plainer.
+func (r *sectionRenderer) postAlert(ctx context.Context, spec alertcard.Spec) error {
+	if r.alert != nil {
+		err := r.alert(ctx, spec)
+		if err == nil {
+			return nil
+		}
+		r.logger.Warn("failed to post alert card; falling back to text", "error", err)
+	}
 	if r.mode != sectionText || r.text == nil {
 		r.text = r.newText()
 		r.mode = sectionText
 	}
-	return r.text.Fail(ctx, err)
+	err := r.text.Append(ctx, alertcard.PlainText(spec))
+	r.closeText(ctx)
+	if err != nil {
+		return fmt.Errorf("deliver alert: %w", err)
+	}
+	return nil
 }
 
 func (r *sectionRenderer) Interrupted(ctx context.Context) {
@@ -334,9 +372,19 @@ func (r *sectionRenderer) EnsureStopped(ctx context.Context) {
 func (r *sectionRenderer) closeText(ctx context.Context) {
 	if r.text != nil && r.text.Started() && !r.text.Stopped() {
 		if err := r.text.Stop(ctx); err != nil {
-			r.logger.Debug("failed to stop text section", "error", err)
+			// Warn, not Debug: a sink that will not seal has usually rejected the
+			// text it is holding, and dropping the sink (below) drops that text
+			// with it. That loss is silent on the Slack side — the user just sees
+			// a reply that stops — so this line is the only place it is visible.
+			// msg_too_long stayed invisible for three days behind exactly this
+			// kind of quiet log.
+			r.logger.Warn("dropping unsealed reply text", "channel", r.channelID, "error", err)
 		}
 	}
+	// Cleared even when Stop failed, so the next section starts on a fresh sink
+	// rather than inheriting a buffer Slack has already refused. This is what
+	// lets an alert land after a reply that could not be painted: postAlert
+	// builds a new sink instead of re-sending the rejected bytes.
 	r.text = nil
 	if r.mode == sectionText {
 		r.mode = sectionNone

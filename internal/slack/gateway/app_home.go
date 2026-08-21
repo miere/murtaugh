@@ -8,6 +8,8 @@ import (
 
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
+
+	"github.com/miere/murtaugh/internal/slack/alertcard"
 )
 
 const (
@@ -235,7 +237,13 @@ func (a *Gateway) handleAppHomeUpdateSubmit(interaction slack.InteractionCallbac
 	installed, err := a.installUpdate(ctx, target)
 	if err != nil {
 		a.logger.Error("app home update install failed", "target", target, "error", err)
-		a.notifyAdminDM(ctx, fmt.Sprintf(":warning: Update to %s failed: %v", displayTarget(target), err))
+		a.notifyAdminAlert(ctx, alertcard.Spec{
+			Level:     alertcard.LevelError,
+			Title:     "Update failed",
+			Subtitle:  fmt.Sprintf("Could not update to %s.", displayTarget(target)),
+			Detail:    err.Error(),
+			NextSteps: "Check the release tag and the gateway logs, then try again from the App Home.",
+		})
 		return
 	}
 	if a.restart == nil {
@@ -362,6 +370,25 @@ func (a *Gateway) notifyAdminDM(ctx context.Context, text string) {
 	if _, _, err := a.messaging.PostMessageContext(ctx, dest, slack.MsgOptionText(text, false)); err != nil {
 		a.logger.Error("app home admin DM failed", "error", err)
 	}
+}
+
+// notifyAdminAlert posts an alert card to the admin's DM, falling back to the
+// plain-text form when no raw-blocks client is wired or the post fails. Like
+// notifyAdminDM it is best-effort: an admin notification must never fail the
+// operation it is reporting on.
+func (a *Gateway) notifyAdminAlert(ctx context.Context, spec alertcard.Spec) {
+	dest, err := a.resolveSuggestionDestination(ctx, "")
+	if err != nil || dest == "" {
+		return
+	}
+	if post := newAlertPoster(a.alertAPI, a.alertCards, dest, ""); post != nil {
+		if err := post(ctx, spec); err == nil {
+			return
+		} else {
+			a.logger.Warn("failed to post admin alert card; falling back to text", "error", err)
+		}
+	}
+	a.notifyAdminDM(ctx, alertcard.PlainText(spec))
 }
 
 // displayTarget renders the target tag for human-facing copy, falling back to a

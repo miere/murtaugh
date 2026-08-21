@@ -23,6 +23,7 @@ import (
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/journal"
 	"github.com/miere/murtaugh/internal/mcpbridge"
+	"github.com/miere/murtaugh/internal/slack/alertcard"
 	"github.com/miere/murtaugh/internal/slack/approvalcard"
 	"github.com/miere/murtaugh/internal/slack/askcard"
 	"github.com/miere/murtaugh/internal/slack/authcard"
@@ -183,6 +184,12 @@ type Gateway struct {
 	// build a Slack client that uploads the bundle to the admin DM (the narrow
 	// api/messaging interfaces deliberately do not expose file upload).
 	botToken string
+	// alertCards renders the alerts this gateway sends outside a chat turn —
+	// today the admin DMs about a failed update or a failed diagnostics bundle —
+	// and alertAPI posts them through the raw-blocks passthrough a container
+	// block needs. Either nil degrades those alerts to plain text.
+	alertCards *alertcard.Renderer
+	alertAPI   alertMessagePoster
 	// journalSweep runs one retention pass over the journal; journalSweepEvery
 	// is its cadence. Wired by the composition root (WithJournalSweeper) as a
 	// closure over the daemon's store. nil disables the sweeper, so CLI/MCP and
@@ -258,6 +265,23 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 		// files.info for the canvas→parent-channel hop a file-backed canvas
 		// conversation needs (its own name identifies the file, not the channel).
 		channelCache = newChannelNameCache(channelAPI, api, slackCanvasParent{api: api}, 30*time.Second, logger)
+	}
+
+	// The alert card is raw Block Kit (a container block), so it needs the Web
+	// API client's raw-blocks passthrough rather than the socket api the rest of
+	// this package posts through — slack-go's typed builders would silently drop
+	// the fields it does not know. A build failure (empty token — already
+	// rejected by config validation) leaves every alert as plain text, which is
+	// the same fallback a failed post takes.
+	//
+	// Built out here rather than inside the chat block because the admin DMs use
+	// it too, and those fire whether or not chat is enabled.
+	alertCards := alertcard.NewRenderer(cfg.BaseDir, assets.FS)
+	var alertAPI alertMessagePoster
+	if alertClient, err := slackclient.NewClient(cfg.OAuth.BotToken); err != nil {
+		logger.Warn("alert cards disabled: could not build Slack client", "error", err)
+	} else {
+		alertAPI = alertClient
 	}
 
 	var chat *ChatHandler
@@ -444,6 +468,7 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 			WithUploader(slackAttachmentUploader{api: api}).
 			WithPermissionAskers(acpPermissionAskers).
 			WithReplyBlocks(cfg.BaseDir, api).
+			WithAlerts(cfg.BaseDir, alertAPI).
 			WithBackgroundEventsRouter(bgRouter)
 		// The router renders background turns through the chat handler's own renderer,
 		// so a background reply looks exactly like a foreground one.
@@ -500,6 +525,8 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 		scheduledJobs:     cfg.Jobs,
 		recorder:          recorder,
 		botToken:          cfg.OAuth.BotToken,
+		alertCards:        alertCards,
+		alertAPI:          alertAPI,
 		channelCache:      channelCache,
 		// Captured here so the no-mention check in handleEventsAPI runs without
 		// re-importing the full cfg.
@@ -1165,14 +1192,14 @@ func (a *Gateway) dispatchInteractiveWorkflow(event socketmode.Event, interactio
 func (a *Gateway) handleSlashCommand(ctx context.Context, event socketmode.Event) {
 	command, ok := event.Data.(slack.SlashCommand)
 	if !ok {
-		a.ack(event, ephemeralText("Unsupported slash command payload."))
+		a.ack(event, ephemeralAlert(alertcard.LevelError, "Unsupported slash command payload."))
 		a.logger.Warn("unexpected slash command payload", "type", fmt.Sprintf("%T", event.Data))
 		return
 	}
 
 	if !a.cfg.IsAllowedUser(command.UserID) {
 		a.logger.Info("denied slash command from unauthorized user", "command", command.Command, "user", command.UserID, "channel", command.ChannelID)
-		a.ack(event, ephemeralText("Sorry, you are not authorized to use this command."))
+		a.ack(event, ephemeralAlert(alertcard.LevelWarn, "You are not authorized to use this command."))
 		return
 	}
 
@@ -1200,7 +1227,7 @@ func (a *Gateway) handleSlashCommand(ctx context.Context, event socketmode.Event
 	}
 	if err != nil {
 		a.logger.Error("slash command failed", "command", command.Command, "error", err)
-		response = ephemeralText("Murtaugh hit an error while handling that command.")
+		response = ephemeralAlert(alertcard.LevelError, "Murtaugh hit an error while handling that command.")
 	}
 	a.ack(event, response)
 }
@@ -1219,12 +1246,12 @@ func (a *Gateway) handleSlashCommand(ctx context.Context, event socketmode.Event
 func (a *Gateway) handleRestartSlashCommand(ctx context.Context, event socketmode.Event, command slack.SlashCommand) {
 	if !a.cfg.IsAdminUser(command.UserID) {
 		a.logger.Info("denied restart slash command from non-admin user", "command", command.Command, "user", command.UserID, "channel", command.ChannelID)
-		a.ack(event, ephemeralText("Sorry, only the configured admin can restart Murtaugh."))
+		a.ack(event, ephemeralAlert(alertcard.LevelWarn, "Only the configured admin can restart Murtaugh."))
 		return
 	}
 	if a.restart == nil {
 		a.logger.Warn("restart slash command received but no coordinator is wired", "user", command.UserID, "channel", command.ChannelID)
-		a.ack(event, ephemeralText("Restart is not available in this deployment."))
+		a.ack(event, ephemeralAlert(alertcard.LevelInfo, "Restart is not available in this deployment."))
 		return
 	}
 	reason := fmt.Sprintf("user requested via %s restart", command.Command)
@@ -1236,7 +1263,7 @@ func (a *Gateway) handleRestartSlashCommand(ctx context.Context, event socketmod
 	a.postRestartNoticeAndSaveMarker(noticeCtx, command.ChannelID, "", command.UserID, restartSourceSlash, reason)
 	cancel()
 	if !a.restart(string(restartSourceSlash), command.UserID, command.ChannelID, reason) {
-		a.ack(event, ephemeralText("A restart is already in progress (or the cool-down has not elapsed). Try again shortly."))
+		a.ack(event, ephemeralAlert(alertcard.LevelInfo, "A restart is already in progress (or the cool-down has not elapsed). Try again shortly."))
 		return
 	}
 	a.ack(event, ephemeralText("Restarting Murtaugh now. I'll be back in a moment."))
@@ -1249,7 +1276,7 @@ func (a *Gateway) handleChatSlashCommand(ctx context.Context, event socketmode.E
 		return
 	}
 	if a.chat == nil {
-		a.ack(event, ephemeralText("ACP chat is not enabled. Configure `agent.enabled: true` first."))
+		a.ack(event, ephemeralAlert(alertcard.LevelInfo, "ACP chat is not enabled. Configure `agent.enabled: true` first."))
 		return
 	}
 	a.ack(event, ephemeralText("Murtaugh is answering in the channel."))
@@ -1264,16 +1291,16 @@ func (a *Gateway) handleChatSlashCommand(ctx context.Context, event socketmode.E
 // the slash command is acked within Slack's ~3s window.
 func (a *Gateway) handleTroubleshootSlashCommand(ctx context.Context, event socketmode.Event, command slack.SlashCommand) {
 	if a.troubleshoot == nil {
-		a.ack(event, ephemeralText("Troubleshooting bundles are not available in this deployment."))
+		a.ack(event, ephemeralAlert(alertcard.LevelInfo, "Troubleshooting bundles are not available in this deployment."))
 		return
 	}
 	admin := strings.TrimSpace(a.cfg.AdminUser)
 	if admin == "" {
-		a.ack(event, ephemeralText("No admin user is configured, so there is nowhere private to send the bundle."))
+		a.ack(event, ephemeralAlert(alertcard.LevelWarn, "No admin user is configured, so there is nowhere private to send the bundle."))
 		return
 	}
 	if strings.TrimSpace(a.botToken) == "" {
-		a.ack(event, ephemeralText("The bot token is not configured, so I cannot upload a bundle."))
+		a.ack(event, ephemeralAlert(alertcard.LevelWarn, "The bot token is not configured, so I cannot upload a bundle."))
 		return
 	}
 	note := slashTroubleshootText(command.Text)
@@ -1297,9 +1324,15 @@ func (a *Gateway) handleTroubleshootSlashCommand(ctx context.Context, event sock
 		zipPath, warnings, err := a.troubleshoot(bgCtx, note)
 		if err != nil {
 			a.logger.Error("troubleshoot bundle failed", "error", err, "user", command.UserID)
-			_, _ = api.PostMessage(bgCtx, slackclient.PostMessageParams{
-				ChannelID: dm,
-				Text:      fmt.Sprintf(":warning: Troubleshooting bundle requested by <@%s> failed: %v", command.UserID, err),
+			_ = newAlertPoster(api, a.alertCards, dm, "")(bgCtx, alertcard.Spec{
+				Level:    alertcard.LevelError,
+				Title:    "Diagnostics bundle failed",
+				Subtitle: "Murtaugh could not assemble the bundle.",
+				// The requester goes in the body, not the subtitle: a subtitle is
+				// plain_text and would show a raw <@U…> instead of a mention.
+				Text:      fmt.Sprintf("Requested by <@%s>.", command.UserID),
+				Detail:    err.Error(),
+				NextSteps: "Check the gateway logs for the step that failed.",
 			})
 			return
 		}
@@ -1325,9 +1358,13 @@ func (a *Gateway) handleTroubleshootSlashCommand(ctx context.Context, event sock
 			Title:     "Murtaugh troubleshooting bundle",
 		}); err != nil {
 			a.logger.Error("troubleshoot: upload bundle failed", "error", err)
-			_, _ = api.PostMessage(bgCtx, slackclient.PostMessageParams{
-				ChannelID: dm,
-				Text:      fmt.Sprintf(":warning: Assembled the diagnostics bundle but the upload failed: %v", err),
+			_ = newAlertPoster(api, a.alertCards, dm, "")(bgCtx, alertcard.Spec{
+				Level:     alertcard.LevelError,
+				Title:     "Diagnostics bundle upload failed",
+				Subtitle:  "The bundle was assembled, but Slack rejected the upload.",
+				Text:      fmt.Sprintf("Requested by <@%s>.", command.UserID),
+				Detail:    err.Error(),
+				NextSteps: "Check the bot token's `files:write` scope, then run the command again.",
 			})
 			return
 		}
