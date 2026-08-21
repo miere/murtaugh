@@ -85,6 +85,9 @@ internal/slack/       Slack subsystem:
   approvalcard/       The tool-approval card, from templates/approval/*.json.
                       Rendering only — the interaction broker keeps the
                       lifecycle and calls in through its CardRenderer hook.
+  alertcard/          The non-interactive alerts Murtaugh sends about itself
+                      (error / warn / info), from templates/alert/alert.json.
+                      Always collapsed; renders to blocks or to plain text.
 internal/agent/       Agent backend interface, session manager, protocol types,
                       and the shared tool watcher / execution ceiling.
   native/             In-process LLM agent loop (kind: native): conversation,
@@ -533,7 +536,30 @@ package owns none of that — it implements the broker's `CardRenderer` hook
 blocks are needed. Reach for this shape when a lifecycle already exists and only
 the looks are changing; reach for authcard's when there is no lifecycle yet.
 
-Two consequences worth knowing before editing either:
+`internal/slack/alertcard` is the third shape: **rendering with neither a
+lifecycle nor a click**. An alert is a statement, so there is nothing to
+correlate and no terminal state to rewrite — a caller renders and posts. Reach
+for it when Murtaugh needs to say something about itself.
+
+Three things it does that the other two do not:
+
+- **It always arrives collapsed.** Title and subtitle stay visible while the body
+  is folded, so the alert costs one line. That is what makes it affordable to put
+  the whole provider error in `Detail` instead of truncating it — the wall of JSON
+  is one click away rather than pasted into the conversation.
+- **It renders two ways.** `Render` gives blocks; `PlainText` gives the same
+  content as mrkdwn, for the surfaces a container cannot reach (text appended to
+  an in-flight stream, or a post that failed). `FallbackText` is the third, shorter
+  form: title and subtitle only, for the notification field. Callers that can post
+  blocks post blocks — the others are degradation paths, not styles.
+- **Its `Level` is the journal's vocabulary** (`error`/`warn`/`info`), so an alert
+  and the event recorded for it use the same word.
+
+Its scope is the alerts that were bare text. The cards that already have routing
+contracts — approval, restart, ask, auth — keep their own rendering; folding them
+in would re-plumb click routers for no visual gain.
+
+Two consequences worth knowing before editing either of the first two:
 
 - The broker mints the `action_id` and the click `value`, and hands them to the
   card as `CardOption`. A card template **must** emit both verbatim; a button that

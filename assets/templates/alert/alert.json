@@ -1,0 +1,48 @@
+{
+	"blocks": [
+		{
+			"type": "container",
+			"block_id": "murtaugh_alert_card",
+			"icon": {
+				"type": "image",
+				"image_url": {{ json .IconURL }},
+				"alt_text": {{ json .IconAlt }}
+			},
+			"title": {
+				"type": "plain_text",
+				"text": {{ json .Title }}
+			},
+			{{ if .Subtitle }}"subtitle": {
+				"type": "plain_text",
+				"text": {{ json .Subtitle }}
+			},
+			{{ end }}"is_collapsible": true,
+			"default_collapsed": true,
+			"has_header_divider": false,
+			"width": "wide",
+			"child_blocks": [
+				{{ if or .Reason .Text .NextSteps }}{
+					"type": "section",
+					"text": {
+						"type": "mrkdwn",
+						"text": "{{ if .Reason }}*Reason*: {{ jsonstr .Reason }}{{ if or .Text .NextSteps }}\n\n{{ end }}{{ end }}{{ if .Text }}{{ jsonstr .Text }}{{ if .NextSteps }}\n\n{{ end }}{{ end }}{{ if .NextSteps }}*Next Steps*: {{ jsonstr .NextSteps }}{{ end }}"
+					}
+				}{{ if .Detail }},
+				{{ end }}{{ end }}{{ if .Detail }}{
+					"type": "rich_text",
+					"elements": [
+						{
+							"type": "rich_text_preformatted",
+							"elements": [
+								{
+									"type": "text",
+									"text": {{ json .Detail }}
+								}
+							]
+						}
+					]
+				}{{ end }}
+			]
+		}
+	]
+}

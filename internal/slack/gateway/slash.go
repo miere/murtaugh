@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/miere/murtaugh/internal/slack/alertcard"
 	"github.com/slack-go/slack"
 )
 
@@ -55,4 +56,16 @@ func (h *DefaultSlashCommandHandler) help(commandName string) AckResponse {
 
 func ephemeralText(text string) AckResponse {
 	return AckResponse{ResponseType: "ephemeral", Text: text}
+}
+
+// ephemeralAlert is the alert form of a slash-command ack: the one sentence,
+// marked with its severity.
+//
+// A slash ack is the one alert surface a card is wrong for — it is a single
+// transient line, visible only to whoever typed the command, and folding one
+// sentence behind a disclosure triangle buys nothing. It shares the severity
+// vocabulary instead, so "not authorized" reads the same here as it does on a
+// card (see alertcard.Marker).
+func ephemeralAlert(level alertcard.Level, text string) AckResponse {
+	return ephemeralText(alertcard.Marker(level) + " " + text)
 }

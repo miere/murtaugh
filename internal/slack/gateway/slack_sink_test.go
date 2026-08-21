@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/slack-go/slack"
+
+	"github.com/miere/murtaugh/internal/slack/alertcard"
 )
 
 var errSample = errors.New("boom")
@@ -108,22 +110,28 @@ func TestDefaultSlackSink_DowngradesOnCanvas(t *testing.T) {
 	}
 }
 
-// TestDefaultSlackSink_FailDowngrades: a turn that errors immediately on a canvas
-// still delivers the failure notice (via a buffered post), rather than erroring the
-// stream-open a second time.
-func TestDefaultSlackSink_FailDowngrades(t *testing.T) {
+// TestDefaultSlackSink_AlertTextDowngrades: when an alert cannot be delivered as
+// a card it is painted on the reply surface instead (sectionRenderer.postAlert),
+// and on a canvas that paint must downgrade to a buffered post rather than
+// erroring the stream-open a second time. This is the last line of defence on a
+// turn that has already failed, so it has to land.
+func TestDefaultSlackSink_AlertTextDowngrades(t *testing.T) {
 	api := canvasAPI()
 	poster := &fakePoster{}
 	s := newDefaultSlackSink(api, poster, "C1", StreamWriterOptions{MinChars: 1, Logger: discardLogger()}, discardLogger())
 
-	if err := s.Fail(context.Background(), errSample); err != nil {
-		t.Fatalf("Fail: %v", err)
+	ctx := context.Background()
+	if err := s.Append(ctx, alertcard.PlainText(failSpec(errSample))); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if err := s.Stop(ctx); err != nil {
+		t.Fatalf("Stop: %v", err)
 	}
 	if len(poster.posts) != 1 {
-		t.Fatalf("expected the failure notice posted once, got %d posts", len(poster.posts))
+		t.Fatalf("expected the alert posted once, got %d posts", len(poster.posts))
 	}
 	if !strings.Contains(poster.posts[0].text, "hit an error") || !strings.Contains(poster.posts[0].text, "boom") {
-		t.Fatalf("failure post = %q, want the warning + cause", poster.posts[0].text)
+		t.Fatalf("alert post = %q, want the notice + cause", poster.posts[0].text)
 	}
 }
 

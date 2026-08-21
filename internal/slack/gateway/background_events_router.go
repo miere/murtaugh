@@ -93,7 +93,7 @@ func (b *backgroundEventsRouter) Handle(sessionID string, ev agent.Event) {
 		}
 	case agent.EventComplete:
 		if r := b.take(sessionID); r != nil {
-			_ = r.Finish(ctx, "")
+			_ = r.Finish(ctx, nil)
 			r.EnsureStopped(ctx)
 		}
 	case agent.EventError:

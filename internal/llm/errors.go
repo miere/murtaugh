@@ -142,6 +142,35 @@ func (f Failure) Headline() string {
 	}
 }
 
+// Remedy is what the person reading the failure should do about it, in one
+// sentence. It sits beside Headline because it follows from the Kind and nothing
+// else: whose quota ran out is a fact about the provider, not about the surface
+// the message is painted on.
+//
+// It is deliberately addressed to the reader rather than to the operator: on a
+// personal deployment they are the same person, and on a shared one the reader
+// still needs to know whether to wait, rephrase, or fetch somebody.
+func (f Failure) Remedy() string {
+	switch f.Kind {
+	case FailureAuth:
+		return "The configured credentials need attention — notify your admin user."
+	case FailureRateLimit, FailureOverloaded:
+		return "Try again in a moment."
+	case FailureQuota:
+		return "The account needs more quota — notify your admin user."
+	case FailureContextOverflow:
+		return "Start a fresh thread: this conversation no longer fits the model's context."
+	case FailureModel:
+		return "The configured model name looks wrong — notify your admin user."
+	case FailureValidation:
+		return "Try rephrasing. If it keeps happening, notify your admin user."
+	case FailureNetwork, FailureTimeout:
+		return "Try again. If it keeps happening, check the network path to the provider."
+	default:
+		return "Try again. If it keeps happening, notify your admin user."
+	}
+}
+
 // String renders the headline with the status code appended when there is one:
 // "Gemini is overloaded (503)". This is the label form callers paint.
 func (f Failure) String() string {

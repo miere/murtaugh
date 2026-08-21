@@ -153,37 +153,43 @@ func TestStreamWriterRecoversFromUnexpectedTooLong(t *testing.T) {
 	}
 }
 
-// TestStreamWriterFailPaintsNoticeOverRejectedText is the other half of the
-// silent-noop regression. When the buffered text is itself what Slack refuses,
-// the failure notice must still land: the user's only signal that the turn died
-// cannot be held hostage by the content that killed it.
-func TestStreamWriterFailPaintsNoticeOverRejectedText(t *testing.T) {
-	// A message cap so low that no rollover can rescue the reply: this reproduces
-	// the production shape, where the buffered text is unpaintable *anywhere* and
-	// therefore stays in the buffer no matter how many times it is retried.
-	api := &fakeStreamAPI{charBudget: 200}
-	writer := NewStreamWriter(api, "C1", StreamWriterOptions{Interval: time.Hour, MinChars: 1 << 20})
+// TestAlertLandsOverRejectedReplyText is the other half of the silent-noop
+// regression. When the buffered reply is itself what Slack refuses, the failure
+// alert must still land: the user's only signal that the turn died cannot be
+// held hostage by the content that killed it.
+//
+// It was written against StreamWriter.Fail, which fixed this by dropping the
+// retained text before painting the notice into the same message. The alert card
+// changed the seam — a failure is now its own message, and closeText drops the
+// unsealable sink so the alert opens a fresh one — but the regression it guards
+// is unchanged, so the test moved down to the renderer rather than going away.
+//
+// The text path is asserted here rather than the card path because it is the
+// harder one: the card goes out through a different client and never touches the
+// poisoned stream at all.
+func TestAlertLandsOverRejectedReplyText(t *testing.T) {
+	// A message cap low enough that no rollover can rescue the reply, but high
+	// enough for the alert itself: this reproduces the production shape, where
+	// the buffered text is unpaintable *anywhere* and therefore stays in the
+	// buffer no matter how many times it is retried.
+	api := &fakeStreamAPI{charBudget: 400}
+	r := alertRenderer(api, &fakeStatusMessenger{}, nil)
 	ctx := context.Background()
 
-	if err := writer.Append(ctx, strings.Repeat("x", 500)); err == nil {
-		t.Fatalf("expected the oversized append to surface an error")
-	}
-	if writer.pending == "" {
-		t.Fatalf("the rejected text should stay buffered — that is the state that poisoned Fail")
+	if err := r.Text(ctx, strings.Repeat("x", 500)); err == nil {
+		t.Fatalf("expected the oversized reply to surface an error")
 	}
 
-	// The notice is small enough to land; only the reply is unpaintable. Painting
-	// the notice on top of the retained reply is what used to sink both.
-	if err := writer.Fail(ctx, context.DeadlineExceeded); err != nil {
+	if err := r.Fail(ctx, context.DeadlineExceeded); err != nil {
 		t.Fatalf("Fail: %v", err)
 	}
 
 	painted := strings.Join(api.messageTexts(), "")
-	if !strings.Contains(painted, "Murtaugh hit an error") {
-		t.Fatalf("failure notice never landed; painted %q", painted)
+	if !strings.Contains(painted, "hit an error") {
+		t.Fatalf("failure alert never landed; painted %q", painted)
 	}
-	if !writer.Stopped() {
-		t.Fatalf("Fail must seal the message, leaving it in streaming state is the empty-bubble symptom")
+	if api.stops == 0 {
+		t.Fatalf("the alert must seal its message; leaving it streaming is the empty-bubble symptom")
 	}
 }
 

@@ -21,7 +21,7 @@ func newTestSectionRenderer(api *fakeStreamAPI, msgr *fakeStatusMessenger) *sect
 		func() toolBlock {
 			return NewStatusLineWriter(msgr, "C1", "100.0", time.Hour, discardLogger())
 		},
-		nil, "C1", "100.0",
+		nil, nil, "C1", "100.0",
 		discardLogger(),
 	)
 }
@@ -48,7 +48,7 @@ func TestSectionRenderer_AlternatesBlocksAndMessages(t *testing.T) {
 	_ = r.Task(ctx, &agent.TaskEvent{ID: "4", Title: "fetch", Status: agent.TaskStatusInProgress})
 	// Message 2 (the wrap-up).
 	_ = r.Text(ctx, "all done")
-	if err := r.Finish(ctx, ""); err != nil {
+	if err := r.Finish(ctx, nil); err != nil {
 		t.Fatalf("Finish: %v", err)
 	}
 
@@ -75,7 +75,7 @@ func TestSectionRenderer_BlockSummarizesItsTools(t *testing.T) {
 	_ = r.Task(ctx, &agent.TaskEvent{ID: "1", Title: "read", Status: agent.TaskStatusInProgress})
 	_ = r.Task(ctx, &agent.TaskEvent{ID: "2", Title: "skill", Status: agent.TaskStatusInProgress})
 	_ = r.Task(ctx, &agent.TaskEvent{ID: "3", Title: "write", Status: agent.TaskStatusInProgress})
-	if err := r.Finish(ctx, ""); err != nil {
+	if err := r.Finish(ctx, nil); err != nil {
 		t.Fatalf("Finish: %v", err)
 	}
 
@@ -104,7 +104,7 @@ func TestSectionRenderer_PlanSnapshotsDoNotChopReply(t *testing.T) {
 	_ = r.Task(ctx, &agent.TaskEvent{ID: "plan-0", Title: "check diff", Status: agent.TaskStatusComplete, Kind: agent.TaskKindPlan})
 	_ = r.Task(ctx, &agent.TaskEvent{ID: "plan-1", Title: "scan jobs", Status: agent.TaskStatusInProgress, Kind: agent.TaskKindPlan})
 	_ = r.Text(ctx, "Nothing screaming announcements yet.")
-	if err := r.Finish(ctx, ""); err != nil {
+	if err := r.Finish(ctx, nil); err != nil {
 		t.Fatalf("Finish: %v", err)
 	}
 
@@ -134,7 +134,7 @@ func TestSectionRenderer_ToolUpdateDoesNotReseal(t *testing.T) {
 	// Late completion of the SAME tool, after the block sealed: must not re-chop.
 	_ = r.Task(ctx, &agent.TaskEvent{ID: "t1", Title: "read", Status: agent.TaskStatusComplete})
 	_ = r.Text(ctx, " and here is the result")
-	if err := r.Finish(ctx, ""); err != nil {
+	if err := r.Finish(ctx, nil); err != nil {
 		t.Fatalf("Finish: %v", err)
 	}
 
@@ -159,7 +159,7 @@ func TestSectionRenderer_PlanFoldsIntoToolBlock(t *testing.T) {
 	_ = r.Text(ctx, "let me look")
 	_ = r.Task(ctx, &agent.TaskEvent{ID: "read-1", Title: "read", Status: agent.TaskStatusInProgress})
 	_ = r.Text(ctx, "done")
-	if err := r.Finish(ctx, ""); err != nil {
+	if err := r.Finish(ctx, nil); err != nil {
 		t.Fatalf("Finish: %v", err)
 	}
 
@@ -180,7 +180,7 @@ func TestSectionRenderer_TextOnlyIsASingleMessage(t *testing.T) {
 	ctx := context.Background()
 
 	_ = r.Text(ctx, "just an answer")
-	if err := r.Finish(ctx, ""); err != nil {
+	if err := r.Finish(ctx, nil); err != nil {
 		t.Fatalf("Finish: %v", err)
 	}
 	if msgr.posts != 0 {
