@@ -366,6 +366,18 @@ func runFakeClaude(mode string) {
 				// Ends abnormally without anyone asking it to: a crash mid-turn,
 				// not a cancellation.
 				emit(abortedResultMsg())
+			case "stray":
+				// The resume case: the CLI drains a prompt of its own (an
+				// orphaned-background-task notification) before ours, and reports
+				// it on the same stream, ahead of the answer we asked for.
+				emit(map[string]any{
+					"type": "system", "subtype": "task_notification",
+					"task_id": "bu0b2ajny", "status": "stopped",
+					"summary": "No completion record was found for this background shell command from the previous session.",
+				})
+				emit(strayResultMsg())
+				emit(assistantText("hello from fake"))
+				emit(resultMsg("end_turn"))
 			case "maxturns":
 				// Ends on the configured turn limit — an error subtype, but a
 				// legitimate end of turn that may well have produced a reply.
@@ -434,6 +446,63 @@ func abortedResultMsg() map[string]any {
 		"is_error":    true,
 		"stop_reason": "tool_use",
 		"result":      nil,
+	}
+}
+
+// strayResultMsg is the result the real CLI (verified against 2.1.238) sends
+// after draining a prompt from its own queue — reproduced by resuming a session
+// whose previous process died with a background shell still running. It reports
+// no turns and no stop reason because it never called the model.
+func strayResultMsg() map[string]any {
+	return map[string]any{
+		"type":      "result",
+		"subtype":   "success",
+		"is_error":  false,
+		"num_turns": 0,
+		"result":    "",
+	}
+}
+
+// TestStrayResultDoesNotCloseOurTurn pins the resume case: the CLI answers a
+// prompt of its own before ours, and that answer must not be mistaken for the
+// end of the turn we asked for. Getting this wrong hands the gateway a turn with
+// no reply text, so the user is told the agent finished without saying anything
+// while their actual question is still running.
+func TestStrayResultDoesNotCloseOurTurn(t *testing.T) {
+	c := newHelperClient(t, "stray", Options{})
+	ctx := context.Background()
+	if err := c.Initialize(ctx); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	sess, err := c.NewSession(ctx, agent.SessionMetadata{})
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	ch, err := c.Prompt(ctx, sess.ID, agent.PromptRequest{Text: "hi"})
+	if err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	got := drain(t, ch, 5*time.Second)
+	var completes int
+	var text string
+	for _, ev := range got {
+		switch ev.Type {
+		case agent.EventComplete:
+			completes++
+		case agent.EventText:
+			text += ev.Text
+		case agent.EventError:
+			t.Fatalf("stray result surfaced as an error: %v", ev.Error)
+		}
+	}
+	if completes != 1 {
+		t.Fatalf("got %d completions, want exactly 1: %+v", completes, got)
+	}
+	if text != "hello from fake" {
+		t.Fatalf("turn closed before the reply arrived; text = %q, events %+v", text, got)
+	}
+	if last := got[len(got)-1]; last.Type != agent.EventComplete || last.StopReason != "end_turn" {
+		t.Fatalf("expected trailing EventComplete end_turn, got %+v", last)
 	}
 }
 

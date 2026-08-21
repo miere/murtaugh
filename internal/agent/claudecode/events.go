@@ -33,6 +33,9 @@ type streamMessage struct {
 	StopReason string `json:"stop_reason"`
 	Result     string `json:"result"`
 	IsError    bool   `json:"is_error"`
+	// NumTurns counts the model turns the CLI ran to produce this result. Zero
+	// means it never called the model — see isStrayResult.
+	NumTurns int `json:"num_turns"`
 
 	// control fields (see client.go for handling)
 	RequestID json.RawMessage `json:"request_id"`
@@ -119,6 +122,29 @@ func (m *streamMessage) isAbortedResult() bool {
 		// the turn completed normally, which is the failure this guards against.
 		return m.IsError
 	}
+}
+
+// isStrayResult reports whether this result closes a turn the CLI started on its
+// own initiative rather than the one we asked for. Claude Code keeps its own
+// prompt queue, and on `--resume` it drains whatever the previous process left
+// there — most commonly a `task_notification` about a background shell that was
+// still running when that process died. Each drained prompt earns its own
+// `result` on the same stream as ours.
+//
+// Such a result is recognisable by having done no work: `num_turns: 0` and no
+// stop reason, because the CLI never called the model. A turn we asked for always
+// reports at least one turn and a stop reason. The subtype check keeps this
+// narrow — an error result is classified by isAbortedResult, not here.
+//
+// Attributing one of these to the caller's turn is what this guards against: it
+// closes the turn before the agent has said anything, so the user gets the
+// "finished without a reply" note while their actual question is still running —
+// and the gateway, believing the turn over, then interrupts it.
+func (m *streamMessage) isStrayResult() bool {
+	if !m.isResult() {
+		return false
+	}
+	return m.Subtype == "success" && m.NumTurns == 0 && m.StopReason == ""
 }
 
 // toEvents maps a (non-control, non-result) message to zero or more agent.Events
