@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/miere/murtaugh/internal/slack/pingcard"
+	"github.com/miere/murtaugh/internal/slack/alertcard"
 	"github.com/slack-go/slack"
 )
 
@@ -23,11 +23,19 @@ type SlackAPI interface {
 type SlackStartupNotifier struct {
 	api       SlackAPI
 	adminUser string
-	blocks    []slack.Block
-	logger    *slog.Logger
+	spec      alertcard.Spec
+	// cards and cardAPI render and post the greeting as an info card. Both nil
+	// (no raw-blocks client could be built) degrades it to the card's plain-text
+	// form over api, which is the same fallback every other alert takes.
+	cards   *alertcard.Renderer
+	cardAPI alertMessagePoster
+	logger  *slog.Logger
 }
 
-func NewSlackStartupNotifier(api SlackAPI, adminUser string, logger *slog.Logger) (StartupNotifier, error) {
+// NewSlackStartupNotifier builds the connect-time greeting for the admin DM.
+// cards and cardAPI are the alert-card renderer and its raw-blocks client; a nil
+// either leaves the greeting as text.
+func NewSlackStartupNotifier(api SlackAPI, adminUser string, cards *alertcard.Renderer, cardAPI alertMessagePoster, logger *slog.Logger) (StartupNotifier, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -36,10 +44,14 @@ func NewSlackStartupNotifier(api SlackAPI, adminUser string, logger *slog.Logger
 		logger.Warn("startup Slack ping disabled: configuration.admin_user is not set")
 		return nil, nil
 	}
-	// The card is built in Go (internal/slack/pingcard) rather than read from a
-	// template asset, so the startup ping and its button stay byte-stable and
-	// untouchable by config/template edits.
-	return &SlackStartupNotifier{api: api, adminUser: adminUser, blocks: pingcard.BuildStartup(), logger: logger}, nil
+	return &SlackStartupNotifier{
+		api:       api,
+		adminUser: adminUser,
+		spec:      startupAlert(),
+		cards:     cards,
+		cardAPI:   cardAPI,
+		logger:    logger,
+	}, nil
 }
 
 func (n *SlackStartupNotifier) NotifyStartup(ctx context.Context) error {
@@ -54,7 +66,15 @@ func (n *SlackStartupNotifier) NotifyStartup(ctx context.Context) error {
 	if channel == nil || channel.ID == "" {
 		return fmt.Errorf("open admin DM: Slack returned no channel")
 	}
-	_, ts, err := n.api.PostMessageContext(ctx, channel.ID, slack.MsgOptionText(pingcard.StartupText, false), slack.MsgOptionBlocks(n.blocks...))
+	if n.cards != nil && n.cardAPI != nil {
+		res, err := postAlertCard(ctx, n.cardAPI, n.cards, channel.ID, "", n.spec)
+		if err == nil {
+			n.logger.Info("sent Slack startup ping", "admin_user", n.adminUser, "channel", res.Channel, "ts", res.TS)
+			return nil
+		}
+		n.logger.Warn("failed to post startup card; falling back to text", "error", err)
+	}
+	_, ts, err := n.api.PostMessageContext(ctx, channel.ID, slack.MsgOptionText(alertcard.PlainText(n.spec), false))
 	if err != nil {
 		return fmt.Errorf("post startup ping: %w", err)
 	}

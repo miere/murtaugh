@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/miere/murtaugh/internal/slack/pingcard"
 	"github.com/slack-go/slack"
 )
 
@@ -101,13 +100,10 @@ type slackMessagingAPI interface {
 	OpenConversationContext(ctx context.Context, params *slack.OpenConversationParameters) (*slack.Channel, bool, bool, error)
 }
 
-const (
-	restartNoticeText = ":hourglass_flowing_sand: Restarting Murtaugh now…"
-	// resumeMarkerMaxAge bounds how stale a marker may be before it is
-	// dropped instead of consumed. Protects against markers left behind
-	// by a crash that never produced a real restart.
-	resumeMarkerMaxAge = 1 * time.Hour
-)
+// resumeMarkerMaxAge bounds how stale a marker may be before it is
+// dropped instead of consumed. Protects against markers left behind
+// by a crash that never produced a real restart.
+const resumeMarkerMaxAge = 1 * time.Hour
 
 // postRestartNoticeAndSaveMarker posts the "restarting…" notice to the
 // originating channel and persists a marker for the next startup to
@@ -121,11 +117,7 @@ func (a *Gateway) postRestartNoticeAndSaveMarker(ctx context.Context, channel, t
 	if a.resumeStore == nil || channel == "" || a.messaging == nil {
 		return
 	}
-	options := []slack.MsgOption{slack.MsgOptionText(restartNoticeText, false)}
-	if threadTS != "" {
-		options = append(options, slack.MsgOptionTS(threadTS))
-	}
-	postedChannel, ts, err := a.messaging.PostMessageContext(ctx, channel, options...)
+	postedChannel, ts, err := a.postLifecycleAlert(ctx, channel, threadTS, restartNoticeAlert())
 	if err != nil {
 		a.logger.Error("post restart notice failed", "channel", channel, "error", err)
 		return
@@ -148,10 +140,10 @@ func (a *Gateway) postRestartNoticeAndSaveMarker(ctx context.Context, channel, t
 
 // consumeResumeMarker is invoked once after Socket Mode connects. It loads the
 // marker (if any) and, when one is present and fresh, edits the original
-// "restarting…" notice in place into the back-online ping card — so the single
-// restart message becomes the operator's communication self-test (points 2c/2d
-// of the redesign). The marker is always cleared, regardless of whether the
-// edit succeeded, to avoid retry storms on every reconnect.
+// "restarting…" notice in place into the back-online card — the same info card
+// at its next state, so a restart costs the operator one message rather than a
+// notice plus a confirmation. The marker is always cleared, regardless of
+// whether the edit succeeded, to avoid retry storms on every reconnect.
 //
 // It returns true only when it actually rendered the back-online card. The
 // caller (notifyConnected) uses that to suppress the otherwise-redundant
@@ -182,10 +174,7 @@ func (a *Gateway) consumeResumeMarker(ctx context.Context) bool {
 		)
 		return false
 	}
-	if _, _, _, err := a.messaging.UpdateMessageContext(ctx, marker.Channel, marker.MessageTS,
-		slack.MsgOptionText(pingcard.BackOnlineText, false),
-		slack.MsgOptionBlocks(pingcard.BuildBackOnline()...),
-	); err != nil {
+	if err := a.updateLifecycleAlert(ctx, marker.Channel, marker.MessageTS, backOnlineAlert()); err != nil {
 		a.logger.Error("update restart notice failed", "channel", marker.Channel, "ts", marker.MessageTS, "error", err)
 		return false
 	}

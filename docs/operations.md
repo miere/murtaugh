@@ -15,8 +15,8 @@ murtaugh slack gateway
 ```
 
 The gateway connects to Slack over Socket Mode and stays up. At startup it warms
-up the configured agents, sends the **ping card** to the admin DM, and starts the
-job scheduler.
+up the configured agents, sends the **"Murtaugh has started"** info card to the
+admin DM, and starts the job scheduler.
 
 ### As a daemon (macOS)
 

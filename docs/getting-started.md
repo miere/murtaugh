@@ -108,9 +108,10 @@ Murtaugh connects over **Socket Mode**. In your Slack app settings, enable:
 5. **App Unfurl Domains** — register each domain you want to unfurl (max 5).
 6. **App Home** — enable the **Home Tab**. This surfaces a control panel: the
    Murtaugh banner and the running version. For the `admin_user` it also offers
-   a **Restart** button (a graceful, confirmed restart on demand) and a
-   one-click **Upgrade to version …** button when a newer release is available.
-   No extra scope required.
+   a **Restart** button (a graceful, confirmed restart on demand), a **Test
+   communication** button (a round-trip self-test answered by the binary
+   itself), and a one-click **Upgrade to version …** button when a newer release
+   is available. No extra scope required.
 
 Copy the **app-level token** (`xapp-…`) and the **bot token** (`xoxb-…`); you
 need both next.
@@ -166,7 +167,9 @@ murtaugh cfg chat set --enabled true --default-agent default
 ```
 
 `--admin-user` may be a handle (with or without `@`) or a user ID. On startup
-Murtaugh opens a DM with that user and sends a **ping card**.
+Murtaugh opens a DM with that user and sends a **"Murtaugh has started"** card.
+To check the link at any other time, open Murtaugh's **App Home** tab and press
+**Test communication**.
 
 ### The chat agent
 
