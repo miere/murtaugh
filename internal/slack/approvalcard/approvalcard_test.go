@@ -127,7 +127,7 @@ func jsonEqual(t *testing.T, a, b []byte) bool {
 
 func testSpec() Spec {
 	return Spec{
-		ToolName: "terminal",
+		Name:     "terminal",
 		Detail:   "grep -n \"perm\" internal/agent/claudecode/claudecode_test.go |\n\thead -20",
 		Language: "bash",
 	}
@@ -222,7 +222,7 @@ func TestPendingRendersAnyNumberOfOptions(t *testing.T) {
 		{ActionID: "a:2", Value: `{"id":"reject_once"}`, Label: "Reject once", Style: "danger"},
 		{ActionID: "a:3", Value: `{"id":"reject_always"}`, Label: "Reject always", Style: "danger"},
 	}
-	c, _ := pending(t, Spec{ToolName: "edit"}, opts)
+	c, _ := pending(t, Spec{Name: "edit"}, opts)
 	if got := len(buttonsOf(t, c)); got != len(opts) {
 		t.Fatalf("rendered %d buttons, want %d", got, len(opts))
 	}
@@ -231,7 +231,7 @@ func TestPendingRendersAnyNumberOfOptions(t *testing.T) {
 // A neutral option carries no style key at all. Slack rejects "style": "" —
 // omitting it is the only valid way to render an unstyled button.
 func TestPendingOmitsEmptyStyle(t *testing.T) {
-	c, raw := pending(t, Spec{ToolName: "edit"}, []Option{{ActionID: "a:0", Value: `{"id":"x"}`, Label: "Something"}})
+	c, raw := pending(t, Spec{Name: "edit"}, []Option{{ActionID: "a:0", Value: `{"id":"x"}`, Label: "Something"}})
 	if got := buttonsOf(t, c)[0].Style; got != "" {
 		t.Fatalf("style = %q, want it omitted", got)
 	}
@@ -242,10 +242,84 @@ func TestPendingOmitsEmptyStyle(t *testing.T) {
 
 // A tool with no command to show must not render an empty code block.
 func TestPendingWithoutDetailRendersNoCodeBlock(t *testing.T) {
-	c, _ := pending(t, Spec{ToolName: "edit"}, testOptions())
+	c, _ := pending(t, Spec{Name: "edit"}, testOptions())
 	for _, cb := range c.Blocks[0].ChildBlocks {
 		if cb.Type == "rich_text" {
 			t.Fatal("rendered a code block for a spec with no detail")
+		}
+	}
+}
+
+// The scheduler asks about a held job, and the card has to say so: nobody
+// reached for it, a timer did, so the tool voice ("the agent wants to use…")
+// would be describing something that never happened.
+func TestPendingSpeaksAboutAJob(t *testing.T) {
+	spec := Spec{
+		Subject:  SubjectJob,
+		Name:     "nightly-report",
+		Detail:   "/usr/bin/report --all",
+		Language: "bash",
+		Note:     "Runs every 1h — approving allows every later run too.",
+	}
+	c, _ := pending(t, spec, testOptions())
+
+	subtitle := c.Blocks[0].Subtitle.Text
+	if !strings.Contains(subtitle, "'nightly-report' job") {
+		t.Errorf("subtitle = %q, want it to name the job", subtitle)
+	}
+	if strings.Contains(subtitle, "tool") {
+		t.Errorf("subtitle = %q, want it not to call a job a tool", subtitle)
+	}
+	// The schedule is the thing the admin is really being asked about: this run
+	// is one of many, and approving settles all of them.
+	if got := footerOf(t, c); got != spec.Note {
+		t.Errorf("context line = %q, want the note %q", got, spec.Note)
+	}
+	if got := len(buttonsOf(t, c)); got != 2 {
+		t.Errorf("the note displaced the buttons: %d rendered, want 2", got)
+	}
+	if got := FallbackText(spec); !strings.Contains(got, "nightly-report") {
+		t.Errorf("FallbackText = %q, want it to name the job", got)
+	}
+}
+
+// A settled job card reports on the job, and says that approving settled every
+// later run too — the part that makes this decision different from a tool
+// approval.
+func TestResolvedSpeaksAboutAJob(t *testing.T) {
+	spec := Spec{Subject: SubjectJob, Name: "nightly-report", Detail: "/usr/bin/report --all", Language: "bash"}
+	for _, tc := range []struct {
+		outcome Outcome
+		want    string
+	}{
+		{OutcomeApproved, "on schedule from now on"},
+		{OutcomeDenied, "was not allowed to run"},
+		{OutcomeTimedOut, "did not run"},
+		{OutcomeDismissed, "did not run"},
+	} {
+		t.Run(string(tc.outcome), func(t *testing.T) {
+			c, _ := resolved(t, spec, tc.outcome, "U1")
+			subtitle := c.Blocks[0].Subtitle.Text
+			if !strings.Contains(subtitle, "'nightly-report' job") {
+				t.Errorf("subtitle = %q, want it to name the job", subtitle)
+			}
+			if !strings.Contains(subtitle, tc.want) {
+				t.Errorf("subtitle = %q, want it to contain %q", subtitle, tc.want)
+			}
+			if strings.Contains(footerOf(t, c), "tool") {
+				t.Errorf("footer = %q, want it not to call a job a tool", footerOf(t, c))
+			}
+		})
+	}
+}
+
+// A gate carries no note, and an empty context block is both ugly and something
+// Slack has no reason to accept.
+func TestPendingWithoutNoteRendersNoContextBlock(t *testing.T) {
+	c, _ := pending(t, testSpec(), testOptions())
+	for _, cb := range c.Blocks[0].ChildBlocks {
+		if cb.Type == "context" {
+			t.Fatal("rendered a context block for a spec with no note")
 		}
 	}
 }
@@ -326,7 +400,7 @@ func TestResolvedIconDistinguishesRefusal(t *testing.T) {
 // land as one inert string.
 func TestDetailCannotInjectBlocks(t *testing.T) {
 	evil := `x"}]},{"type":"actions","block_id":"pwned","elements":[{"type":"button","action_id":"evil","text":{"type":"plain_text","text":"Click"}}]},{"a":"`
-	c, _ := pending(t, Spec{ToolName: "terminal", Detail: evil, Language: "bash"}, testOptions())
+	c, _ := pending(t, Spec{Name: "terminal", Detail: evil, Language: "bash"}, testOptions())
 
 	// The detail block plus the actions block, and nothing the payload smuggled in.
 	if len(c.Blocks) != 1 {
@@ -349,7 +423,7 @@ func TestDetailCannotInjectBlocks(t *testing.T) {
 // through a second template.
 func TestDetailCannotInjectIntoResolved(t *testing.T) {
 	evil := `x"}]},{"type":"actions","block_id":"pwned","elements":[]},{"a":"`
-	c, _ := resolved(t, Spec{ToolName: "terminal", Detail: evil}, OutcomeApproved, "U1")
+	c, _ := resolved(t, Spec{Name: "terminal", Detail: evil}, OutcomeApproved, "U1")
 	for _, cb := range c.Blocks[0].ChildBlocks {
 		if cb.BlockID == "pwned" {
 			t.Fatal("injected block survived into the settled card")
@@ -359,7 +433,7 @@ func TestDetailCannotInjectIntoResolved(t *testing.T) {
 
 // The language hint is optional; an empty one must not emit an empty key.
 func TestLanguageOmittedWhenUnset(t *testing.T) {
-	_, raw := pending(t, Spec{ToolName: "edit", Detail: "some detail"}, testOptions())
+	_, raw := pending(t, Spec{Name: "edit", Detail: "some detail"}, testOptions())
 	if strings.Contains(string(raw), `"language"`) {
 		t.Fatalf("emitted a language key with no hint set:\n%s", raw)
 	}
