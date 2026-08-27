@@ -127,7 +127,7 @@ and stay operator-trusted until something writes to them.
   reuse or overwrite a job that serves the same purpose (`cfg job set` with the
   same `--name`) rather than adding a parallel one.
 - **Schedule edits apply on the next gateway restart**, not live. After a
-  `cfg job set` change, restart the gateway (e.g. the **Restart Murtaugh** button
+  `cfg job set` change, restart the gateway (e.g. the **Restart** button
   on the App Home tab).
 - **Scheduled runs are best-effort.** A run that would fire while the gateway is
   down is **skipped, not caught up**. Don't rely on a scheduled job for

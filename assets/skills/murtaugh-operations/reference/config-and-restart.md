@@ -28,7 +28,7 @@ Config changes are not detected automatically — after any `cfg …` change (or
 Three ways, all **admin-only**:
 
 - **`/murtaugh restart`** (slash command),
-- the **Restart Murtaugh** button on the **App Home** tab, or
+- the **Restart** button on the **App Home** tab, or
 - the **Restart now** button on a restart-approval card posted by the `restart`
   tool (`murtaugh_restart_suggestion_confirm`; **Dismiss** is
   `murtaugh_restart_suggestion_dismiss`). The card is only posted when the

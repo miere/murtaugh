@@ -17,8 +17,8 @@ const (
 	// surface (as opposed to "messages").
 	appHomeTab = "home"
 
-	// appHomeUpdateActionID identifies the "Update" button rendered beside the
-	// version on the admin's Home tab.
+	// appHomeUpdateActionID identifies the "Upgrade to version X" button in the
+	// control row of the admin's Home tab.
 	appHomeUpdateActionID = "app_home_update"
 	// appHomeVersionBlockID is the block holding the version line; a stable id
 	// keeps the published view diffable.
@@ -27,17 +27,29 @@ const (
 	// router can recognize its view_submission.
 	appHomeUpdateCallbackID = "app_home_update_confirm"
 
-	// appHomeRestartActionID identifies the "Restart Murtaugh" button on the
-	// admin's Home tab. Unlike the Update button it is always offered to the
-	// admin (no precondition), letting them trigger a graceful restart on
-	// demand — the replacement for the old config-file-watch restart suggestion.
+	// appHomeRestartActionID identifies the "Restart" button on the admin's Home
+	// tab. Unlike the Upgrade button it is always offered to the admin (no
+	// precondition), letting them trigger a graceful restart on demand — the
+	// replacement for the old config-file-watch restart suggestion.
 	appHomeRestartActionID = "app_home_restart"
-	// appHomeRestartBlockID tags the actions block holding the restart button;
-	// a stable id keeps the published view diffable.
-	appHomeRestartBlockID = "app_home_restart_actions"
+	// appHomeActionsBlockID tags the single actions row holding the admin's
+	// control buttons (Upgrade, when available, and Restart); a stable id keeps
+	// the published view diffable.
+	appHomeActionsBlockID = "app_home_actions"
 	// appHomeRestartCallbackID tags the restart confirmation modal so the
 	// interaction router can recognize its view_submission.
 	appHomeRestartCallbackID = "app_home_restart_confirm"
+
+	// appHomeBannerBlockID tags the banner image so a failed publish can drop it
+	// and retry (see publishHomeView).
+	appHomeBannerBlockID = "app_home_banner"
+	// appHomeBannerURL is the Home tab's banner. Slack fetches the image itself,
+	// so it must be a public URL: this is the raw form of assets/murtaugh-wide.png
+	// on the (public) repo's main branch, which is where the redirect from the
+	// github.com/…?raw=true form lands.
+	appHomeBannerURL = "https://raw.githubusercontent.com/miere/murtaugh/main/assets/murtaugh-wide.png"
+	// appHomeBannerAlt is the banner's alt text, read out by screen readers.
+	appHomeBannerAlt = "Murtaugh"
 )
 
 // handleAppHomeOpened publishes the control panel when a user opens the app's
@@ -56,12 +68,52 @@ func (a *Gateway) handleAppHomeOpened(ev *slackevents.AppHomeOpenedEvent) {
 	defer cancel()
 
 	view := a.buildHomeView(ctx, a.cfg.IsAdminUser(ev.User))
-	if _, err := a.webClient.PublishViewContext(ctx, slack.PublishViewContextRequest{
-		UserID: ev.User,
+	a.publishHomeView(ctx, ev.User, view)
+}
+
+// publishHomeView publishes the Home view, retrying once without the banner if
+// Slack rejects it. Slack fetches the banner itself, so an unreachable image
+// fails the whole publish — and the control panel (version, Upgrade, Restart)
+// matters more than its decoration, so the picture is what gets dropped.
+func (a *Gateway) publishHomeView(ctx context.Context, user string, view slack.HomeTabViewRequest) {
+	_, err := a.webClient.PublishViewContext(ctx, slack.PublishViewContextRequest{
+		UserID: user,
 		View:   view,
-	}); err != nil {
-		a.logger.Error("publish app home failed", "user", ev.User, "error", err)
+	})
+	if err == nil {
+		return
 	}
+	stripped, dropped := homeViewWithoutBanner(view)
+	if !dropped {
+		a.logger.Error("publish app home failed", "user", user, "error", err)
+		return
+	}
+	a.logger.Warn("publish app home failed; retrying without the banner", "user", user, "error", err)
+	if _, retryErr := a.webClient.PublishViewContext(ctx, slack.PublishViewContextRequest{
+		UserID: user,
+		View:   stripped,
+	}); retryErr != nil {
+		a.logger.Error("publish app home failed", "user", user, "error", retryErr)
+	}
+}
+
+// homeViewWithoutBanner returns the view with its banner image removed,
+// reporting whether there was one to remove.
+func homeViewWithoutBanner(view slack.HomeTabViewRequest) (slack.HomeTabViewRequest, bool) {
+	kept := make([]slack.Block, 0, len(view.Blocks.BlockSet))
+	dropped := false
+	for _, b := range view.Blocks.BlockSet {
+		if img, ok := b.(*slack.ImageBlock); ok && img.BlockID == appHomeBannerBlockID {
+			dropped = true
+			continue
+		}
+		kept = append(kept, b)
+	}
+	if !dropped {
+		return view, false
+	}
+	view.Blocks = slack.Blocks{BlockSet: kept}
+	return view, true
 }
 
 // buildHomeView assembles the Home-surface view. The admin additionally sees
@@ -89,46 +141,47 @@ func (a *Gateway) buildHomeView(ctx context.Context, admin bool) slack.HomeTabVi
 	return renderHomeView(version, latest, updateAvailable, true)
 }
 
-// renderHomeView builds the Block Kit Home view: a "Murtaugh" header and a
-// version line. When updateAvailable is set, the version line carries an
-// "Update to <latest>" accessory button and a note advertising the new release.
-// For the admin (admin set) a "Restart Murtaugh" button is appended so a
-// graceful restart can be triggered on demand.
+// renderHomeView builds the Block Kit Home view: the Murtaugh banner, a
+// "Version: <version>" context line and — for the admin only — a divider and a
+// row of control buttons. The row always carries "Restart"; it additionally
+// carries "Upgrade to version <latest>" when a newer release is available.
+// Everyone else sees just the banner and the version.
 func renderHomeView(version, latest string, updateAvailable, admin bool) slack.HomeTabViewRequest {
-	header := slack.NewHeaderBlock(
-		slack.NewTextBlockObject(slack.PlainTextType, "Murtaugh", false, false),
-	)
-
-	versionText := fmt.Sprintf("*Version* `%s`", version)
-	var accessory *slack.Accessory
-	if updateAvailable && strings.TrimSpace(latest) != "" {
-		versionText = fmt.Sprintf("*Version* `%s`\n:tada: *%s* is available", version, latest)
-		button := slack.NewButtonBlockElement(
-			appHomeUpdateActionID,
-			latest,
-			slack.NewTextBlockObject(slack.PlainTextType, fmt.Sprintf("Update to %s", latest), false, false),
-		)
-		button.Style = slack.StylePrimary
-		accessory = slack.NewAccessory(button)
-	}
-
-	versionBlock := slack.NewSectionBlock(
-		slack.NewTextBlockObject(slack.MarkdownType, versionText, false, false),
+	banner := slack.NewImageBlock(
+		appHomeBannerURL,
+		appHomeBannerAlt,
+		appHomeBannerBlockID,
 		nil,
-		accessory,
 	)
-	versionBlock.BlockID = appHomeVersionBlockID
 
-	blocks := []slack.Block{header, versionBlock}
+	versionBlock := slack.NewContextBlock(
+		appHomeVersionBlockID,
+		slack.NewTextBlockObject(slack.PlainTextType, fmt.Sprintf("Version: %s", version), false, false),
+	)
+
+	blocks := []slack.Block{banner, versionBlock}
 	if admin {
+		var buttons []slack.BlockElement
+		if updateAvailable && strings.TrimSpace(latest) != "" {
+			upgrade := slack.NewButtonBlockElement(
+				appHomeUpdateActionID,
+				latest,
+				slack.NewTextBlockObject(slack.PlainTextType, fmt.Sprintf("Upgrade to version %s", latest), true, false),
+			)
+			upgrade.Style = slack.StyleDanger
+			buttons = append(buttons, upgrade)
+		}
 		restart := slack.NewButtonBlockElement(
 			appHomeRestartActionID,
 			"",
-			slack.NewTextBlockObject(slack.PlainTextType, "Restart Murtaugh", false, false),
+			slack.NewTextBlockObject(slack.PlainTextType, "Restart", true, false),
 		)
-		restart.Style = slack.StyleDanger
-		actions := slack.NewActionBlock(appHomeRestartBlockID, restart)
-		blocks = append(blocks, actions)
+		buttons = append(buttons, restart)
+
+		blocks = append(blocks,
+			slack.NewDividerBlock(),
+			slack.NewActionBlock(appHomeActionsBlockID, buttons...),
+		)
 	}
 
 	return slack.HomeTabViewRequest{
