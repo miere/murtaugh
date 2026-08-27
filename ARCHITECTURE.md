@@ -363,7 +363,8 @@ subsystems (`handler`, `workflow`, `chat`, `unfurl`). `New()` wires them:
 - `workflow.NewEngine` always exists; with no rules it simply matches nothing.
   The ping → pong self-test is **not** a workflow rule: it is owned by the
   gateway (`internal/slack/gateway/ping.go` + `internal/slack/pingcard`), handled
-  before the engine, so it cannot be redirected by config or template edits.
+  before the engine, so it cannot be redirected by config or template edits. Its
+  button lives in the App Home control row, next to Restart.
 
 ### Event loop
 
@@ -372,7 +373,7 @@ selects over `socket.Events`, dispatching each to `handleEvent`:
 
 | Socket event            | Handler                | Behaviour                                            |
 |-------------------------|------------------------|------------------------------------------------------|
-| `Connected`             | `notifyConnected`      | Greets once: resumes a pending restart (edits the notice into the back-online ping card) **or** sends the startup ping — never both. |
+| `Connected`             | `notifyConnected`      | Greets once: resumes a pending restart (edits the notice into the back-online card) **or** sends the startup card — never both. |
 | `SlashCommand`          | `handleSlashCommand`   | `/...  chat` → ACP chat; otherwise the default handler acks. |
 | `Interactive`           | `handleInteractive`    | Acks, then runs `workflow.Execute` in a goroutine (5 min).   |
 | `EventsAPI`             | `handleEventsAPI`      | Routes inner events (below).                          |
@@ -688,8 +689,10 @@ The embedded `config.yaml` is the slim bootstrap default (`oauth:` +
 that configuration now lives in the config store.
 Block Kit templates live under `templates/` (`unfurl/`, `auth/`, `ask/`) — see "Block Kit
 rendering" above for why a card is a template rather than Go builders. The
-ping → pong card is built in Go (`internal/slack/pingcard`), not a template:
-its blocks are all types the pinned slack-go models. Bundled agent skills
+Test-communication button is built in Go (`internal/slack/pingcard` supplies its
+ids and label; `app_home.go` renders it), not a template, so no config or
+template edit can shadow the self-test. Its reply, and Murtaugh's other
+lifecycle messages, are ordinary info alert cards. Bundled agent skills
 live under `skills/`, each a `SKILL.md` + `reference/` + `examples/` tree.
 `cli-help.md` is the canonical command reference (see "CLI/MCP command
 reference" above). The `templates` and `skills` directories are embedded

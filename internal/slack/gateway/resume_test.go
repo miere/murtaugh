@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/miere/murtaugh/internal/config"
-	"github.com/miere/murtaugh/internal/slack/pingcard"
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/socketmode"
 )
@@ -279,18 +278,15 @@ func TestConsumeResumeMarkerEditsAndClears(t *testing.T) {
 	if msg.updateChannel != "C1" || msg.updateTS != "1700000000.000100" {
 		t.Fatalf("unexpected update args: channel=%q ts=%q", msg.updateChannel, msg.updateTS)
 	}
-	// The "restarting…" notice must become the ping card: back-online copy plus
-	// the Test-communication button. The button rides in a blocks option, so the
-	// edit carries text *and* blocks (two options) rather than the old text-only
-	// edit. pingcard's own tests pin the button's action_id.
+	// The "restarting…" notice must become the back-online message in place.
+	// This gateway has no raw-blocks client, so it takes the text fallback —
+	// lifecycle_alerts_test.go covers the card path. Either way the copy is the
+	// back-online spec's.
 	if !strings.Contains(msg.updateText, "back online") {
 		t.Fatalf("expected back-online text on the edit, got %q", msg.updateText)
 	}
-	if msg.updateOptions < 2 {
-		t.Fatalf("expected the edit to carry the ping card blocks (text+blocks), got %d option(s)", msg.updateOptions)
-	}
-	if pingcard.BackOnlineText == "" || !strings.Contains(pingcard.BackOnlineText, "back online") {
-		t.Fatalf("pingcard.BackOnlineText drifted from the asserted copy: %q", pingcard.BackOnlineText)
+	if !strings.Contains(backOnlineAlert().Title, "back online") {
+		t.Fatalf("backOnlineAlert drifted from the asserted copy: %q", backOnlineAlert().Title)
 	}
 	if got, _ := store.Load(); got != nil {
 		t.Fatalf("expected marker cleared after consume, got %#v", got)

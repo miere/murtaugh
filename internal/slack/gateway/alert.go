@@ -27,6 +27,15 @@ type alertMessagePoster interface {
 	PostMessage(ctx context.Context, p slackclient.PostMessageParams) (slackclient.PostMessageResult, error)
 }
 
+// alertMessageEditor is the update verb, needed by the one alert that is not
+// fire-and-forget: the restart notice, which is posted before the process exits
+// and then edited in place into the back-online card by the process that comes
+// back (see resume.go). It is the same raw-blocks passthrough as
+// alertMessagePoster, and the same concrete client satisfies both.
+type alertMessageEditor interface {
+	UpdateMessage(ctx context.Context, p slackclient.UpdateMessageParams) (slackclient.PostMessageResult, error)
+}
+
 // newAlertPoster binds a renderer and a Slack client to one channel/thread.
 //
 // The card is posted as its own message rather than appended to the reply for a
@@ -38,23 +47,50 @@ func newAlertPoster(api alertMessagePoster, cards *alertcard.Renderer, channelID
 		return nil
 	}
 	return func(ctx context.Context, spec alertcard.Spec) error {
-		blocks, err := cards.Render(spec)
-		if err != nil {
-			return fmt.Errorf("render alert card: %w", err)
-		}
-		_, err = api.PostMessage(ctx, slackclient.PostMessageParams{
-			ChannelID: channelID,
-			ThreadTS:  threadTS,
-			// The text field is the notification and screen-reader form, and the
-			// fallback Slack shows anywhere blocks do not render.
-			Text:   alertcard.FallbackText(spec),
-			Blocks: blocks,
-		})
-		if err != nil {
-			return fmt.Errorf("post alert card: %w", err)
-		}
-		return nil
+		_, err := postAlertCard(ctx, api, cards, channelID, threadTS, spec)
+		return err
 	}
+}
+
+// postAlertCard renders spec and posts it, returning the channel and TS Slack
+// assigned. It is the poster above, minus the discarded result: the restart
+// notice needs the TS so the resume marker can point the next process at the
+// message it must edit.
+func postAlertCard(ctx context.Context, api alertMessagePoster, cards *alertcard.Renderer, channelID, threadTS string, spec alertcard.Spec) (slackclient.PostMessageResult, error) {
+	blocks, err := cards.Render(spec)
+	if err != nil {
+		return slackclient.PostMessageResult{}, fmt.Errorf("render alert card: %w", err)
+	}
+	res, err := api.PostMessage(ctx, slackclient.PostMessageParams{
+		ChannelID: channelID,
+		ThreadTS:  threadTS,
+		// The text field is the notification and screen-reader form, and the
+		// fallback Slack shows anywhere blocks do not render.
+		Text:   alertcard.FallbackText(spec),
+		Blocks: blocks,
+	})
+	if err != nil {
+		return slackclient.PostMessageResult{}, fmt.Errorf("post alert card: %w", err)
+	}
+	return res, nil
+}
+
+// updateAlertCard re-renders an already-posted alert in place, replacing both
+// its blocks and its notification text.
+func updateAlertCard(ctx context.Context, api alertMessageEditor, cards *alertcard.Renderer, channelID, ts string, spec alertcard.Spec) error {
+	blocks, err := cards.Render(spec)
+	if err != nil {
+		return fmt.Errorf("render alert card: %w", err)
+	}
+	if _, err := api.UpdateMessage(ctx, slackclient.UpdateMessageParams{
+		ChannelID: channelID,
+		TS:        ts,
+		Text:      alertcard.FallbackText(spec),
+		Blocks:    blocks,
+	}); err != nil {
+		return fmt.Errorf("update alert card: %w", err)
+	}
+	return nil
 }
 
 // failSpec turns a turn-ending error into an alert.

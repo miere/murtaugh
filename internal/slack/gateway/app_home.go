@@ -10,6 +10,7 @@ import (
 	"github.com/slack-go/slack/slackevents"
 
 	"github.com/miere/murtaugh/internal/slack/alertcard"
+	"github.com/miere/murtaugh/internal/slack/pingcard"
 )
 
 const (
@@ -33,8 +34,8 @@ const (
 	// replacement for the old config-file-watch restart suggestion.
 	appHomeRestartActionID = "app_home_restart"
 	// appHomeActionsBlockID tags the single actions row holding the admin's
-	// control buttons (Upgrade, when available, and Restart); a stable id keeps
-	// the published view diffable.
+	// control buttons (Upgrade, when available, Restart, and Test communication);
+	// a stable id keeps the published view diffable.
 	appHomeActionsBlockID = "app_home_actions"
 	// appHomeRestartCallbackID tags the restart confirmation modal so the
 	// interaction router can recognize its view_submission.
@@ -143,9 +144,15 @@ func (a *Gateway) buildHomeView(ctx context.Context, admin bool) slack.HomeTabVi
 
 // renderHomeView builds the Block Kit Home view: the Murtaugh banner, a
 // "Version: <version>" context line and — for the admin only — a divider and a
-// row of control buttons. The row always carries "Restart"; it additionally
-// carries "Upgrade to version <latest>" when a newer release is available.
-// Everyone else sees just the banner and the version.
+// row of control buttons. The row always carries "Restart" and "Test
+// communication"; it additionally carries "Upgrade to version <latest>", first,
+// when a newer release is available. Everyone else sees just the banner and the
+// version.
+//
+// Test communication used to ride on the startup and back-online messages,
+// which meant reaching it required scrolling back to whichever lifecycle
+// message was most recent. Here it sits beside the other two controls and is
+// available at any time; the lifecycle messages are now plain info cards.
 func renderHomeView(version, latest string, updateAvailable, admin bool) slack.HomeTabViewRequest {
 	banner := slack.NewImageBlock(
 		appHomeBannerURL,
@@ -176,7 +183,15 @@ func renderHomeView(version, latest string, updateAvailable, admin bool) slack.H
 			"",
 			slack.NewTextBlockObject(slack.PlainTextType, "Restart", true, false),
 		)
-		buttons = append(buttons, restart)
+		// The self-test carries pingcard's own action_id rather than an
+		// app_home_* one, so the router (isPingInteraction) recognises it here
+		// exactly as it did on the message-hosted card.
+		ping := slack.NewButtonBlockElement(
+			pingcard.ActionPing,
+			"",
+			slack.NewTextBlockObject(slack.PlainTextType, pingcard.ButtonLabel, true, false),
+		)
+		buttons = append(buttons, restart, ping)
 
 		blocks = append(blocks,
 			slack.NewDividerBlock(),

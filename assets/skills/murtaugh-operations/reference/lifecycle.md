@@ -22,24 +22,33 @@ Config files are read **once at startup** — there is no on-disk watcher. After
 editing config, restart the daemon (e.g. the **Restart** button on the
 App Home tab) to load the changes. → `reference/config-and-restart.md`
 
-## Startup ping
+## Startup greeting
 
 Once connected, the gateway greets the admin **once per process** — and exactly
 one of two things happens:
 
-- **Fresh boot:** it DMs the admin a **":zap: The server has started."** card
-  with a **Test communication** button. The card is built in Go
-  (`internal/slack/pingcard`), and clicking the button is answered by the binary
-  itself (`:recycle: …functional.`) — no workflow rule or template involved, so
-  the self-test can't be broken by config edits.
-- **Returning from a restart:** the startup ping is suppressed; instead the
-  pending "restarting…" notice is edited in place into a **":white_check_mark:
-  Murtaugh is back online."** card carrying the same Test communication button
-  (see `config-and-restart.md`).
+- **Fresh boot:** it DMs the admin a **"Murtaugh has started"** info card — the
+  same collapsed alert card used everywhere else, at `info` severity.
+- **Returning from a restart:** the greeting is suppressed; instead the pending
+  "Restarting Murtaugh…" notice is edited in place into **"Murtaugh is back
+  online"** (see `config-and-restart.md`).
+
+## Test communication
+
+The self-test button lives in the **App Home control row**, to the right of
+**Restart** — so it is reachable at any time, not just from whichever lifecycle
+message happens to be the newest in the DM. Its ids are Go constants
+(`internal/slack/pingcard`) and the click is answered by the binary itself with
+a **"Communication check — The server communication is functional."** info card;
+no workflow rule or template is involved, so the self-test can't be broken by
+config edits. A click from the App Home carries no channel, so the reply lands
+in the clicker's DM.
 
 A reconnect won't repeat the greeting. Seeing it is the quickest confirmation the
 daemon is up and the admin user resolved correctly. If it never arrives, check
-that `admin_user` is set and resolvable.
+that `admin_user` is set and resolvable. If it arrives as plain text rather than
+a card, the bot token could not build a raw-blocks client — every alert degrades
+the same way.
 
 ## Event deduplication
 

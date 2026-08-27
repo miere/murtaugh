@@ -185,11 +185,16 @@ type Gateway struct {
 	// api/messaging interfaces deliberately do not expose file upload).
 	botToken string
 	// alertCards renders the alerts this gateway sends outside a chat turn —
-	// today the admin DMs about a failed update or a failed diagnostics bundle —
-	// and alertAPI posts them through the raw-blocks passthrough a container
-	// block needs. Either nil degrades those alerts to plain text.
+	// the admin DMs about a failed update or a failed diagnostics bundle, plus
+	// the lifecycle notices (started / restarting / back online / pong) — and
+	// alertAPI posts them through the raw-blocks passthrough a container block
+	// needs. Either nil degrades those alerts to plain text.
 	alertCards *alertcard.Renderer
 	alertAPI   alertMessagePoster
+	// alertEditor is the same client seen through its update verb, for the one
+	// alert that is edited rather than only posted: the restart notice, which
+	// becomes the back-online card in place (see resume.go).
+	alertEditor alertMessageEditor
 	// approvalCards renders the approval container card. The chat gates get it
 	// too (they are handed it at construction), but the gateway keeps a
 	// reference of its own because the scheduler's first-run hold asks outside
@@ -253,10 +258,6 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 	}
 	api := slack.New(cfg.OAuth.BotToken, slack.OptionAppLevelToken(cfg.OAuth.AppToken))
 	socket := socketmode.New(api, socketmode.OptionDebug(cfg.Access.Debug))
-	startupNotifier, err := NewSlackStartupNotifier(api, cfg.Access.AdminUser, logger)
-	if err != nil {
-		logger.Error("startup Slack ping disabled", "error", err)
-	}
 	// The channel-name cache backs name-glob routing in chat.channel_agents. It
 	// needs a SlackAPI with ListChannels (the narrow socket api/webClient do
 	// not expose it), so build a Web API client over the bot token. A build
@@ -290,10 +291,19 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 	// whether or not chat is enabled.
 	approvalCards := approvalcard.NewRenderer(cfg.BaseDir, assets.FS)
 	var alertAPI alertMessagePoster
+	var alertEditor alertMessageEditor
 	if alertClient, err := slackclient.NewClient(cfg.OAuth.BotToken); err != nil {
 		logger.Warn("alert cards disabled: could not build Slack client", "error", err)
 	} else {
 		alertAPI = alertClient
+		alertEditor = alertClient
+	}
+
+	// Built after the alert client because the startup greeting is itself an
+	// info card and needs the raw-blocks passthrough to render one.
+	startupNotifier, err := NewSlackStartupNotifier(api, cfg.Access.AdminUser, alertCards, alertAPI, logger)
+	if err != nil {
+		logger.Error("startup Slack ping disabled", "error", err)
 	}
 
 	var chat *ChatHandler
@@ -534,6 +544,7 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 		botToken:          cfg.OAuth.BotToken,
 		alertCards:        alertCards,
 		alertAPI:          alertAPI,
+		alertEditor:       alertEditor,
 		approvalCards:     approvalCards,
 		channelCache:      channelCache,
 		// Captured here so the no-mention check in handleEventsAPI runs without

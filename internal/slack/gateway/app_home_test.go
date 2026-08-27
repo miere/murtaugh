@@ -2,10 +2,12 @@ package gateway
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/miere/murtaugh/internal/config"
+	"github.com/miere/murtaugh/internal/slack/pingcard"
 	"github.com/miere/murtaugh/internal/updates"
 	"github.com/slack-go/slack"
 )
@@ -153,23 +155,61 @@ func TestRenderHomeView_UpgradeButtonWhenUpdateAvailable(t *testing.T) {
 	}
 }
 
-func TestRenderHomeView_UpgradeLeadsTheControlRow(t *testing.T) {
-	view := renderHomeView("v0.9.1", "v0.9.4", true, true)
-	var actions *slack.ActionBlock
+// controlRow returns the admin's actions block, or fails.
+func controlRow(t *testing.T, view slack.HomeTabViewRequest) *slack.ActionBlock {
+	t.Helper()
 	for _, b := range view.Blocks.BlockSet {
 		if act, ok := b.(*slack.ActionBlock); ok && act.BlockID == appHomeActionsBlockID {
-			actions = act
+			return act
 		}
 	}
-	if actions == nil {
-		t.Fatal("admin view should carry a controls row")
+	t.Fatal("admin view should carry a controls row")
+	return nil
+}
+
+// controlRowActionIDs returns the row's button action_ids in render order.
+func controlRowActionIDs(t *testing.T, view slack.HomeTabViewRequest) []string {
+	t.Helper()
+	var ids []string
+	for _, el := range controlRow(t, view).Elements.ElementSet {
+		btn, ok := el.(*slack.ButtonBlockElement)
+		if !ok {
+			t.Fatalf("control row carries a non-button element: %T", el)
+		}
+		ids = append(ids, btn.ActionID)
 	}
-	if len(actions.Elements.ElementSet) != 2 {
-		t.Fatalf("expected upgrade + restart buttons, got %d", len(actions.Elements.ElementSet))
+	return ids
+}
+
+func TestRenderHomeView_UpgradeLeadsTheControlRow(t *testing.T) {
+	got := controlRowActionIDs(t, renderHomeView("v0.9.1", "v0.9.4", true, true))
+	want := []string{appHomeUpdateActionID, appHomeRestartActionID, pingcard.ActionPing}
+	if !slices.Equal(got, want) {
+		t.Fatalf("control row = %v, want %v", got, want)
 	}
-	first, ok := actions.Elements.ElementSet[0].(*slack.ButtonBlockElement)
-	if !ok || first.ActionID != appHomeUpdateActionID {
-		t.Fatalf("upgrade should lead the control row, got %+v", actions.Elements.ElementSet[0])
+}
+
+// Test communication is the self-test's only home now that the startup and
+// back-online messages are plain info cards, so it must be in the row whether
+// or not an upgrade is on offer — and it sits to the right of Restart.
+func TestRenderHomeView_PingButtonFollowsRestart(t *testing.T) {
+	got := controlRowActionIDs(t, renderHomeView("v0.9.1", "", false, true))
+	want := []string{appHomeRestartActionID, pingcard.ActionPing}
+	if !slices.Equal(got, want) {
+		t.Fatalf("control row = %v, want %v", got, want)
+	}
+	btn := findHomeButton(renderHomeView("v0.9.1", "", false, true), pingcard.ActionPing)
+	if btn == nil || btn.Text.Text != pingcard.ButtonLabel {
+		t.Fatalf("expected a %q button, got %+v", pingcard.ButtonLabel, btn)
+	}
+	if btn.Style != "" {
+		t.Fatalf("ping button style = %q, want the default style", btn.Style)
+	}
+}
+
+func TestRenderHomeView_NonAdminNeverSeesThePingButton(t *testing.T) {
+	if btn := findHomeButton(renderHomeView("v0.9.1", "", false, false), pingcard.ActionPing); btn != nil {
+		t.Fatal("non-admin must never see the Test communication button")
 	}
 }
 
