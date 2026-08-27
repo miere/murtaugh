@@ -6,8 +6,22 @@ import (
 	"github.com/miere/murtaugh/internal/slack/approvalcard"
 )
 
+// Cards adapts an approvalcard.Renderer to the broker's CardRenderer for a
+// prompt Murtaugh itself owns the options of — the fixed approve/deny pair, as
+// the scheduler's first-run hold asks. The gates build their own adapter
+// in-package because they read a Decision differently (an ACP agent declares its
+// own options); a caller outside this package has no such need and gets the
+// native reading. A nil renderer returns a nil CardRenderer, which the broker
+// reads as "render the plain button row".
+func Cards(cards *approvalcard.Renderer, spec approvalcard.Spec) CardRenderer {
+	if cards == nil {
+		return nil
+	}
+	return approvalCards{cards: cards, spec: spec, outcome: nativeOutcome}
+}
+
 // approvalCards adapts an approvalcard.Renderer to the broker's CardRenderer for
-// one gated tool call. It carries the two things the renderer needs and the
+// one gated call. It carries the two things the renderer needs and the
 // prompt cannot supply: what the call is (the tool and its command), and how to
 // read a Decision as an outcome — which differs between the native gate's fixed
 // Approve/Deny options and an ACP agent's self-declared ones.

@@ -9,6 +9,7 @@ import (
 	"github.com/go-co-op/gocron/v2"
 
 	"github.com/miere/murtaugh/internal/config"
+	"github.com/miere/murtaugh/internal/slack/approvalcard"
 	askbroker "github.com/miere/murtaugh/internal/slack/interaction"
 )
 
@@ -152,8 +153,13 @@ func (a *Gateway) confirmHeldJob(ctx context.Context, name string, job config.Jo
 		a.logger.Warn("held scheduled job cannot be confirmed: no admin DM available; not run", "job", name, "error", err)
 		return false
 	}
-	question := fmt.Sprintf("Scheduled job `%s` is about to run for the first time:\n```%s```\nSchedule: %s. Approve its first run?",
-		name, jobCommandLine(job), scheduleSummary(job))
+	detail, language := jobDetail(job)
+	note := jobNote(job)
+	// Question is the text the broker's plain button-row rendering falls back to
+	// when no card renderer is wired; the card below is what the admin normally
+	// sees. Both say the same things, in the same order.
+	question := fmt.Sprintf("Scheduled job `%s` is about to run for the first time:\n```%s```\n%s Approve its first run?",
+		name, detail, note)
 	decision, err := a.interactions.Ask(ctx, askbroker.Destination{ChannelID: dest}, askbroker.PromptSpec{
 		Title:    ":alarm_clock: First run of a scheduled job",
 		Question: question,
@@ -161,6 +167,19 @@ func (a *Gateway) confirmHeldJob(ctx context.Context, name string, job config.Jo
 			{ID: "approve", Label: "Approve", Style: "primary"},
 			{ID: "deny", Label: "Deny", Style: "danger"},
 		},
+		// Rendered as the same approval card the tool gates use. The hold is an
+		// approval like any other, and the admin who sees one in their DM should
+		// not have to read a second visual language for it. The settled card is
+		// left in place (no AutoDismiss): unlike a tool approval it is a
+		// standing decision — the job runs unattended from here on — so the
+		// record of who allowed it is worth keeping in the DM.
+		Cards: askbroker.Cards(a.approvalCards, approvalcard.Spec{
+			Subject:  approvalcard.SubjectJob,
+			Name:     name,
+			Detail:   detail,
+			Language: language,
+			Note:     note,
+		}),
 	})
 	if err != nil {
 		a.logger.Warn("held scheduled job confirmation failed; not run", "job", name, "error", err)
@@ -183,12 +202,44 @@ func (a *Gateway) confirmHeldJob(ctx context.Context, name string, job config.Jo
 	return false
 }
 
-// jobCommandLine renders a job's command and args for the confirmation prompt.
-func jobCommandLine(job config.JobProfile) string {
-	if len(job.Args) == 0 {
-		return job.Command
+// jobDetail renders what the job will actually do, with the language its detail
+// should be highlighted as. A command job shows its command line; an
+// agent-delegated one has no command at all and shows the prompt it will be sent
+// — asking someone to approve a blank code block tells them nothing.
+func jobDetail(job config.JobProfile) (detail, language string) {
+	if strings.TrimSpace(job.Agent) != "" {
+		return strings.TrimSpace(job.Prompt), ""
 	}
-	return job.Command + " " + strings.Join(job.Args, " ")
+	if len(job.Args) == 0 {
+		return job.Command, "bash"
+	}
+	return job.Command + " " + strings.Join(job.Args, " "), "bash"
+}
+
+// jobNote is the line under the command: what will trigger this job from here
+// on, and for a delegated job which agent carries it out. Approving is a
+// standing decision rather than a one-off — the confirmation is persisted and
+// the job runs unattended afterwards — so the schedule is the part the admin is
+// really being asked about.
+func jobNote(job config.JobProfile) string {
+	who := ""
+	if agent := strings.TrimSpace(job.Agent); agent != "" {
+		who = fmt.Sprintf(" through the `%s` agent", agent)
+	}
+	return fmt.Sprintf("Runs %s%s — approving allows every later run too.", schedulePhrase(job), who)
+}
+
+// schedulePhrase renders a job's trigger to sit inside a sentence, where
+// scheduleSummary's log-line form ("cron 0 9 * * *") does not read.
+func schedulePhrase(job config.JobProfile) string {
+	switch job.ScheduleKind() {
+	case config.ScheduleCron:
+		return fmt.Sprintf("on cron `%s`", strings.TrimSpace(job.Schedule))
+	case config.ScheduleEvery:
+		return "every " + strings.TrimSpace(job.Every)
+	default:
+		return "only when asked"
+	}
 }
 
 // scheduleDefinition maps a job profile onto the gocron job definition for

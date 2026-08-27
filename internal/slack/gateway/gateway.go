@@ -190,6 +190,12 @@ type Gateway struct {
 	// block needs. Either nil degrades those alerts to plain text.
 	alertCards *alertcard.Renderer
 	alertAPI   alertMessagePoster
+	// approvalCards renders the approval container card. The chat gates get it
+	// too (they are handed it at construction), but the gateway keeps a
+	// reference of its own because the scheduler's first-run hold asks outside
+	// any chat turn — and outside chat entirely, since a scheduler runs whether
+	// or not chat is enabled. nil falls back to the broker's plain button row.
+	approvalCards *approvalcard.Renderer
 	// journalSweep runs one retention pass over the journal; journalSweepEvery
 	// is its cadence. Wired by the composition root (WithJournalSweeper) as a
 	// closure over the daemon's store. nil disables the sweeper, so CLI/MCP and
@@ -277,6 +283,12 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 	// Built out here rather than inside the chat block because the admin DMs use
 	// it too, and those fire whether or not chat is enabled.
 	alertCards := alertcard.NewRenderer(cfg.BaseDir, assets.FS)
+	// One approval renderer serves every asker: it is stateless, and it reads its
+	// card templates from the config dir first so an operator can restyle them
+	// without a rebuild, falling back to the embedded assets tree. Built out here
+	// for the same reason as alertCards — the scheduler's first-run hold uses it
+	// whether or not chat is enabled.
+	approvalCards := approvalcard.NewRenderer(cfg.BaseDir, assets.FS)
 	var alertAPI alertMessagePoster
 	if alertClient, err := slackclient.NewClient(cfg.OAuth.BotToken); err != nil {
 		logger.Warn("alert cards disabled: could not build Slack client", "error", err)
@@ -314,12 +326,7 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 		// whether its settled cards are kept or swept, and one shared gate could
 		// only ever honour one agent's choice. profile.Approval is already the
 		// resolved policy: both config loaders bake defaults.approval into every
-		// agent before this point.
-		//
-		// One renderer serves all of them: it is stateless, and it reads card
-		// templates from the config dir first so an operator can restyle them
-		// without a rebuild, falling back to the embedded assets tree.
-		approvalCards := approvalcard.NewRenderer(cfg.BaseDir, assets.FS)
+		// agent before this point. They all share the one renderer built above.
 		acpPermissionAskers := make(map[string]agent.PermissionAsker, len(cfg.Agents))
 		for name, profile := range cfg.Agents {
 			var approver native.Approver
@@ -527,6 +534,7 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 		botToken:          cfg.OAuth.BotToken,
 		alertCards:        alertCards,
 		alertAPI:          alertAPI,
+		approvalCards:     approvalCards,
 		channelCache:      channelCache,
 		// Captured here so the no-mention check in handleEventsAPI runs without
 		// re-importing the full cfg.

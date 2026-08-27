@@ -135,7 +135,7 @@ func (g *PermissionGate) approvalCards(name, detail string, kindByID map[string]
 	return approvalCards{
 		cards: g.cards,
 		spec: approvalcard.Spec{
-			ToolName: name,
+			Name:     name,
 			Detail:   detail,
 			Language: codeLang(name),
 		},

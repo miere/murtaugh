@@ -36,6 +36,15 @@
 						}
 					]
 				},
+				{{ end }}{{ if .Footer }}{
+					"type": "context",
+					"elements": [
+						{
+							"type": "mrkdwn",
+							"text": {{ json .Footer }}
+						}
+					]
+				},
 				{{ end }}{
 					"type": "actions",
 					"block_id": {{ json .ActionsBlockID }},

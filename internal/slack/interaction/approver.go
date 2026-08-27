@@ -140,7 +140,7 @@ func (g *GateApprover) approvalCards(toolName, summary string) CardRenderer {
 	return approvalCards{
 		cards: g.cards,
 		spec: approvalcard.Spec{
-			ToolName: toolName,
+			Name:     toolName,
 			Detail:   strings.TrimRight(summary, "\n"),
 			Language: codeLang(toolName),
 		},

@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -38,6 +39,42 @@ func TestScheduleDefinition(t *testing.T) {
 			t.Fatal("expected error for a manual (unscheduled) job")
 		}
 	})
+}
+
+// An agent-delegated job has no command at all, so the card must show the prompt
+// it will be sent instead. Rendering its (empty) command line asks the admin to
+// approve a blank box.
+func TestJobDetail(t *testing.T) {
+	cmd, lang := jobDetail(config.JobProfile{Command: "/bin/echo", Args: []string{"hi", "there"}})
+	if cmd != "/bin/echo hi there" {
+		t.Errorf("command detail = %q, want the full command line", cmd)
+	}
+	if lang != "bash" {
+		t.Errorf("command language = %q, want bash", lang)
+	}
+
+	prompt, lang := jobDetail(config.JobProfile{Agent: "researcher", Prompt: "Summarise yesterday's alerts."})
+	if prompt != "Summarise yesterday's alerts." {
+		t.Errorf("agent detail = %q, want the prompt", prompt)
+	}
+	if lang != "" {
+		t.Errorf("a prompt is not code: language = %q, want none", lang)
+	}
+}
+
+// The note is what the admin is really agreeing to: not this run, but every one
+// after it.
+func TestJobNote(t *testing.T) {
+	if note := jobNote(config.JobProfile{Command: "/bin/echo", Schedule: "0 2 * * *"}); !strings.Contains(note, "0 2 * * *") {
+		t.Errorf("note = %q, want it to name the cron schedule", note)
+	}
+	note := jobNote(config.JobProfile{Agent: "researcher", Every: "1h"})
+	if !strings.Contains(note, "every 1h") {
+		t.Errorf("note = %q, want it to name the interval", note)
+	}
+	if !strings.Contains(note, "researcher") {
+		t.Errorf("note = %q, want it to name the agent that will carry the job out", note)
+	}
 }
 
 func TestStartSchedulerNoOpWithoutRunner(t *testing.T) {

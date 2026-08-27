@@ -112,6 +112,12 @@ run before it executes.
   changed command is held for a fresh approval. An approval covers the exact
   definition it was shown, nothing else.
 
+The DM is the same approval card a gated tool call renders as: the command it
+will run (or, for a delegated job, the prompt the agent will be sent), the
+schedule you are agreeing to, and Approve / Deny. Unlike a tool approval, the
+settled card is **not** swept from the DM afterwards — the decision is a standing
+one, so the record of who allowed the job to run unattended stays put.
+
 This exists because a job's command runs headless and ungated — so nothing can
 define-then-auto-run a command without a human OK. `jobs.define` additionally
 prompts a human at definition time, showing the rendered command and schedule.

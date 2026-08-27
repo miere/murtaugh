@@ -9,7 +9,9 @@ import (
 
 	slackgo "github.com/slack-go/slack"
 
+	"github.com/miere/murtaugh/assets"
 	"github.com/miere/murtaugh/internal/config"
+	"github.com/miere/murtaugh/internal/slack/approvalcard"
 	slacklib "github.com/miere/murtaugh/internal/slack/client"
 	"github.com/miere/murtaugh/internal/slack/client/slacktest"
 	"github.com/miere/murtaugh/internal/slack/interaction"
@@ -55,6 +57,9 @@ func newConfirmGateway(t *testing.T) (*Gateway, *signalingSlackAPI, *interaction
 		interactions: broker,
 		messaging:    &dmMessaging{dm: "DADMIN"},
 		cfg:          config.AccessConfig{AdminUser: "UADMIN"},
+		// Wired as production wires it, so the tests drive the card the admin
+		// actually sees rather than the plain button-row fallback.
+		approvalCards: approvalcard.NewRenderer("", assets.FS),
 	}
 	return a, sig, broker
 }
@@ -168,24 +173,141 @@ func TestConfirmHeldJob_NoBrokerDoesNotRun(t *testing.T) {
 }
 
 // corrFromBlocks parses the correlation id out of the posted prompt's first
-// button (action_id = "murtaugh_interaction:<corr>:<idx>").
+// button (action_id = "murtaugh_interaction:<corr>:<idx>"). The buttons sit
+// inside the approval card's container child_blocks, a block type newer than the
+// pinned slack-go, so the payload is walked as raw JSON rather than decoded into
+// typed blocks — and the walk finds the button wherever the card puts it.
 func corrFromBlocks(t *testing.T, raw []byte) string {
 	t.Helper()
-	var blocks slackgo.Blocks
-	if err := json.Unmarshal(raw, &blocks); err != nil {
-		t.Fatalf("posted blocks are not valid Block Kit JSON: %v", err)
+	var doc any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("posted blocks are not valid JSON: %v", err)
 	}
-	for _, b := range blocks.BlockSet {
-		if action, ok := b.(*slackgo.ActionBlock); ok && action.Elements != nil {
-			for _, el := range action.Elements.ElementSet {
-				if btn, ok := el.(*slackgo.ButtonBlockElement); ok {
-					if parts := strings.Split(btn.ActionID, ":"); len(parts) >= 3 {
-						return parts[1]
-					}
-				}
+	actionID, ok := firstActionID(doc)
+	if !ok {
+		t.Fatalf("no broker button found in posted blocks:\n%s", raw)
+	}
+	parts := strings.Split(actionID, ":")
+	if len(parts) < 3 {
+		t.Fatalf("action_id %q is not a broker button", actionID)
+	}
+	return parts[1]
+}
+
+// firstActionID returns the first action_id found anywhere in the decoded JSON.
+// Both buttons of a prompt carry the same correlation id, so which one the walk
+// reaches first does not matter.
+func firstActionID(node any) (string, bool) {
+	switch n := node.(type) {
+	case map[string]any:
+		if id, ok := n["action_id"].(string); ok && id != "" {
+			return id, true
+		}
+		for _, child := range n {
+			if id, ok := firstActionID(child); ok {
+				return id, true
+			}
+		}
+	case []any:
+		for _, child := range n {
+			if id, ok := firstActionID(child); ok {
+				return id, true
 			}
 		}
 	}
-	t.Fatal("no broker button found in posted blocks")
-	return ""
+	return "", false
+}
+
+// The hold is an approval, and it must look like every other approval Murtaugh
+// asks for: one container card, not the loose section-and-buttons prompt the
+// broker falls back to. The subtitle has to name the job, because the admin sees
+// this in a DM with no thread around it to say what it is about.
+func TestConfirmHeldJob_RendersTheApprovalCard(t *testing.T) {
+	a, sig, broker := newConfirmGateway(t)
+
+	out := make(chan bool, 1)
+	go func() { out <- a.confirmHeldJob(context.Background(), "myjob", heldJob()) }()
+
+	posted := <-sig.posted
+	card := containerCard(t, posted.Blocks)
+	if card.Type != "container" {
+		t.Fatalf("posted a %q block, want the approval card's container", card.Type)
+	}
+	if card.BlockID != approvalcard.ContainerBlockID {
+		t.Errorf("container block_id = %q, want %q", card.BlockID, approvalcard.ContainerBlockID)
+	}
+	if !strings.Contains(card.Subtitle.Text, "'myjob'") {
+		t.Errorf("subtitle = %q, want it to name the job", card.Subtitle.Text)
+	}
+	// The command, the schedule note and the buttons: what the admin needs to
+	// decide, and the thing that makes the card clickable.
+	if !strings.Contains(string(posted.Blocks), "/bin/echo hi") {
+		t.Errorf("card does not show the command it is asking about:\n%s", posted.Blocks)
+	}
+	if !strings.Contains(string(posted.Blocks), "every 1h") {
+		t.Errorf("card does not show the schedule being approved:\n%s", posted.Blocks)
+	}
+	// A push notification is the least private surface Slack has: it may name
+	// the job, never the command.
+	if strings.Contains(posted.Text, "/bin/echo") {
+		t.Errorf("notification text leaks the command: %q", posted.Text)
+	}
+
+	broker.Resolve(corrFromBlocks(t, posted.Blocks), interaction.Decision{OptionID: "approve", UserID: "UADMIN"})
+	if !<-out {
+		t.Fatal("approval should return true (run the job)")
+	}
+
+	// The settled card replaces the prompt and stays put: the confirmation is
+	// persisted and the job runs unattended from here on, so who allowed it is
+	// worth keeping in the DM.
+	if len(sig.Updated) != 1 {
+		t.Fatalf("settled prompt was updated %d times, want 1", len(sig.Updated))
+	}
+	settled := containerCard(t, sig.Updated[0].Blocks)
+	if !settled.IsCollapsible {
+		t.Error("a settled card must be collapsible")
+	}
+	if _, ok := firstActionID(rawJSON(t, sig.Updated[0].Blocks)); ok {
+		t.Error("settled card still carries a clickable button")
+	}
+	if !strings.Contains(string(sig.Updated[0].Blocks), "<@UADMIN>") {
+		t.Errorf("settled card does not name the decider:\n%s", sig.Updated[0].Blocks)
+	}
+	if len(sig.Deleted) != 0 {
+		t.Error("the settled first-run card must not be swept from the DM")
+	}
+}
+
+// cardBlock is the approval card decoded far enough to assert on it.
+type cardBlock struct {
+	Type          string `json:"type"`
+	BlockID       string `json:"block_id"`
+	IsCollapsible bool   `json:"is_collapsible"`
+	Subtitle      struct {
+		Text string `json:"text"`
+	} `json:"subtitle"`
+}
+
+func containerCard(t *testing.T, raw []byte) cardBlock {
+	t.Helper()
+	var doc struct {
+		Blocks []cardBlock `json:"blocks"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("decode posted blocks: %v\n%s", err, raw)
+	}
+	if len(doc.Blocks) != 1 {
+		t.Fatalf("want exactly one top-level block, got %d:\n%s", len(doc.Blocks), raw)
+	}
+	return doc.Blocks[0]
+}
+
+func rawJSON(t *testing.T, raw []byte) any {
+	t.Helper()
+	var doc any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("decode blocks: %v", err)
+	}
+	return doc
 }

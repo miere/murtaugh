@@ -82,7 +82,8 @@ internal/slack/       Slack subsystem:
                       answered in place, from templates/ask/*.json.
   authcard/           Two-party authentication card (requester + admin),
                       rendered from templates/auth/*.json.
-  approvalcard/       The tool-approval card, from templates/approval/*.json.
+  approvalcard/       The approval card — a gated tool call, or a held job's
+                      first run — from templates/approval/*.json.
                       Rendering only — the interaction broker keeps the
                       lifecycle and calls in through its CardRenderer hook.
   alertcard/          The non-interactive alerts Murtaugh sends about itself
@@ -530,11 +531,17 @@ posts, blocks on a rendezvous, and rewrites the card to its terminal state.
 
 `internal/slack/approvalcard` is the other shape: **rendering without a
 lifecycle**. The interaction broker already posted, correlated, timed out and
-optionally deleted the pre-card approval prompts for all three gates, so the card
-package owns none of that — it implements the broker's `CardRenderer` hook
-(`Pending`/`Resolved`/`Fallback`) and the broker calls in at the two points where
-blocks are needed. Reach for this shape when a lifecycle already exists and only
-the looks are changing; reach for authcard's when there is no lifecycle yet.
+optionally deleted the pre-card approval prompts for all three gates and for the
+scheduler's first-run hold, so the card package owns none of that — it implements
+the broker's `CardRenderer` hook (`Pending`/`Resolved`/`Fallback`) and the broker
+calls in at the two points where blocks are needed. Reach for this shape when a
+lifecycle already exists and only the looks are changing; reach for authcard's
+when there is no lifecycle yet.
+
+Its `Spec.Subject` picks the card's voice. A gate asks about a tool an agent
+wants to use; the scheduler asks about a held job whose first run has come due,
+where "the agent wants to" would be untrue — a timer asked, not an agent. Adding
+a third asker means adding a `Subject`, not a second card package.
 
 `internal/slack/alertcard` is the third shape: **rendering with neither a
 lifecycle nor a click**. An alert is a statement, so there is nothing to
