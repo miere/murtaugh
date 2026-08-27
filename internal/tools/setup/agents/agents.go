@@ -15,6 +15,7 @@ package agents
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -199,11 +200,23 @@ func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 
 	created := false
 	if resultKind != "" {
-		_, existed, err := s.GetItem(ctx, config.SectionAgent, agentName)
+		body, existed, err := s.GetItem(ctx, config.SectionAgent, agentName)
 		if err != nil {
 			return nil, err
 		}
 		created = !existed
+		// Setup rebuilds the profile from its flags, so re-running it would hand
+		// a known agent a new face. Carry the stored icon across; a genuinely new
+		// agent gets one picked here so it has an icon from its first write.
+		if existed {
+			var stored config.AgentProfile
+			if err := json.Unmarshal(body, &stored); err == nil {
+				profile.Icon = stored.Icon
+			}
+		}
+		if strings.TrimSpace(profile.Icon) == "" {
+			profile.Icon = config.PickAgentIcon()
+		}
 		if err := s.UpsertItem(ctx, config.SectionAgent, agentName, profile); err != nil {
 			return nil, err
 		}

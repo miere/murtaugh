@@ -21,6 +21,7 @@ func agentSchema(nameRequired bool) *jsonschema.Schema {
 		"name":                   {Type: "string", Description: "agent name (the key it is stored under)"},
 		"type":                   {Type: "string", Description: "backend: native | acp | claude_code"},
 		"workdir":                {Type: "string", Description: "agent working directory"},
+		"icon":                   {Type: "string", Description: "http(s) image URL for the agent's icon (omitted picks one at random)"},
 		"tools":                  {Type: "array", Items: &jsonschema.Schema{Type: "string"}, Description: "tool group to expose (repeatable)"},
 		"mcp_servers":            {Type: "array", Items: &jsonschema.Schema{Type: "string"}, Description: "extra MCP server to attach (repeatable)"},
 		"export_skills_to_fs":    {Type: "array", Items: &jsonschema.Schema{Type: "string"}, Description: "bundled skill to export to the workdir (repeatable; 'all' for every one)"},
@@ -138,6 +139,15 @@ func buildAgentProfile(existing *config.AgentProfile, args map[string]any) (conf
 
 	if v, ok := stringArg(args, "workdir"); ok {
 		p.WorkDir = v
+	}
+	if v, ok := stringArg(args, "icon"); ok {
+		p.Icon = v
+	}
+	// An agent always has a face. Assigning it here rather than waiting for the
+	// startup backfill means `cfg agent show` reports the real icon straight
+	// after create, instead of an empty field until the next restart.
+	if strings.TrimSpace(p.Icon) == "" {
+		p.Icon = config.PickAgentIcon()
 	}
 	if v, ok := arrayArg(args, "tools"); ok {
 		p.Tools = v

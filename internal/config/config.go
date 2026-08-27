@@ -464,6 +464,11 @@ type AgentProfile struct {
 	// WorkDir roots the agent: the files/terminal tools for a native agent, or
 	// the spawned process's cwd for an ACP agent.
 	WorkDir string `yaml:"workdir" json:"workdir"`
+	// Icon is the agent's face: an http(s) image URL. Empty means "not assigned
+	// yet" — the startup backfill picks one from AgentIcons and persists it, so
+	// an agent looks the same on every surface and across restarts. Set it
+	// explicitly to pin your own artwork.
+	Icon string `yaml:"icon" json:"icon,omitempty"`
 	// Tools is the allowlist of registry/native tool groups exposed to this
 	// agent (e.g. "files", "terminal", "skills", "slack", "jobs"). Empty means
 	// no tools beyond the always-on set the toolset resolver decides.
@@ -972,6 +977,9 @@ func (c Config) Validate() error {
 	}
 	for name, profile := range c.Agents {
 		if err := validateProgressDisplay(fmt.Sprintf("agents[%s].progress_display", name), profile.ProgressDisplay); err != nil {
+			errs = append(errs, err)
+		}
+		if err := validateAgentIcon(fmt.Sprintf("agents[%s].icon", name), profile.Icon); err != nil {
 			errs = append(errs, err)
 		}
 		if profile.ACP != nil {

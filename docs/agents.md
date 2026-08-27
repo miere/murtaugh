@@ -302,3 +302,23 @@ approval:                    # global default, overridden per agent by --approva
 
 An agent's `--workdir` defaults to the workspace (`~/.config/murtaugh`) when
 unset, so it starts where the bundled skills and templates live.
+
+---
+
+## Agent icons
+
+Every agent carries an **icon** — an `http(s)` image URL — so two agents are
+told apart at a glance instead of wearing the same generic bot face.
+
+You never have to set one. An agent created without `--icon` is given a random
+icon from a small built-in palette, and it is written to the config store there
+and then, so the face stays the same across restarts. Agents that predate the
+feature are backfilled on the next start.
+
+```sh
+murtaugh cfg agent update --name emily --icon https://example.com/emily.png
+murtaugh cfg agent show --name emily      # icon: …
+```
+
+Pinning your own URL opts out of the palette; Murtaugh only checks that it is an
+absolute `http(s)` URL, and never overwrites it.
