@@ -19,7 +19,7 @@ What `murtaugh slack gateway` does, in order, when it starts:
    DMs, and `link_shared` until shutdown.
 
 Config files are read **once at startup** — there is no on-disk watcher. After
-editing config, restart the daemon (e.g. the **Restart Murtaugh** button on the
+editing config, restart the daemon (e.g. the **Restart** button on the
 App Home tab) to load the changes. → `reference/config-and-restart.md`
 
 ## Startup ping

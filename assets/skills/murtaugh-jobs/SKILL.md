@@ -62,7 +62,7 @@ without a human OK.
   Murtaugh rejects that at validation time (and rolls the change back). Leave both
   unset for a manual-only job.
 - **Schedule edits apply on the next gateway restart**, not live. After a
-  `cfg job set`, restart the gateway (e.g. the **Restart Murtaugh** button on the
+  `cfg job set`, restart the gateway (e.g. the **Restart** button on the
   App Home tab).
 - **`jobs_define` requires approval.** Defining a job via the agent tool is never a
   silent write — it always prompts a human, showing the rendered command +
