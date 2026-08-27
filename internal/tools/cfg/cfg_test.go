@@ -132,6 +132,79 @@ func TestCfgAgentUpdateMergesFields(t *testing.T) {
 	}
 }
 
+// readAgent decodes one stored agent entry.
+func readAgent(t *testing.T, p Provider, name string) config.AgentProfile {
+	t.Helper()
+	s, err := p()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, ok, err := s.GetItem(context.Background(), config.SectionAgent, name)
+	if err != nil || !ok {
+		t.Fatalf("GetItem(%q): ok=%v err=%v", name, ok, err)
+	}
+	var profile config.AgentProfile
+	if err := json.Unmarshal(body, &profile); err != nil {
+		t.Fatal(err)
+	}
+	return profile
+}
+
+// TestCfgAgentCreateAssignsAnIcon: a created agent gets a face straight away —
+// a random one from the palette, or the one the operator pinned.
+func TestCfgAgentCreateAssignsAnIcon(t *testing.T) {
+	p := testProvider(t)
+	agents := AgentTools(p)
+	if _, err := invoke(t, find(t, agents, "cfg.agent.create"), map[string]any{
+		"name": "auto", "type": "native", "provider": "gemini", "model": "gemini-2.5-pro", "api_key_env": "K",
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	icon := readAgent(t, p, "auto").Icon
+	found := false
+	for _, want := range config.AgentIcons {
+		if want == icon {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("created agent icon %q is not from the palette", icon)
+	}
+	// An update that says nothing about the icon leaves it alone.
+	if _, err := invoke(t, find(t, agents, "cfg.agent.update"), map[string]any{
+		"name": "auto", "model": "gemini-3-pro",
+	}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if got := readAgent(t, p, "auto").Icon; got != icon {
+		t.Errorf("update reshuffled the icon: %q → %q", icon, got)
+	}
+
+	// --icon pins an explicit one.
+	if _, err := invoke(t, find(t, agents, "cfg.agent.create"), map[string]any{
+		"name": "pinned", "type": "native", "provider": "gemini", "model": "gemini-2.5-pro", "api_key_env": "K",
+		"icon": "https://example.com/mine.png",
+	}); err != nil {
+		t.Fatalf("create pinned: %v", err)
+	}
+	if got := readAgent(t, p, "pinned").Icon; got != "https://example.com/mine.png" {
+		t.Errorf("--icon not honoured: %q", got)
+	}
+}
+
+// TestCfgAgentRejectsNonURLIcon: validation runs on the way in, so a typo is a
+// create error rather than a broken image in Slack later.
+func TestCfgAgentRejectsNonURLIcon(t *testing.T) {
+	p := testProvider(t)
+	agents := AgentTools(p)
+	if _, err := invoke(t, find(t, agents, "cfg.agent.create"), map[string]any{
+		"name": "bad", "type": "native", "provider": "gemini", "model": "gemini-2.5-pro", "api_key_env": "K",
+		"icon": "robot.png",
+	}); err == nil {
+		t.Fatal("a non-URL icon should be rejected")
+	}
+}
+
 func TestCfgRejectsInvalidCreate(t *testing.T) {
 	p := testProvider(t)
 	agents := AgentTools(p)

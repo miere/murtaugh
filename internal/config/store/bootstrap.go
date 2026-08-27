@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -66,7 +68,52 @@ func Bootstrap(ctx context.Context, configPath string, setup bool) (config.Confi
 		_ = s.Close()
 		return config.Config{}, nil, err
 	}
+	cfg = ensureAgentIcons(ctx, s, cfg)
 	return cfg, s, nil
+}
+
+// ensureAgentIcons gives every agent that has no icon a random one from the
+// palette and writes it back, so the face an agent shows is decided once and
+// then stays put — across surfaces and across restarts. Agents created before
+// the feature are backfilled here on the next start.
+//
+// It writes the profile as it is stored, re-read from the row, NOT the profile
+// off cfg: Load bakes the global defaults.approval into each in-memory agent,
+// and persisting that would silently freeze today's default into the agent row.
+//
+// An icon is cosmetic, so a store that refuses the write degrades the icon
+// rather than the daemon: the failure is logged and the profile is left
+// iconless, both in the store and in memory, for the next start to retry.
+// Assigning it in memory only would hand out a different face on every boot.
+func ensureAgentIcons(ctx context.Context, s config.Store, cfg config.Config) config.Config {
+	if len(cfg.Agents) == 0 {
+		return cfg
+	}
+	rows, err := s.ListItems(ctx, config.SectionAgent)
+	if err != nil {
+		slog.Default().Warn("could not read agents to assign icons", "error", err)
+		return cfg
+	}
+	for name, body := range rows {
+		var stored config.AgentProfile
+		if err := json.Unmarshal(body, &stored); err != nil {
+			slog.Default().Warn("could not decode agent to assign an icon", "agent", name, "error", err)
+			continue
+		}
+		if strings.TrimSpace(stored.Icon) != "" {
+			continue
+		}
+		stored.Icon = config.PickAgentIcon()
+		if err := s.UpsertItem(ctx, config.SectionAgent, name, stored); err != nil {
+			slog.Default().Warn("could not persist the agent icon", "agent", name, "error", err)
+			continue
+		}
+		if live, ok := cfg.Agents[name]; ok {
+			live.Icon = stored.Icon
+			cfg.Agents[name] = live
+		}
+	}
+	return cfg
 }
 
 // bootstrapFile is the slim, post-migration shape of config.yaml: credentials

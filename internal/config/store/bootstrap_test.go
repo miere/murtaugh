@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -138,6 +139,130 @@ func TestBootstrapIsIdempotent(t *testing.T) {
 	if len(archives) != 1 {
 		t.Errorf("expected exactly one migrated-* dir, got %d", len(archives))
 	}
+}
+
+// seedStore writes a post-migration config dir (config.yaml with a database
+// block, plus .env) and fills its store with the given agents and a
+// defaults.approval that Load will bake into every in-memory profile. It
+// returns the config.yaml path.
+func seedStore(t *testing.T, agents map[string]config.AgentProfile) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	body := `oauth:
+  app_token: ${SLACK_APP_TOKEN}
+  bot_token: ${SLACK_BOT_TOKEN}
+database:
+  backend: sqlite
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("SLACK_APP_TOKEN=xapp-1\nSLACK_BOT_TOKEN=xoxb-1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// setup=true opens the store without loading, which is exactly what a
+	// seeding step wants.
+	_, s, err := Bootstrap(context.Background(), path, true)
+	if err != nil {
+		t.Fatalf("seed Bootstrap: %v", err)
+	}
+	defer s.Close()
+	for name, p := range agents {
+		if err := s.UpsertItem(context.Background(), config.SectionAgent, name, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	defaults := config.RuntimeDefaults{Approval: config.ApprovalConfig{Terminal: "prompt"}}
+	if err := s.PutSingleton(context.Background(), config.SingletonDefaults, defaults); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// storedAgent re-reads one agent row as it is persisted (before Load bakes the
+// global defaults into it).
+func storedAgent(t *testing.T, s config.Store, name string) config.AgentProfile {
+	t.Helper()
+	body, ok, err := s.GetItem(context.Background(), config.SectionAgent, name)
+	if err != nil || !ok {
+		t.Fatalf("GetItem(%q): ok=%v err=%v", name, ok, err)
+	}
+	var p config.AgentProfile
+	if err := json.Unmarshal(body, &p); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// TestBootstrapAssignsMissingAgentIcons: an agent stored without an icon is
+// backfilled with one from the palette, in memory AND in the store, and the
+// same icon comes back on the next start.
+func TestBootstrapAssignsMissingAgentIcons(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	path := seedStore(t, map[string]config.AgentProfile{"code": nativeAgent()})
+
+	cfg, s, err := Bootstrap(context.Background(), path, false)
+	if err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	icon := cfg.Agents["code"].Icon
+	if icon == "" {
+		t.Fatal("agent icon was not assigned")
+	}
+	if !containsIcon(config.AgentIcons, icon) {
+		t.Errorf("assigned icon is not from the palette: %q", icon)
+	}
+	stored := storedAgent(t, s, "code")
+	if stored.Icon != icon {
+		t.Errorf("store has %q, memory has %q", stored.Icon, icon)
+	}
+	// The write must carry the profile AS STORED, not the in-memory one Load
+	// baked defaults.approval into — otherwise today's global default freezes
+	// into the agent row.
+	if stored.Approval.Terminal != "" {
+		t.Errorf("backfill baked the global approval default into the row: %q", stored.Approval.Terminal)
+	}
+	s.Close()
+
+	cfg2, s2, err := Bootstrap(context.Background(), path, false)
+	if err != nil {
+		t.Fatalf("second Bootstrap: %v", err)
+	}
+	defer s2.Close()
+	if got := cfg2.Agents["code"].Icon; got != icon {
+		t.Errorf("icon changed across restarts: %q → %q", icon, got)
+	}
+}
+
+// TestBootstrapKeepsExplicitAgentIcon: an operator's own icon is never
+// reshuffled by the backfill.
+func TestBootstrapKeepsExplicitAgentIcon(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	pinned := nativeAgent()
+	pinned.Icon = "https://example.com/mine.png"
+	path := seedStore(t, map[string]config.AgentProfile{"code": pinned})
+
+	cfg, s, err := Bootstrap(context.Background(), path, false)
+	if err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	defer s.Close()
+	if got := cfg.Agents["code"].Icon; got != pinned.Icon {
+		t.Errorf("explicit icon replaced: %q", got)
+	}
+	if got := storedAgent(t, s, "code").Icon; got != pinned.Icon {
+		t.Errorf("explicit icon rewritten in the store: %q", got)
+	}
+}
+
+func containsIcon(icons []string, want string) bool {
+	for _, i := range icons {
+		if i == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestBootstrapSetupSkipsLoad(t *testing.T) {
