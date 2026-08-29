@@ -42,6 +42,7 @@ type Config struct {
 	Jobs          map[string]JobProfile         `yaml:"-" json:"-"`
 	Journal       JournalConfig                 `yaml:"-" json:"-"`
 	Troubleshoot  TroubleshootConfig            `yaml:"-" json:"-"`
+	Fallback      FallbackConfig                `yaml:"-" json:"-"`
 	WorkflowRules map[string]WorkflowRuleConfig `yaml:"-" json:"-"`
 	UnfurlRules   map[string]UnfurlRuleConfig   `yaml:"-" json:"-"`
 }
@@ -52,6 +53,94 @@ type Config struct {
 // Murtaugh into a client that is also a known diagnostics provider (e.g. goose).
 type TroubleshootConfig struct {
 	Providers []string `yaml:"providers" json:"providers,omitempty"`
+}
+
+// FallbackConfig governs leader election: several Murtaugh nodes contending so
+// that one dying is covered by another taking over.
+//
+// It lives in the config store rather than in the bootstrap file precisely
+// because every contending node must agree on these numbers. Two nodes reading
+// different lease lengths from their own on-disk files would disagree about
+// when the incumbent's claim lapsed — which is the disagreement leader election
+// exists to prevent.
+type FallbackConfig struct {
+	// Enabled turns leader election on. Left off, a node simply runs, which is
+	// the correct behaviour for the single-node deployment that is still the
+	// common case.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+
+	// LeaseSeconds is how long a claim stays valid without renewal. It is a
+	// compromise: too short and a network hiccup hands leadership away for no
+	// reason (worse than the outage it avoids, since a takeover tears down
+	// in-flight work), too long and a dead node's silence is visible. Zero
+	// selects DefaultLeaseSeconds.
+	//
+	// It is ignored by a backend that does not need a lease, which is every
+	// backend whose liveness the OS can observe directly.
+	LeaseSeconds int `yaml:"lease_seconds" json:"lease_seconds,omitempty"`
+
+	// RenewSeconds is how often the leader refreshes its claim. Zero selects
+	// DefaultRenewSeconds.
+	RenewSeconds int `yaml:"renew_seconds" json:"renew_seconds,omitempty"`
+}
+
+// Fallback timing defaults. Thirty seconds of lease renewed every ten gives a
+// leader two chances to renew before its claim lapses, so a single failed
+// renewal is survivable and a genuinely dead node is replaced inside about half
+// a minute.
+const (
+	DefaultLeaseSeconds = 30
+	DefaultRenewSeconds = 10
+)
+
+// EffectiveLease resolves the lease duration.
+func (f FallbackConfig) EffectiveLease() time.Duration {
+	if f.LeaseSeconds > 0 {
+		return time.Duration(f.LeaseSeconds) * time.Second
+	}
+	return DefaultLeaseSeconds * time.Second
+}
+
+// EffectiveRenew resolves the renewal interval.
+func (f FallbackConfig) EffectiveRenew() time.Duration {
+	if f.RenewSeconds > 0 {
+		return time.Duration(f.RenewSeconds) * time.Second
+	}
+	return DefaultRenewSeconds * time.Second
+}
+
+// EffectiveDemoteAfter is how long a leader may go without a confirmed renewal
+// before it must stand down.
+//
+// It is strictly shorter than the lease, by one renewal interval. That gap is
+// the whole point: the outgoing leader stops acting BEFORE its claim lapses, so
+// it is already silent by the time a challenger is entitled to promote. A
+// leader that instead stood down at the moment its lease expired would overlap
+// with its successor for exactly as long as it took to notice — and during that
+// overlap both would answer Slack.
+func (f FallbackConfig) EffectiveDemoteAfter() time.Duration {
+	return f.EffectiveLease() - f.EffectiveRenew()
+}
+
+// Validate checks the fallback timings are usable. It is called from
+// Config.Validate, so a bad edit is rejected at the store's write boundary
+// rather than at 3am when a node tries to fail over.
+func (f FallbackConfig) Validate() error {
+	if !f.Enabled {
+		return nil
+	}
+	if f.LeaseSeconds < 0 || f.RenewSeconds < 0 {
+		return errors.New("fallback: lease_seconds and renew_seconds must not be negative")
+	}
+	lease, renew := f.EffectiveLease(), f.EffectiveRenew()
+	// Two renewal attempts must fit inside a lease. With fewer, a single lost
+	// packet costs the leader its claim, and leadership flaps on ordinary
+	// network noise.
+	if renew*2 > lease {
+		return fmt.Errorf("fallback: renew_seconds (%d) must be at most half of lease_seconds (%d), so a single failed renewal is survivable",
+			int(renew/time.Second), int(lease/time.Second))
+	}
+	return nil
 }
 
 type OAuthConfig struct {
@@ -973,6 +1062,9 @@ func (c Config) Validate() error {
 		}
 	}
 	if err := c.Defaults.Validate(); err != nil {
+		errs = append(errs, err)
+	}
+	if err := c.Fallback.Validate(); err != nil {
 		errs = append(errs, err)
 	}
 	for name, profile := range c.Agents {

@@ -139,6 +139,58 @@ func (t *accessSetTool) Invoke(ctx context.Context, args map[string]any) (any, e
 	return okResult{Message: "saved access config"}, nil
 }
 
+// fallbackSetTool (cfg.fallback.set) edits the leader-election block.
+//
+// It writes to the config store rather than to a local file on purpose: every
+// contending node must agree on these timings, and a per-node setting would let
+// two nodes disagree about when the incumbent's lease lapsed.
+type fallbackSetTool struct{ p Provider }
+
+func (t *fallbackSetTool) Name() string { return "cfg.fallback.set" }
+func (t *fallbackSetTool) Description() string {
+	return "Update the leader-election config (enable failover, lease and renewal timings)."
+}
+func (t *fallbackSetTool) InputSchema() *jsonschema.Schema {
+	return &jsonschema.Schema{
+		Type: "object",
+		Properties: map[string]*jsonschema.Schema{
+			"enabled":       {Type: "boolean", Description: "contend for leadership instead of always running"},
+			"lease_seconds": {Type: "integer", Description: "how long a leadership claim lasts without renewal (default 30)"},
+			"renew_seconds": {Type: "integer", Description: "how often the leader refreshes its claim (default 10; at most half the lease)"},
+		},
+	}
+}
+func (t *fallbackSetTool) Invoke(ctx context.Context, args map[string]any) (any, error) {
+	s, err := t.p()
+	if err != nil {
+		return nil, err
+	}
+	var cfg config.FallbackConfig
+	if body, ok, err := s.GetSingleton(ctx, config.SingletonFallback); err != nil {
+		return nil, err
+	} else if ok && len(body) > 0 {
+		if err := json.Unmarshal(body, &cfg); err != nil {
+			return nil, err
+		}
+	}
+	if v, ok := boolArg(args, "enabled"); ok {
+		cfg.Enabled = v
+	}
+	if v, ok := intArg(args, "lease_seconds"); ok {
+		cfg.LeaseSeconds = v
+	}
+	if v, ok := intArg(args, "renew_seconds"); ok {
+		cfg.RenewSeconds = v
+	}
+	// putSingletonValidated re-validates the whole assembled config and rolls
+	// back on failure, so an unworkable lease/renew pair is refused here rather
+	// than discovered during a failover.
+	if err := putSingletonValidated(ctx, s, config.SingletonFallback, cfg); err != nil {
+		return nil, err
+	}
+	return okResult{Message: "saved fallback config; restart Murtaugh to apply"}, nil
+}
+
 // SingletonTools returns the typed set tools for chat/access plus read-only
 // show tools for every singleton block.
 func SingletonTools(p Provider) []tools.Tool {
@@ -150,5 +202,7 @@ func SingletonTools(p Provider) []tools.Tool {
 		&singletonShowTool{p: p, key: config.SingletonDefaults, label: "defaults"},
 		&singletonShowTool{p: p, key: config.SingletonJournal, label: "journal"},
 		&singletonShowTool{p: p, key: config.SingletonTroubleshoot, label: "troubleshoot"},
+		&fallbackSetTool{p: p},
+		&singletonShowTool{p: p, key: config.SingletonFallback, label: "fallback"},
 	}
 }
