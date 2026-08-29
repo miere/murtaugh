@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 
@@ -149,10 +150,24 @@ type SlackClient struct {
 // returns ErrTokenMissing so the failure is reported the same way on every
 // tool invocation.
 func NewClient(token string) (*SlackClient, error) {
+	return NewClientWithHTTP(token, nil)
+}
+
+// NewClientWithHTTP builds a SlackClient whose Web API calls go through hc. A
+// nil hc uses slack-go's default.
+//
+// The gateway passes its leadership-gated transport here, so a node that has
+// lost the election cannot post through a client built by this package any more
+// than through one it built itself. Every Slack client in the daemon has to
+// share that transport for the gate to mean anything.
+func NewClientWithHTTP(token string, hc *http.Client) (*SlackClient, error) {
 	if strings.TrimSpace(token) == "" {
 		return nil, ErrTokenMissing
 	}
-	return &SlackClient{api: slackgo.New(token)}, nil
+	if hc == nil {
+		return &SlackClient{api: slackgo.New(token)}, nil
+	}
+	return &SlackClient{api: slackgo.New(token, slackgo.OptionHTTPClient(hc))}, nil
 }
 
 // LazyClient is a sync.Once-guarded SlackAPI factory. Tools hold one of

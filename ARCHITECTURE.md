@@ -382,6 +382,43 @@ subsystems (`handler`, `workflow`, `chat`, `unfurl`). `New()` wires them:
   before the engine, so it cannot be redirected by config or template edits. Its
   button lives in the App Home control row, next to Restart.
 
+### Leader election and failover (`internal/election` + `slack/gateway/leader.go`)
+
+Off by default. With `fallback.enabled: true` in the config store, several nodes
+contend so that one dying is covered by another taking over.
+
+`Gateway.Run` branches once: with no elector it calls `serve` and behaves
+exactly as it always has; with one, the elector owns the loop and
+`StartServing` / `StopServing` run beneath it on promotion and demotion. The
+gateway depends on a two-method `LeaderElector` interface, not on the election
+package — the composition root (`internal/app/leader.go`) is the only place that
+knows about both halves, and it is where the promote/demote callbacks are built.
+
+Three decisions carry the safety argument:
+
+- **The lock is keyed on `team_id` + `bot_id` from `auth.test`**, resolved
+  before contending. Not on the bot token: a token-derived key changes on
+  rotation, so the incumbent would keep the old key's lock while a new node took
+  a different one, and both would serve the same Slack app.
+- **The outbound gate is an `http.RoundTripper`** shared by every Slack client
+  in the daemon (`outbound_gate.go`), not a check at the socket. Slack's Web API
+  is stateless HTTP independent of the socket, and chat turns deliberately run on
+  background contexts, so a demoted node with a closed socket can still post.
+  `auth.test` and `apps.connections.open` are exempt: they establish leadership
+  rather than exercise it.
+- **Demotion order is gate → disconnect → drain**, not drain first. The elector
+  clears leadership before calling `OnDemote`, so nothing during the teardown can
+  reach Slack; in-flight agent turns then get up to `drainTimeout` to finish
+  writing files before being cancelled. The danger of a demoted node was never
+  that its work continued, but that its work replied.
+
+Session managers survive demotion — a standby may be promoted again, and a torn
+down agent backend cannot be revived. They are closed only on process exit.
+
+A new leader announces itself to the admin DM with hostname, local and public
+IP, version, PID, and the leadership epoch, plus whether it is the first leader
+or took over from a predecessor.
+
 ### Event loop
 
 `Run` launches `socket.RunContext` in a goroutine, warms the ACP client, then

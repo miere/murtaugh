@@ -45,8 +45,11 @@ import (
 type LockIdentity struct {
 	// TeamID is the Slack workspace ID (auth.test `team_id`).
 	TeamID string
-	// AppID is the Slack app ID (auth.test `bot_id`'s app, or the app-level
-	// token's app). Two distinct apps in one workspace are independent gateways.
+	// AppID identifies the bot INSTALLATION, taken from auth.test's `bot_id`.
+	// It is not the credential: rotating the bot token leaves it unchanged,
+	// which is exactly the property the key needs. It changes only when the app
+	// is reinstalled, which genuinely is a different gateway. Two distinct apps
+	// in one workspace are independent gateways and get independent locks.
 	AppID string
 }
 

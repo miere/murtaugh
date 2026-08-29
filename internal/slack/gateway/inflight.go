@@ -100,6 +100,35 @@ func (r *InFlightRegistry) Cancel(key agent.ConversationKey) bool {
 	return true
 }
 
+// CancelAll cancels every tracked chat and returns how many it stopped.
+//
+// It exists for demotion: a node that has lost leadership must stop the agent
+// work it is still driving, because that work's whole purpose was to answer in
+// Slack and this node may no longer do so. The registry is emptied under the
+// lock and the cancel closures are invoked outside it, so a slow ACP
+// `session/cancel` does not block a concurrent Register.
+//
+// It does NOT close the session managers. Those own the agent backend
+// processes, and a demoted node may be promoted again later — tearing the
+// backends down here would leave it unable to serve when it is.
+func (r *InFlightRegistry) CancelAll() int {
+	if r == nil {
+		return 0
+	}
+	r.mu.Lock()
+	pending := make([]*inFlightChat, 0, len(r.entries))
+	for key, entry := range r.entries {
+		pending = append(pending, entry)
+		delete(r.entries, key)
+	}
+	r.mu.Unlock()
+
+	for _, entry := range pending {
+		entry.cancel()
+	}
+	return len(pending)
+}
+
 // Active reports whether a chat is currently in flight for the conversation.
 // It races with concurrent Register/Cancel by nature, so callers must treat
 // the answer as a best-effort snapshot, not a lock.
