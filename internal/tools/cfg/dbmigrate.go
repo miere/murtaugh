@@ -15,12 +15,19 @@ import (
 )
 
 // dbMigrateTool (cfg.db.migrate) copies the whole config store to another
-// backend and repoints config.yaml at it. The canonical use is SQLite→Postgres:
+// backend and repoints config.yaml at it:
 //
-//	murtaugh cfg db migrate --to postgres --dsn-env MURTAUGH_DB_DSN
+//	murtaugh cfg db migrate --to postgres  --dsn-env MURTAUGH_DB_DSN
+//	murtaugh cfg db migrate --to firestore --firestore-project my-project
 //
-// The DSN is read from the named .env variable (never passed on the command
-// line), and config.yaml records it as ${VAR} so the secret stays out of YAML.
+// For Postgres the DSN is read from the named .env variable (never passed on
+// the command line), and config.yaml records it as ${VAR} so the secret stays
+// out of YAML. Firestore has no such secret — it authenticates via ADC — so its
+// settings are written literally.
+//
+// The Firestore target is what a deployment adopting the leader-election
+// fallback runs: election needs a store every node can reach, so moving the
+// config store is the prerequisite, not a separate choice.
 type dbMigrateTool struct {
 	p          Provider
 	configPath string
@@ -34,9 +41,13 @@ func (t *dbMigrateTool) InputSchema() *jsonschema.Schema {
 	return &jsonschema.Schema{
 		Type: "object",
 		Properties: map[string]*jsonschema.Schema{
-			"to":          {Type: "string", Description: "target backend: postgres | sqlite"},
-			"dsn_env":     {Type: "string", Description: "for postgres: name of the .env variable holding the DSN"},
-			"sqlite_path": {Type: "string", Description: "for sqlite: destination database path"},
+			"to":                    {Type: "string", Description: "target backend: postgres | sqlite | firestore"},
+			"dsn_env":               {Type: "string", Description: "for postgres: name of the .env variable holding the DSN"},
+			"sqlite_path":           {Type: "string", Description: "for sqlite: destination database path"},
+			"firestore_project":     {Type: "string", Description: "for firestore: GCP project ID (omit to let ADC decide)"},
+			"firestore_database":    {Type: "string", Description: "for firestore: database ID (omit for the project's default database)"},
+			"firestore_collection":  {Type: "string", Description: "for firestore: root collection (omit for \"murtaugh\")"},
+			"firestore_credentials": {Type: "string", Description: "for firestore: service-account key file (omit to use ADC)"},
 		},
 	}
 }
@@ -71,8 +82,22 @@ func (t *dbMigrateTool) Invoke(ctx context.Context, args map[string]any) (any, e
 		path := strings.TrimSpace(mustString(args, "sqlite_path"))
 		connectDBC = config.DatabaseConfig{Backend: config.BackendSQLite, SQLite: config.SQLiteConfig{Path: path}}
 		fileDBC = connectDBC
+	case config.BackendFirestore:
+		// Firestore has no DSN and no secret to keep out of YAML: it
+		// authenticates via Application Default Credentials, and the optional
+		// credentials override is a file path rather than a key. So the connect
+		// and file configs are the same value — unlike Postgres, there is
+		// nothing to split.
+		fsc := config.FirestoreConfig{
+			ProjectID:       strings.TrimSpace(mustString(args, "firestore_project")),
+			DatabaseID:      strings.TrimSpace(mustString(args, "firestore_database")),
+			Collection:      strings.TrimSpace(mustString(args, "firestore_collection")),
+			CredentialsFile: strings.TrimSpace(mustString(args, "firestore_credentials")),
+		}
+		connectDBC = config.DatabaseConfig{Backend: config.BackendFirestore, Firestore: fsc}
+		fileDBC = connectDBC
 	default:
-		return nil, fmt.Errorf("--to must be postgres or sqlite (got %q)", to)
+		return nil, fmt.Errorf("--to must be postgres, sqlite, or firestore (got %q)", to)
 	}
 
 	if to == src.Backend() {

@@ -1,12 +1,18 @@
-# Local Postgres for exercising the Postgres config-store backend.
+# Local backends for exercising the non-SQLite config-store implementations.
 #
 #   docker compose up -d
 #   export MURTAUGH_TEST_POSTGRES_DSN='postgres://murtaugh:murtaugh@localhost:5433/murtaugh?sslmode=disable'
+#   export FIRESTORE_EMULATOR_HOST='localhost:8579'
 #   go test ./internal/config/store/...
 #   docker compose down
 #
-# The Postgres integration tests skip themselves when MURTAUGH_TEST_POSTGRES_DSN
-# is unset, so the default `go test ./...` never needs this container.
+# Both suites skip themselves when their variable is unset, so the default
+# `go test ./...` never needs these containers.
+#
+# The Firestore emulator can also be run without Docker, which is usually
+# quicker on a workstation that already has the Cloud SDK:
+#
+#   gcloud emulators firestore start --host-port=127.0.0.1:8579
 services:
   postgres:
     image: postgres:16
@@ -21,3 +27,12 @@ services:
       interval: 2s
       timeout: 5s
       retries: 15
+
+  firestore:
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
+    command: >
+      gcloud emulators firestore start
+      --host-port=0.0.0.0:8579
+      --project=murtaugh-test
+    ports:
+      - "8579:8579"
