@@ -260,6 +260,32 @@ type Gateway struct {
 	// the chat resolver consults cfg.Chat.Channels for routing. Both use
 	// matchChannel, so a channel is judged by exactly one rule either way.
 	chatChannels config.ChannelRules
+
+	// elector makes this node contend for leadership instead of serving
+	// unconditionally. nil is the single-node default: Run serves immediately
+	// and the outbound gate permits everything. Guarded by electorMu because
+	// the outbound gate reads it from whichever goroutine is calling Slack.
+	elector   LeaderElector
+	electorMu sync.RWMutex
+	// serveCancel stops the leadership-scoped work (socket supervisor,
+	// scheduler, background helpers) without shutting the process down;
+	// serveDone closes once that work has unwound. Both are set on promotion
+	// and cleared on demotion, under serveMu. nil means "not currently
+	// serving", which is the standby state.
+	serveCancel context.CancelFunc
+	serveDone   chan struct{}
+	serveMu     sync.Mutex
+	// drainWait overrides how long demotion waits for in-flight agent turns.
+	// Zero takes drainTimeout; tests shorten it.
+	drainWait time.Duration
+	// leaderGate is the HTTP transport every Slack client here routes through.
+	// It is built before the Gateway exists (the clients need it at
+	// construction) and told how to ask about leadership afterwards.
+	leaderGate *outboundGate
+	// nodeReport describes this node for the takeover announcement: hostname,
+	// addresses, version. Resolved lazily on promotion, not at construction,
+	// because a node's public address can change between boot and failover.
+	nodeReport func(ctx context.Context) NodeReport
 }
 
 func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recorder journal.Recorder, broker *askbroker.Broker, authFlow *authcard.Flow, askFlow *askcard.Flow) *Gateway {
@@ -269,7 +295,17 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 	if recorder == nil {
 		recorder = journal.NopRecorder{}
 	}
-	api := slack.New(cfg.OAuth.BotToken, slack.OptionAppLevelToken(cfg.OAuth.AppToken))
+	// Every Slack client below routes through this one transport, so leadership
+	// is enforced once for all of them rather than at each typed seam. It
+	// permits everything until told otherwise, which is both the pre-election
+	// state during construction and the permanent state of a single-node
+	// deployment. See outbound_gate.go for why the transport is the right layer.
+	leaderGate := newOutboundGate(nil, logger)
+	gatedHTTP := leaderGate.httpClient()
+
+	api := slack.New(cfg.OAuth.BotToken,
+		slack.OptionAppLevelToken(cfg.OAuth.AppToken),
+		slack.OptionHTTPClient(gatedHTTP))
 	socket := socketmode.New(api, socketmode.OptionDebug(cfg.Access.Debug))
 	// The channel-name cache backs name-glob routing in chat.channel_agents. It
 	// needs a SlackAPI with ListChannels (the narrow socket api/webClient do
@@ -277,7 +313,7 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 	// failure (empty token — already rejected by config validation) just leaves
 	// the cache nil, degrading to exact channel-ID matching.
 	var channelCache *channelNameCache
-	if channelAPI, err := slackclient.NewClient(cfg.OAuth.BotToken); err != nil {
+	if channelAPI, err := slackclient.NewClientWithHTTP(cfg.OAuth.BotToken, gatedHTTP); err != nil {
 		logger.Warn("channel-name routing disabled: could not build Slack client", "error", err)
 	} else {
 		// api (a *slack.Client) provides conversations.info for the synchronous
@@ -305,7 +341,7 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 	approvalCards := approvalcard.NewRenderer(cfg.BaseDir, assets.FS)
 	var alertAPI alertMessagePoster
 	var alertEditor alertMessageEditor
-	if alertClient, err := slackclient.NewClient(cfg.OAuth.BotToken); err != nil {
+	if alertClient, err := slackclient.NewClientWithHTTP(cfg.OAuth.BotToken, gatedHTTP); err != nil {
 		logger.Warn("alert cards disabled: could not build Slack client", "error", err)
 	} else {
 		alertAPI = alertClient
@@ -581,7 +617,12 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 		noMentionPerChannel: cfg.Chat.NoMention.ByChannel,
 		noMentionEverywhere: cfg.Chat.NoMention.Everywhere,
 		chatChannels:        cfg.Chat.Channels,
+		leaderGate:          leaderGate,
 	}
+	// The gate was handed to every Slack client above before g existed; now that
+	// it does, teach the gate how to ask about leadership. Until an elector is
+	// wired, leaderAllows answers yes to everything.
+	leaderGate.setAllow(g.leaderAllows)
 	// The coalescer needs g's dispatch/interrupt hooks, so it is wired after the
 	// struct exists. It owns the decision of when and what to dispatch per
 	// conversation; startChat merely submits each message to it.
@@ -717,14 +758,35 @@ func (a *Gateway) WithTroubleshootBundler(bundler TroubleshootBundler) *Gateway 
 	return a
 }
 
+// Run starts the daemon and blocks until ctx is cancelled.
+//
+// Without leader election it serves immediately, which is the single-node
+// behaviour and still the common case. With an elector wired it serves only
+// while it holds leadership: the elector owns the loop, and promotion and
+// demotion start and stop serving beneath it (see leader.go).
 func (a *Gateway) Run(ctx context.Context) error {
-	// On shutdown/restart (ctx cancelled, superviseSocket returns) close every
-	// agent's session manager so its backend processes — and the whole tree each
-	// spawns (ACP adapter + mcp-bridge + claude + MCP servers) — are killed rather
-	// than orphaned. Runs before the process exits (or before the restart
-	// coordinator's os.Exit, within its grace window).
+	// On shutdown/restart close every agent's session manager so its backend
+	// processes — and the whole tree each spawns (ACP adapter + mcp-bridge +
+	// claude + MCP servers) — are killed rather than orphaned. Runs before the
+	// process exits (or before the restart coordinator's os.Exit, within its
+	// grace window).
+	//
+	// This is deliberately the PROCESS-exit path, not the demotion path. A
+	// demoted node keeps its session managers, because it may be promoted again
+	// and a torn-down backend cannot be revived; demotion stops the work in
+	// flight (see stopServing) without destroying the capacity to do more.
 	defer a.closeChatSessions()
 
+	if a.elector != nil {
+		return a.elector.Run(ctx)
+	}
+	return a.serve(ctx)
+}
+
+// serve runs the gateway's actual work: resolve the allowlist, start the
+// background helpers and the scheduler, and supervise the Slack socket until
+// ctx is cancelled.
+func (a *Gateway) serve(ctx context.Context) error {
 	resolveCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	err := a.resolveAllowSet(resolveCtx)
 	cancel()

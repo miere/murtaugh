@@ -116,6 +116,10 @@ type Application struct {
 	// jsonOutput requests JSONL output from the CLI frontend (global --json
 	// flag). Irrelevant to MCP/Gateway modes.
 	jsonOutput bool
+	// leaderLocker is the election lock's backend handle, retained only so
+	// shutdown can close it. nil when fallback is disabled, which is the
+	// single-node default.
+	leaderLocker config.Locker
 }
 
 // New constructs an Application for the given mode. cfg/configPath/logger
