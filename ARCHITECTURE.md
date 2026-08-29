@@ -242,8 +242,10 @@ live on disk; everything else lives in the store.
   `${VAR}` reference resolved from the sibling `.env`.
 - `database:` — the config-store backend (`config.DatabaseConfig`): `backend:
   sqlite` (default; `sqlite.path`, defaulting to
-  `~/.config/murtaugh/config.db`) or `backend: postgres` (`postgres.dsn`,
-  a `${VAR}` reference into `.env`).
+  `~/.config/murtaugh/config.db`), `backend: postgres` (`postgres.dsn`,
+  a `${VAR}` reference into `.env`), or `backend: firestore`
+  (`firestore.project_id` / `database_id` / `collection` /
+  `credentials_file`, all optional).
 
 `config.LoadBootstrap(path)` parses *only* these two blocks, loads `.env`, and
 expands the `${VAR}` references. It does **not** read the store or validate — it
@@ -265,6 +267,20 @@ singletons.
   `config.Store`. A `Dialect` (`internal/config/store/dialect.go`) abstracts the
   SQLite vs Postgres SQL differences (placeholders, JSON column type, `now()`),
   so one store implementation serves both.
+- **Firestore** (`firestore.go`) is a *separate* implementation, not a third
+  dialect: the SQL store is written against `database/sql` and Firestore shares
+  none of that. What it does share is the data's shape — the config store is
+  already a document store — so the mapping is direct and there is no schema to
+  migrate. Documents live in `<collection>_items` (keyed `section~name`) and
+  `<collection>_singletons`; `updated_at` is a **server** timestamp, because
+  writes arrive from several machines whose clocks need not agree.
+  Authentication is Google ADC, so a node on GKE / Cloud Run / a Compute Engine
+  VM needs nothing but `backend: firestore`; `credentials_file` overrides it
+  with an explicit key file for hosts ADC cannot serve.
+  Firestore exists because it is the backend a *distributed* deployment can
+  actually reach: a Postgres store good enough for leader election would have to
+  be reachable from every node, which for a workstation node means a tunnel to
+  production — infrastructure the deployment does not otherwise need.
 - `store.Bootstrap(ctx, configPath, setup)` is the single startup entrypoint
   that replaced the old `config.Load`: parse the bootstrap file, migrate a
   legacy YAML tree on first upgrade (below), open the store, and — unless

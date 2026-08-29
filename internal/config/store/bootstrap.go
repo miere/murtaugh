@@ -127,9 +127,10 @@ type bootstrapFile struct {
 }
 
 type databaseBlock struct {
-	Backend  string         `yaml:"backend"`
-	SQLite   *sqliteBlock   `yaml:"sqlite,omitempty"`
-	Postgres *postgresBlock `yaml:"postgres,omitempty"`
+	Backend   string          `yaml:"backend"`
+	SQLite    *sqliteBlock    `yaml:"sqlite,omitempty"`
+	Postgres  *postgresBlock  `yaml:"postgres,omitempty"`
+	Firestore *firestoreBlock `yaml:"firestore,omitempty"`
 }
 
 type sqliteBlock struct {
@@ -138,6 +139,16 @@ type sqliteBlock struct {
 
 type postgresBlock struct {
 	DSN string `yaml:"dsn"`
+}
+
+// firestoreBlock carries no secret — Firestore authenticates via ADC — so every
+// field is omitempty and a fully-defaulted Firestore store writes just
+// `backend: firestore`.
+type firestoreBlock struct {
+	ProjectID       string `yaml:"project_id,omitempty"`
+	DatabaseID      string `yaml:"database_id,omitempty"`
+	Collection      string `yaml:"collection,omitempty"`
+	CredentialsFile string `yaml:"credentials_file,omitempty"`
 }
 
 // toBlock renders a DatabaseConfig for writing, omitting empty sub-blocks so a
@@ -149,6 +160,14 @@ func toBlock(d config.DatabaseConfig) databaseBlock {
 	}
 	if dsn := strings.TrimSpace(d.Postgres.DSN); dsn != "" {
 		b.Postgres = &postgresBlock{DSN: d.Postgres.DSN}
+	}
+	if d.Firestore != (config.FirestoreConfig{}) {
+		b.Firestore = &firestoreBlock{
+			ProjectID:       d.Firestore.ProjectID,
+			DatabaseID:      d.Firestore.DatabaseID,
+			Collection:      d.Firestore.Collection,
+			CredentialsFile: d.Firestore.CredentialsFile,
+		}
 	}
 	return b
 }

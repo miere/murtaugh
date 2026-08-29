@@ -43,8 +43,10 @@ func Open(ctx context.Context, dbc config.DatabaseConfig, configDir, baseName st
 		return openSQLite(ctx, dbc.EffectiveSQLitePath(configDir, baseName))
 	case config.BackendPostgres:
 		return openPostgres(ctx, dbc.Postgres.DSN)
+	case config.BackendFirestore:
+		return openFirestore(ctx, dbc.Firestore)
 	default:
-		return nil, fmt.Errorf("unknown database backend %q (want sqlite or postgres)", dbc.Backend)
+		return nil, fmt.Errorf("unknown database backend %q (want sqlite, postgres, or firestore)", dbc.Backend)
 	}
 }
 

@@ -37,6 +37,13 @@ func LoadBootstrap(path string) (Config, error) {
 	// before the store opens.
 	cfg.Database.Postgres.DSN = os.ExpandEnv(cfg.Database.Postgres.DSN)
 	cfg.Database.SQLite.Path = os.ExpandEnv(cfg.Database.SQLite.Path)
+	// Firestore's settings are not secrets, but they are deployment-specific —
+	// the project differs between a workstation and a Cloud Run revision — so
+	// they get the same ${VAR} treatment.
+	cfg.Database.Firestore.ProjectID = os.ExpandEnv(cfg.Database.Firestore.ProjectID)
+	cfg.Database.Firestore.DatabaseID = os.ExpandEnv(cfg.Database.Firestore.DatabaseID)
+	cfg.Database.Firestore.Collection = os.ExpandEnv(cfg.Database.Firestore.Collection)
+	cfg.Database.Firestore.CredentialsFile = os.ExpandEnv(cfg.Database.Firestore.CredentialsFile)
 	return cfg, nil
 }
 
@@ -60,6 +67,8 @@ type DatabaseConfig struct {
 	SQLite SQLiteConfig `yaml:"sqlite" json:"sqlite"`
 	// Postgres carries the Postgres-backend settings.
 	Postgres PostgresConfig `yaml:"postgres" json:"postgres"`
+	// Firestore carries the Firestore-backend settings.
+	Firestore FirestoreConfig `yaml:"firestore" json:"firestore"`
 }
 
 // SQLiteConfig is the `database.sqlite:` block.
@@ -76,11 +85,68 @@ type PostgresConfig struct {
 	DSN string `yaml:"dsn" json:"dsn"`
 }
 
+// FirestoreConfig is the `database.firestore:` block. Unlike Postgres it holds
+// no secret: authentication is Google's Application Default Credentials, so
+// there is no DSN to keep out of YAML.
+type FirestoreConfig struct {
+	// ProjectID is the GCP project holding the database. Empty means "let ADC
+	// decide", which is the right default on GKE, Cloud Run, or a Compute
+	// Engine VM, where the metadata server already knows the project.
+	ProjectID string `yaml:"project_id" json:"project_id"`
+	// DatabaseID selects a named Firestore database. Empty means "(default)".
+	DatabaseID string `yaml:"database_id" json:"database_id"`
+	// Collection is the root collection Murtaugh's documents live under,
+	// defaulting to "murtaugh". Set it to share one Firestore database between
+	// several Murtaugh deployments without their configs colliding.
+	Collection string `yaml:"collection" json:"collection"`
+	// CredentialsFile overrides ADC with an explicit service-account key file.
+	// It is a path, not a secret, so it belongs in YAML; it exists for the
+	// deployments ADC cannot serve — a workstation or a non-GCP host — and
+	// should be left empty anywhere the ambient credentials are correct.
+	CredentialsFile string `yaml:"credentials_file" json:"credentials_file"`
+}
+
 // Backend names for DatabaseConfig.Backend.
 const (
-	BackendSQLite   = "sqlite"
-	BackendPostgres = "postgres"
+	BackendSQLite    = "sqlite"
+	BackendPostgres  = "postgres"
+	BackendFirestore = "firestore"
 )
+
+// DefaultFirestoreCollection is the root collection used when
+// `database.firestore.collection` is unset.
+const DefaultFirestoreCollection = "murtaugh"
+
+// DefaultFirestoreDatabase is the Firestore database ID used when
+// `database.firestore.database_id` is unset. It is Firestore's own name for the
+// unnamed database a project gets by default.
+const DefaultFirestoreDatabase = "(default)"
+
+// EffectiveCollection resolves the root collection, defaulting to "murtaugh".
+func (f FirestoreConfig) EffectiveCollection() string {
+	if c := strings.TrimSpace(f.Collection); c != "" {
+		return c
+	}
+	return DefaultFirestoreCollection
+}
+
+// EffectiveDatabaseID resolves the Firestore database ID, defaulting to the
+// project's unnamed database.
+func (f FirestoreConfig) EffectiveDatabaseID() string {
+	if d := strings.TrimSpace(f.DatabaseID); d != "" {
+		return d
+	}
+	return DefaultFirestoreDatabase
+}
+
+// EffectiveCredentialsFile resolves the optional credentials override, applying
+// ~ expansion. Empty means ADC.
+func (f FirestoreConfig) EffectiveCredentialsFile() string {
+	if p := strings.TrimSpace(f.CredentialsFile); p != "" {
+		return expandHome(p)
+	}
+	return ""
+}
 
 // IsZero reports whether the database block is absent/unset. A bootstrap
 // config.yaml written before this feature has no `database:` block, which is
@@ -88,7 +154,8 @@ const (
 func (d DatabaseConfig) IsZero() bool {
 	return strings.TrimSpace(d.Backend) == "" &&
 		strings.TrimSpace(d.SQLite.Path) == "" &&
-		strings.TrimSpace(d.Postgres.DSN) == ""
+		strings.TrimSpace(d.Postgres.DSN) == "" &&
+		d.Firestore == FirestoreConfig{}
 }
 
 // EffectiveBackend resolves the store backend, defaulting to SQLite.
