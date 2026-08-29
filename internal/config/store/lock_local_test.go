@@ -226,7 +226,7 @@ func TestLocalLockerRenewIsIdentity(t *testing.T) {
 // only looks like it works.
 func TestOpenLockerRefusesPostgres(t *testing.T) {
 	_, err := OpenLocker(context.Background(),
-		config.DatabaseConfig{Backend: config.BackendPostgres}, testIdentity())
+		config.DatabaseConfig{Backend: config.BackendPostgres}, testIdentity(), 0)
 	if err == nil {
 		t.Fatal("OpenLocker(postgres) returned no error; want ErrLockUnsupported")
 	}
@@ -245,7 +245,7 @@ func TestOpenLockerRejectsIncompleteIdentity(t *testing.T) {
 		"neither": {},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := OpenLocker(context.Background(), config.DatabaseConfig{}, identity); err == nil {
+			if _, err := OpenLocker(context.Background(), config.DatabaseConfig{}, identity, 0); err == nil {
 				t.Fatal("OpenLocker accepted an incomplete identity")
 			}
 		})
