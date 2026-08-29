@@ -3,12 +3,14 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/miere/murtaugh/internal/config"
 )
@@ -25,13 +27,21 @@ func firestoreTestConfig(t *testing.T) config.FirestoreConfig {
 	if os.Getenv("FIRESTORE_EMULATOR_HOST") == "" {
 		t.Skip("set FIRESTORE_EMULATOR_HOST (e.g. via docker compose up -d) to run Firestore tests")
 	}
-	// A per-test root collection keeps parallel and repeated runs from seeing
-	// each other's documents; the emulator has no truncate.
+	// The root collection is unique per test AND per run. Per-test alone is not
+	// enough: the emulator keeps its data for as long as it is up and offers no
+	// truncate, so a second `go test` would find the previous run's documents.
+	// That is harmless for the store tests, which only add rows, but fatal for
+	// the lock tests, which contend on a single document — a leftover live lease
+	// makes every acquisition in the new run fail.
 	return config.FirestoreConfig{
 		ProjectID:  "murtaugh-test",
-		Collection: "test_" + strings.ToLower(strings.ReplaceAll(t.Name(), "/", "_")),
+		Collection: fmt.Sprintf("test_%s_%d", strings.ToLower(strings.ReplaceAll(t.Name(), "/", "_")), testRunID),
 	}
 }
+
+// testRunID distinguishes one `go test` invocation from the next against a
+// long-lived emulator. It is read once at process start.
+var testRunID = time.Now().UnixNano()
 
 // openFirestoreTestStore opens a store against the emulator.
 func openFirestoreTestStore(t *testing.T) config.Store {

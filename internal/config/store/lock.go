@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/miere/murtaugh/internal/config"
 )
@@ -20,19 +21,24 @@ import (
 // reported rather than papered over — a backend that cannot coordinate separate
 // machines says so with ErrLockUnsupported instead of silently degrading to a
 // lock that only looks like it works.
-func OpenLocker(_ context.Context, dbc config.DatabaseConfig, identity config.LockIdentity) (config.Locker, error) {
+//
+// ttl sets the lease length for a backend that needs one; it is ignored by a
+// backend whose liveness the OS guarantees. Zero selects DefaultLeaseTTL.
+func OpenLocker(ctx context.Context, dbc config.DatabaseConfig, identity config.LockIdentity, ttl time.Duration) (config.Locker, error) {
 	if err := identity.Validate(); err != nil {
 		return nil, err
 	}
 	switch backend := dbc.EffectiveBackend(); backend {
 	case config.BackendSQLite:
 		return openLocalLocker(config.LockDir(), identity)
+	case config.BackendFirestore:
+		return openFirestoreLocker(ctx, dbc.Firestore, identity, ttl)
 	case config.BackendPostgres:
 		// Postgres could host a lease — but it is not wired yet, and guessing
 		// would be worse than saying so. Until then a Postgres-backed
 		// deployment gets no election rather than a broken one.
 		return nil, fmt.Errorf("%w: %q", config.ErrLockUnsupported, backend)
 	default:
-		return nil, fmt.Errorf("unknown database backend %q (want sqlite or postgres)", dbc.Backend)
+		return nil, fmt.Errorf("unknown database backend %q (want sqlite, postgres, or firestore)", dbc.Backend)
 	}
 }
