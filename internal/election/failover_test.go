@@ -119,12 +119,12 @@ func (n *node) counts() (int, int) {
 func TestFailoverBetweenTwoNodes(t *testing.T) {
 	fsc := firestoreFailoverConfig(t)
 	identity := config.LockIdentity{TeamID: "T0FAILOVER", AppID: "B0FAILOVER"}
-	fallback := config.FallbackConfig{Enabled: true, LeaseSeconds: 2, RenewSeconds: 1}
+	election := config.ElectionConfig{LeaseSeconds: 2, RenewSeconds: 1}
 
 	newNode := func(name string) *node {
 		locker, err := store.OpenLocker(context.Background(),
 			config.DatabaseConfig{Backend: config.BackendFirestore, Firestore: fsc},
-			identity, fallback.EffectiveLease())
+			identity, election.EffectiveLease())
 		if err != nil {
 			t.Fatalf("%s: open locker: %v", name, err)
 		}
@@ -133,7 +133,7 @@ func TestFailoverBetweenTwoNodes(t *testing.T) {
 		n := &node{name: name, locker: locker}
 		r, err := New(Options{
 			Locker:   locker,
-			Fallback: fallback,
+			Election: election,
 			Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 			Callbacks: Callbacks{
 				OnPromote: func(context.Context, config.Lease) error {

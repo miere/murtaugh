@@ -79,9 +79,9 @@ type Options struct {
 	Locker    config.Locker
 	Callbacks Callbacks
 	Logger    *slog.Logger
-	// Fallback supplies the timings. Its lease value is ignored for a locker
+	// Election supplies the timings. Its lease value is ignored for a locker
 	// that reports no TTL, since such a lock does not expire.
-	Fallback config.FallbackConfig
+	Election config.ElectionConfig
 	// Clock defaults to SystemClock. Tests substitute it to drive the
 	// wall-versus-monotonic divergence that a real suspension produces.
 	Clock Clock
@@ -106,9 +106,9 @@ func New(opts Options) (*Runner, error) {
 		cb:          opts.Callbacks,
 		logger:      logger,
 		clock:       clock,
-		renew:       opts.Fallback.EffectiveRenew(),
-		demoteAfter: opts.Fallback.EffectiveDemoteAfter(),
-		retry:       opts.Fallback.EffectiveRenew(),
+		renew:       opts.Election.EffectiveRenew(),
+		demoteAfter: opts.Election.EffectiveDemoteAfter(),
+		retry:       opts.Election.EffectiveRenew(),
 	}
 
 	// A locker with no TTL detects holder death itself — the kernel drops a

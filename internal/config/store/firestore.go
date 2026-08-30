@@ -71,9 +71,14 @@ func openFirestore(ctx context.Context, fsc config.FirestoreConfig) (config.Stor
 	return &firestoreStore{client: client, root: fsc.EffectiveCollection()}, nil
 }
 
-// newFirestoreClient builds the Firestore client for fsc, resolving credentials
-// and probing the connection so a misconfigured project or a missing grant
-// fails at startup rather than on the first config read.
+// newFirestoreClient builds the Firestore client for fsc.
+//
+// Credential resolution happens here, so bad or absent ADC fails immediately.
+// Reachability does NOT: the Firestore client dials lazily, so an unreachable
+// database or a missing IAM grant surfaces on the first read, not here. For the
+// config store that is close enough to startup to be indistinguishable —
+// Bootstrap loads the whole config straight after opening. A caller that opens
+// a client for anything else has to make its own first call fail loudly.
 func newFirestoreClient(ctx context.Context, fsc config.FirestoreConfig) (*firestore.Client, error) {
 	projectID := strings.TrimSpace(fsc.ProjectID)
 	if projectID == "" {

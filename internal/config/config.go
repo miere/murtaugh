@@ -42,7 +42,7 @@ type Config struct {
 	Jobs          map[string]JobProfile         `yaml:"-" json:"-"`
 	Journal       JournalConfig                 `yaml:"-" json:"-"`
 	Troubleshoot  TroubleshootConfig            `yaml:"-" json:"-"`
-	Fallback      FallbackConfig                `yaml:"-" json:"-"`
+	Election      ElectionConfig                `yaml:"-" json:"-"`
 	WorkflowRules map[string]WorkflowRuleConfig `yaml:"-" json:"-"`
 	UnfurlRules   map[string]UnfurlRuleConfig   `yaml:"-" json:"-"`
 }
@@ -55,20 +55,21 @@ type TroubleshootConfig struct {
 	Providers []string `yaml:"providers" json:"providers,omitempty"`
 }
 
-// FallbackConfig governs leader election: several Murtaugh nodes contending so
-// that one dying is covered by another taking over.
+// ElectionConfig carries the timings for leader election.
 //
-// It lives in the config store rather than in the bootstrap file precisely
-// because every contending node must agree on these numbers. Two nodes reading
+// There is no on/off switch here, deliberately. Election is not a feature a
+// deployment opts into — it is a property of the configuration backend, which
+// always supplies a lock: SQLite guarantees one gateway per machine, Postgres
+// and Firestore guarantee one per cluster. A node that served without
+// contending would be exactly the duplicate gateway the mechanism exists to
+// prevent, so "off" is not a state worth being able to reach.
+//
+// The timings live in the config store rather than in the bootstrap file
+// precisely because every contending node must agree on them. Two nodes reading
 // different lease lengths from their own on-disk files would disagree about
 // when the incumbent's claim lapsed — which is the disagreement leader election
 // exists to prevent.
-type FallbackConfig struct {
-	// Enabled turns leader election on. Left off, a node simply runs, which is
-	// the correct behaviour for the single-node deployment that is still the
-	// common case.
-	Enabled bool `yaml:"enabled" json:"enabled"`
-
+type ElectionConfig struct {
 	// LeaseSeconds is how long a claim stays valid without renewal. It is a
 	// compromise: too short and a network hiccup hands leadership away for no
 	// reason (worse than the outage it avoids, since a takeover tears down
@@ -84,7 +85,7 @@ type FallbackConfig struct {
 	RenewSeconds int `yaml:"renew_seconds" json:"renew_seconds,omitempty"`
 }
 
-// Fallback timing defaults. Thirty seconds of lease renewed every ten gives a
+// Election timing defaults. Thirty seconds of lease renewed every ten gives a
 // leader two chances to renew before its claim lapses, so a single failed
 // renewal is survivable and a genuinely dead node is replaced inside about half
 // a minute.
@@ -94,7 +95,7 @@ const (
 )
 
 // EffectiveLease resolves the lease duration.
-func (f FallbackConfig) EffectiveLease() time.Duration {
+func (f ElectionConfig) EffectiveLease() time.Duration {
 	if f.LeaseSeconds > 0 {
 		return time.Duration(f.LeaseSeconds) * time.Second
 	}
@@ -102,7 +103,7 @@ func (f FallbackConfig) EffectiveLease() time.Duration {
 }
 
 // EffectiveRenew resolves the renewal interval.
-func (f FallbackConfig) EffectiveRenew() time.Duration {
+func (f ElectionConfig) EffectiveRenew() time.Duration {
 	if f.RenewSeconds > 0 {
 		return time.Duration(f.RenewSeconds) * time.Second
 	}
@@ -118,26 +119,23 @@ func (f FallbackConfig) EffectiveRenew() time.Duration {
 // leader that instead stood down at the moment its lease expired would overlap
 // with its successor for exactly as long as it took to notice — and during that
 // overlap both would answer Slack.
-func (f FallbackConfig) EffectiveDemoteAfter() time.Duration {
+func (f ElectionConfig) EffectiveDemoteAfter() time.Duration {
 	return f.EffectiveLease() - f.EffectiveRenew()
 }
 
-// Validate checks the fallback timings are usable. It is called from
+// Validate checks the election timings are usable. It is called from
 // Config.Validate, so a bad edit is rejected at the store's write boundary
 // rather than at 3am when a node tries to fail over.
-func (f FallbackConfig) Validate() error {
-	if !f.Enabled {
-		return nil
-	}
+func (f ElectionConfig) Validate() error {
 	if f.LeaseSeconds < 0 || f.RenewSeconds < 0 {
-		return errors.New("fallback: lease_seconds and renew_seconds must not be negative")
+		return errors.New("election: lease_seconds and renew_seconds must not be negative")
 	}
 	lease, renew := f.EffectiveLease(), f.EffectiveRenew()
 	// Two renewal attempts must fit inside a lease. With fewer, a single lost
 	// packet costs the leader its claim, and leadership flaps on ordinary
 	// network noise.
 	if renew*2 > lease {
-		return fmt.Errorf("fallback: renew_seconds (%d) must be at most half of lease_seconds (%d), so a single failed renewal is survivable",
+		return fmt.Errorf("election: renew_seconds (%d) must be at most half of lease_seconds (%d), so a single failed renewal is survivable",
 			int(renew/time.Second), int(lease/time.Second))
 	}
 	return nil
@@ -1064,7 +1062,7 @@ func (c Config) Validate() error {
 	if err := c.Defaults.Validate(); err != nil {
 		errs = append(errs, err)
 	}
-	if err := c.Fallback.Validate(); err != nil {
+	if err := c.Election.Validate(); err != nil {
 		errs = append(errs, err)
 	}
 	for name, profile := range c.Agents {

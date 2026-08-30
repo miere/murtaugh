@@ -203,14 +203,14 @@ const (
 	SingletonDefaults     = "defaults"
 	SingletonJournal      = "journal"
 	SingletonTroubleshoot = "troubleshoot"
-	SingletonFallback     = "fallback"
+	SingletonElection     = "election"
 )
 
 // AllSections and AllSingletons enumerate the valid keys, in a stable order
 // suitable for import/export and dump.
 var (
 	AllSections   = []string{SectionAgent, SectionMCP, SectionJob, SectionWorkflowRule, SectionUnfurlRule}
-	AllSingletons = []string{SingletonAccess, SingletonChat, SingletonDefaults, SingletonJournal, SingletonTroubleshoot, SingletonFallback}
+	AllSingletons = []string{SingletonAccess, SingletonChat, SingletonDefaults, SingletonJournal, SingletonTroubleshoot, SingletonElection}
 )
 
 // ValidSection reports whether s is a known config_items section.
@@ -336,7 +336,7 @@ func AssembleFromRows(base Config, items map[string]map[string]json.RawMessage, 
 	if err := decodeSingleton(singletons, SingletonTroubleshoot, &cfg.Troubleshoot); err != nil {
 		return Config{}, err
 	}
-	if err := decodeSingleton(singletons, SingletonFallback, &cfg.Fallback); err != nil {
+	if err := decodeSingleton(singletons, SingletonElection, &cfg.Election); err != nil {
 		return Config{}, err
 	}
 
