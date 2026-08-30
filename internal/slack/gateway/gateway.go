@@ -21,6 +21,7 @@ import (
 	"github.com/miere/murtaugh/internal/agentbuild"
 	"github.com/miere/murtaugh/internal/agentdelegate"
 	"github.com/miere/murtaugh/internal/config"
+	"github.com/miere/murtaugh/internal/credwarden"
 	"github.com/miere/murtaugh/internal/journal"
 	"github.com/miere/murtaugh/internal/mcpbridge"
 	"github.com/miere/murtaugh/internal/slack/alertcard"
@@ -207,6 +208,13 @@ type Gateway struct {
 	// tests never start it.
 	journalSweep      func(context.Context) error
 	journalSweepEvery time.Duration
+	// credWarden refreshes each claude_code credential from OUTSIDE the agent
+	// sandbox, shortly before it lapses — a boxed `claude` can read its
+	// credential but cannot write the rotated one back, and a rotation that
+	// cannot be persisted destroys the credential rather than merely failing.
+	// Derived from the agent set at construction (see claudeCodeIdentities)
+	// rather than configured; nil when no claude_code agent is defined.
+	credWarden *credwarden.Warden
 	// webClient is the concrete Slack Web API client. It backs both the
 	// active connection heartbeat (auth.test) and the construction of fresh
 	// socketmode clients on every (re)connect. The Web API is stateless HTTP
@@ -514,18 +522,25 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 		}
 	}
 	g := &Gateway{
-		api:               api,
-		webClient:         api,
-		socket:            socket,
-		now:               time.Now,
-		handler:           NewDefaultSlashCommandHandler(),
-		workflow:          workflow.NewEngine(cfg, workflow.Options{Logger: logger, Delegator: workflowDelegator, Recorder: recorder}),
-		interactions:      broker,
-		auth:              authFlow,
-		askCards:          askFlow,
-		bridge:            bridge,
-		chat:              chat,
-		chatSessions:      sessions,
+		api:          api,
+		webClient:    api,
+		socket:       socket,
+		now:          time.Now,
+		handler:      NewDefaultSlashCommandHandler(),
+		workflow:     workflow.NewEngine(cfg, workflow.Options{Logger: logger, Delegator: workflowDelegator, Recorder: recorder}),
+		interactions: broker,
+		auth:         authFlow,
+		askCards:     askFlow,
+		bridge:       bridge,
+		chat:         chat,
+		chatSessions: sessions,
+		// Built from the whole agent set, not from the chat loop above: a
+		// claude_code agent is reachable by jobs, workflow rules and unfurls even
+		// when chat is disabled, and its credential still has to be kept alive.
+		credWarden: credwarden.New(credwarden.Options{
+			Identities: claudeCodeIdentities(cfg.Agents),
+			Logger:     logger,
+		}),
 		chatRouting:       cfg.Chat,
 		agentProfiles:     cfg.Agents,
 		agentToolProblems: agentToolProblems,
@@ -714,6 +729,7 @@ func (a *Gateway) Run(ctx context.Context) error {
 	a.warmChat(ctx)
 	a.startChannelCache(ctx)
 	a.startJournalSweeper(ctx)
+	a.startCredWarden(ctx)
 	stopScheduler := a.startScheduler(ctx)
 	defer stopScheduler()
 
