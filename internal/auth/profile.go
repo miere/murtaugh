@@ -80,6 +80,12 @@ var googleAuthURL = regexp.MustCompile(`https://accounts\.google\.com/\S+`)
 // something to offer the user as a button.
 var anyHTTPSURL = regexp.MustCompile(`https://\S+`)
 
+// claudeAuthURL matches the consent URL `claude auth login` prints. It is
+// anchored on the oauth/authorize path, not merely the host: the same output
+// carries a redirect_uri pointing at platform.claude.com, and a looser pattern
+// would happily hand the admin the callback URL instead of the consent page.
+var claudeAuthURL = regexp.MustCompile(`https://claude\.com/\S*oauth/authorize\S+`)
+
 // builtins are the profiles that ship with the tool, keyed by the name the
 // agent passes. `aws` is intentionally absent until its flow is implemented —
 // a profile that posts a card and then cannot complete would be worse than a
@@ -98,6 +104,31 @@ var builtins = map[string]Profile{
 		Command:    "gcloud",
 		Args:       []string{"auth", "application-default", "login", "--no-launch-browser"},
 		urlPattern: googleAuthURL,
+	},
+	// claude-code re-authenticates the Claude Code CLI itself — the credential
+	// every `claude_code` agent runs on.
+	//
+	// It drives `claude auth login`, NOT `claude setup-token`. Both share the
+	// same URL-and-paste-back component, so either would fit this card, but
+	// setup-token mints a token valid for about a year and scoped to inference
+	// only. That reshapes the expiry problem into a slower one and quietly drops
+	// capability; `auth login` produces the ordinary rotating credential in the
+	// ordinary store, which is what the rest of the system already expects.
+	//
+	// `--claudeai` is required, not cosmetic: without it the CLI opens with an
+	// interactive "select login method" menu that a headless pipe cannot
+	// navigate, and the flow parks there forever instead of printing a URL.
+	//
+	// Verified against CLI 2.1.238: with stdin and stdout as plain pipes the
+	// process prints the consent URL, then prompts `Paste code here if prompted >`
+	// WITHOUT a trailing newline (proc surfaces that as a partial line) and reads
+	// the answer straight off stdin. No pty is needed.
+	"claude-code": {
+		Name:       "claude-code",
+		NeedsCode:  true,
+		Command:    "claude",
+		Args:       []string{"auth", "login", "--claudeai"},
+		urlPattern: claudeAuthURL,
 	},
 }
 

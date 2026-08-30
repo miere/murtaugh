@@ -68,7 +68,9 @@ func (t *Tool) InputSchema() *jsonschema.Schema {
 				Type: "string",
 				Description: "Which authentication workflow to run: " + strings.Join(auth.Names(), ", ") +
 					". `gcloud` signs in the user credential; `gcloud-adc` writes application-default " +
-					"credentials, which is what client libraries and MCP servers usually read.",
+					"credentials, which is what client libraries and MCP servers usually read; " +
+					"`claude-code` re-authenticates the Claude Code CLI itself — the credential every " +
+					"claude_code agent runs on — when it has been revoked or has lapsed.",
 				Enum: profileEnum(),
 			},
 			"command": {
