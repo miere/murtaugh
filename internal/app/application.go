@@ -500,7 +500,7 @@ func newJobConfirmer(store config.Store) gateway.JobConfirmer {
 // exists, because a daemon can be unclaimed while still carrying an allowlist
 // or a debug flag an operator set by hand — and adoption should not quietly
 // discard them.
-func newAdminClaimer(store config.Store) gateway.AdminClaimer {
+func (a *Application) newAdminClaimer(store config.Store) gateway.AdminClaimer {
 	return func(ctx context.Context, userID string) error {
 		var access config.AccessConfig
 		if body, ok, err := store.GetSingleton(ctx, config.SingletonAccess); err != nil {
@@ -517,7 +517,24 @@ func newAdminClaimer(store config.Store) gateway.AdminClaimer {
 			return fmt.Errorf("an administrator (%s) is already recorded", access.AdminUser)
 		}
 		access.AdminUser = userID
-		return store.PutSingleton(ctx, config.SingletonAccess, access)
+		if err := store.PutSingleton(ctx, config.SingletonAccess, access); err != nil {
+			return err
+		}
+
+		// Re-baseline the hot-reload watcher. Adoption is a write Murtaugh made
+		// itself, and without this the watcher spots it on the next poll and
+		// asks the brand-new administrator to approve the change that made them
+		// the administrator — the first thing a fresh install would do is
+		// interrogate the person setting it up.
+		snapshot, err := store.Snapshot(ctx)
+		if err != nil {
+			// The claim stands; only the baseline is missing, which costs one
+			// spurious approval prompt rather than a broken install.
+			a.logger.Warn("could not re-baseline the configuration watcher after adoption", "error", err)
+			return nil
+		}
+		a.setApprovedConfig(snapshot)
+		return nil
 	}
 }
 

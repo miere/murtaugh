@@ -125,7 +125,8 @@ func (a *Application) reviewConfigChange(ctx context.Context, holder *gatewayHol
 			a.logger.Error("the approved configuration is invalid; rolling back", "error", err)
 			return a.rollbackConfig(ctx, approved), true
 		}
-		if err := a.reloadConfig(ctx, holder, runner, newCfg); err != nil {
+		// The watcher's ctx IS the daemon's, so it serves as both here.
+		if err := a.reloadConfig(ctx, ctx, holder, runner, newCfg); err != nil {
 			a.logger.Error("configuration reload failed", "error", err)
 			return approved, false
 		}

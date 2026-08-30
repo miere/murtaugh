@@ -63,7 +63,7 @@ func (a *Application) runGateway(ctx context.Context) error {
 	// gateway learns about leadership last. A reload repeats this for the
 	// replacement (see reloadConfig).
 	holder.get().WithLeaderElection(runner)
-	a.attachAgentSetup(holder.get(), holder, runner)
+	a.attachAgentSetup(ctx, holder.get(), holder, runner)
 
 	// Close agent backends on the way out, whichever gateway is current by
 	// then. A reload has already closed the one it replaced.
@@ -99,12 +99,24 @@ func (a *Application) runGateway(ctx context.Context) error {
 // The gain over a process restart is real but narrow: no launchd round trip, no
 // binary re-exec, and the leader lease is held throughout rather than released
 // and re-acquired. In-flight agent work is lost either way.
-func (a *Application) reloadConfig(ctx context.Context, holder *gatewayHolder, runner leaderRunner, cfg config.Config) error {
+// daemonCtx bounds the REPLACEMENT gateway's serving life and must be the
+// daemon's own context, not the caller's. opCtx bounds the teardown and the
+// notices, which are ordinary bounded operations.
+//
+// Separating them is not fastidiousness: an earlier version passed one context
+// for both, and the agent-setup form calls this under a 30-second write
+// timeout. The rebuilt gateway inherited that deadline, connected to Slack, and
+// was cancelled 85 milliseconds later — leaving a daemon that held the leader
+// lock, looked healthy in the log, and answered nobody.
+func (a *Application) reloadConfig(daemonCtx, opCtx context.Context, holder *gatewayHolder, runner leaderRunner, cfg config.Config) error {
+	ctx := opCtx
 	old := holder.get()
 
 	// Tell the admin before going quiet, using the gateway that can still
 	// speak: the stand-down below shuts the outbound gate.
-	old.NotifyConfigReloading(ctx)
+	// Where the "reloading…" notice landed, so the completion can edit it in
+	// place rather than post a second block under the card that caused it.
+	noticeChannel, noticeTS := old.NotifyConfigReloading(ctx)
 
 	old.StopServing(ctx, "reloading the approved configuration")
 	old.CloseChatSessions()
@@ -112,18 +124,18 @@ func (a *Application) reloadConfig(ctx context.Context, holder *gatewayHolder, r
 	replacement := a.buildGateway(cfg)
 	replacement.WithLeaderElection(runner)
 	a.attachRunClaims(replacement)
-	a.attachAgentSetup(replacement, holder, runner)
+	a.attachAgentSetup(daemonCtx, replacement, holder, runner)
 	holder.swap(replacement)
 	a.cfg = cfg
 
-	if err := replacement.StartServing(ctx); err != nil {
+	if err := replacement.StartServing(daemonCtx); err != nil {
 		// The daemon is now holding the lock without serving, which is the one
 		// state worse than either side of the reload. Report it loudly; the
 		// runner's next renewal keeps the lock, and an operator restarting the
 		// process is the recovery.
 		return err
 	}
-	replacement.NotifyConfigReloaded(ctx)
+	replacement.NotifyConfigReloaded(ctx, noticeChannel, noticeTS)
 	a.logger.Info("configuration reloaded", "config", a.configPath)
 	return nil
 }

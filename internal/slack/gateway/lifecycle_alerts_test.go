@@ -63,43 +63,44 @@ func assertInfoAlertCard(t *testing.T, blocks []byte) {
 }
 
 // A restart is one message in two states: the notice posted on the way out is
-// the message the returning process edits. Both must render as the same info
-// card, through the raw-blocks passthrough the container needs.
-func TestRestartNoticeAndBackOnlineRenderAsInfoCards(t *testing.T) {
+// the message the returning process edits.
+//
+// Both are NOTICES — the discreet one-line form the idle-timeout nudge uses —
+// so they go through the ordinary messaging client, not the raw-blocks
+// passthrough the container card needs.
+func TestRestartNoticeAndBackOnlineRenderAsNotices(t *testing.T) {
 	poster := &fakeAlertAPI{}
-	editor := &fakeAlertEditor{}
+	msg := &recordingMessaging{postReturnedTS: "111.222"}
 	app := &Gateway{
 		logger:      newSilentLogger(),
-		messaging:   &recordingMessaging{},
+		messaging:   msg,
 		alertCards:  testAlertCards(),
 		alertAPI:    poster,
-		alertEditor: editor,
+		alertEditor: &fakeAlertEditor{},
 	}
 
 	channel, ts, err := app.postLifecycleAlert(context.Background(), "C1", "", restartNoticeAlert())
 	if err != nil {
 		t.Fatalf("postLifecycleAlert returned error: %v", err)
 	}
-	if len(poster.posts) != 1 {
-		t.Fatalf("expected one card post, got %d", len(poster.posts))
+	if len(poster.posts) != 0 {
+		t.Fatalf("a notice was posted as a card; it must take the plain messaging path")
 	}
-	assertInfoAlertCard(t, poster.posts[0].Blocks)
+	if msg.postCalls != 1 {
+		t.Fatalf("expected one notice post, got %d", msg.postCalls)
+	}
 
 	if err := app.updateLifecycleAlert(context.Background(), channel, ts, backOnlineAlert()); err != nil {
 		t.Fatalf("updateLifecycleAlert returned error: %v", err)
 	}
-	if len(editor.updates) != 1 {
-		t.Fatalf("expected one card edit, got %d", len(editor.updates))
+	if msg.updateCalls != 1 {
+		t.Fatalf("expected one notice edit, got %d", msg.updateCalls)
 	}
-	got := editor.updates[0]
 	// The edit must land on the message the post created; that identity is what
 	// makes the confirmation replace the notice instead of stacking below it.
-	if got.ChannelID != channel || got.TS != ts {
-		t.Fatalf("edit targeted %q/%q, want the posted message %q/%q", got.ChannelID, got.TS, channel, ts)
-	}
-	assertInfoAlertCard(t, got.Blocks)
-	if !strings.Contains(got.Text, backOnlineAlert().Title) {
-		t.Fatalf("expected the edit's notification text to carry the back-online headline, got %q", got.Text)
+	if msg.updateChannel != channel || msg.updateTS != ts {
+		t.Fatalf("edit targeted %q/%q, want the posted message %q/%q",
+			msg.updateChannel, msg.updateTS, channel, ts)
 	}
 }
 
@@ -150,19 +151,70 @@ func TestPostLifecycleAlertFallsBackWhenTheCardPostFails(t *testing.T) {
 }
 
 // Every lifecycle message is a statement of fact about Murtaugh itself, never a
-// failure — so none of them may carry a louder level.
-func TestLifecycleAlertsAreAllInfo(t *testing.T) {
+// failure — and none of them needs a card. They arrive next to the thing they
+// refer to (an approval card, a setup prompt), where a second full-width block
+// repeats what is already on screen at the same cost in space.
+func TestLifecycleAlertsAreAllNotices(t *testing.T) {
 	for name, spec := range map[string]alertcard.Spec{
-		"startup":       startupAlert(),
-		"restartNotice": restartNoticeAlert(),
-		"backOnline":    backOnlineAlert(),
-		"pong":          pongAlert(),
+		"startup":         startupAlert(),
+		"restartNotice":   restartNoticeAlert(),
+		"backOnline":      backOnlineAlert(),
+		"configReloading": configReloadingAlert(),
+		"configReloaded":  configReloadedAlert(),
 	} {
-		if spec.Level != alertcard.LevelInfo {
-			t.Errorf("%s alert has level %q, want %q", name, spec.Level, alertcard.LevelInfo)
+		if spec.Level != alertcard.LevelNotice {
+			t.Errorf("%s alert has level %q, want %q", name, spec.Level, alertcard.LevelNotice)
 		}
 		if strings.TrimSpace(spec.Title) == "" || strings.TrimSpace(spec.Subtitle) == "" {
 			t.Errorf("%s alert needs both a title and a subtitle; they are the whole message while the card is collapsed", name)
 		}
+	}
+}
+
+// TestNoticeMatchesTheNudgeShape is the whole point of the level.
+//
+// A notice must render as the same discreet grey line the idle-timeout nudge
+// uses — one context block carrying plain_text with emoji enabled. Asserting it
+// against statusMsgOptions rather than against a hand-written expectation is
+// what stops the two drifting: if the nudge's shape changes, this changes with
+// it or fails.
+func TestNoticeMatchesTheNudgeShape(t *testing.T) {
+	msg := &recordingMessaging{postReturnedTS: "1.0"}
+	app := &Gateway{logger: newSilentLogger(), messaging: msg, alertCards: testAlertCards()}
+
+	spec := configReloadingAlert()
+	if _, _, err := app.postLifecycleAlert(context.Background(), "C1", "", spec); err != nil {
+		t.Fatalf("postLifecycleAlert: %v", err)
+	}
+
+	want := statusMsgOptions(alertcard.NoticeText(spec))
+	if msg.postOptionCount != len(want) {
+		t.Fatalf("notice posted %d message options, want %d — it is not using the nudge helper",
+			msg.postOptionCount, len(want))
+	}
+	// The notification text is the same single line, so a muted client still
+	// shows something meaningful.
+	if !strings.Contains(msg.postText, spec.Title) {
+		t.Errorf("notice text %q does not carry the headline %q", msg.postText, spec.Title)
+	}
+}
+
+// TestNoticeTextIsOneLine keeps a notice to the one thing it is for. Anything
+// needing a reason, next steps or a diagnostic is an info card, and a caller
+// that supplies them has picked the wrong level.
+func TestNoticeTextIsOneLine(t *testing.T) {
+	text := alertcard.NoticeText(alertcard.Spec{
+		Level:     alertcard.LevelNotice,
+		Title:     "Reloading the configuration…",
+		Subtitle:  "The approved changes are being applied.",
+		Reason:    "should not appear",
+		NextSteps: "should not appear",
+		Detail:    "should not appear",
+	})
+	if strings.Contains(text, "should not appear") {
+		t.Errorf("notice carried card-only fields: %q", text)
+	}
+	if strings.Contains(text, "\n") {
+		t.Errorf("notice is not a single line: %q", text)
 	}
 }

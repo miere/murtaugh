@@ -57,6 +57,16 @@ const (
 	// LevelInfo is a statement of fact — a capability that is not configured, a
 	// state that is not an error.
 	LevelInfo Level = "info"
+	// LevelNotice is a passing remark: something happened, it is going fine,
+	// and it needs no decision. It renders as a single context line rather than
+	// a container card.
+	//
+	// It exists because the card is the wrong shape for lifecycle chatter.
+	// "Reloading the configuration…" arrives directly under the approval card
+	// that caused it, and a second full-width block there says nothing the
+	// first did not while costing as much screen space. A notice is one line
+	// under the thing it refers to.
+	LevelNotice Level = "notice"
 )
 
 // ContainerBlockID tags the card's container block. It is descriptive only:
@@ -207,7 +217,10 @@ func normalise(spec Spec) Spec {
 	// expand and finds an empty box. When a caller supplies no body at all,
 	// the level's generic guidance becomes the body, which is both honest and
 	// the most useful thing left to say.
-	if spec.Reason == "" && spec.Text == "" && spec.NextSteps == "" && spec.Detail == "" {
+	// A notice is one line by design, so an empty body is the expected shape
+	// rather than the trap it is for a collapsible card.
+	if spec.Level != LevelNotice &&
+		spec.Reason == "" && spec.Text == "" && spec.NextSteps == "" && spec.Detail == "" {
 		spec.NextSteps = defaultNextSteps(spec.Level)
 	}
 	return spec
@@ -219,7 +232,7 @@ func normalise(spec Spec) Spec {
 // an informational note is not.
 func normaliseLevel(level Level) Level {
 	switch level {
-	case LevelError, LevelWarn, LevelInfo:
+	case LevelError, LevelWarn, LevelInfo, LevelNotice:
 		return level
 	default:
 		return LevelError
@@ -230,7 +243,7 @@ func icon(level Level) string {
 	switch level {
 	case LevelWarn:
 		return iconWarn
-	case LevelInfo:
+	case LevelInfo, LevelNotice:
 		return iconInfo
 	default:
 		return iconError
@@ -241,7 +254,7 @@ func iconAlt(level Level) string {
 	switch level {
 	case LevelWarn:
 		return "Warning icon"
-	case LevelInfo:
+	case LevelInfo, LevelNotice:
 		return "Information icon"
 	default:
 		return "Error icon"
@@ -254,7 +267,7 @@ func defaultTitle(level Level) string {
 	switch level {
 	case LevelWarn:
 		return "Heads up"
-	case LevelInfo:
+	case LevelInfo, LevelNotice:
 		return "Good to know"
 	default:
 		return "Oops! Something went wrong!"
@@ -282,6 +295,27 @@ func defaultNextSteps(level Level) string {
 // body, a Go error chain — and exceeding a Slack text limit makes the API reject
 // the whole message with invalid_blocks. On this path that would mean an alert
 // about a failure itself failing to arrive.
+// NoticeText flattens a spec into the single line a notice renders as.
+//
+// A notice is NOT a card and is not rendered from the template: it is the same
+// discreet context line the idle-timeout nudge uses, built by the caller with
+// the shared Slack helper so the two cannot drift apart. This package supplies
+// only the words.
+//
+// Title and subtitle, nothing else. A notice that needed a reason, next steps
+// or a diagnostic would not be a notice — it would be an info card, and the
+// caller should say so.
+func NoticeText(spec Spec) string {
+	parts := make([]string, 0, 2)
+	if t := strings.TrimSpace(spec.Title); t != "" {
+		parts = append(parts, t)
+	}
+	if sub := strings.TrimSpace(spec.Subtitle); sub != "" {
+		parts = append(parts, sub)
+	}
+	return clamp(strings.Join(parts, " — "), subtitleLimit)
+}
+
 func clamp(s string, limit int) string {
 	r := []rune(s)
 	if len(r) <= limit {
