@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/miere/murtaugh/internal/config"
@@ -17,10 +18,16 @@ import (
 // shared configuration came from. Letting the lock be configured independently
 // would permit two nodes to hold two different "the" locks.
 //
-// Not every store backend can arbitrate every scope, and the difference is
-// reported rather than papered over — a backend that cannot coordinate separate
-// machines says so with ErrLockUnsupported instead of silently degrading to a
-// lock that only looks like it works.
+// Every backend supplies one, and the backend decides what kind. SQLite is
+// local by construction, so it gets an OS advisory lock that guarantees one
+// gateway per machine; Postgres and Firestore are reachable from anywhere, so
+// they get a renewed lease that guarantees one gateway per cluster. There is no
+// "no locker" option, because a node that serves without contending is the
+// duplicate gateway the whole mechanism exists to prevent.
+//
+// ErrLockUnsupported therefore reports a genuinely unserviceable combination —
+// today only a non-unix host on the SQLite backend — rather than a backend
+// nobody has got round to.
 //
 // ttl sets the lease length for a backend that needs one; it is ignored by a
 // backend whose liveness the OS guarantees. Zero selects DefaultLeaseTTL.
@@ -34,10 +41,7 @@ func OpenLocker(ctx context.Context, dbc config.DatabaseConfig, identity config.
 	case config.BackendFirestore:
 		return openFirestoreLocker(ctx, dbc.Firestore, identity, ttl)
 	case config.BackendPostgres:
-		// Postgres could host a lease — but it is not wired yet, and guessing
-		// would be worse than saying so. Until then a Postgres-backed
-		// deployment gets no election rather than a broken one.
-		return nil, fmt.Errorf("%w: %q", config.ErrLockUnsupported, backend)
+		return openPostgresLocker(ctx, strings.TrimSpace(dbc.Postgres.DSN), identity, ttl)
 	default:
 		return nil, fmt.Errorf("unknown database backend %q (want sqlite, postgres, or firestore)", dbc.Backend)
 	}

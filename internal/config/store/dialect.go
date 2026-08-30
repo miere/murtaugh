@@ -21,6 +21,17 @@ type Dialect interface {
 	TimestampType() string
 	// Now is the SQL expression yielding the current timestamp.
 	Now() string
+	// LeaseExpired is the boolean SQL expression "the lease recorded in
+	// acquiredCol, lasting secondsCol seconds, has lapsed" — evaluated by the
+	// DATABASE, never by the client.
+	//
+	// This is the one place the leader lease's correctness meets SQL dialect,
+	// and it lives behind the seam rather than inline because getting it wrong
+	// is invisible: a comparison against a client-supplied timestamp would
+	// compile, pass tests on one machine, and then let two nodes with skewed
+	// clocks disagree about whether the incumbent still holds the lock. Both
+	// sides of this comparison come from the server.
+	LeaseExpired(acquiredCol, secondsCol string) string
 }
 
 // sqliteDialect targets modernc.org/sqlite (pure-Go). SQLite has no native JSON
@@ -33,3 +44,10 @@ func (sqliteDialect) JSONValue(int) string   { return "?" }
 func (sqliteDialect) JSONType() string       { return "TEXT" }
 func (sqliteDialect) TimestampType() string  { return "TEXT" }
 func (sqliteDialect) Now() string            { return "CURRENT_TIMESTAMP" }
+
+// LeaseExpired uses SQLite's datetime() modifier arithmetic. Timestamps are
+// ISO-8601 text here, which orders correctly under lexicographic comparison as
+// long as both sides are produced by SQLite itself — which they are.
+func (sqliteDialect) LeaseExpired(acquiredCol, secondsCol string) string {
+	return "datetime(" + acquiredCol + ", '+' || " + secondsCol + " || ' seconds') <= CURRENT_TIMESTAMP"
+}

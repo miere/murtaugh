@@ -29,6 +29,27 @@ func migrations(d Dialect) [][]string {
 				updated_at %s   NOT NULL
 			)`, d.JSONType(), d.TimestampType()),
 		},
+		// v2 — the leader lease. One row per Slack app: exactly one gateway may
+		// hold a live socket for it, and this row is what decides which.
+		//
+		// acquired_at is written with the DATABASE's clock and compared against
+		// it, never against a node's; lease_seconds travels with the row so a
+		// challenger judges the incumbent by the terms the incumbent took the
+		// lock on. fence is the compare-and-swap token, replaced on every
+		// acquisition, which is how a displaced holder discovers it has lost.
+		{
+			fmt.Sprintf(`CREATE TABLE IF NOT EXISTS leader_locks (
+				lock_key      TEXT PRIMARY KEY,
+				owner         TEXT    NOT NULL,
+				fence         TEXT    NOT NULL,
+				epoch         BIGINT  NOT NULL,
+				acquired_at   %s      NOT NULL,
+				lease_seconds BIGINT  NOT NULL,
+				released      INTEGER NOT NULL,
+				team_id       TEXT    NOT NULL,
+				app_id        TEXT    NOT NULL
+			)`, d.TimestampType()),
+		},
 	}
 }
 

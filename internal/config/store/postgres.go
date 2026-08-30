@@ -24,6 +24,13 @@ func (postgresDialect) JSONType() string         { return "JSONB" }
 func (postgresDialect) TimestampType() string    { return "TIMESTAMPTZ" }
 func (postgresDialect) Now() string              { return "now()" }
 
+// LeaseExpired builds interval arithmetic from the stored lease length.
+// make_interval takes the seconds column as a value rather than concatenating
+// it into a cast, which keeps the expression free of any string-built SQL.
+func (postgresDialect) LeaseExpired(acquiredCol, secondsCol string) string {
+	return acquiredCol + " + make_interval(secs => " + secondsCol + ") <= now()"
+}
+
 // openPostgres connects to the Postgres config store described by dsn and brings
 // its schema up to date. The DSN is a libpq/pgx connection string (URL or
 // key=value form), supplied from .env via ${VAR} — never a literal in YAML.

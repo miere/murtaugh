@@ -70,9 +70,33 @@ jobs:
       - name: Build
         run: go build ./...
 
+      # The Firestore backend and its leader lease are integration-tested against
+      # the emulator, and skip themselves when FIRESTORE_EMULATOR_HOST is unset —
+      # so without this step they would silently not run here at all. It is a
+      # step rather than a `services:` container because service containers
+      # cannot override the image's command, and this image's default entrypoint
+      # is a shell.
+      - name: Start the Firestore emulator
+        run: |
+          set -euo pipefail
+          docker run -d --name firestore-emulator -p 8579:8579 \
+            gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators \
+            gcloud emulators firestore start --host-port=0.0.0.0:8579
+          for i in $(seq 1 60); do
+            if curl -sf -m 2 http://127.0.0.1:8579/ >/dev/null; then
+              echo "emulator ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::the Firestore emulator did not become ready"
+          docker logs firestore-emulator
+          exit 1
+
       - name: Test (race detector)
         env:
           MURTAUGH_TEST_POSTGRES_DSN: postgres://murtaugh:murtaugh@localhost:5432/murtaugh?sslmode=disable
+          FIRESTORE_EMULATOR_HOST: 127.0.0.1:8579
         run: go test -race ./...
 
   macos-installer-tests:

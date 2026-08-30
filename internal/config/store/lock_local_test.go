@@ -221,17 +221,32 @@ func TestLocalLockerRenewIsIdentity(t *testing.T) {
 	}
 }
 
-// TestOpenLockerRefusesPostgres pins the reported-not-degraded rule: a backend
-// with no election implementation must say so rather than hand back a lock that
-// only looks like it works.
-func TestOpenLockerRefusesPostgres(t *testing.T) {
+// TestOpenLockerRejectsUnknownBackend pins the reported-not-degraded rule.
+//
+// Election is mandatory, so an unrecognised backend must fail loudly rather
+// than hand back something lock-shaped: a node that starts without a real lock
+// is precisely the duplicate gateway the mechanism exists to prevent. Every
+// backend Murtaugh actually supports now provides one, so this covers the
+// typo'd value rather than a missing implementation.
+func TestOpenLockerRejectsUnknownBackend(t *testing.T) {
+	_, err := OpenLocker(context.Background(),
+		config.DatabaseConfig{Backend: "mysql"}, testIdentity(), 0)
+	if err == nil {
+		t.Fatal("OpenLocker accepted an unknown backend")
+	}
+}
+
+// TestOpenLockerReportsAMisconfiguredPostgres checks the Postgres path fails
+// with its own diagnosis rather than a generic one — a missing DSN is an
+// operator error worth naming, not an unsupported backend.
+func TestOpenLockerReportsAMisconfiguredPostgres(t *testing.T) {
 	_, err := OpenLocker(context.Background(),
 		config.DatabaseConfig{Backend: config.BackendPostgres}, testIdentity(), 0)
 	if err == nil {
-		t.Fatal("OpenLocker(postgres) returned no error; want ErrLockUnsupported")
+		t.Fatal("OpenLocker(postgres) with no DSN returned no error")
 	}
-	if !errors.Is(err, config.ErrLockUnsupported) {
-		t.Errorf("OpenLocker(postgres) error = %v, want ErrLockUnsupported", err)
+	if errors.Is(err, config.ErrLockUnsupported) {
+		t.Errorf("a missing DSN was reported as an unsupported backend: %v", err)
 	}
 }
 

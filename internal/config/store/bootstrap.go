@@ -302,7 +302,7 @@ func importConfig(ctx context.Context, s config.Store, cfg config.Config) error 
 		{config.SingletonDefaults, cfg.Defaults},
 		{config.SingletonJournal, cfg.Journal},
 		{config.SingletonTroubleshoot, cfg.Troubleshoot},
-		{config.SingletonFallback, cfg.Fallback},
+		{config.SingletonElection, cfg.Election},
 	}
 	for _, sg := range singletons {
 		if err := s.PutSingleton(ctx, sg.key, sg.body); err != nil {

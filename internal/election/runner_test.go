@@ -180,7 +180,7 @@ func newTestRunner(t *testing.T, locker config.Locker, clock Clock, cb Callbacks
 		Callbacks: cb,
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Clock:     clock,
-		Fallback:  config.FallbackConfig{Enabled: true, LeaseSeconds: 30, RenewSeconds: 10},
+		Election:  config.ElectionConfig{LeaseSeconds: 30, RenewSeconds: 10},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

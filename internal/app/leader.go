@@ -16,37 +16,36 @@ import (
 	gateway "github.com/miere/murtaugh/internal/slack/gateway"
 )
 
-// wireLeaderElection makes gw contend for leadership when the fallback config
-// asks for it, and leaves it serving unconditionally when it does not.
+// wireLeaderElection makes gw contend for leadership.
+//
+// It runs for every gateway, unconditionally. Election is not opt-in: the
+// configuration backend always supplies a lock, and its kind is what varies —
+// SQLite guarantees one gateway per machine, Postgres and Firestore one per
+// cluster. A node that served without contending would be the duplicate
+// gateway the whole mechanism exists to prevent.
 //
 // This is the only place that knows about both halves — the election package
 // and the gateway — which is why the promote/demote callbacks are built here
 // rather than in either of them.
 //
-// Every failure to set up election is fatal rather than degraded. That is the
-// opposite of how this composition root treats most optional collaborators, and
-// deliberately so: an operator who turned fallback on has two or more nodes
-// running, and a node that quietly carries on serving without contending is a
-// second gateway answering every message. Refusing to start is the safe
-// failure; carrying on is not.
+// Every failure here is fatal rather than degraded, which is the opposite of
+// how this composition root treats most optional collaborators. That is the
+// point: the degraded state of leader election is a second gateway answering
+// every message, so refusing to start is the safe failure and carrying on is
+// not.
 func (a *Application) wireLeaderElection(ctx context.Context, gw *gateway.Gateway) (*gateway.Gateway, error) {
-	if !a.cfg.Fallback.Enabled {
-		return gw, nil
-	}
-
 	identity, err := resolveLockIdentity(ctx, a.cfg.OAuth.BotToken)
 	if err != nil {
 		return nil, fmt.Errorf("leader election: %w", err)
 	}
 
-	locker, err := store.OpenLocker(ctx, a.cfg.Database, identity, a.cfg.Fallback.EffectiveLease())
+	locker, err := store.OpenLocker(ctx, a.cfg.Database, identity, a.cfg.Election.EffectiveLease())
 	if err != nil {
 		if errors.Is(err, config.ErrLockUnsupported) {
-			// Naming the backend matters here: the fix is to move the config
-			// store, and an operator who only hears "unsupported" has to go
-			// looking for which knob that means.
+			// Naming the backend matters: an operator who only hears
+			// "unsupported" has to go looking for which knob that means.
 			return nil, fmt.Errorf(
-				"leader election is enabled but the %q config-store backend cannot provide it; migrate the store (murtaugh cfg db migrate --to firestore) or set fallback.enabled: false: %w",
+				"the %q config-store backend cannot provide a leader lock on this host, and Murtaugh will not run a gateway without one: %w",
 				a.cfg.Database.EffectiveBackend(), err)
 		}
 		return nil, fmt.Errorf("leader election: open lock: %w", err)
@@ -54,7 +53,7 @@ func (a *Application) wireLeaderElection(ctx context.Context, gw *gateway.Gatewa
 
 	runner, err := election.New(election.Options{
 		Locker:   locker,
-		Fallback: a.cfg.Fallback,
+		Election: a.cfg.Election,
 		Logger:   a.logger.With("component", "election"),
 		Callbacks: election.Callbacks{
 			OnPromote: func(ctx context.Context, lease config.Lease) error {
@@ -74,12 +73,12 @@ func (a *Application) wireLeaderElection(ctx context.Context, gw *gateway.Gatewa
 		return nil, fmt.Errorf("leader election: %w", err)
 	}
 
-	a.logger.Info("leader election enabled",
+	a.logger.Info("leader election active",
 		"backend", locker.Backend(),
 		"identity", identity.String(),
-		"lease", a.cfg.Fallback.EffectiveLease(),
-		"renew", a.cfg.Fallback.EffectiveRenew(),
-		"stands_down_after", a.cfg.Fallback.EffectiveDemoteAfter())
+		"lease", a.cfg.Election.EffectiveLease(),
+		"renew", a.cfg.Election.EffectiveRenew(),
+		"stands_down_after", a.cfg.Election.EffectiveDemoteAfter())
 
 	a.leaderLocker = locker
 	return gw.WithLeaderElection(runner), nil

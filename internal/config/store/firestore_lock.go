@@ -104,14 +104,36 @@ func openFirestoreLocker(ctx context.Context, fsc config.FirestoreConfig, identi
 	if ttl <= 0 {
 		ttl = DefaultLeaseTTL
 	}
-	return &firestoreLocker{
+	locker := &firestoreLocker{
 		client:     client,
 		doc:        client.Collection(fsc.EffectiveCollection() + "_locks").Doc(identity.Key()),
 		identity:   identity,
 		ttl:        ttl,
 		ownsClient: true,
-	}, nil
+	}
+
+	// Prove the lock document is actually readable before returning.
+	//
+	// The Firestore client dials lazily, so without this a missing IAM grant or
+	// an unreachable database would not surface here — it would surface as
+	// every acquisition failing, which the runner correctly treats as "cannot
+	// tell" and so stays a standby. The node would then sit silent forever,
+	// having never led and never complained. That is the worst shape a failure
+	// can take: fail-closed and invisible. One read at startup turns it into a
+	// refusal to boot with the real error attached.
+	probeCtx, cancel := context.WithTimeout(ctx, lockProbeTimeout)
+	defer cancel()
+	if _, err := locker.read(probeCtx); err != nil {
+		_ = client.Close()
+		return nil, fmt.Errorf("leader lock is not reachable in firestore: %w", err)
+	}
+	return locker, nil
 }
+
+// lockProbeTimeout bounds the startup reachability check. Long enough for a
+// cold connection to a distant region, short enough that a wedged network
+// fails the daemon rather than hanging it.
+const lockProbeTimeout = 10 * time.Second
 
 func (l *firestoreLocker) Backend() string { return config.BackendFirestore }
 
