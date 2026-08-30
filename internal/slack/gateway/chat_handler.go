@@ -119,6 +119,12 @@ type ChatHandler struct {
 	// instead — the same fallback a failed post takes.
 	alertCards *alertcard.Renderer
 	alertAPI   alertMessagePoster
+	// credRepair asks the admin to re-authenticate when a claude_code turn fails
+	// because its credential was rejected. It covers the case auth.request
+	// structurally cannot: that tool is called by an agent from inside a turn, but
+	// a bad credential stops the agent running at all, so nobody is left to call
+	// it. nil leaves such failures reported as ordinary errors.
+	credRepair *credentialRepair
 }
 
 // threadBackfiller renders a Slack thread into a transcript block for a cold
@@ -168,6 +174,29 @@ func NewChatHandler(api StreamAPI, sessions map[string]ChatSessionManager, resol
 		logger = slog.Default()
 	}
 	return &ChatHandler{api: api, sessions: sessions, resolver: resolver, interval: interval, minChars: minChars, logger: logger, statusRefreshInterval: defaultStatusRefreshInterval}
+}
+
+// WithCredentialRepair attaches the path that asks the admin to re-authenticate
+// a rejected Claude Code credential. nil (the default) leaves credential
+// failures reported as ordinary turn errors. Returns the handler for chaining.
+func (h *ChatHandler) WithCredentialRepair(r *credentialRepair) *ChatHandler {
+	h.credRepair = r
+	return h
+}
+
+// errCredentialBlocked is what the user sees when their turn failed only because
+// the agent's credential was rejected. It replaces the raw error deliberately:
+// the CLI's own text tells them to run /login, which they cannot do and which is
+// not their job — the admin owns the credential.
+var errCredentialBlocked = errors.New(
+	"Claude Code's credentials were rejected, so this turn could not run. " +
+		"I've asked your admin to re-authenticate — try again once they have.")
+
+// failedOnCredential reports the turn as blocked-on-credentials and starts a
+// repair, or returns false when this is an ordinary failure the caller should
+// report as-is.
+func (h *ChatHandler) failedOnCredential(agentName string, err error) bool {
+	return h.credRepair.Handles(agentName, err) && h.credRepair.Request(agentName)
 }
 
 // WithIdleTimeout sets how long a turn may go without any agent activity before
@@ -647,6 +676,16 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest, route ChatRou
 	events, err := sessions.Prompt(promptCtx, key, metadata, agent.PromptRequest{Text: promptForAgent, History: history})
 	if err != nil {
 		turnErr = err
+		// A rejected credential surfaces here rather than as an event: Prompt opens
+		// the session, and the launch handshake is where a bad credential is caught.
+		// Drop the binding so the retry after re-authentication starts a fresh
+		// process rather than reusing one that already failed to authenticate.
+		if h.failedOnCredential(route.Agent, err) {
+			discardSession(sessions, key)
+			h.logger.Warn("claude_code credential rejected on session start; asked admin to re-authenticate",
+				"agent", route.Agent, "channel", req.ChannelID)
+			return renderer.Fail(ctx, errCredentialBlocked)
+		}
 		return renderer.Fail(ctx, err)
 	}
 	// The session now exists; capture its id for the turn record.
@@ -791,6 +830,15 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest, route ChatRou
 				// a tool red. Real agent errors are surfaced on the reply surface.
 				if errors.Is(event.Error, context.Canceled) || errors.Is(context.Cause(ctx), context.Canceled) {
 					return event.Error
+				}
+				// A credential rejected mid-turn is the admin's to repair, not the
+				// user's. Drop the session so the retry re-launches rather than
+				// reusing a process whose credential the server has refused.
+				if h.failedOnCredential(route.Agent, event.Error) {
+					discardSession(sessions, key)
+					h.logger.Warn("claude_code credential rejected mid-turn; asked admin to re-authenticate",
+						"agent", route.Agent, "channel", req.ChannelID, "session_id", sessionID)
+					return renderer.Fail(ctx, errCredentialBlocked)
 				}
 				if errors.Is(event.Error, agent.ErrToolCeiling) {
 					// A tool blew past its ceiling. The backend may still be running it
