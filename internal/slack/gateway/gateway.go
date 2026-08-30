@@ -494,6 +494,7 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 			WithPermissionAskers(acpPermissionAskers).
 			WithReplyBlocks(cfg.BaseDir, api).
 			WithAlerts(cfg.BaseDir, alertAPI).
+			WithCredentialRepair(newCredentialRepair(authFlow, cfg.Agents)).
 			WithBackgroundEventsRouter(bgRouter)
 		// The router renders background turns through the chat handler's own renderer,
 		// so a background reply looks exactly like a foreground one.
