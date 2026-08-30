@@ -59,6 +59,13 @@ func (a *Application) watchConfig(ctx context.Context, holder *gatewayHolder, ru
 			return
 		case <-ticker.C:
 		}
+		// A configuration Murtaugh wrote itself (the agent setup form) hands
+		// over a new baseline rather than being reviewed: asking somebody to
+		// approve a change they made through a form thirty seconds ago is how a
+		// review prompt becomes noise.
+		if adopted, ok := a.takeApprovedConfig(); ok {
+			approved = adopted
+		}
 		if !runner.Leading() {
 			continue
 		}

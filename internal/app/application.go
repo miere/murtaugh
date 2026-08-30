@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/miere/murtaugh/assets"
@@ -118,6 +119,12 @@ type Application struct {
 	// leaderLocker is the election lock's backend handle, retained only so
 	// shutdown can close it.
 	leaderLocker config.Locker
+	// approvedCfg lets a configuration Murtaugh wrote itself (the agent setup
+	// form) hand the watcher a new baseline, so it is not queued for the
+	// administrator to re-approve a change they just made.
+	approvedCfg    config.Snapshot
+	approvedCfgSet bool
+	approvedCfgMu  sync.Mutex
 	// jobRuns is the shared scheduled-run claim store, retained only so
 	// shutdown can close it. nil when no job is scheduled.
 	jobRuns config.JobRunStore

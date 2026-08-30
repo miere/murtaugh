@@ -71,6 +71,12 @@ func (a *Application) wireLeaderElection(ctx context.Context, holder *gatewayHol
 				// report. Off the critical path — a failed report must not fail
 				// a promotion.
 				go a.reportMissedJobs(context.WithoutCancel(ctx), gw)
+				// A daemon with no agent is running correctly and answering
+				// nobody, which from the operator's side looks exactly like a
+				// broken one. Say so and offer the form.
+				if !hasAgents(a.cfg) {
+					go gw.NotifyNoAgents(context.WithoutCancel(ctx))
+				}
 				return nil
 			},
 			OnDemote: func(ctx context.Context, reason string) {
