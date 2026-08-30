@@ -282,6 +282,10 @@ type Gateway struct {
 	// It is built before the Gateway exists (the clients need it at
 	// construction) and told how to ask about leadership afterwards.
 	leaderGate *outboundGate
+	// claimRun gates each scheduled fire on a claim recorded in the SHARED
+	// store, so a restart or a failover inside a job's window cannot run it
+	// twice. nil leaves the scheduler unguarded (CLI/MCP and tests).
+	claimRun RunClaimer
 	// nodeReport describes this node for the takeover announcement: hostname,
 	// addresses, version. Resolved lazily on promotion, not at construction,
 	// because a node's public address can change between boot and failover.

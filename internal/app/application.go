@@ -117,9 +117,11 @@ type Application struct {
 	// flag). Irrelevant to MCP/Gateway modes.
 	jsonOutput bool
 	// leaderLocker is the election lock's backend handle, retained only so
-	// shutdown can close it. nil when fallback is disabled, which is the
-	// single-node default.
+	// shutdown can close it.
 	leaderLocker config.Locker
+	// jobRuns is the shared scheduled-run claim store, retained only so
+	// shutdown can close it. nil when no job is scheduled.
+	jobRuns config.JobRunStore
 }
 
 // New constructs an Application for the given mode. cfg/configPath/logger

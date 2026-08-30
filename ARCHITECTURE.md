@@ -384,8 +384,14 @@ subsystems (`handler`, `workflow`, `chat`, `unfurl`). `New()` wires them:
 
 ### Leader election and failover (`internal/election` + `slack/gateway/leader.go`)
 
-Off by default. With `fallback.enabled: true` in the config store, several nodes
-contend so that one dying is covered by another taking over.
+Always on, and not configurable off. Election is a property of the
+configuration backend rather than a feature a deployment opts into: every
+backend supplies a lock, and only its *scope* varies — SQLite gives one gateway
+per machine (an OS advisory lock, released by the kernel on process death),
+Postgres and Firestore give one per cluster (a renewed lease). The `election:`
+block in the config store carries only the timings. A node that served without
+contending would be the duplicate gateway the mechanism exists to prevent, so
+every setup failure here is fatal rather than degraded.
 
 `Gateway.Run` branches once: with no elector it calls `serve` and behaves
 exactly as it always has; with one, the elector owns the loop and
@@ -418,6 +424,24 @@ down agent backend cannot be revived. They are closed only on process exit.
 A new leader announces itself to the admin DM with hostname, local and public
 IP, version, PID, and the leadership epoch, plus whether it is the first leader
 or took over from a predecessor.
+
+**Scheduled runs are claimed, not just scheduled.** Election stops two nodes
+firing a job simultaneously, but `gocron` counts from when *its* scheduler
+started, which is per-process — so a leader that restarts mid-interval starts a
+fresh interval and fires again far too soon, and a promoted standby has no idea
+what its predecessor already ran. Every fire therefore takes a claim in the
+shared store first (`config.JobRunStore`), keyed by job name plus an occurrence
+slot: wall-clock time truncated to the job's resolution (a minute for cron, the
+period for `every`). Truncation is against a fixed origin, not node uptime —
+otherwise each node computes its own grid and each wins its own claim. The
+insert's primary key *is* the mutual exclusion, so there is no read before the
+write and no window between checking and claiming. A claim that errors skips the
+run: a missed occurrence is visible and recovers, a duplicate deploy may not.
+
+Not implemented: **catch-up for missed occurrences**. If no leader exists when a
+cron is due, that run is skipped entirely rather than replayed on the next
+promotion — replaying raises policy questions (should a 03:00 backup run at
+09:00?) that want an explicit answer.
 
 ### Event loop
 

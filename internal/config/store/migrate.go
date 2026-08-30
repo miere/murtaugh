@@ -50,6 +50,24 @@ func migrations(d Dialect) [][]string {
 				app_id        TEXT    NOT NULL
 			)`, d.TimestampType()),
 		},
+		// v3 — scheduled-run claims. One row per (job, occurrence): the primary
+		// key IS the mutual exclusion, so an insert that affects a row is a
+		// won claim and one that affects none is a job another node — or an
+		// earlier incarnation of this one — has already run.
+		//
+		// occurrence is TEXT in every dialect on purpose. It is an identity
+		// rather than a moment: its only job is to be byte-identical across
+		// nodes so the key collides, and leaving it to each driver's timestamp
+		// handling would risk two representations of one instant both winning.
+		{
+			fmt.Sprintf(`CREATE TABLE IF NOT EXISTS job_runs (
+				job        TEXT NOT NULL,
+				occurrence TEXT NOT NULL,
+				node       TEXT NOT NULL,
+				claimed_at %s   NOT NULL,
+				PRIMARY KEY (job, occurrence)
+			)`, d.TimestampType()),
+		},
 	}
 }
 
