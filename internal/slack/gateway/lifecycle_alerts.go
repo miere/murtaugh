@@ -63,6 +63,30 @@ func backOnlineAlert() alertcard.Spec {
 	}
 }
 
+// configReloadingAlert is posted once an admin approves a configuration change.
+//
+// It mirrors restartNoticeAlert on purpose: from the admin's side a soft reload
+// and a restart are the same experience — the bot goes quiet, agents drop their
+// work, and it comes back — so it should read the same rather than making them
+// learn a second vocabulary for it.
+func configReloadingAlert() alertcard.Spec {
+	return alertcard.Spec{
+		Level:     alertcard.LevelInfo,
+		Title:     "Reloading the configuration…",
+		Subtitle:  "The approved changes are being applied; agents are restarting.",
+		NextSteps: "Any conversation that was in flight has been stopped; ask again once Murtaugh is back.",
+	}
+}
+
+// configReloadedAlert confirms the new configuration is live.
+func configReloadedAlert() alertcard.Spec {
+	return alertcard.Spec{
+		Level:    alertcard.LevelInfo,
+		Title:    "Configuration reloaded",
+		Subtitle: "Murtaugh is running the approved configuration.",
+	}
+}
+
 // pongAlert is the reply to a click on the App Home's Test-communication
 // button: the round-trip completed, which is the whole content of the message.
 func pongAlert() alertcard.Spec {

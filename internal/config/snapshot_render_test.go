@@ -163,8 +163,13 @@ func TestDiffSnapshotsShowsBothSides(t *testing.T) {
 	if !strings.Contains(diff, "+") || !strings.Contains(diff, "U9") {
 		t.Errorf("diff does not show the added user:\n%s", diff)
 	}
-	if !strings.Contains(diff, "@@") {
-		t.Errorf("diff has no hunk header:\n%s", diff)
+	// Deliberately header-less: this YAML has no file on disk, so `---` and
+	// `@@` lines would name a path that does not exist and offset arithmetic
+	// against a document the reader cannot open.
+	for _, noise := range []string{"@@", "--- ", "+++ "} {
+		if strings.Contains(diff, noise) {
+			t.Errorf("diff carries %q, which has nothing to orient against:\n%s", noise, diff)
+		}
 	}
 }
 

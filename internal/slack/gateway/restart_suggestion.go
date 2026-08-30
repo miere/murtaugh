@@ -36,6 +36,13 @@ func (a *Gateway) resolveSuggestionDestination(ctx context.Context, channel stri
 	if admin == "" {
 		return "", nil
 	}
+	// A struct-literal gateway (tests, and a build whose Slack client failed to
+	// construct) has no messaging surface. Reporting "nowhere to post" is the
+	// same answer as having no admin, and beats a nil dereference on a path
+	// every caller already treats as best-effort.
+	if a.messaging == nil {
+		return "", nil
+	}
 	convo, _, _, err := a.messaging.OpenConversationContext(ctx, &slack.OpenConversationParameters{Users: []string{admin}, ReturnIM: true})
 	if err != nil {
 		return "", fmt.Errorf("open admin DM for restart suggestion: %w", err)
