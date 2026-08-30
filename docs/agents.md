@@ -114,6 +114,20 @@ return an error — so the agent stops rather than retrying a call it still has 
 credentials for. With no admin configured, nothing is posted and the request is
 refused. See `murtaugh help auth request`.
 
+Its built-in profiles are `gcloud`, `gcloud-adc`, `claude-code`, and `custom`.
+The `claude-code` profile re-authenticates the Claude Code CLI itself — the
+credential every `claude_code` agent runs on — by driving
+`claude auth login --claudeai`.
+
+An agent can ask for it like any other profile, but usually will not have to: a
+`claude_code` agent whose credential has been rejected cannot run at all, so
+there is no turn left from which to call `auth.request`. The gateway detects that
+case and posts the card on the agent's behalf, and the admin can trigger one
+pre-emptively with `/murtaugh auth`. See
+[Operations → Claude Code credentials](operations.md#claude-code-credentials),
+which also covers how Murtaugh keeps that credential from lapsing in the first
+place.
+
 ### The approval gate
 
 `--approval-terminal` governs whether a native agent's `terminal` commands need

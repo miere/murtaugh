@@ -118,6 +118,75 @@ either (see [Configuration](configuration.md)).
 
 ---
 
+## Claude Code credentials
+
+A `claude_code` agent runs on the Claude Code CLI's own OAuth credential — the
+one `claude auth login` writes. Murtaugh keeps it alive and can repair it from
+Slack, so a lapsed login does not mean SSH-ing to the host.
+
+### Why it needs keeping alive
+
+A sandboxed agent (`sandbox: seatbelt`) can **read** its credential but cannot
+**write** it back: on macOS the store is the login keychain, a single file under
+`~/Library/Keychains`, which the seatbelt profile's blanket `(deny file-write*)`
+covers. A failed refresh leaves a stranded `login.keychain-db.sb-*` temp behind —
+a zero-byte file next to the keychain is the tell.
+
+That is worse than a write that merely fails. Anthropic's refresh tokens
+**rotate**: the server retires the old one the moment it issues a new one. So a
+refresh that cannot be persisted *destroys* the stored credential. The next spawn
+presents an already-retired token and the agent is locked out — which looks
+exactly like Anthropic revoking the token out of the blue.
+
+### The warden
+
+The gateway watches each Claude Code credential's expiry and, shortly before it
+lapses, runs one minimal **unsandboxed** `claude` turn. Claude Code refreshes and
+persists normally, because nothing is denying the write, and sandboxed sessions
+only ever read a credential that is already valid.
+
+It is **derived, not configured**. There is no enable flag: the warden exists
+because a `claude_code` agent exists and disappears when the last one is removed.
+It is one watcher per distinct credential — the `(claude binary, HOME)` pair —
+because two concurrent refreshes would race the server's rotation and cause the
+very lockout it prevents.
+
+It is also deliberately **not** a job. A job would be runnable by name,
+redefinable, and silently disable-able by any agent holding the `jobs` tool
+group; the warden is internal, so there is nothing to enumerate or turn off.
+
+Two consequences worth knowing:
+
+- It spends a **small amount of quota**: one throwaway prompt per refresh.
+  `claude auth status` was measured and does *not* refresh — it reads local state
+  and returns — so only a real turn will do.
+- **ACP agents are not covered.** An ACP command may be Claude Code behind an
+  adapter, but the adapter's name is arbitrary, so guessing would fail quietly.
+  Credentials for ACP agents are the admin's own responsibility.
+
+### Repairing a login
+
+```sh
+/murtaugh auth status   # admin-only: expiry, last refresh, last error per credential
+/murtaugh auth          # admin-only: start a Claude Code sign-in now
+```
+
+`auth status` reports timings only, never token material. `auth` posts the
+[Auth Request](agents.md#what-an-agent-can-do-tools) card to your DMs: open the
+link, sign in, paste the code back.
+
+You rarely need to ask. When a turn fails because the credential was rejected,
+the gateway posts that card **unprompted** and tells the user in-thread that
+their turn is blocked pending the admin. One card is posted no matter how many
+conversations fail at once.
+
+> **A caveat worth stating.** The sandbox is not a boundary for this credential.
+> Reads are allow-by-default and the keychain is reachable over IPC, so any agent
+> holding the `terminal` tool group can read the Claude Code credential. Treat
+> `terminal` as credential-equivalent when deciding which agents get it.
+
+---
+
 ## What the daemon owns
 
 One process runs it all:
@@ -126,6 +195,7 @@ One process runs it all:
 - the **chat agents** and their streaming replies ([Agent chat](agents.md));
 - the **workflow** and **unfurl** handlers ([Slack](slack.md));
 - the **job scheduler** ([Jobs](jobs.md));
+- the **Claude Code credential warden** (above);
 - the **event journal** writer ([Gateway Debug Mode](journal.md)).
 
 If the gateway is down, scheduled jobs don't fire and Slack events go unanswered
