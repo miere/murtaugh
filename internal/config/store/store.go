@@ -54,6 +54,18 @@ func Open(ctx context.Context, dbc config.DatabaseConfig, configDir, baseName st
 // connection setup: WAL for concurrent readers, a busy_timeout so a brief write
 // lock is waited out, and MaxOpenConns=1 so the pragmas stay deterministic.
 func openSQLite(ctx context.Context, path string) (config.Store, error) {
+	db, err := openSQLiteDB(path)
+	if err != nil {
+		return nil, err
+	}
+	return newStore(ctx, db, sqliteDialect{})
+}
+
+// openSQLiteDB opens the SQLite file with the connection settings every caller
+// in this package needs, creating its parent directory. Shared by the config
+// store and the scheduled-run claim store, which open the same file
+// independently.
+func openSQLiteDB(path string) (*sql.DB, error) {
 	if path != ":memory:" && !strings.HasPrefix(path, "file:") {
 		if dir := filepath.Dir(path); dir != "" && dir != "." {
 			if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -66,7 +78,7 @@ func openSQLite(ctx context.Context, path string) (config.Store, error) {
 		return nil, fmt.Errorf("open config db %q: %w", path, err)
 	}
 	db.SetMaxOpenConns(1)
-	return newStore(ctx, db, sqliteDialect{})
+	return db, nil
 }
 
 // newStore runs migrations against an opened handle and returns the store.

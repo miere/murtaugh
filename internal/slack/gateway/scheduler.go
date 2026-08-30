@@ -108,6 +108,14 @@ func (a *Gateway) runScheduledJob(ctx context.Context, name string) {
 			return
 		}
 	}
+	// Claim the slot before doing anything. Leadership stops two nodes firing
+	// at once, but not a node whose scheduler restarted mid-interval, nor an
+	// incoming leader that has no idea what the outgoing one already ran — the
+	// scheduler's clock is per-process, and only the shared store remembers
+	// across processes.
+	if !a.claimScheduledRun(ctx, name) {
+		return
+	}
 	a.logger.Info("running scheduled job", "job", name)
 	if err := a.runJob(ctx, name); err != nil {
 		a.logger.Error("scheduled job failed", "job", name, "error", err)
