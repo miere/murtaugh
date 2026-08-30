@@ -1,0 +1,93 @@
+{
+	"blocks": [
+		{
+			"type": "container",
+			"block_id": "murtaugh_config_update_card",
+			"icon": {
+				"type": "image",
+				"image_url": "https://img.icons8.com/external-flaticons-lineal-color-flat-icons/64/external-protocols-back-to-work-flaticons-lineal-color-flat-icons.png",
+				"alt_text": "Configuration icon"
+			},
+			"title": {
+				"type": "plain_text",
+				"text": {{ json .Title }}
+			},
+			"subtitle": {
+				"type": "plain_text",
+				"text": {{ json .Subtitle }}
+			},
+			"is_collapsible": false,
+			"default_collapsed": false,
+			"has_header_divider": true,
+			"width": "wide",
+			"child_blocks": [
+				{
+					"type": "rich_text",
+					"elements": [
+						{
+							"type": "rich_text_section",
+							"elements": [
+								{
+									"type": "text",
+									"text": {{ json .Intro }}
+								}
+							]
+						},
+						{
+							"type": "rich_text_preformatted",
+							"language": "diff",
+							"elements": [
+								{
+									"type": "text",
+									"text": {{ json .Diff }}
+								}
+							]
+						}{{ if .Impact }},
+						{
+							"type": "rich_text_section",
+							"elements": [
+								{
+									"type": "text",
+									"text": {{ json .Impact }},
+									"style": { "bold": true }
+								}
+							]
+						}{{ end }}
+					]
+				}{{ if .ShowActions }},
+				{
+					"type": "actions",
+					"elements": [
+						{
+							"type": "button",
+							"action_id": {{ json .ActionApply }},
+							"text": {
+								"type": "plain_text",
+								"text": "Apply Modifications"
+							},
+							"style": "primary"
+						},
+						{
+							"type": "button",
+							"action_id": {{ json .ActionRollback }},
+							"style": "danger",
+							"text": {
+								"type": "plain_text",
+								"text": "Rollback"
+							}
+						}
+					]
+				}{{ end }}{{ if .Footer }},
+				{
+					"type": "context",
+					"elements": [
+						{
+							"type": "mrkdwn",
+							"text": {{ json .Footer }}
+						}
+					]
+				}{{ end }}
+			]
+		}
+	]
+}

@@ -57,7 +57,6 @@ import (
 	troubleshootbundle "github.com/miere/murtaugh/internal/tools/troubleshoot/bundle"
 	versiontool "github.com/miere/murtaugh/internal/tools/version"
 	"github.com/miere/murtaugh/internal/troubleshoot"
-	"github.com/miere/murtaugh/internal/updates"
 )
 
 // Mode selects which frontend Run starts.
@@ -178,92 +177,7 @@ func (a *Application) Run(ctx context.Context) error {
 	case ModeMCP:
 		return mcp.New(a.registry).Serve(ctx)
 	case ModeGateway:
-		gw := gateway.New(a.cfg, a.registry, a.logger, a.recorder, a.interactionBroker, a.authFlow, a.askFlow)
-		if rc := a.restart; rc != nil {
-			// Adapt the coordinator's Request method into the gateway's
-			// stringly-typed trigger so the gateway package stays free
-			// of any internal/app import (which would cycle).
-			gw = gw.WithRestartTrigger(func(source, userID, channel, reason string) bool {
-				return rc.Request(RestartRequest{
-					Source:  RestartSource(source),
-					UserID:  userID,
-					Channel: channel,
-					Reason:  reason,
-				})
-			})
-		}
-		if path := strings.TrimSpace(a.resumeMarkerPath); path != "" {
-			gw = gw.WithResumeMarkerStore(gateway.NewFileResumeMarkerStore(path))
-			a.logger.Debug("resume marker store wired", "path", path)
-		}
-		// Scheduled jobs reuse the jobs.run execution path so a cron/every
-		// run behaves identically to a manual one (same timeout, workdir, and
-		// exit-code handling). Output streams to the daemon's stdout/stderr,
-		// which launchd captures into the Murtaugh log files.
-		gw = gw.WithScheduledRunner(newScheduledRunner(a.cfg, a.recorder, a.registry))
-		// Approving a held job's first run writes `confirmed: true` back to the
-		// store, so the prompt is not repeated after every restart. The gate
-		// still re-arms on change: every job write surface (jobs.define,
-		// cfg.job.set) stamps the entry unconfirmed again.
-		if a.cfgStore != nil {
-			gw = gw.WithJobConfirmer(newJobConfirmer(a.cfgStore))
-		}
-		if a.journalSweep != nil {
-			gw = gw.WithJournalSweeper(a.journalSweep, a.journalSweepEvery)
-		}
-		// `/murtaugh troubleshoot <symptoms>` assembles a redacted diagnostics
-		// bundle and DMs it to the admin. The gateway owns Slack delivery; the
-		// deterministic file assembly is this closure over the same bundler the
-		// troubleshoot.bundle tool uses. Always attempts to include known
-		// providers (e.g. Goose) — absent files are simply skipped.
-		gw = gw.WithTroubleshootBundler(func(ctx context.Context, note string) (string, []string, error) {
-			res, err := troubleshoot.Build(ctx, troubleshoot.Options{
-				Note:      note,
-				Providers: effectiveTroubleshootProviders(a.cfg),
-			}, troubleshoot.ResolveSources(
-				a.cfg.Journal.EffectivePath(a.cfg.BaseDir, a.cfg.BaseName),
-				a.cfg.Journal.EffectiveBlobDir(a.cfg.BaseDir, a.cfg.BaseName),
-				baseDirFor(a.cfg, a.configPath),
-				a.version,
-			))
-			if err != nil {
-				return "", nil, err
-			}
-			return res.Path, res.Manifest.Errors, nil
-		})
-		// App Home control panel: everyone who opens the Home tab sees the
-		// running version; the admin additionally gets a one-click "Update"
-		// button when a newer release exists. The check reuses the same release
-		// source as the setup.update tool, and the install path IS that tool,
-		// followed by the existing restart coordinator.
-		updDeps := updateDeps(a.version)
-		gw = gw.WithVersion(a.version).WithUpdateChecker(
-			updates.New(updates.Deps{
-				Current: a.version,
-				Owner:   updDeps.Owner,
-				Repo:    updDeps.Repo,
-				HTTPGet: updates.HTTPGet(updDeps.HTTPGet),
-			}),
-			func(ctx context.Context, target string) (string, error) {
-				args := map[string]any{}
-				if t := strings.TrimSpace(target); t != "" {
-					args["version"] = t
-				}
-				out, err := setupupdate.New(updDeps).Invoke(ctx, args)
-				if err != nil {
-					return "", err
-				}
-				res, _ := out.(setupupdate.Result)
-				return res.TargetVersion, nil
-			},
-		)
-		a.logger.Info("starting Slack gateway (Socket Mode)", "config", a.configPath)
-		err := gw.Run(ctx)
-		if err != nil && ctx.Err() != nil {
-			err = nil
-		}
-		a.logger.Info("Slack gateway stopped")
-		return err
+		return a.runGateway(ctx)
 	default:
 		return cli.New(a.registry).WithJSON(a.jsonOutput).Run(ctx, a.args)
 	}

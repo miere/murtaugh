@@ -29,6 +29,7 @@ import (
 	"github.com/miere/murtaugh/internal/slack/askcard"
 	"github.com/miere/murtaugh/internal/slack/authcard"
 	slackclient "github.com/miere/murtaugh/internal/slack/client"
+	"github.com/miere/murtaugh/internal/slack/configcard"
 	askbroker "github.com/miere/murtaugh/internal/slack/interaction"
 	"github.com/miere/murtaugh/internal/tools"
 	"github.com/miere/murtaugh/internal/toolset"
@@ -286,6 +287,11 @@ type Gateway struct {
 	// store, so a restart or a failover inside a job's window cannot run it
 	// twice. nil leaves the scheduler unguarded (CLI/MCP and tests).
 	claimRun RunClaimer
+	// configCards renders the configuration-change approval card; configChanges
+	// holds the decisions currently awaiting a click, keyed by correlation id.
+	configCards     *configcard.Renderer
+	configChanges   map[string]*pendingConfigChange
+	configChangesMu sync.Mutex
 	// nodeReport describes this node for the takeover announcement: hostname,
 	// addresses, version. Resolved lazily on promotion, not at construction,
 	// because a node's public address can change between boot and failover.
@@ -615,6 +621,7 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 		alertAPI:          alertAPI,
 		alertEditor:       alertEditor,
 		approvalCards:     approvalCards,
+		configCards:       configcard.NewRenderer(cfg.BaseDir, assets.FS),
 		channelCache:      channelCache,
 		// Captured here so the no-mention check in handleEventsAPI runs without
 		// re-importing the full cfg.
@@ -762,62 +769,16 @@ func (a *Gateway) WithTroubleshootBundler(bundler TroubleshootBundler) *Gateway 
 	return a
 }
 
-// Run starts the daemon and blocks until ctx is cancelled.
+// CloseChatSessions closes every agent's session manager, tearing down its
+// backend processes and the whole tree each spawns (ACP adapter + mcp-bridge +
+// claude + MCP servers) rather than orphaning them.
 //
-// Without leader election it serves immediately, which is the single-node
-// behaviour and still the common case. With an elector wired it serves only
-// while it holds leadership: the elector owns the loop, and promotion and
-// demotion start and stop serving beneath it (see leader.go).
-func (a *Gateway) Run(ctx context.Context) error {
-	// On shutdown/restart close every agent's session manager so its backend
-	// processes — and the whole tree each spawns (ACP adapter + mcp-bridge +
-	// claude + MCP servers) — are killed rather than orphaned. Runs before the
-	// process exits (or before the restart coordinator's os.Exit, within its
-	// grace window).
-	//
-	// This is deliberately the PROCESS-exit path, not the demotion path. A
-	// demoted node keeps its session managers, because it may be promoted again
-	// and a torn-down backend cannot be revived; demotion stops the work in
-	// flight (see stopServing) without destroying the capacity to do more.
-	defer a.closeChatSessions()
-
-	if a.elector != nil {
-		return a.elector.Run(ctx)
-	}
-	return a.serve(ctx)
-}
-
-// serve runs the gateway's actual work: resolve the allowlist, start the
-// background helpers and the scheduler, and supervise the Slack socket until
-// ctx is cancelled.
-func (a *Gateway) serve(ctx context.Context) error {
-	resolveCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	err := a.resolveAllowSet(resolveCtx)
-	cancel()
-	if err != nil {
-		return fmt.Errorf("resolve allowed users: %w", err)
-	}
-	// resolveAllowSet rewrites a.cfg with IDs; hand the resolved admin to the
-	// auth flow, which was constructed with the raw (possibly handle) value and
-	// would otherwise open a DM against "@someone".
-	if a.auth != nil {
-		a.auth.SetAdmin(a.cfg.AdminUser, a.cfg.IsAdminUser)
-	}
-
-	a.startBridge(ctx)
-	a.logStartupRouting(ctx)
-	a.warmChat(ctx)
-	a.startChannelCache(ctx)
-	a.startJournalSweeper(ctx)
-	a.startCredWarden(ctx)
-	stopScheduler := a.startScheduler(ctx)
-	defer stopScheduler()
-
-	// The Slack socket is owned by a supervisor that reconnects on failure and
-	// recycles a wedged (half-open) connection via a heartbeat watchdog, rather
-	// than running socketmode.RunContext once and giving up when it returns.
-	return a.superviseSocket(ctx)
-}
+// It is the PROCESS-exit and RELOAD path, never the demotion path. A demoted
+// node keeps its session managers, because it may be promoted again and a
+// torn-down backend cannot be revived; demotion stops the work in flight (see
+// StopServing) without destroying the capacity to do more. A reload is
+// different: it replaces this Gateway entirely, so its backends have to go.
+func (a *Gateway) CloseChatSessions() { a.closeChatSessions() }
 
 // closeChatSessions closes every agent's session manager, tearing down its backend
 // processes (and the process tree each spawned). Idempotent and safe to call when
@@ -1208,7 +1169,8 @@ func (a *Gateway) builtinInteractionHandled(interaction slack.InteractionCallbac
 		isAppHomeUpdateClick(interaction) ||
 		isAppHomeUpdateSubmit(interaction) ||
 		isAppHomeRestartClick(interaction) ||
-		isAppHomeRestartSubmit(interaction)
+		isAppHomeRestartSubmit(interaction) ||
+		isConfigApprovalInteraction(interaction)
 }
 
 // dispatchInteractiveBuiltins runs the binary-owned controls. Each is handled
@@ -1264,6 +1226,18 @@ func (a *Gateway) dispatchInteractiveBuiltins(interaction slack.InteractionCallb
 	}
 	if isAppHomeRestartSubmit(interaction) {
 		go a.handleAppHomeRestartSubmit(interaction)
+		return
+	}
+	// Configuration-change approval. Handled here with the other built-ins
+	// because approving one rewrites the daemon's own configuration, which is
+	// not something a configured workflow rule should be able to intercept or
+	// impersonate.
+	if isConfigApprovalInteraction(interaction) {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			a.handleConfigApprovalClick(ctx, interaction)
+		}()
 		return
 	}
 }

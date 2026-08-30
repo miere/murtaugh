@@ -89,6 +89,8 @@ internal/slack/       Slack subsystem:
   alertcard/          The non-interactive alerts Murtaugh sends about itself
                       (error / warn / info), from templates/alert/alert.json.
                       Always collapsed; renders to blocks or to plain text.
+  configcard/         The configuration-change approval card: a YAML diff plus
+                      Apply / Rollback, from templates/config/update.json.
 internal/agent/       Agent backend interface, session manager, protocol types,
                       and the shared tool watcher / execution ceiling.
   native/             In-process LLM agent loop (kind: native): conversation,
@@ -310,8 +312,40 @@ assembled config via `AssembleFromRows`, and on failure restores the prior row
 so a bad edit can never leave the store in an unloadable state. `cfg db migrate`
 copies the store into the other backend and rewrites the `database:` block.
 
-The runtime loads config **once** at startup — a `cfg` change requires a daemon
-restart to take effect.
+**Configuration is hot-reloaded, under admin approval.** The runtime no longer
+loads config once and keeps it: leader election made that untenable, since a
+standby can sit for a week before promotion, so "the config this process booted
+with" and "the config the operator believes is live" drift arbitrarily far
+apart — and the moment that matters is the moment nobody is watching.
+
+The leader polls the store every 30s (`internal/app/config_watch.go`; polling
+because no two backends offer the same change feed). A difference is rendered as
+YAML, diffed, and DM'd to the admin as a `configcard` container block with
+**Apply Modifications** / **Rollback**. Approval reloads; rejection — and
+timeout, and an unreachable admin — writes the running config back over the
+edit, so the next poll is quiet either way.
+
+Three properties are load-bearing:
+
+- **The rendering is deterministic**, and an empty singleton renders as absent.
+  Instability would show as a phantom diff and train the admin to approve
+  without reading; treating a written `{}` as present made the daemon re-detect
+  its own rollback and prompt forever.
+- **Rollback is `config.RevertToSnapshot`, not `Store.Restore`.** Restore
+  upserts, so it would leave a newly-added agent standing while telling the
+  admin their rejection was applied.
+- **The click is admin-only**, re-checked in the handler. The router admits any
+  allowlisted user to built-ins, and approving adopts whatever is in the store —
+  possibly an edit that widens the allowlist itself.
+
+Applying performs a **soft reload** (`Application.reloadConfig`): stop serving,
+tear the gateway down, rebuild from the new config, start serving — all while
+holding the leader lease, so the cluster sees no gap to fail over into. It is
+not hot in the swap-a-value sense and cannot be: agents own backend process
+trees decided at construction. The card says so in as many words. What it buys
+over a process restart is narrow but real — no launchd round trip, no re-exec,
+and leadership is never released. Everything that outlives a single gateway
+reaches the current one through `gatewayHolder` rather than a captured pointer.
 
 ### Multi-agent routing
 

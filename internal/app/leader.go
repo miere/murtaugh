@@ -13,10 +13,10 @@ import (
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/config/store"
 	"github.com/miere/murtaugh/internal/election"
-	gateway "github.com/miere/murtaugh/internal/slack/gateway"
 )
 
-// wireLeaderElection makes gw contend for leadership.
+// wireLeaderElection builds the election runner that makes this node contend
+// for leadership.
 //
 // It runs for every gateway, unconditionally. Election is not opt-in: the
 // configuration backend always supplies a lock, and its kind is what varies —
@@ -33,7 +33,7 @@ import (
 // point: the degraded state of leader election is a second gateway answering
 // every message, so refusing to start is the safe failure and carrying on is
 // not.
-func (a *Application) wireLeaderElection(ctx context.Context, gw *gateway.Gateway) (*gateway.Gateway, error) {
+func (a *Application) wireLeaderElection(ctx context.Context, holder *gatewayHolder) (*election.Runner, error) {
 	identity, err := resolveLockIdentity(ctx, a.cfg.OAuth.BotToken)
 	if err != nil {
 		return nil, fmt.Errorf("leader election: %w", err)
@@ -56,7 +56,12 @@ func (a *Application) wireLeaderElection(ctx context.Context, gw *gateway.Gatewa
 		Election: a.cfg.Election,
 		Logger:   a.logger.With("component", "election"),
 		Callbacks: election.Callbacks{
+			// Both reach the CURRENT gateway through the holder rather than a
+			// captured pointer: a configuration reload replaces it, and the
+			// election must keep driving whichever one is live rather than a
+			// torn-down predecessor.
 			OnPromote: func(ctx context.Context, lease config.Lease) error {
+				gw := holder.get()
 				if err := gw.StartServing(ctx); err != nil {
 					return err
 				}
@@ -64,7 +69,7 @@ func (a *Application) wireLeaderElection(ctx context.Context, gw *gateway.Gatewa
 				return nil
 			},
 			OnDemote: func(ctx context.Context, reason string) {
-				gw.StopServing(ctx, reason)
+				holder.get().StopServing(ctx, reason)
 			},
 		},
 	})
@@ -81,7 +86,7 @@ func (a *Application) wireLeaderElection(ctx context.Context, gw *gateway.Gatewa
 		"stands_down_after", a.cfg.Election.EffectiveDemoteAfter())
 
 	a.leaderLocker = locker
-	return gw.WithLeaderElection(runner), nil
+	return runner, nil
 }
 
 // promotionReason turns a lease into the sentence the takeover notice carries.

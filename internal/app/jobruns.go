@@ -24,14 +24,14 @@ import (
 // It is skipped only when nothing would use it: a gateway with no scheduled
 // jobs never calls the claimer, and opening a second database handle for it
 // would be pure cost.
-func (a *Application) wireRunClaims(ctx context.Context, gw *gateway.Gateway) (*gateway.Gateway, error) {
+func (a *Application) wireRunClaims(ctx context.Context, holder *gatewayHolder) error {
 	if !hasScheduledJobs(a.cfg) {
-		return gw, nil
+		return nil
 	}
 
 	runs, err := store.OpenJobRuns(ctx, a.cfg.Database, filepath.Dir(a.configPath), config.BaseNameOf(a.configPath))
 	if err != nil {
-		return nil, fmt.Errorf("scheduled-run claims: %w", err)
+		return fmt.Errorf("scheduled-run claims: %w", err)
 	}
 	a.jobRuns = runs
 
@@ -41,9 +41,24 @@ func (a *Application) wireRunClaims(ctx context.Context, gw *gateway.Gateway) (*
 	// small cost, and a node that never promotes never pays it.
 	a.pruneJobRuns(ctx, runs)
 
-	return gw.WithRunClaimer(func(ctx context.Context, claim config.JobRunClaim) (bool, error) {
+	a.attachRunClaims(holder.get())
+	return nil
+}
+
+// attachRunClaims points a gateway at the claim store.
+//
+// It is separate from wireRunClaims because a configuration reload builds a new
+// gateway that needs the SAME claim store: reopening it per reload would be
+// wasteful, and worse, a reload that briefly had no claimer would let the new
+// scheduler re-fire an occurrence the old one already ran.
+func (a *Application) attachRunClaims(gw *gateway.Gateway) {
+	if a.jobRuns == nil || gw == nil {
+		return
+	}
+	runs := a.jobRuns
+	gw.WithRunClaimer(func(ctx context.Context, claim config.JobRunClaim) (bool, error) {
 		return runs.Claim(ctx, claim, config.OwnerID())
-	}), nil
+	})
 }
 
 // hasScheduledJobs reports whether any job is cron- or interval-driven.

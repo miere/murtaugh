@@ -127,8 +127,14 @@ func SnapshotChanged(before, after Snapshot) (bool, error) {
 	return !bytes.Equal(a, b), nil
 }
 
-// DiffSnapshots renders a unified diff between two snapshots. An empty result
-// means they are equivalent.
+// DiffSnapshots renders a diff between two snapshots for an admin to read. An
+// empty result means they are equivalent.
+//
+// It emits NO file or hunk headers. A unified diff's `--- a/file` and `@@ -1,7`
+// lines orient you in a file you can go and open; this YAML has no file — it is
+// a rendering of database rows — so those lines would name a path that does not
+// exist and offset arithmetic against a document nobody can look up. What is
+// left is the part that carries meaning: the changed lines and their context.
 func DiffSnapshots(before, after Snapshot, context int) (string, error) {
 	a, err := RenderSnapshotYAML(before)
 	if err != nil {
@@ -138,18 +144,31 @@ func DiffSnapshots(before, after Snapshot, context int) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return UnifiedDiff(string(a), string(b), context), nil
+	return PlainDiff(string(a), string(b), context), nil
+}
+
+// PlainDiff is UnifiedDiff without the hunk headers.
+//
+// Separate hunks are joined by a blank line. Without headers there is nothing
+// to say "and now we are 40 lines further down", so the blank line is the only
+// signal that the listing jumped — enough to stop two distant edits reading as
+// one contiguous block, and quieter than inventing a marker.
+func PlainDiff(before, after string, context int) string {
+	return renderDiff(before, after, context, false)
 }
 
 // UnifiedDiff produces a unified diff of two texts with the given number of
-// context lines.
+// context lines, including @@ hunk headers.
 //
-// Hand-rolled because the alternative is a dependency for one screen of code,
-// and because the output has one job: be readable inside a Slack code block.
-// It is line-based (config YAML is line-oriented) and emits standard +/-/space
-// prefixes with @@ hunk headers, so it reads like every other diff an operator
-// has seen.
+// Hand-rolled because the alternative is a dependency for one screen of code.
+// It is line-based (config YAML is line-oriented) and emits the standard
+// +/-/space prefixes, so it reads like every other diff an operator has seen.
 func UnifiedDiff(before, after string, context int) string {
+	return renderDiff(before, after, context, true)
+}
+
+// renderDiff is the shared body of PlainDiff and UnifiedDiff.
+func renderDiff(before, after string, context int, headers bool) string {
 	if context < 0 {
 		context = 0
 	}
@@ -169,6 +188,7 @@ func UnifiedDiff(before, after string, context int) string {
 	}
 
 	var out bytes.Buffer
+	wrote := false
 	for i := 0; i < len(ops); {
 		if !keep[i] {
 			i++
@@ -178,29 +198,35 @@ func UnifiedDiff(before, after string, context int) string {
 		for i < len(ops) && keep[i] {
 			i++
 		}
-		writeHunk(&out, ops[start:i])
+		if wrote && !headers {
+			out.WriteByte('\n')
+		}
+		writeHunk(&out, ops[start:i], headers)
+		wrote = true
 	}
 	return out.String()
 }
 
-// writeHunk emits one @@ header and its lines.
-func writeHunk(out *bytes.Buffer, ops []diffOp) {
-	var aStart, bStart, aCount, bCount int
-	for i, op := range ops {
-		if i == 0 {
-			aStart, bStart = op.aLine, op.bLine
+// writeHunk emits one hunk, with its @@ header only when headers is set.
+func writeHunk(out *bytes.Buffer, ops []diffOp, headers bool) {
+	if headers {
+		var aStart, bStart, aCount, bCount int
+		for i, op := range ops {
+			if i == 0 {
+				aStart, bStart = op.aLine, op.bLine
+			}
+			switch op.kind {
+			case opEqual:
+				aCount++
+				bCount++
+			case opDelete:
+				aCount++
+			case opInsert:
+				bCount++
+			}
 		}
-		switch op.kind {
-		case opEqual:
-			aCount++
-			bCount++
-		case opDelete:
-			aCount++
-		case opInsert:
-			bCount++
-		}
+		fmt.Fprintf(out, "@@ -%d,%d +%d,%d @@\n", aStart+1, aCount, bStart+1, bCount)
 	}
-	fmt.Fprintf(out, "@@ -%d,%d +%d,%d @@\n", aStart+1, aCount, bStart+1, bCount)
 	for _, op := range ops {
 		switch op.kind {
 		case opEqual:

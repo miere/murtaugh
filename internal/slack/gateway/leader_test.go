@@ -263,36 +263,11 @@ func TestLeaderAllowsFollowsTheElector(t *testing.T) {
 	}
 }
 
-// TestRunDelegatesToTheElector checks Run hands control to the election rather
-// than serving unconditionally — the difference between contending for
-// leadership and being a second gateway.
-func TestRunDelegatesToTheElector(t *testing.T) {
+// TestCloseChatSessionsIsSafeWhenEmpty covers the process-exit path on a
+// gateway that never built any agents — CLI/MCP modes and every struct-literal
+// test gateway reach it.
+func TestCloseChatSessionsIsSafeWhenEmpty(t *testing.T) {
 	gw := leaderTestGateway(time.Second)
 	gw.chatSessions = map[string]ChatSessionManager{}
-	elector := &stubElector{}
-	gw.WithLeaderElection(elector)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- gw.Run(ctx) }()
-
-	deadline := time.After(2 * time.Second)
-	for !elector.ran.Load() {
-		select {
-		case <-deadline:
-			t.Fatal("Run did not delegate to the elector")
-		default:
-			time.Sleep(time.Millisecond)
-		}
-	}
-
-	cancel()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Errorf("Run returned %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("Run did not return after cancellation")
-	}
+	gw.CloseChatSessions()
 }
