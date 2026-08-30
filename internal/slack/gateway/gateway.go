@@ -215,6 +215,11 @@ type Gateway struct {
 	// Derived from the agent set at construction (see claudeCodeIdentities)
 	// rather than configured; nil when no claude_code agent is defined.
 	credWarden *credwarden.Warden
+	// credRepair drives the admin-facing re-authentication card. Shared with the
+	// chat handler, which reaches it when a turn fails on a rejected credential;
+	// the gateway keeps a reference for the `auth` slash verb, which repairs one
+	// pre-emptively and runs whether or not chat is enabled.
+	credRepair *credentialRepair
 	// webClient is the concrete Slack Web API client. It backs both the
 	// active connection heartbeat (auth.test) and the construction of fresh
 	// socketmode clients on every (re)connect. The Web API is stateless HTTP
@@ -313,6 +318,13 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 	if err != nil {
 		logger.Error("startup Slack ping disabled", "error", err)
 	}
+
+	// Built once and shared by both entry points: the chat handler reaches it when
+	// a turn fails on a rejected credential, and the `auth` slash verb reaches it
+	// when the admin repairs one pre-emptively. It must exist even with chat
+	// disabled, since claude_code agents still serve jobs, workflow rules and
+	// unfurls.
+	credRepair := newCredentialRepair(authFlow, cfg.Agents)
 
 	var chat *ChatHandler
 	var sessions map[string]ChatSessionManager
@@ -494,7 +506,7 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 			WithPermissionAskers(acpPermissionAskers).
 			WithReplyBlocks(cfg.BaseDir, api).
 			WithAlerts(cfg.BaseDir, alertAPI).
-			WithCredentialRepair(newCredentialRepair(authFlow, cfg.Agents)).
+			WithCredentialRepair(credRepair).
 			WithBackgroundEventsRouter(bgRouter)
 		// The router renders background turns through the chat handler's own renderer,
 		// so a background reply looks exactly like a foreground one.
@@ -542,6 +554,7 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 			Identities: claudeCodeIdentities(cfg.Agents),
 			Logger:     logger,
 		}),
+		credRepair:        credRepair,
 		chatRouting:       cfg.Chat,
 		agentProfiles:     cfg.Agents,
 		agentToolProblems: agentToolProblems,
@@ -1255,6 +1268,10 @@ func (a *Gateway) handleSlashCommand(ctx context.Context, event socketmode.Event
 	}
 	if isStopSlashCommand(command) {
 		a.handleStopSlashCommand(event, command, slashCommandThreadTS(event))
+		return
+	}
+	if isAuthSlashCommand(command.Text) {
+		a.handleAuthSlashCommand(event, command)
 		return
 	}
 	if isTroubleshootSlashCommand(command.Text) {
