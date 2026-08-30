@@ -1,0 +1,57 @@
+{
+	"blocks": [
+		{
+			"type": "container",
+			"block_id": "murtaugh_agent_setup_card",
+			"icon": {
+				"type": "image",
+				"image_url": "https://img.icons8.com/external-flaticons-lineal-color-flat-icons/64/external-danger-electrician-flaticons-lineal-color-flat-icons-4.png",
+				"alt_text": "Warning icon"
+			},
+			"title": {
+				"type": "plain_text",
+				"text": {{ json .Title }}
+			},
+			"subtitle": {
+				"type": "plain_text",
+				"text": {{ json .Subtitle }}
+			},
+			"is_collapsible": false,
+			"default_collapsed": false,
+			"has_header_divider": true,
+			"width": "wide",
+			"child_blocks": [
+				{
+					"type": "section",
+					"text": {
+						"type": "mrkdwn",
+						"text": {{ json .Body }}
+					}
+				}{{ if .ShowAction }},
+				{
+					"type": "actions",
+					"elements": [
+						{
+							"type": "button",
+							"action_id": {{ json .ActionOpen }},
+							"text": {
+								"type": "plain_text",
+								"text": "Set up an agent"
+							},
+							"style": "primary"
+						}
+					]
+				}{{ end }}{{ if .Footer }},
+				{
+					"type": "context",
+					"elements": [
+						{
+							"type": "mrkdwn",
+							"text": {{ json .Footer }}
+						}
+					]
+				}{{ end }}
+			]
+		}
+	]
+}

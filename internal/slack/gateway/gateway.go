@@ -24,6 +24,8 @@ import (
 	"github.com/miere/murtaugh/internal/credwarden"
 	"github.com/miere/murtaugh/internal/journal"
 	"github.com/miere/murtaugh/internal/mcpbridge"
+	"github.com/miere/murtaugh/internal/onboarding"
+	"github.com/miere/murtaugh/internal/slack/agentcard"
 	"github.com/miere/murtaugh/internal/slack/alertcard"
 	"github.com/miere/murtaugh/internal/slack/approvalcard"
 	"github.com/miere/murtaugh/internal/slack/askcard"
@@ -289,6 +291,14 @@ type Gateway struct {
 	// goroutine and every alert path read it. Runtime readers must go through
 	// access() rather than touching the field.
 	accessMu sync.RWMutex
+	// agentCards renders the "no agent configured" prompt; writeAgentProfiles
+	// applies the form it opens. configDir is where config.yaml lives, which is
+	// where the tweaker profile is rooted. probeClient asks providers which
+	// models a credential can use.
+	agentCards         *agentcard.Renderer
+	writeAgentProfiles AgentProfileWriter
+	configDir          string
+	probeClient        onboarding.Doer
 	// claimAdmin persists the first-user-wins administrator adoption. nil keeps
 	// the claim in memory for this process only (CLI/MCP and tests).
 	claimAdmin AdminClaimer
@@ -640,6 +650,8 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 		alertEditor:       alertEditor,
 		approvalCards:     approvalCards,
 		configCards:       configcard.NewRenderer(cfg.BaseDir, assets.FS),
+		agentCards:        agentcard.NewRenderer(cfg.BaseDir, assets.FS),
+		configDir:         cfg.BaseDir,
 		channelCache:      channelCache,
 		// Captured here so the no-mention check in handleEventsAPI runs without
 		// re-importing the full cfg.
@@ -1116,6 +1128,15 @@ func (a *Gateway) handleInteractive(event socketmode.Event) {
 		return
 	}
 
+	// The agent-setup form advances by replacing itself, and Slack only accepts
+	// that in the acknowledgement of the submission that triggered it. Acking
+	// blank here — as every other interaction does — would close the form
+	// instead of advancing it, so this one owns its own ack.
+	if isAgentSetupSubmit(interaction) {
+		a.handleAgentSetupSubmit(event, interaction)
+		return
+	}
+
 	a.ack(event)
 	// Fast path: an allowlisted clicker needs no channel context, so the common
 	// case keeps running inline — this matters for the modal path below, whose
@@ -1238,7 +1259,8 @@ func (a *Gateway) builtinInteractionHandled(interaction slack.InteractionCallbac
 		isAppHomeUpdateSubmit(interaction) ||
 		isAppHomeRestartClick(interaction) ||
 		isAppHomeRestartSubmit(interaction) ||
-		isConfigApprovalInteraction(interaction)
+		isConfigApprovalInteraction(interaction) ||
+		isAgentSetupOpen(interaction)
 }
 
 // dispatchInteractiveBuiltins runs the binary-owned controls. Each is handled
@@ -1306,6 +1328,15 @@ func (a *Gateway) dispatchInteractiveBuiltins(interaction slack.InteractionCallb
 			defer cancel()
 			a.handleConfigApprovalClick(ctx, interaction)
 		}()
+		return
+	}
+	// Agent setup. Opened inline rather than on a goroutine: Slack expires a
+	// trigger_id within seconds, and a modal opened with an expired one fails
+	// silently.
+	if isAgentSetupOpen(interaction) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		a.handleAgentSetupOpen(ctx, interaction)
 		return
 	}
 }

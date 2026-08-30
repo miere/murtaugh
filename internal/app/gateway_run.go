@@ -63,6 +63,7 @@ func (a *Application) runGateway(ctx context.Context) error {
 	// gateway learns about leadership last. A reload repeats this for the
 	// replacement (see reloadConfig).
 	holder.get().WithLeaderElection(runner)
+	a.attachAgentSetup(holder.get(), holder, runner)
 
 	// Close agent backends on the way out, whichever gateway is current by
 	// then. A reload has already closed the one it replaced.
@@ -111,6 +112,7 @@ func (a *Application) reloadConfig(ctx context.Context, holder *gatewayHolder, r
 	replacement := a.buildGateway(cfg)
 	replacement.WithLeaderElection(runner)
 	a.attachRunClaims(replacement)
+	a.attachAgentSetup(replacement, holder, runner)
 	holder.swap(replacement)
 	a.cfg = cfg
 
