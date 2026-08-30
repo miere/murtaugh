@@ -198,7 +198,7 @@ func isConfigApprovalInteraction(interaction slack.InteractionCallback) bool {
 // itself. An allowlisted user must not be able to promote themselves by
 // clicking a button meant for the admin.
 func (a *Gateway) handleConfigApprovalClick(ctx context.Context, interaction slack.InteractionCallback) {
-	if !a.cfg.IsAdminUser(interaction.User.ID) {
+	if !a.access().IsAdminUser(interaction.User.ID) {
 		a.logger.Warn("ignoring a configuration approval click from a non-admin", "user", interaction.User.ID)
 		return
 	}
@@ -264,7 +264,7 @@ func (a *Gateway) configChange(corr string) (*pendingConfigChange, bool) {
 // work, and it comes back — so it should read the same rather than making them
 // learn a second vocabulary for the same experience.
 func (a *Gateway) NotifyConfigReloading(ctx context.Context) {
-	admin := strings.TrimSpace(a.cfg.AdminUser)
+	admin := strings.TrimSpace(a.access().AdminUser)
 	if admin == "" {
 		return
 	}
@@ -275,7 +275,7 @@ func (a *Gateway) NotifyConfigReloading(ctx context.Context) {
 
 // NotifyConfigReloaded confirms the new configuration is live.
 func (a *Gateway) NotifyConfigReloaded(ctx context.Context) {
-	admin := strings.TrimSpace(a.cfg.AdminUser)
+	admin := strings.TrimSpace(a.access().AdminUser)
 	if admin == "" {
 		return
 	}

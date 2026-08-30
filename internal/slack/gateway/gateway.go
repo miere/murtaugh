@@ -283,6 +283,19 @@ type Gateway struct {
 	// It is built before the Gateway exists (the clients need it at
 	// construction) and told how to ask about leadership afterwards.
 	leaderGate *outboundGate
+	// accessMu guards cfg. That block is not the immutable snapshot it once
+	// was: resolveAllowSet rewrites handles to IDs at startup, and the
+	// first-user-wins claim writes admin_user at runtime, while the socket
+	// goroutine and every alert path read it. Runtime readers must go through
+	// access() rather than touching the field.
+	accessMu sync.RWMutex
+	// claimAdmin persists the first-user-wins administrator adoption. nil keeps
+	// the claim in memory for this process only (CLI/MCP and tests).
+	claimAdmin AdminClaimer
+	// chatDefaults is the routing defaults block the chat resolver reads. It is
+	// a pointer so resolveAllowSet's handle→ID rewrite of dm_agents is visible
+	// to routing decisions made afterwards. nil in struct-literal gateways.
+	chatDefaults *config.ChatDefaults
 	// claimRun gates each scheduled fire on a claim recorded in the SHARED
 	// store, so a restart or a failover inside a job's window cannot run it
 	// twice. nil leaves the scheduler unguarded (CLI/MCP and tests).
@@ -381,6 +394,11 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 	if !cfg.Chat.Enabled {
 		logger.Warn("chat disabled: set chat.enabled: true to enable DM and app_mention replies (delegation still runs)")
 	}
+	// The chat resolver reads defaults through this pointer rather than the
+	// captured cfg value, because resolveAllowSet rewrites dm_agents' handle
+	// keys to Slack IDs at startup and the routing decision has to see the
+	// resolved map, not the one New was handed.
+	chatDefaults := &cfg.Chat.Defaults
 	var bridge *mcpbridge.Server
 	var bgRouter *backgroundEventsRouter
 	if cfg.Chat.Enabled {
@@ -492,12 +510,11 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 				}
 				return r
 			}
-			def := cfg.Chat.Defaults
+			def := *chatDefaults
 			if req.DM {
-				agent := def.DMAgent
-				if agent == "" {
-					agent = def.Agent
-				}
+				// Per-user routing first: an agent trusted enough for the
+				// operator is not one to hand to everybody who can DM the bot.
+				agent := def.AgentForDM(req.UserID)
 				// DMs live in the assistant pane, which is inherently threaded, so
 				// the reply strategy does not apply to them.
 				return applyOverride(ChatRoute{Agent: agent, ReplyOnThread: true})
@@ -602,6 +619,7 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 		}),
 		credRepair:        credRepair,
 		chatRouting:       cfg.Chat,
+		chatDefaults:      chatDefaults,
 		agentProfiles:     cfg.Agents,
 		agentToolProblems: agentToolProblems,
 		chatWarmTimeout:   cfg.Defaults.EffectiveStartupTimeout(),
@@ -915,13 +933,36 @@ func (a *Gateway) handleEvent(ctx context.Context, event socketmode.Event) {
 // entries are fatal (fail-closed). When both admin_user and allowed_users are
 // empty the Gateway is effectively locked down and direct interactions will be
 // denied; a warning is logged in that case.
+// access returns a snapshot of the authorization config.
+//
+// A copy rather than a pointer: callers make several checks against it and a
+// concurrent claim must not change the answer halfway through a decision. The
+// AllowedUsers slice is only ever replaced wholesale, never mutated in place,
+// so sharing its backing array is safe.
+func (a *Gateway) access() config.AccessConfig {
+	a.accessMu.RLock()
+	defer a.accessMu.RUnlock()
+	return a.cfg
+}
+
+// setAccess mutates the authorization config under the write lock.
+func (a *Gateway) setAccess(mutate func(*config.AccessConfig)) {
+	a.accessMu.Lock()
+	defer a.accessMu.Unlock()
+	mutate(&a.cfg)
+}
+
 func (a *Gateway) resolveAllowSet(ctx context.Context) error {
 	// The admin and allowed_users entries plus the no-mention lists (global and
 	// per-channel) may each be handles or IDs. They are resolved in one batched
 	// users.list call by concatenating every reference, resolving once, and
 	// slicing the result back into place — so a workspace with no handles makes
 	// zero Slack calls and one with handles makes exactly one.
-	hasAdmin := strings.TrimSpace(a.cfg.AdminUser) != ""
+	// One snapshot for the whole resolution: taking it repeatedly could observe
+	// a first-user-wins claim landing halfway through and slice the resolved
+	// IDs back out against a different shape than they were gathered from.
+	access := a.access()
+	hasAdmin := strings.TrimSpace(access.AdminUser) != ""
 
 	// Deterministic per-channel key order so the resolved slices line up with the
 	// keys when we split the result back out.
@@ -931,15 +972,27 @@ func (a *Gateway) resolveAllowSet(ctx context.Context) error {
 	}
 	sort.Strings(channelKeys)
 
-	refs := make([]string, 0, 1+len(a.cfg.AllowedUsers)+len(a.noMentionEverywhere))
-	if hasAdmin {
-		refs = append(refs, a.cfg.AdminUser)
+	// dm_agents is keyed by user, so its KEYS need the same handle→ID
+	// resolution as the access lists. Sorted for the same reason as the channel
+	// keys: the resolved slice is sliced back out positionally.
+	var dmUserKeys []string
+	if a.chatDefaults != nil {
+		for key := range a.chatDefaults.DMAgents {
+			dmUserKeys = append(dmUserKeys, key)
+		}
+		sort.Strings(dmUserKeys)
 	}
-	refs = append(refs, a.cfg.AllowedUsers...)
+
+	refs := make([]string, 0, 1+len(access.AllowedUsers)+len(a.noMentionEverywhere))
+	if hasAdmin {
+		refs = append(refs, access.AdminUser)
+	}
+	refs = append(refs, access.AllowedUsers...)
 	refs = append(refs, a.noMentionEverywhere...)
 	for _, key := range channelKeys {
 		refs = append(refs, a.noMentionPerChannel[key]...)
 	}
+	refs = append(refs, dmUserKeys...)
 	if len(refs) == 0 {
 		a.logger.Warn("authorization locked down: configuration.admin_user and configuration.allowed_users are both empty; direct interactions will be ignored")
 		return nil
@@ -951,13 +1004,19 @@ func (a *Gateway) resolveAllowSet(ctx context.Context) error {
 
 	// Slice the resolved IDs back into the same shapes, in the same order they
 	// were appended above.
+	// Applied under the write lock: nothing else is reading yet (the socket
+	// opens after this returns), but admin_user and allowed_users are guarded
+	// from here on and writing them unguarded would be a latent race the next
+	// reader inherits.
 	cursor := 0
-	if hasAdmin {
-		a.cfg.AdminUser = ids[cursor]
-		cursor++
-	}
-	a.cfg.AllowedUsers = ids[cursor : cursor+len(a.cfg.AllowedUsers)]
-	cursor += len(a.cfg.AllowedUsers)
+	a.setAccess(func(access *config.AccessConfig) {
+		if hasAdmin {
+			access.AdminUser = ids[cursor]
+			cursor++
+		}
+		access.AllowedUsers = ids[cursor : cursor+len(access.AllowedUsers)]
+		cursor += len(access.AllowedUsers)
+	})
 	a.noMentionEverywhere = ids[cursor : cursor+len(a.noMentionEverywhere)]
 	cursor += len(a.noMentionEverywhere)
 	if len(channelKeys) > 0 {
@@ -969,8 +1028,17 @@ func (a *Gateway) resolveAllowSet(ctx context.Context) error {
 		}
 		a.noMentionPerChannel = resolvedPerChannel
 	}
+	if len(dmUserKeys) > 0 {
+		resolvedDM := make(map[string]string, len(dmUserKeys))
+		for _, key := range dmUserKeys {
+			resolvedDM[ids[cursor]] = a.chatDefaults.DMAgents[key]
+			cursor++
+		}
+		a.chatDefaults.DMAgents = resolvedDM
+	}
 
-	a.logger.Info("resolved authorized Slack users", "admin_user", a.cfg.AdminUser, "allowed_users", len(a.cfg.AllowedUsers))
+	resolved := a.access()
+	a.logger.Info("resolved authorized Slack users", "admin_user", resolved.AdminUser, "allowed_users", len(resolved.AllowedUsers))
 	return nil
 }
 
@@ -1052,7 +1120,7 @@ func (a *Gateway) handleInteractive(event socketmode.Event) {
 	// Fast path: an allowlisted clicker needs no channel context, so the common
 	// case keeps running inline — this matters for the modal path below, whose
 	// trigger_id expires in seconds.
-	if a.cfg.IsAllowedUser(interaction.User.ID) {
+	if a.access().IsAllowedUser(interaction.User.ID) {
 		a.dispatchInteractive(event, interaction, admissionAllowlisted)
 		return
 	}
@@ -1286,7 +1354,7 @@ func (a *Gateway) handleSlashCommand(ctx context.Context, event socketmode.Event
 		return
 	}
 
-	if !a.cfg.IsAllowedUser(command.UserID) {
+	if !a.access().IsAllowedUser(command.UserID) {
 		a.logger.Info("denied slash command from unauthorized user", "command", command.Command, "user", command.UserID, "channel", command.ChannelID)
 		a.ack(event, ephemeralAlert(alertcard.LevelWarn, "You are not authorized to use this command."))
 		return
@@ -1337,7 +1405,7 @@ func (a *Gateway) handleSlashCommand(ctx context.Context, event socketmode.Event
 // is signalled. The notice + marker are best-effort: any failure is
 // logged but never blocks the restart itself (see resume.go).
 func (a *Gateway) handleRestartSlashCommand(ctx context.Context, event socketmode.Event, command slack.SlashCommand) {
-	if !a.cfg.IsAdminUser(command.UserID) {
+	if !a.access().IsAdminUser(command.UserID) {
 		a.logger.Info("denied restart slash command from non-admin user", "command", command.Command, "user", command.UserID, "channel", command.ChannelID)
 		a.ack(event, ephemeralAlert(alertcard.LevelWarn, "Only the configured admin can restart Murtaugh."))
 		return
@@ -1387,7 +1455,7 @@ func (a *Gateway) handleTroubleshootSlashCommand(ctx context.Context, event sock
 		a.ack(event, ephemeralAlert(alertcard.LevelInfo, "Troubleshooting bundles are not available in this deployment."))
 		return
 	}
-	admin := strings.TrimSpace(a.cfg.AdminUser)
+	admin := strings.TrimSpace(a.access().AdminUser)
 	if admin == "" {
 		a.ack(event, ephemeralAlert(alertcard.LevelWarn, "No admin user is configured, so there is nowhere private to send the bundle."))
 		return
@@ -1612,7 +1680,17 @@ func (a *Gateway) handleEventsAPI(event socketmode.Event) {
 // path lifted out of handleEventsAPI: authorize the author, drop redelivered
 // duplicates, then start the chat. DMs never require a mention.
 func (a *Gateway) handleDirectMessage(eventsAPI slackevents.EventsAPIEvent, inner *slackevents.MessageEvent, event socketmode.Event) {
-	if !a.cfg.IsAllowedUser(inner.User) {
+	// An unclaimed daemon adopts whoever speaks first. This runs BEFORE the
+	// allowlist check on purpose: on a fresh install the allowlist is empty, so
+	// gating on it would close the only door in. See admin_claim.go.
+	if a.unclaimed() {
+		claimCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if a.handleAdminClaim(claimCtx, inner.User, inner.Channel) {
+			return
+		}
+	}
+	if !a.access().IsAllowedUser(inner.User) {
 		a.logger.Debug("ignored DM from unauthorized user", "user", inner.User, "channel", inner.Channel)
 		return
 	}
@@ -1655,7 +1733,7 @@ func (a *Gateway) resolveChannelNameFor(ctx context.Context, channelID string) s
 // directly, so opening a channel for conversation never widens who can approve a
 // tool call, pull a diagnostics bundle, or DM the bot.
 func (a *Gateway) mayChatInChannel(userID, channelID, channelName string) bool {
-	if a.cfg.IsAllowedUser(userID) {
+	if a.access().IsAllowedUser(userID) {
 		return true
 	}
 	return channelAllowsAnyone(channelID, channelName, a.chatChannels)

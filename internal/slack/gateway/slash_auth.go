@@ -31,7 +31,7 @@ func isAuthSlashCommand(text string) bool {
 // non-admin gets an explicit deny rather than silence, so the boundary is
 // discoverable.
 func (a *Gateway) handleAuthSlashCommand(event socketmode.Event, command slack.SlashCommand) {
-	if !a.cfg.IsAdminUser(command.UserID) {
+	if !a.access().IsAdminUser(command.UserID) {
 		a.logger.Info("denied auth slash command from non-admin user",
 			"command", command.Command, "user", command.UserID, "channel", command.ChannelID)
 		a.ack(event, ephemeralAlert(alertcard.LevelWarn, "Only the configured admin can manage Murtaugh's credentials."))

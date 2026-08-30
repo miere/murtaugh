@@ -487,6 +487,33 @@ func newJobConfirmer(store config.Store) gateway.JobConfirmer {
 	}
 }
 
+// newAdminClaimer persists the first-user-wins administrator adoption.
+//
+// It writes only admin_user, merging into whatever access config already
+// exists, because a daemon can be unclaimed while still carrying an allowlist
+// or a debug flag an operator set by hand — and adoption should not quietly
+// discard them.
+func newAdminClaimer(store config.Store) gateway.AdminClaimer {
+	return func(ctx context.Context, userID string) error {
+		var access config.AccessConfig
+		if body, ok, err := store.GetSingleton(ctx, config.SingletonAccess); err != nil {
+			return err
+		} else if ok && len(body) > 0 {
+			if err := json.Unmarshal(body, &access); err != nil {
+				return fmt.Errorf("decode access config: %w", err)
+			}
+		}
+		// Re-check against the STORE, not the in-memory config: another node
+		// that led before this one may have adopted somebody already, and
+		// overwriting that would silently transfer ownership.
+		if strings.TrimSpace(access.AdminUser) != "" {
+			return fmt.Errorf("an administrator (%s) is already recorded", access.AdminUser)
+		}
+		access.AdminUser = userID
+		return store.PutSingleton(ctx, config.SingletonAccess, access)
+	}
+}
+
 // updateDeps builds the dependency bundle shared by the setup.update tool and
 // the App Home "Update" button. Centralizing it guarantees the in-Slack update
 // installs exactly what the tool would, against the same GitHub repository.

@@ -97,7 +97,7 @@ func (a *Gateway) StartServing(ctx context.Context) error {
 		return fmt.Errorf("resolve allowed users: %w", err)
 	}
 	if a.auth != nil {
-		a.auth.SetAdmin(a.cfg.AdminUser, a.cfg.IsAdminUser)
+		a.auth.SetAdmin(a.access().AdminUser, a.access().IsAdminUser)
 	}
 
 	// Child of the caller's context so daemon shutdown stops serving too; the
