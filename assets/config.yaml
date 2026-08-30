@@ -6,21 +6,44 @@
 #
 # Credentials are NOT stored here. They live in ~/.config/murtaugh/.env (a
 # template .env is seeded on first run) and are referenced below as ${VAR}.
+#
+# There is no admin_user setting: the first person to direct-message Murtaugh
+# becomes its administrator, once, and it announces the fact. Everything after
+# that — agents, models, credentials, routing — is configured from Slack.
 oauth:
   app_token: ${SLACK_APP_TOKEN}
   bot_token: ${SLACK_BOT_TOKEN}
   # user_token: ${SLACK_USER_TOKEN}   # optional: post "as admin" (xoxp-…)
 
-# database selects the config store backend. SQLite (the default) needs no
-# external service; its file location is recorded here. Switch to Postgres with
-# `murtaugh cfg db migrate --to postgres` (it rewrites this block for you).
+# database selects the config store backend, and with it the scope of the
+# leader lock. Exactly one Murtaugh may hold a live Slack connection for a given
+# app, and this choice decides how widely that is enforced:
+#
+#   sqlite    — one gateway per MACHINE. An OS file lock the kernel releases
+#               when the process dies. The default; needs no external service.
+#   firestore — one gateway per CLUSTER. A renewed lease; nodes anywhere ADC
+#               works can contend, so a dead node is replaced automatically.
+#   postgres  — one gateway per cluster, same lease over SQL.
+#
+# Switch with `murtaugh cfg db migrate --to firestore` (it copies the store and
+# rewrites this block for you). Election is always on; only its reach varies.
 database:
-  backend: sqlite            # sqlite | postgres
+  backend: sqlite            # sqlite | firestore | postgres
   # sqlite:
   #   # Path to the config database. Defaults to `<this file's name>.db` beside
   #   # this file (so config.yaml → config.db, slack-nurturecloud.yaml →
   #   # slack-nurturecloud.db, and two configs can share a directory safely);
   #   # set an absolute path to move it elsewhere.
   #   path: /custom/path/config.db
+  #
+  # firestore:
+  #   # Every field is optional. On GKE, Cloud Run, or a Compute Engine VM the
+  #   # attached service account is discovered automatically and `backend:
+  #   # firestore` alone is enough.
+  #   project_id: my-gcp-project      # omit to let ADC decide
+  #   database_id: "(default)"        # omit for the project's default database
+  #   collection: murtaugh            # root collection; set to share a database
+  #   credentials_file: ~/sa-key.json # only where ADC cannot serve
+  #
   # postgres:
   #   dsn: ${MURTAUGH_DB_DSN}   # e.g. postgres://user:pass@host:5432/murtaugh
