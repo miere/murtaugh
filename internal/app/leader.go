@@ -55,6 +55,11 @@ func (a *Application) wireLeaderElection(ctx context.Context, holder *gatewayHol
 		Locker:   locker,
 		Election: a.cfg.Election,
 		Logger:   a.logger.With("component", "election"),
+		// Journalled to the gateway stream: an operator debugging "Murtaugh
+		// stopped answering" is already reading that stream, and a failover
+		// otherwise leaves its trace only in whichever node's launchd log
+		// happens to still exist.
+		Recorder: a.recorder,
 		Callbacks: election.Callbacks{
 			// Both reach the CURRENT gateway through the holder rather than a
 			// captured pointer: a configuration reload replaces it, and the
