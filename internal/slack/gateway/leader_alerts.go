@@ -168,7 +168,7 @@ func orUnknown(s string) string {
 // about it is still the leader, and refusing the promotion over a failed
 // announcement would trade a cosmetic problem for an outage.
 func (a *Gateway) AnnouncePromotion(ctx context.Context, epoch int64, reason string) {
-	admin := strings.TrimSpace(a.cfg.AdminUser)
+	admin := strings.TrimSpace(a.access().AdminUser)
 	if admin == "" {
 		return
 	}

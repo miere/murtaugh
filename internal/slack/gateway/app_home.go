@@ -68,7 +68,7 @@ func (a *Gateway) handleAppHomeOpened(ev *slackevents.AppHomeOpenedEvent) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	view := a.buildHomeView(ctx, a.cfg.IsAdminUser(ev.User))
+	view := a.buildHomeView(ctx, a.access().IsAdminUser(ev.User))
 	a.publishHomeView(ctx, ev.User, view)
 }
 
@@ -243,7 +243,7 @@ func appHomeUpdateTarget(interaction slack.InteractionCallback) string {
 // action id could be replayed).
 func (a *Gateway) handleAppHomeUpdateClick(ctx context.Context, interaction slack.InteractionCallback) {
 	user := interaction.User.ID
-	if !a.cfg.IsAdminUser(user) {
+	if !a.access().IsAdminUser(user) {
 		a.logger.Info("denied app home update click from non-admin", "user", user)
 		return
 	}
@@ -289,7 +289,7 @@ func (a *Gateway) buildUpdateModal(target string) slack.ModalViewRequest {
 // be updated mid-restart.
 func (a *Gateway) handleAppHomeUpdateSubmit(interaction slack.InteractionCallback) {
 	user := interaction.User.ID
-	if !a.cfg.IsAdminUser(user) {
+	if !a.access().IsAdminUser(user) {
 		a.logger.Info("denied app home update submit from non-admin", "user", user)
 		return
 	}
@@ -352,7 +352,7 @@ func isAppHomeRestartSubmit(interaction slack.InteractionCallback) bool {
 // could be replayed).
 func (a *Gateway) handleAppHomeRestartClick(ctx context.Context, interaction slack.InteractionCallback) {
 	user := interaction.User.ID
-	if !a.cfg.IsAdminUser(user) {
+	if !a.access().IsAdminUser(user) {
 		a.logger.Info("denied app home restart click from non-admin", "user", user)
 		return
 	}
@@ -393,7 +393,7 @@ func buildRestartModal() slack.ModalViewRequest {
 // once the new process reconnects.
 func (a *Gateway) handleAppHomeRestartSubmit(interaction slack.InteractionCallback) {
 	user := interaction.User.ID
-	if !a.cfg.IsAdminUser(user) {
+	if !a.access().IsAdminUser(user) {
 		a.logger.Info("denied app home restart submit from non-admin", "user", user)
 		return
 	}

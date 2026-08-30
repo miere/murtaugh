@@ -180,6 +180,21 @@ type ChatConfig struct {
 	NoMention NoMentionConfig `yaml:"no_mention" json:"no_mention"`
 }
 
+// AgentForDM resolves which agent answers a direct message from userID: the
+// per-user entry if there is one, then DMAgent, then Agent.
+//
+// userID must already be a Slack ID — resolveAllowSet rewrites any handle keys
+// at startup, so the lookup here never has to parse "@someone".
+func (d ChatDefaults) AgentForDM(userID string) string {
+	if agent, ok := d.DMAgents[strings.TrimSpace(userID)]; ok && strings.TrimSpace(agent) != "" {
+		return agent
+	}
+	if strings.TrimSpace(d.DMAgent) != "" {
+		return d.DMAgent
+	}
+	return d.Agent
+}
+
 // ChatDefaults are the global chat routing/reply defaults.
 type ChatDefaults struct {
 	// Agent is the fallback agent for any channel without a matching Channels
@@ -187,6 +202,18 @@ type ChatDefaults struct {
 	Agent string `yaml:"agent" json:"agent"`
 	// DMAgent routes direct messages; falls back to Agent when empty.
 	DMAgent string `yaml:"dm_agent" json:"dm_agent"`
+	// DMAgents routes a NAMED user's direct messages, overriding DMAgent. The
+	// key is a Slack user ID or handle (resolved to an ID at startup, like the
+	// access lists).
+	//
+	// It exists because DMAgent is all-or-nothing, and an agent trusted enough
+	// for the operator is not one to hand to everybody. The onboarding flow's
+	// `tweaker` profile is the case in point: it runs unsandboxed, without an
+	// approval gate, rooted in the directory holding the Slack tokens and every
+	// provider key. Routed through DMAgent that reaches every allowlisted user,
+	// which is a privilege escalation one DM wide. Keyed per user it reaches
+	// only the person it was built for.
+	DMAgents map[string]string `yaml:"dm_agents" json:"dm_agents,omitempty"`
 	// ReplyOnThread sets the default reply strategy: true (the default when
 	// omitted) makes the bot root a thread on each new top-level channel message;
 	// false makes it reply directly in the channel. A pointer so an omitted value
@@ -1115,6 +1142,14 @@ func (c Config) Validate() error {
 			errs = append(errs, errors.New("chat.defaults.agent is required when chat is enabled"))
 		} else if _, ok := c.Agents[c.Chat.Defaults.Agent]; !ok {
 			errs = append(errs, fmt.Errorf("chat.defaults.agent %q not found in agents.yaml", c.Chat.Defaults.Agent))
+		}
+		for user, agent := range c.Chat.Defaults.DMAgents {
+			if strings.TrimSpace(user) == "" {
+				errs = append(errs, errors.New("chat.defaults.dm_agents has a blank user key"))
+			}
+			if _, ok := c.Agents[agent]; !ok {
+				errs = append(errs, fmt.Errorf("chat.defaults.dm_agents[%s] %q not found in agents", user, agent))
+			}
 		}
 		if c.Chat.Defaults.DMAgent != "" {
 			if _, ok := c.Agents[c.Chat.Defaults.DMAgent]; !ok {

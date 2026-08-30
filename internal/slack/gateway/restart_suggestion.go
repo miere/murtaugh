@@ -32,7 +32,7 @@ func (a *Gateway) resolveSuggestionDestination(ctx context.Context, channel stri
 	if channel != "" {
 		return channel, nil
 	}
-	admin := strings.TrimSpace(a.cfg.AdminUser)
+	admin := strings.TrimSpace(a.access().AdminUser)
 	if admin == "" {
 		return "", nil
 	}
@@ -131,7 +131,7 @@ func (a *Gateway) handleRestartSuggestionInteraction(ctx context.Context, intera
 // touched.
 func (a *Gateway) handleRestartSuggestionConfirm(ctx context.Context, interaction slack.InteractionCallback, channel, messageTS, reason string) {
 	user := interaction.User.ID
-	if !a.cfg.IsAdminUser(user) {
+	if !a.access().IsAdminUser(user) {
 		a.logger.Info("denied restart suggestion confirm from non-admin", "user", user, "channel", channel)
 		a.editSuggestion(ctx, channel, messageTS, restartSuggestionDenied)
 		return

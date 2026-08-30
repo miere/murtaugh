@@ -37,7 +37,7 @@ func (a *Gateway) NotifyMissedJobs(ctx context.Context, missed []MissedJob) {
 	if len(missed) == 0 {
 		return
 	}
-	admin := strings.TrimSpace(a.cfg.AdminUser)
+	admin := strings.TrimSpace(a.access().AdminUser)
 	if admin == "" {
 		return
 	}
