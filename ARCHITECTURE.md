@@ -91,6 +91,8 @@ internal/slack/       Slack subsystem:
                       Always collapsed; renders to blocks or to plain text.
   configcard/         The configuration-change approval card: a YAML diff plus
                       Apply / Rollback, from templates/config/update.json.
+  agentcard/          The "no agent configured" prompt and the button that opens
+                      the setup form, from templates/agent/setup.json.
 internal/agent/       Agent backend interface, session manager, protocol types,
                       and the shared tool watcher / execution ceiling.
   native/             In-process LLM agent loop (kind: native): conversation,
@@ -98,6 +100,10 @@ internal/agent/       Agent backend interface, session manager, protocol types,
   acp/                External ACP agent over a subprocess (kind: acp).
   claudecode/         Claude Code stream-json backend (kind: claude_code).
 internal/agentbuild/  Kind-aware backend builder (native / ACP / claude_code).
+internal/election/    Leader election: the lifecycle runner, the suspend-safe
+                      gate, and the journal of promotions and stand-downs.
+internal/onboarding/  The agent-setup form's domain: provider catalogue, model
+                      discovery, and the two profiles a completed form produces.
 internal/jsontemplate/ JSON-document templating with JSON-safe escaping funcs.
                       The single renderer behind every Block Kit template.
 internal/llm/         Provider-agnostic LLM boundary over litellm (gemini /
@@ -458,6 +464,20 @@ down agent backend cannot be revived. They are closed only on process exit.
 A new leader announces itself to the admin DM with hostname, local and public
 IP, version, PID, and the leadership epoch, plus whether it is the first leader
 or took over from a predecessor.
+
+**The election is journalled** to the `gateway` stream under kind `election`, so
+`murtaugh journal query --stream gateway --kind election` reconstructs a
+failover after the fact. Four states are recorded — `promoted`, `renew_failed`,
+`stood_down`, `lock_unreachable` — each carrying the epoch (which totally orders
+events across nodes whose logs interleave arbitrarily) and, on a failure, the
+store's own error.
+
+This matters most for the case that is otherwise invisible: a node whose lock
+credentials lapse mid-flight stands down correctly and *silently*. It cannot say
+so in Slack, because the outbound gate shuts before the demote callback runs;
+and its successor knows a lease expired but not why. The journal is the only
+place that sequence survives. Healthy renewals record nothing, so the stream
+stays readable.
 
 **Scheduled runs are claimed, not just scheduled.** Election stops two nodes
 firing a job simultaneously, but `gocron` counts from when *its* scheduler

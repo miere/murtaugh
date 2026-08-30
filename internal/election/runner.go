@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/miere/murtaugh/internal/config"
+	"github.com/miere/murtaugh/internal/journal"
 )
 
 // Callbacks are the transitions a caller reacts to. Both are invoked
@@ -59,6 +60,8 @@ type Runner struct {
 	// without a CONFIRMED renewal this node may keep acting. demoteAfter is
 	// strictly less than the lease, so we stand down before a challenger may
 	// stand up.
+	recorder journal.Recorder
+
 	renew       time.Duration
 	demoteAfter time.Duration
 	// retry is how long a standby waits between acquisition attempts.
@@ -85,6 +88,9 @@ type Options struct {
 	// Clock defaults to SystemClock. Tests substitute it to drive the
 	// wall-versus-monotonic divergence that a real suspension produces.
 	Clock Clock
+	// Recorder journals the election. nil discards, which is what CLI/MCP
+	// builds and most tests want.
+	Recorder journal.Recorder
 }
 
 // New builds a Runner.
@@ -101,8 +107,14 @@ func New(opts Options) (*Runner, error) {
 		clock = SystemClock()
 	}
 
+	recorder := opts.Recorder
+	if recorder == nil {
+		recorder = journal.NopRecorder{}
+	}
+
 	r := &Runner{
 		locker:      opts.Locker,
+		recorder:    recorder,
 		cb:          opts.Callbacks,
 		logger:      logger,
 		clock:       clock,
@@ -161,6 +173,9 @@ func (r *Runner) acquireOnce(ctx context.Context) {
 		// Not knowing whether the lock is free is not the same as it being
 		// free. Stay a standby and try again.
 		r.logger.Warn("could not determine leader lock state", "error", err)
+		r.record(ctx, journal.LevelWarn, "lock_unreachable",
+			"Could not read the leader lock; staying a standby",
+			map[string]any{"error": err.Error()})
 		return
 	}
 	if !ok {
@@ -174,6 +189,7 @@ func (r *Runner) acquireOnce(ctx context.Context) {
 	r.mu.Unlock()
 
 	r.logger.Info("promoted to leader", "epoch", lease.Epoch, "owner", lease.Owner, "backend", r.locker.Backend())
+	r.record(ctx, journal.LevelInfo, "promoted", "Took the leader lock", leaseFields(lease))
 
 	if r.cb.OnPromote != nil {
 		if err := r.cb.OnPromote(ctx, lease); err != nil {
@@ -199,6 +215,12 @@ func (r *Runner) renewOnce(ctx context.Context) {
 		// and let the unconfirmed deadline below decide when holding on stops
 		// being defensible.
 		r.logger.Warn("leader lease renewal failed", "error", err)
+		// Warn, not error: one failed renewal is survivable by design. It
+		// becomes an outage only if it keeps failing, and the stand-down below
+		// records that separately.
+		r.record(ctx, journal.LevelWarn, "renew_failed",
+			"Could not renew the leader lease",
+			map[string]any{"error": err.Error(), "epoch": lease.Epoch})
 	case !ok:
 		// An unambiguous loss: another node holds the lock. Stand down at once
 		// rather than waiting for a deadline.
@@ -340,6 +362,7 @@ func (r *Runner) standDown(ctx context.Context, reason string) {
 	r.mu.Unlock()
 
 	r.logger.Warn("standing down as leader", "reason", reason, "epoch", lease.Epoch)
+	r.record(ctx, journal.LevelWarn, "stood_down", "Stopped leading: "+reason, leaseFields(lease))
 
 	if r.cb.OnDemote != nil {
 		r.cb.OnDemote(ctx, reason)
