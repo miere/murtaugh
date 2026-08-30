@@ -12,6 +12,7 @@ import (
 
 	"github.com/miere/murtaugh/internal/onboarding"
 	"github.com/miere/murtaugh/internal/slack/agentcard"
+	"github.com/miere/murtaugh/internal/slack/alertcard"
 )
 
 // This file drives the agent-setup conversation: notice that no agent exists,
@@ -229,27 +230,37 @@ func (a *Gateway) applySetup(event socketmode.Event, interaction slack.Interacti
 
 		if err := a.writeAgentProfiles(ctx, profiles); err != nil {
 			a.logger.Error("could not apply the agent setup", "error", err)
-			a.reportSetupOutcome(ctx, interaction.User.ID, fmt.Sprintf(":x: Could not save the agent profiles: %v", err))
+			a.reportSetupOutcome(ctx, alertcard.Spec{
+				Level:     alertcard.LevelError,
+				Title:     "Could not save the agent profiles",
+				Subtitle:  "Nothing was changed; the form can be reopened from the prompt above.",
+				Detail:    err.Error(),
+				NextSteps: "Check the daemon log, then try the form again.",
+			})
 			return
 		}
 		a.logger.Info("agent profiles created", "default", profiles.Name, "tweaker", onboarding.TweakerName)
-		a.reportSetupOutcome(ctx, interaction.User.ID, fmt.Sprintf(
-			":white_check_mark: Created *%s* and *%s*. Reloading the configuration — say hello when I am back.",
-			profiles.Name, onboarding.TweakerName))
+		a.reportSetupOutcome(ctx, alertcard.Spec{
+			Level:    alertcard.LevelNotice,
+			Title:    fmt.Sprintf("Created %s and %s", profiles.Name, onboarding.TweakerName),
+			Subtitle: "say hello when the reload finishes",
+		})
 	}()
 }
 
 // reportSetupOutcome DMs the operator the result of applying the form.
-func (a *Gateway) reportSetupOutcome(ctx context.Context, userID, message string) {
+//
+// Success is a notice rather than a card: it lands directly under the setup
+// prompt that produced it, and a second full-width block there repeats what the
+// reload notices already say. A failure keeps the card, because that one needs
+// a body.
+func (a *Gateway) reportSetupOutcome(ctx context.Context, spec alertcard.Spec) {
 	dest, err := a.resolveSuggestionDestination(ctx, "")
 	if err != nil || dest == "" {
-		a.logger.Warn("could not report the agent setup outcome", "user", userID, "error", err)
+		a.logger.Warn("could not report the agent setup outcome", "error", err)
 		return
 	}
-	if a.messaging == nil {
-		return
-	}
-	if _, _, err := a.messaging.PostMessageContext(ctx, dest, slack.MsgOptionText(message, false)); err != nil {
+	if _, _, err := a.postLifecycleAlert(ctx, dest, "", spec); err != nil {
 		a.logger.Warn("could not report the agent setup outcome", "error", err)
 	}
 }

@@ -1680,10 +1680,6 @@ func (a *Gateway) handleEventsAPI(event socketmode.Event) {
 		}
 		a.handleAppMention(eventsAPI, inner)
 	case *slackevents.MessageEvent:
-		if a.chat == nil {
-			a.logger.Debug("ignored message because chat is disabled")
-			return
-		}
 		// Bot/self messages are never answered, in DMs or channels.
 		if inner.BotID != "" {
 			return
@@ -1695,7 +1691,16 @@ func (a *Gateway) handleEventsAPI(event socketmode.Event) {
 			return
 		}
 		if inner.ChannelType == "im" {
+			// The chat gate is checked INSIDE the DM handler, not before it. On
+			// a fresh install chat is disabled — there is no agent yet — and
+			// the direct message that adopts the administrator is the only way
+			// to reach the setup form. Dropping DMs here would make onboarding
+			// unreachable on exactly the install it exists for.
 			a.handleDirectMessage(eventsAPI, inner, event)
+			return
+		}
+		if a.chat == nil {
+			a.logger.Debug("ignored message because chat is disabled")
 			return
 		}
 		// A plain (non-mention) channel message: the bot only answers it when the
@@ -1723,6 +1728,13 @@ func (a *Gateway) handleDirectMessage(eventsAPI slackevents.EventsAPIEvent, inne
 	}
 	if !a.access().IsAllowedUser(inner.User) {
 		a.logger.Debug("ignored DM from unauthorized user", "user", inner.User, "channel", inner.Channel)
+		return
+	}
+	// Chat is gated here rather than at dispatch so an unclaimed daemon can
+	// still be adopted above: a fresh install has no agent, so chat is off, and
+	// refusing the DM outright would strand the operator before onboarding.
+	if a.chat == nil {
+		a.logger.Debug("ignored DM because chat is disabled", "user", inner.User)
 		return
 	}
 	if a.isDuplicateEvent(eventsAPI.TeamID, inner.Channel, inner.TimeStamp) {

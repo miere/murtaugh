@@ -257,24 +257,42 @@ func (a *Gateway) configChange(corr string) (*pendingConfigChange, bool) {
 	return pending, ok
 }
 
-// NotifyConfigReloading tells the admin the approved change is being applied.
+// NotifyConfigReloading tells the admin the approved change is being applied,
+// and returns where it said so.
 //
 // It mirrors the restart notice deliberately: from the admin's side a soft
 // reload and a restart feel the same — the bot goes quiet, agents drop their
 // work, and it comes back — so it should read the same rather than making them
 // learn a second vocabulary for the same experience.
-func (a *Gateway) NotifyConfigReloading(ctx context.Context) {
+//
+// The returned coordinates let the completion EDIT this message rather than
+// post a second one. Two blocks saying "reloading" then "reloaded" directly
+// under the approval card that caused them is three messages for one event.
+func (a *Gateway) NotifyConfigReloading(ctx context.Context) (channel, ts string) {
 	admin := strings.TrimSpace(a.access().AdminUser)
 	if admin == "" {
-		return
+		return "", ""
 	}
-	if _, _, err := a.postLifecycleAlert(ctx, admin, "", configReloadingAlert()); err != nil {
+	channel, ts, err := a.postLifecycleAlert(ctx, admin, "", configReloadingAlert())
+	if err != nil {
 		a.logger.Warn("could not post the configuration reload notice", "error", err)
+		return "", ""
 	}
+	return channel, ts
 }
 
-// NotifyConfigReloaded confirms the new configuration is live.
-func (a *Gateway) NotifyConfigReloaded(ctx context.Context) {
+// NotifyConfigReloaded confirms the new configuration is live, replacing the
+// "reloading" notice in place when one was posted.
+func (a *Gateway) NotifyConfigReloaded(ctx context.Context, channel, ts string) {
+	if channel != "" && ts != "" {
+		if err := a.updateLifecycleAlert(ctx, channel, ts, configReloadedAlert()); err == nil {
+			return
+		}
+		// The edit failed — the message may have been deleted, or this is a
+		// rebuilt gateway with no editor wired. Fall through and post, because
+		// silence after "reloading…" reads as a hung daemon.
+		a.logger.Warn("could not update the configuration reload notice; posting instead")
+	}
 	admin := strings.TrimSpace(a.access().AdminUser)
 	if admin == "" {
 		return

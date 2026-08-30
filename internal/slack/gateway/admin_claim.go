@@ -100,6 +100,15 @@ func (a *Gateway) handleAdminClaim(ctx context.Context, userID, channelID string
 	if _, _, err := a.postLifecycleAlert(ctx, channelID, "", adminClaimedAlert(userID)); err != nil {
 		a.logger.Warn("could not confirm the administrator claim", "error", err)
 	}
+
+	// Offer the setup form straight away. The zero-agent prompt otherwise fires
+	// only on promotion, which has already happened by the time anybody can DM
+	// — so a fresh install would greet its new administrator and then go
+	// silent until the next restart, which is the opposite of finishing the
+	// install in Slack.
+	if len(a.agentProfiles) == 0 {
+		a.NotifyNoAgents(ctx)
+	}
 	return true
 }
 

@@ -30,6 +30,8 @@ type recordingMessaging struct {
 	postThreadTS    string
 	postReturnedTS  string
 	postReturnedErr error
+	postText        string
+	postOptionCount int
 
 	updateCalls      int
 	updateChannel    string
@@ -49,8 +51,10 @@ func (m *recordingMessaging) PostMessageContext(_ context.Context, channelID str
 	defer m.mu.Unlock()
 	m.postCalls++
 	m.postChannel = channelID
+	m.postOptionCount = len(options)
 	if _, values, err := slack.UnsafeApplyMsgOptions("", channelID, "", options...); err == nil {
 		m.postThreadTS = values.Get("thread_ts")
+		m.postText = values.Get("text")
 	}
 	if m.postReturnedErr != nil {
 		return "", "", m.postReturnedErr

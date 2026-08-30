@@ -52,7 +52,7 @@ func (a *Application) buildGateway(cfg config.Config) *gateway.Gateway {
 		gw = gw.WithJobConfirmer(newJobConfirmer(a.cfgStore))
 		// First-user-wins adoption of a fresh install. Without a store the
 		// claim still works for this process but is forgotten on restart.
-		gw = gw.WithAdminClaimer(newAdminClaimer(a.cfgStore))
+		gw = gw.WithAdminClaimer(a.newAdminClaimer(a.cfgStore))
 	}
 	if a.journalSweep != nil {
 		gw = gw.WithJournalSweeper(a.journalSweep, a.journalSweepEvery)

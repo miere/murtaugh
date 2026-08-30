@@ -66,6 +66,19 @@ func (n *SlackStartupNotifier) NotifyStartup(ctx context.Context) error {
 	if channel == nil || channel.ID == "" {
 		return fmt.Errorf("open admin DM: Slack returned no channel")
 	}
+	// A notice is the discreet one-line form, not a card — the same shape the
+	// idle-timeout nudge uses. The startup greeting is a passing remark, and it
+	// posts through the ordinary client rather than the raw-blocks passthrough
+	// the container card needs.
+	if n.spec.Level == alertcard.LevelNotice {
+		text := alertcard.NoticeText(n.spec)
+		_, ts, err := n.api.PostMessageContext(ctx, channel.ID, statusMsgOptions(text)...)
+		if err != nil {
+			return fmt.Errorf("post startup notice: %w", err)
+		}
+		n.logger.Info("sent Slack startup ping", "admin_user", n.adminUser, "channel", channel.ID, "ts", ts)
+		return nil
+	}
 	if n.cards != nil && n.cardAPI != nil {
 		res, err := postAlertCard(ctx, n.cardAPI, n.cards, channel.ID, "", n.spec)
 		if err == nil {

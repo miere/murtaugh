@@ -25,7 +25,7 @@ import (
 // profiles reference it by variable name and a profile whose key is not yet on
 // disk would fail to build the moment the reload picked it up. Then the
 // profiles and the routing go into the store, and the reload adopts them.
-func (a *Application) newAgentProfileWriter(holder *gatewayHolder, runner leaderRunner) gateway.AgentProfileWriter {
+func (a *Application) newAgentProfileWriter(daemonCtx context.Context, holder *gatewayHolder, runner leaderRunner) gateway.AgentProfileWriter {
 	return func(ctx context.Context, profiles onboarding.Profiles) error {
 		if a.cfgStore == nil {
 			return fmt.Errorf("no configuration store is open")
@@ -49,7 +49,7 @@ func (a *Application) newAgentProfileWriter(holder *gatewayHolder, runner leader
 			return fmt.Errorf("enable chat: %w", err)
 		}
 
-		return a.adoptOwnConfigChange(ctx, holder, runner)
+		return a.adoptOwnConfigChange(daemonCtx, ctx, holder, runner)
 	}
 }
 
@@ -60,7 +60,8 @@ func (a *Application) newAgentProfileWriter(holder *gatewayHolder, runner leader
 // would spot these writes on its next poll and ask the administrator to approve
 // a change they made thirty seconds ago through a form. Asking somebody to
 // re-approve their own click is how a review prompt becomes noise.
-func (a *Application) adoptOwnConfigChange(ctx context.Context, holder *gatewayHolder, runner leaderRunner) error {
+func (a *Application) adoptOwnConfigChange(daemonCtx, opCtx context.Context, holder *gatewayHolder, runner leaderRunner) error {
+	ctx := opCtx
 	snapshot, err := a.cfgStore.Snapshot(ctx)
 	if err != nil {
 		return fmt.Errorf("read back the configuration: %w", err)
@@ -75,7 +76,7 @@ func (a *Application) adoptOwnConfigChange(ctx context.Context, holder *gatewayH
 	// see the change as unreviewed.
 	a.setApprovedConfig(snapshot)
 
-	return a.reloadConfig(ctx, holder, runner, cfg)
+	return a.reloadConfig(daemonCtx, ctx, holder, runner, cfg)
 }
 
 // writeEnvVar stores a credential in the .env beside the config.
@@ -123,9 +124,9 @@ func hasAgents(cfg config.Config) bool { return len(cfg.Agents) > 0 }
 // Repeated for every rebuilt gateway, like the run claimer: a reload replaces
 // the object, and a replacement that could not offer the form would strand an
 // operator who had not finished onboarding.
-func (a *Application) attachAgentSetup(gw *gateway.Gateway, holder *gatewayHolder, runner leaderRunner) {
+func (a *Application) attachAgentSetup(daemonCtx context.Context, gw *gateway.Gateway, holder *gatewayHolder, runner leaderRunner) {
 	if gw == nil {
 		return
 	}
-	gw.WithAgentProfileWriter(a.newAgentProfileWriter(holder, runner))
+	gw.WithAgentProfileWriter(a.newAgentProfileWriter(daemonCtx, holder, runner))
 }

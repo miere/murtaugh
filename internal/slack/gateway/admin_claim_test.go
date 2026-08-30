@@ -7,7 +7,10 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/miere/murtaugh/assets"
 	"github.com/miere/murtaugh/internal/config"
+	"github.com/miere/murtaugh/internal/onboarding"
+	"github.com/miere/murtaugh/internal/slack/agentcard"
 )
 
 // claimGateway builds a gateway in the unclaimed state, with a recording
@@ -171,5 +174,48 @@ func TestClaimConfirmationNamesTheUser(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(spec.Text), "nobody else") {
 		t.Errorf("the confirmation does not say the door has shut: %q", spec.Text)
+	}
+}
+
+// TestClaimOffersTheSetupFormImmediately is the onboarding hand-off.
+//
+// The zero-agent prompt otherwise fires only on promotion, which has already
+// happened by the time anybody can DM. Without this a fresh install greets its
+// new administrator and then goes silent until the next restart — the opposite
+// of finishing the install in Slack.
+func TestClaimOffersTheSetupFormImmediately(t *testing.T) {
+	api := &recordingCardAPI{}
+	gw, _ := claimGateway(t, api)
+	gw.agentCards = agentcard.NewRenderer(t.TempDir(), assets.FS)
+	gw.agentProfiles = map[string]config.AgentProfile{} // fresh install
+	gw.WithAgentProfileWriter(func(context.Context, onboarding.Profiles) error { return nil })
+
+	if !gw.handleAdminClaim(context.Background(), "U01FIRST", "D01FIRST") {
+		t.Fatal("the claim failed")
+	}
+
+	posts, _ := api.snapshot()
+	if len(posts) != 2 {
+		t.Fatalf("%d messages posted, want 2 (the welcome and the setup prompt)", len(posts))
+	}
+	if !strings.Contains(string(posts[1].Blocks), agentcard.ActionOpen) {
+		t.Errorf("the setup form was not offered after adoption:\n%s", posts[1].Blocks)
+	}
+}
+
+// TestClaimStaysQuietWhenAgentsExist keeps the prompt off an install that is
+// already configured — adopting an admin there is not an onboarding event.
+func TestClaimStaysQuietWhenAgentsExist(t *testing.T) {
+	api := &recordingCardAPI{}
+	gw, _ := claimGateway(t, api)
+	gw.agentCards = agentcard.NewRenderer(t.TempDir(), assets.FS)
+	gw.agentProfiles = map[string]config.AgentProfile{"default": {}}
+	gw.WithAgentProfileWriter(func(context.Context, onboarding.Profiles) error { return nil })
+
+	if !gw.handleAdminClaim(context.Background(), "U01FIRST", "D01FIRST") {
+		t.Fatal("the claim failed")
+	}
+	if posts, _ := api.snapshot(); len(posts) != 1 {
+		t.Errorf("%d messages posted, want just the welcome", len(posts))
 	}
 }

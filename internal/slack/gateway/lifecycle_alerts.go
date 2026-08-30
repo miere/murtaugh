@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/miere/murtaugh/internal/slack/alertcard"
 	"github.com/miere/murtaugh/internal/slack/pingcard"
@@ -32,7 +33,7 @@ var errNoSlackMessaging = errors.New("no Slack messaging surface is wired")
 // control row now, and this is where an operator finds that out.
 func startupAlert() alertcard.Spec {
 	return alertcard.Spec{
-		Level:     alertcard.LevelInfo,
+		Level:     alertcard.LevelNotice,
 		Title:     "Murtaugh has started",
 		Subtitle:  "The server is up and connected to Slack.",
 		NextSteps: "Open Murtaugh's App Home to restart, update, or test communication.",
@@ -45,7 +46,7 @@ func startupAlert() alertcard.Spec {
 // the operator one message rather than three.
 func restartNoticeAlert() alertcard.Spec {
 	return alertcard.Spec{
-		Level:     alertcard.LevelInfo,
+		Level:     alertcard.LevelNotice,
 		Title:     "Restarting Murtaugh…",
 		Subtitle:  "The daemon is going down; its supervisor brings it straight back.",
 		NextSteps: "Nothing to do — this message updates itself once Murtaugh is back.",
@@ -56,7 +57,7 @@ func restartNoticeAlert() alertcard.Spec {
 // connected to Slack.
 func backOnlineAlert() alertcard.Spec {
 	return alertcard.Spec{
-		Level:     alertcard.LevelInfo,
+		Level:     alertcard.LevelNotice,
 		Title:     "Murtaugh is back online",
 		Subtitle:  "The restart finished and the Slack connection is live.",
 		NextSteps: "Any conversation that was in flight when the restart began was interrupted; ask again to resume it.",
@@ -71,7 +72,7 @@ func backOnlineAlert() alertcard.Spec {
 // learn a second vocabulary for it.
 func configReloadingAlert() alertcard.Spec {
 	return alertcard.Spec{
-		Level:     alertcard.LevelInfo,
+		Level:     alertcard.LevelNotice,
 		Title:     "Reloading the configuration…",
 		Subtitle:  "The approved changes are being applied; agents are restarting.",
 		NextSteps: "Any conversation that was in flight has been stopped; ask again once Murtaugh is back.",
@@ -81,7 +82,7 @@ func configReloadingAlert() alertcard.Spec {
 // configReloadedAlert confirms the new configuration is live.
 func configReloadedAlert() alertcard.Spec {
 	return alertcard.Spec{
-		Level:    alertcard.LevelInfo,
+		Level:    alertcard.LevelNotice,
 		Title:    "Configuration reloaded",
 		Subtitle: "Murtaugh is running the approved configuration.",
 	}
@@ -97,6 +98,35 @@ func pongAlert() alertcard.Spec {
 	}
 }
 
+// postNotice posts the discreet one-line form: a single context block carrying
+// plain text, exactly as statusMsgOptions builds for the idle-timeout nudge.
+//
+// It goes through the ordinary messaging client rather than the raw-blocks
+// passthrough, because a context block is not one of the newer types slack-go
+// cannot express — the passthrough exists for the container card, and a notice
+// is not one.
+func (a *Gateway) postNotice(ctx context.Context, channel, threadTS, text string) (string, string, error) {
+	if a.messaging == nil {
+		return "", "", errNoSlackMessaging
+	}
+	options := statusMsgOptions(text)
+	if threadTS != "" {
+		options = append(options, slack.MsgOptionTS(threadTS))
+	}
+	return a.messaging.PostMessageContext(ctx, channel, options...)
+}
+
+// updateNotice rewrites a posted notice in place, keeping its shape.
+func (a *Gateway) updateNotice(ctx context.Context, channel, ts, text string) error {
+	if a.messaging == nil {
+		return errNoSlackMessaging
+	}
+	if _, _, _, err := a.messaging.UpdateMessageContext(ctx, channel, ts, statusMsgOptions(text)...); err != nil {
+		return fmt.Errorf("update notice: %w", err)
+	}
+	return nil
+}
+
 // postLifecycleAlert posts spec as an info card and reports where it landed.
 //
 // The card needs the raw-blocks passthrough (a container block; see alert.go),
@@ -107,6 +137,12 @@ func pongAlert() alertcard.Spec {
 // and TS are identical either way, which is what lets the resume marker point
 // at the message regardless of which path posted it.
 func (a *Gateway) postLifecycleAlert(ctx context.Context, channel, threadTS string, spec alertcard.Spec) (string, string, error) {
+	// A notice is not a card. It is the same discreet context line the
+	// idle-timeout nudge uses — one grey sentence under the thing it refers to,
+	// built with the shared helper so the two shapes cannot drift.
+	if spec.Level == alertcard.LevelNotice {
+		return a.postNotice(ctx, channel, threadTS, alertcard.NoticeText(spec))
+	}
 	if a.alertAPI != nil && a.alertCards != nil {
 		res, err := postAlertCard(ctx, a.alertAPI, a.alertCards, channel, threadTS, spec)
 		if err == nil {
@@ -132,6 +168,9 @@ func (a *Gateway) postLifecycleAlert(ctx context.Context, channel, threadTS stri
 // no raw-blocks client, and an edit that only replaces the text would leave the
 // stale card visible underneath.
 func (a *Gateway) updateLifecycleAlert(ctx context.Context, channel, ts string, spec alertcard.Spec) error {
+	if spec.Level == alertcard.LevelNotice {
+		return a.updateNotice(ctx, channel, ts, alertcard.NoticeText(spec))
+	}
 	if a.alertEditor != nil && a.alertCards != nil {
 		err := updateAlertCard(ctx, a.alertEditor, a.alertCards, channel, ts, spec)
 		if err == nil {
