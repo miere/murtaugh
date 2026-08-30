@@ -66,6 +66,11 @@ func (a *Application) wireLeaderElection(ctx context.Context, holder *gatewayHol
 					return err
 				}
 				gw.AnnouncePromotion(ctx, lease.Epoch, promotionReason(lease))
+				// Promotion is the moment missed schedules become visible:
+				// whatever the previous leader failed to run is this node's to
+				// report. Off the critical path — a failed report must not fail
+				// a promotion.
+				go a.reportMissedJobs(context.WithoutCancel(ctx), gw)
 				return nil
 			},
 			OnDemote: func(ctx context.Context, reason string) {
