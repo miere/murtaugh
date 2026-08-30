@@ -2,17 +2,21 @@
 #
 # Murtaugh macOS installer (thin orchestrator).
 #
-# This script only handles things that must happen before a Murtaugh binary
-# exists locally: platform gate, flag/env parsing, install-dir choice,
-# downloading + version-comparing + atomically replacing the binary, and
-# restarting the LaunchAgent when one was previously loaded.
+# It does four things and nothing else: install the binary, seed a config
+# skeleton, write the LaunchAgent plist WITHOUT starting it, and print what is
+# left to do.
 #
-# Everything else — writing config.yaml (oauth + database blocks), seeding the
-# config store (agents, chat routing, access) via `murtaugh cfg`/`setup`,
-# dev.murtaugh.plist, and MCP client config — is delegated to the
-# freshly-installed binary via `murtaugh setup ...` tools, which share the exact
-# same code path the CLI and MCP frontends use. See internal/tools/setup/* for
-# the implementations.
+# It used to do much more — prompt for Slack tokens, ask which agent backend to
+# use, collect provider credentials, register MCP clients. That was worse in
+# every direction: it kept the operator in a terminal answering questions, the
+# hard-coded agent list went stale as backends changed, and one mistyped answer
+# meant re-running the whole thing. All of that now happens in Slack, where the
+# model list is fetched live and a wrong answer is one click to fix.
+#
+# So this script asks nothing. It is non-interactive by construction rather than
+# by a --yes flag, and it deliberately leaves the daemon stopped: Murtaugh can
+# do nothing until real Slack tokens are in .env, and an agent started before
+# then only crash-loops behind the instructions the operator is still reading.
 
 set -euo pipefail
 
@@ -20,6 +24,8 @@ REPO_OWNER="miere"
 REPO_NAME="murtaugh"
 RELEASE_API_URL="${MURTAUGH_RELEASE_API_URL:-https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest}"
 
+# ASSUME_YES is accepted and ignored: the installer no longer asks anything, so
+# --yes exists only so published curl|bash instructions keep working.
 ASSUME_YES=0
 SKIP_CONFIG=0
 RECONFIGURE=0
@@ -27,28 +33,23 @@ FORCE_INSTALL=0
 DRY_RUN=0
 LOCAL_BUILD=0
 TARGET_VERSION=""
-CUSTOM_AGENT_ARGS=()
-
-# LAUNCH_AGENT_LOAD_CHOICE records the answer to MURTAUGH_LOAD_LAUNCH_AGENT so
-# the post-install restart can honour it. Empty means the question was never
-# reached (the user declined the LaunchAgent itself), which leaves the restart
-# free to pick up a newly installed binary in an agent they already had.
-LAUNCH_AGENT_LOAD_CHOICE=""
 
 usage() {
   cat <<'EOF'
-Usage: install.sh [--yes] [--version VERSION] [--force] [--skip-config] [--reconfigure] [--dry-run] [--local-build]
+Usage: install.sh [--version VERSION] [--force] [--skip-config] [--reconfigure] [--dry-run] [--local-build]
 
-Installs or updates the Murtaugh macOS release. Re-running this installer
-updates the binary and preserves existing config by default. Use --reconfigure
-to force a full config rewrite.
+Installs or updates Murtaugh on macOS. The installer asks nothing: it puts the
+binary in place, seeds a config skeleton, writes the LaunchAgent plist without
+starting it, and prints the three steps left. The rest of setup — choosing an
+agent, its model and its credentials — happens in Slack.
 
 Options:
-  --yes                 Skip interactive prompts (use env vars for all values).
+  --yes                 Accepted and ignored; nothing is interactive any more.
   --version VERSION     Install a specific version instead of the latest.
   --force               Reinstall even if the current version matches latest.
-  --skip-config         Update binary only; do not write or modify any config.
-  --reconfigure         Always rewrite config files, backing up existing ones.
+  --skip-config         Update binary only; do not touch the config directory.
+  --reconfigure         Re-seed the config skeleton and templates, backing up
+                        anything replaced. Your .env and stored config are kept.
   --dry-run             Show what would happen without making changes.
   --local-build         Compile from the local checkout instead of fetching a
                         release. Useful for testing changes before cutting a
@@ -57,18 +58,6 @@ Options:
 
 Environment overrides:
   MURTAUGH_INSTALL_DIR
-  MURTAUGH_SLACK_APP_TOKEN
-  MURTAUGH_SLACK_BOT_TOKEN
-  MURTAUGH_ADMIN_USER
-  MURTAUGH_CHAT_AGENT             skip|native|opencode|goose|auggie|custom
-  MURTAUGH_NATIVE_PROVIDER        gemini|anthropic|openai (native agent)
-  MURTAUGH_NATIVE_MODEL           provider model id (native agent)
-  MURTAUGH_NATIVE_API_KEY         provider API key, stored in ~/.config/murtaugh/.env
-  MURTAUGH_CUSTOM_AGENT_COMMAND
-  MURTAUGH_CUSTOM_AGENT_ARGS      shell-style argument string
-  MURTAUGH_ENABLE_LAUNCH_AGENT    yes|no
-  MURTAUGH_LOAD_LAUNCH_AGENT      yes|no
-  MURTAUGH_MCP_CLIENT             skip|opencode|auggie|goose
   MURTAUGH_RELEASE_JSON_PATH      local file used instead of GitHub API
   MURTAUGH_INSTALL_ARCH           override uname arch for testing
   MURTAUGH_DRY_RUN                yes|no
@@ -180,50 +169,6 @@ parse_args() {
   is_env_yes "${MURTAUGH_LOCAL_BUILD:-}" && LOCAL_BUILD=1
   [[ -n "${MURTAUGH_TARGET_VERSION:-}" ]] && TARGET_VERSION="$MURTAUGH_TARGET_VERSION"
   return 0
-}
-
-prompt_required() {
-  local env_name=$1 prompt=$2 secret=${3:-no} value=${!1:-}
-  if [[ -n "$value" ]]; then printf '%s' "$value"; return 0; fi
-  [[ $ASSUME_YES -eq 1 ]] && die "${env_name} is required when running with --yes"
-  if [[ "$secret" == "yes" ]]; then
-    read -r -s -p "$prompt: " value; printf '\n' >&2
-  else
-    read -r -p "$prompt: " value
-  fi
-  [[ -n "$value" ]] || die "$prompt is required"
-  printf '%s' "$value"
-}
-
-# prompt_choice asks the user to pick one of a fixed set of options.
-# Scripted callers (env var set, or --yes) get strict validation: an
-# invalid value aborts immediately, which is what CI/automation needs.
-# Interactive callers get a re-prompt loop with the available options
-# rendered inline, so a typo or a "yes" answer to a multi-option
-# question never aborts the install half-way through.
-prompt_choice() {
-  local env_name=$1 prompt=$2 default_value=$3
-  shift 3
-  local choices=("$@") value=${!env_name:-} choice choices_pretty
-  choices_pretty=$(IFS='/'; printf '%s' "${choices[*]}")
-
-  if [[ -n "$value" || $ASSUME_YES -eq 1 ]]; then
-    [[ -z "$value" ]] && value=$default_value
-    for choice in "${choices[@]}"; do
-      [[ "$value" == "$choice" ]] && { printf '%s' "$value"; return 0; }
-    done
-    die "invalid value '${value}' for ${env_name}; expected one of: ${choices[*]}"
-  fi
-
-  while :; do
-    read -r -p "${prompt} [${choices_pretty}] (default: ${default_value}): " value
-    value=${value:-$default_value}
-    for choice in "${choices[@]}"; do
-      [[ "$value" == "$choice" ]] && { printf '%s' "$value"; return 0; }
-    done
-    printf '[murtaugh-installer] Invalid choice: %s. Please pick one of: %s\n' \
-      "$value" "${choices[*]}" >&2
-  done
 }
 
 choose_install_dir() {
@@ -415,84 +360,6 @@ binary_supports_setup() {
   "$bin" setup --help >/dev/null 2>&1
 }
 
-# api_key_env_for maps a provider to the .env variable name that holds its key.
-# The stored agent references its credential by this name (api_key_env), so the
-# key value never lives in the config store — only in .env.
-api_key_env_for() {
-  case "$1" in
-    gemini) printf 'GEMINI_API_KEY' ;;
-    anthropic) printf 'ANTHROPIC_API_KEY' ;;
-    openai) printf 'OPENAI_API_KEY' ;;
-    *) die "unsupported native provider: $1" ;;
-  esac
-}
-
-# default_model_for offers a sensible starting model per provider; the user can
-# override it at the prompt or via MURTAUGH_NATIVE_MODEL.
-default_model_for() {
-  case "$1" in
-    gemini) printf 'gemini-2.5-pro' ;;
-    anthropic) printf 'claude-sonnet-4-6' ;;
-    openai) printf 'gpt-5' ;;
-    *) printf '' ;;
-  esac
-}
-
-# configure_native_agent probes for the native-agent provider, model, and API
-# key, populating the NATIVE_* globals consumed by write_slack_config. The key is
-# read silently and only ever written to ~/.config/murtaugh/.env.
-configure_native_agent() {
-  NATIVE_PROVIDER=$(prompt_choice MURTAUGH_NATIVE_PROVIDER "Native LLM provider" gemini gemini anthropic openai)
-  NATIVE_API_KEY_ENV=$(api_key_env_for "$NATIVE_PROVIDER")
-  local default_model
-  default_model=$(default_model_for "$NATIVE_PROVIDER")
-  if [[ -n "${MURTAUGH_NATIVE_MODEL:-}" ]]; then
-    NATIVE_MODEL="$MURTAUGH_NATIVE_MODEL"
-  elif [[ $ASSUME_YES -eq 1 ]]; then
-    NATIVE_MODEL="$default_model"
-  else
-    read -r -p "Model (default: ${default_model}): " NATIVE_MODEL
-    NATIVE_MODEL=${NATIVE_MODEL:-$default_model}
-  fi
-  [[ -n "$NATIVE_MODEL" ]] || die "a model is required for the native agent"
-  NATIVE_API_KEY=$(prompt_required MURTAUGH_NATIVE_API_KEY "${NATIVE_PROVIDER} API key (stored in ~/.config/murtaugh/.env)" yes)
-}
-
-resolve_agent_command() {
-  local choice=$1
-  case "$choice" in
-    skip) return 0 ;;
-    opencode|goose|auggie)
-      command -v "$choice" >/dev/null 2>&1 || die "${choice} is not installed or not on PATH"
-      resolve_path "$(command -v "$choice")"
-      ;;
-    custom)
-      local custom_cmd=${MURTAUGH_CUSTOM_AGENT_COMMAND:-}
-      if [[ -z "$custom_cmd" ]]; then
-        [[ $ASSUME_YES -eq 1 ]] && die "MURTAUGH_CUSTOM_AGENT_COMMAND is required for custom chat agent in --yes mode"
-        read -r -p "Custom ACP command path: " custom_cmd
-      fi
-      [[ -x "$custom_cmd" ]] || die "custom command is not executable: ${custom_cmd}"
-      resolve_path "$custom_cmd"
-      ;;
-    *) die "unsupported chat agent choice: ${choice}" ;;
-  esac
-}
-
-# collect_custom_args splits MURTAUGH_CUSTOM_AGENT_ARGS using shell quoting
-# rules. xargs -n1 honors quotes/escapes the same way a shell would when
-# tokenizing a command line, so e.g. `--flag "two words" --other` becomes
-# three array entries with the quoted span preserved.
-collect_custom_args() {
-  local arg_string=${MURTAUGH_CUSTOM_AGENT_ARGS:-}
-  CUSTOM_AGENT_ARGS=()
-  [[ -z "$arg_string" && $ASSUME_YES -eq 0 ]] && read -r -p "Custom ACP command args (optional): " arg_string
-  [[ -z "$arg_string" ]] && return 0
-  while IFS= read -r arg; do
-    [[ -n "$arg" ]] && CUSTOM_AGENT_ARGS+=("$arg")
-  done < <(printf '%s' "$arg_string" | xargs -n1 printf '%s\n' 2>/dev/null)
-}
-
 # login_home prints the home directory the directory service records for the
 # current uid, or nothing when it cannot be resolved.
 login_home() {
@@ -525,13 +392,6 @@ restart_launch_agent_if_needed() {
   local plist="$HOME/Library/LaunchAgents/dev.murtaugh.plist" uid
   [[ -f "$plist" ]] || return 0
   command -v launchctl >/dev/null 2>&1 || return 0
-  # An explicit "no" to MURTAUGH_LOAD_LAUNCH_AGENT means the user does not want
-  # this install touching launchd — write_launch_agent already honoured it, and
-  # restarting here would quietly override that answer.
-  if [[ "$LAUNCH_AGENT_LOAD_CHOICE" == "no" ]]; then
-    log "Not restarting LaunchAgent dev.murtaugh (MURTAUGH_LOAD_LAUNCH_AGENT=no)"
-    return 0
-  fi
   if ! launchd_domain_is_ours; then
     log "Not restarting LaunchAgent dev.murtaugh (HOME=${HOME} is not the login home; refusing to touch the live launchd session)"
     return 0
@@ -551,84 +411,15 @@ restart_launch_agent_if_needed() {
   log "Restarted LaunchAgent dev.murtaugh"
 }
 
-# write_slack_config delegates the oauth block of config.yaml (plus the admin
-# user and chat routing, which go into the config store) to `murtaugh setup
-# slack`. The agent write (`setup agents`, also into the store) is paired here
-# so the daemon never sees an inconsistent intermediate state where chat routing
-# points at an agent that isn't defined yet.
-write_slack_config() {
-  local bin=$1 app=$2 bot=$3 admin=$4 chat_choice=$5 chat_cmd=$6
-  shift 6
-  local setup_args=(setup slack --app-token "$app" --bot-token "$bot" --admin-user "$admin")
-  if [[ "$chat_choice" != "skip" ]]; then
-    setup_args+=(--default-agent default)
-  fi
-  "$bin" "${setup_args[@]}" >&2
-
-  # Native agent: write the provider key to .env, then a native agent into the
-  # store that references it by name. No external binary, no ACP.
-  if [[ "$chat_choice" == "native" ]]; then
-    "$bin" setup env --set "${NATIVE_API_KEY_ENV}=${NATIVE_API_KEY}" >&2
-    "$bin" setup agents --provider "$NATIVE_PROVIDER" --model "$NATIVE_MODEL" \
-      --api-key-env "$NATIVE_API_KEY_ENV" \
-      --tools files --tools terminal --tools skills >&2
-    return 0
-  fi
-
-  local agents_args=(setup agents)
-  if [[ "$chat_choice" != "skip" ]]; then
-    agents_args+=(--command "$chat_cmd")
-    local a
-    for a in "$@"; do agents_args+=(--args "$a"); done
-  fi
-  "$bin" "${agents_args[@]}" >&2
-}
-
-# write_launch_agent delegates the plist to `murtaugh setup launchd`, and
-# optionally loads it via launchctl. Returns silently when the user declined.
+# write_launch_agent installs the LaunchAgent plist WITHOUT loading it.
+#
+# Deliberately not started. Murtaugh cannot do anything until real Slack tokens
+# are in .env, and an agent started here only crash-loops in the background
+# while the operator is still reading the instructions. Starting it is the last
+# step of the printed hand-off, and it is theirs to take.
 write_launch_agent() {
-  local bin=$1 enable_choice load_choice setup_args
-  enable_choice=$(prompt_choice MURTAUGH_ENABLE_LAUNCH_AGENT "Create a launchd LaunchAgent?" yes yes no)
-  [[ "$enable_choice" == "yes" ]] || return 0
-  load_choice=$(prompt_choice MURTAUGH_LOAD_LAUNCH_AGENT "Load the LaunchAgent now?" yes yes no)
-  LAUNCH_AGENT_LOAD_CHOICE=$load_choice
-  setup_args=(setup launchd --binary-path "$bin")
-  # `setup launchd --load` bootstraps into gui/$(id -u) while writing a plist
-  # under $HOME, so it carries the same out-of-sandbox risk as the restart path.
-  if [[ "$load_choice" == "yes" ]]; then
-    if launchd_domain_is_ours; then
-      setup_args+=(--load true)
-    else
-      log "Writing the LaunchAgent plist but not loading it (HOME=${HOME} is not the login home)"
-    fi
-  fi
-  "$bin" "${setup_args[@]}" >&2
-}
-
-# configure_mcp_client delegates the per-client merge to
-# `murtaugh setup mcp-register`. The bash side still gates on whether the
-# client is installed locally so we keep the same error semantics as before.
-configure_mcp_client() {
-  local bin=$1 mcp_client target backup
-  mcp_client=$(prompt_choice MURTAUGH_MCP_CLIENT "Configure Murtaugh as an MCP server in a client?" skip skip opencode auggie goose)
-  case "$mcp_client" in
-    skip) return 0 ;;
-    opencode)
-      command -v opencode >/dev/null 2>&1 || die "OpenCode is not installed or not on PATH"
-      target="$HOME/.config/opencode/opencode.json"
-      "$bin" setup mcp-register --client opencode --binary-path "$bin" >&2 || die "failed to update ${target}; if it contains JSONC comments, please edit it manually"
-      log "Configured OpenCode MCP in ${target}" ;;
-    auggie)
-      command -v auggie >/dev/null 2>&1 || die "Auggie is not installed or not on PATH"
-      target="$HOME/.augment/settings.json"
-      "$bin" setup mcp-register --client auggie --binary-path "$bin" >&2 || die "failed to update ${target}"
-      log "Configured Auggie MCP in ${target}" ;;
-    goose)
-      command -v goose >/dev/null 2>&1 || die "Goose is not installed or not on PATH"
-      target="$HOME/.config/goose/config.yaml"
-      "$bin" setup mcp-register --client goose --binary-path "$bin" >&2 || die "failed to update ${target}"
-      log "Configured Goose MCP in ${target}" ;;
-  esac
+  local bin=$1
+  "$bin" setup launchd --binary-path "$bin" >&2
 }
 
 main() {
@@ -664,84 +455,58 @@ main() {
     die "the installed Murtaugh (${installed_bin}) does not support 'setup' yet. Upgrade to a release that includes the setup tools, or pass --skip-config to update the binary only."
   fi
 
-  # config.yaml is the single on-disk config file on a fresh install (agents,
-  # jobs, and rules now live in the config store, not YAML siblings). An older
-  # install that still has YAML siblings gets them auto-migrated into the store
-  # by the binary on first run, so config.yaml is a sufficient existence check.
-  local config_dir gateway_yaml has_config
+  local config_dir gateway_yaml env_file has_config
   config_dir="$HOME/.config/murtaugh"
   gateway_yaml="$config_dir/config.yaml"
+  env_file="$config_dir/.env"
   has_config=0
   [[ -f "$gateway_yaml" ]] && has_config=1
 
-  local app_token bot_token admin_user chat_choice chat_command=""
-  local -a chat_args=()
-
-  if [[ "$has_config" -eq 1 && "$RECONFIGURE" -eq 0 && "$DRY_RUN" -eq 0 ]]; then
-    log "Existing config detected. Preserving Slack and agent configs by default."
-    log "Use --reconfigure to rewrite them."
-  else
-    if [[ "$DRY_RUN" -eq 1 && "$has_config" -eq 1 && "$RECONFIGURE" -eq 0 ]]; then
-      log "[DRY-RUN] Would preserve existing config files."
-    elif [[ "$DRY_RUN" -eq 1 && "$RECONFIGURE" -eq 1 ]]; then
-      log "[DRY-RUN] Would rewrite config files with backups."
-    elif [[ "$DRY_RUN" -eq 1 && "$has_config" -eq 0 ]]; then
-      log "[DRY-RUN] Would write new config files."
-    fi
-
-    app_token=$(prompt_required MURTAUGH_SLACK_APP_TOKEN "Slack app token (xapp-...)" yes)
-    bot_token=$(prompt_required MURTAUGH_SLACK_BOT_TOKEN "Slack bot token (xoxb-...)" yes)
-    admin_user=$(prompt_required MURTAUGH_ADMIN_USER "Slack admin handle or user ID")
-    [[ "$app_token" == xapp-* ]] || die "Slack app token must start with xapp-"
-    [[ "$bot_token" == xoxb-* ]] || die "Slack bot token must start with xoxb-"
-
-    chat_choice=$(prompt_choice MURTAUGH_CHAT_AGENT "Slack Chat agent" skip skip native opencode goose auggie custom)
-    if [[ "$chat_choice" == "native" ]]; then
-      configure_native_agent
-    elif [[ "$chat_choice" != "skip" ]]; then
-      chat_command=$(resolve_agent_command "$chat_choice")
-    fi
-    case "$chat_choice" in
-      opencode) chat_args=(acp) ;;
-      goose) chat_args=(acp) ;;
-      auggie) chat_args=(--acp --allow-indexing) ;;
-      custom) collect_custom_args; chat_args=("${CUSTOM_AGENT_ARGS[@]}") ;;
-    esac
-
-    mkdir -p "$config_dir"
-    chmod 700 "$config_dir" 2>/dev/null || true
-
-    if [[ "$DRY_RUN" -eq 1 ]]; then
-      log "[DRY-RUN] Would write ${gateway_yaml} and seed the config store"
-    else
-      # Seed embedded defaults first so skills/ + docs land before the
-      # user-provided slack/agents writes overlay on top. On --reconfigure also
-      # refresh the bundled default system prompt to the shipped version (user
-      # config, secrets, and AGENTS.md are always preserved).
-      local boot_args=(setup bootstrap)
-      [[ "$RECONFIGURE" -eq 1 ]] && boot_args+=(--force true)
-      "$installed_bin" "${boot_args[@]}" >&2
-      write_slack_config "$installed_bin" "$app_token" "$bot_token" "$admin_user" "$chat_choice" "$chat_command" ${chat_args[@]+"${chat_args[@]}"}
-      log "Wrote Slack oauth config to ${gateway_yaml}"
-      log "Seeded access, chat routing, and the agent into the config store"
-    fi
-  fi
-
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    log "[DRY-RUN] Would configure LaunchAgent and MCP clients if applicable."
-  else
-    write_launch_agent "$installed_bin"
-    configure_mcp_client "$installed_bin"
+    log "[DRY-RUN] Would seed ${gateway_yaml} and ${env_file}, and write the LaunchAgent plist without loading it."
+    log "Murtaugh MCP command: ${installed_bin} mcp"
+    return 0
   fi
 
+  mkdir -p "$config_dir"
+  chmod 700 "$config_dir" 2>/dev/null || true
+
+  if [[ "$has_config" -eq 1 && "$RECONFIGURE" -eq 0 ]]; then
+    log "Existing config detected at ${gateway_yaml}; leaving it alone."
+    log "Use --reconfigure to re-seed the skeleton and templates."
+  else
+    # setup bootstrap seeds the config directory: the config.yaml skeleton, the
+    # .env template, and the Block Kit templates. It writes no credentials and
+    # asks no questions.
+    local boot_args=(setup bootstrap)
+    [[ "$RECONFIGURE" -eq 1 ]] && boot_args+=(--force true)
+    "$installed_bin" "${boot_args[@]}" >&2
+  fi
+
+  write_launch_agent "$installed_bin"
   restart_launch_agent_if_needed
 
+  log ""
+  log "Murtaugh is installed but not running yet. Three steps left:"
+  log ""
+  log "  1. Put your Slack tokens in   ${env_file}"
+  log "       SLACK_APP_TOKEN=xapp-..."
+  log "       SLACK_BOT_TOKEN=xoxb-..."
+  log "  2. Review the storage backend in ${gateway_yaml}"
+  log "       SQLite is the default and needs nothing. Firestore and Postgres"
+  log "       are commented out there; uncomment one to run several nodes."
+  log "  3. Start it:"
+  log "       launchctl kickstart -k gui/\$(id -u)/dev.murtaugh"
+  log ""
+  log "Then send Murtaugh a direct message in Slack. The first person to do so"
+  log "becomes its administrator, and it walks you through creating an agent"
+  log "from there. The rest of setup happens in Slack, not here."
+  log ""
   log "Murtaugh MCP command: ${installed_bin} mcp"
-  log "Done. Re-run this installer any time to update or regenerate config."
 }
 
 # Only run main when executed directly, so unit tests can source the
-# script to exercise individual helpers like prompt_choice in isolation.
+# script to exercise individual helpers in isolation.
 #
 # The `:-$0` default matters for the `curl … | bash` install path: bash then
 # reads the script from stdin, BASH_SOURCE is empty, and a bare

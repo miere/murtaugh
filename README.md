@@ -29,12 +29,18 @@ self-contained binary that connects to your workspace over Socket Mode and adds:
 
 ## Quick start
 
-**macOS** — the installer downloads the right binary, seeds your config, and
-optionally installs the background daemon:
+**macOS** — the installer asks nothing. It installs the binary, seeds a config
+skeleton, and registers the background daemon without starting it:
 
 ```sh
 curl -fsSL https://github.com/miere/murtaugh/releases/latest/download/install_macos.sh | bash
 ```
+
+It then prints three steps: put your Slack tokens in `~/.config/murtaugh/.env`,
+pick a storage backend in `config.yaml` (SQLite by default; Firestore and
+Postgres are commented out there), and start the daemon. Everything after that —
+the agent, its model, its credentials — is configured by direct-messaging
+Murtaugh in Slack. The first person to DM it becomes its administrator.
 
 **From source** (requires [Go 1.26+](https://go.dev/dl/)):
 

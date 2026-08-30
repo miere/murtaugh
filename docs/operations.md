@@ -37,16 +37,24 @@ On other platforms, run `murtaugh slack gateway` under your own supervisor
 
 ## Applying config changes
 
-The gateway loads config **once at startup** — it never hot-reloads. After a
-`murtaugh cfg …` change, the running daemon *suggests* a restart (an admin-only
-button) but applies nothing until you restart. (Every `cfg` change is validated
-against the whole store immediately, so a rejected change never reaches the
-running gateway in the first place.)
+The gateway **hot-reloads under admin approval**. The leader polls the config
+store, and any change it did not make itself is rendered as a YAML diff and sent
+to the admin's DM with **Apply Modifications** / **Rollback**.
 
-**Restart** is admin-only — `/murtaugh restart`, or the suggestion button. It
-preserves a "restarting… / back online" notice across the restart so users aren't
-left wondering. Schedule edits, agent changes, access-list changes, and journal
-settings all take effect on the next restart.
+- **Apply** performs a soft reload: the gateway stops serving, is rebuilt from
+  the new configuration, and starts again — all while holding the leader lease,
+  so the cluster never sees a gap. Agents own backend process trees decided at
+  construction, so a reload restarts them: any conversation or job in flight is
+  stopped, and the approval card says so before you click.
+- **Rollback** — and a timeout, and an unreachable admin — writes the running
+  configuration back over the edit. None of those is approval.
+
+(Every `cfg` change is still validated against the whole store immediately, so a
+rejected change never reaches the store in the first place.)
+
+**Restart** remains available — `/murtaugh restart`, or the suggestion button —
+and is admin-only. It preserves a "restarting… / back online" notice across the
+restart so users aren't left wondering.
 
 ### Auto-migration on upgrade
 
