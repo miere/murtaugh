@@ -204,6 +204,21 @@ func (f *Flow) Run(ctx context.Context, req Request) (Outcome, error) {
 		return finish(Outcome{}, StateFailed, err.Error())
 	}
 
+	// Register before the card is posted, never after. The corr id is already
+	// baked into the buttons, so the instant Slack has the message an admin can
+	// click it — and a click that arrives before this map entry exists is
+	// rejected with "no authentication request is waiting", silently losing a
+	// decision the admin believes they made.
+	s := &session{
+		toolName:  req.ToolName,
+		needsCode: req.Profile.NeedsCode,
+		primary:   make(chan struct{}),
+		denied:    make(chan struct{}),
+		code:      make(chan string, 1),
+	}
+	f.register(corr, s)
+	defer f.unregister(corr)
+
 	adminBlocks, err := f.cards.render(AdminTemplate, f.data(req, corr, url, attemptAt, StatePending, "", true, false))
 	if err != nil {
 		return finish(Outcome{}, StateFailed, err.Error())
@@ -217,16 +232,6 @@ func (f *Flow) Run(ctx context.Context, req Request) (Outcome, error) {
 		return finish(Outcome{}, StateFailed, "could not deliver the authentication card to the admin: "+err.Error())
 	}
 	adminChannel, adminTS = postedAdmin.Channel, postedAdmin.TS
-
-	s := &session{
-		toolName:  req.ToolName,
-		needsCode: req.Profile.NeedsCode,
-		primary:   make(chan struct{}),
-		denied:    make(chan struct{}),
-		code:      make(chan string, 1),
-	}
-	f.register(corr, s)
-	defer f.unregister(corr)
 
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()

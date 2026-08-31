@@ -34,6 +34,11 @@ type syncAPI struct {
 
 	openDMErr error
 	postErr   error
+
+	// onPost, when set, runs inside PostMessage after the message has been
+	// recorded — standing in for the instant Slack has delivered the card and a
+	// human could already be clicking it.
+	onPost func(index int, p slacklib.PostMessageParams)
 }
 
 func newSyncAPI() *syncAPI {
@@ -48,7 +53,13 @@ func (a *syncAPI) PostMessage(_ context.Context, p slacklib.PostMessageParams) (
 	}
 	a.posts = append(a.posts, p)
 	ts := fmt.Sprintf("ts-%d", len(a.posts))
+	index := len(a.posts)
+	hook := a.onPost
 	a.mu.Unlock()
+
+	if hook != nil {
+		hook(index, p)
+	}
 
 	select {
 	case a.postCh <- struct{}{}:
@@ -480,6 +491,43 @@ func TestNonAdminCannotResolve(t *testing.T) {
 	}
 	if o := <-result; !o.Denied {
 		t.Fatalf("expected the admin's denial to land, got %+v", o)
+	}
+}
+
+// A click can arrive the moment Slack delivers the card — the corr id is
+// already in the buttons, so there is no grace period. This pins the ordering
+// that makes that safe: the session must be registered BEFORE the admin card is
+// posted. With the two reversed, a fast admin's decision was rejected with "no
+// authentication request is waiting" and silently lost, which showed up as an
+// occasional CI failure and would have been an unreproducible bug in the field.
+func TestClickDuringCardDeliveryIsNotLost(t *testing.T) {
+	api := newSyncAPI()
+	f := newTestFlow(api)
+	p := script(t, true, `echo "Go to https://example.com/auth?x=1"; read code; echo ok`)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var clickErr error
+	var once sync.Once
+	api.onPost = func(index int, posted slacklib.PostMessageParams) {
+		if index != 2 { // 1 is the requester notice; 2 is the admin card
+			return
+		}
+		once.Do(func() {
+			clickErr = f.HandleClick(ctx, corrOf(t, posted.Blocks), ActionDeny, adminID, "t")
+		})
+	}
+
+	o, err := f.Run(ctx, request(p))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if clickErr != nil {
+		t.Fatalf("a click delivered with the card was rejected: %v", clickErr)
+	}
+	if !o.Denied {
+		t.Fatalf("the denial did not take effect: %+v", o)
 	}
 }
 
