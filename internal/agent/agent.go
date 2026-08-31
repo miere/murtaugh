@@ -217,6 +217,34 @@ func TurnLocationFromContext(ctx context.Context) (TurnLocation, bool) {
 	return loc, ok && loc.ChannelID != ""
 }
 
+type turnEnvKey struct{}
+
+// WithTurnEnv returns ctx carrying the calling agent's environment overrides as
+// KEY=VALUE pairs.
+//
+// It exists because a tool that spawns a process on an agent's behalf is not the
+// agent: it runs inside the daemon, so it inherits the DAEMON's environment. For
+// most tools that is harmless, but `auth.request` shells out to the very CLI the
+// agent is about to use — and if the agent's profile redirects that CLI's state
+// (CLOUDSDK_CONFIG, AWS_CONFIG_FILE, …) while the sign-in does not, the
+// credentials land in one place and are read from another. The symptom is an
+// authentication that reports success and changes nothing.
+//
+// Empty for a native agent, which has no process environment of its own, and for
+// CLI/MCP callers, which are not acting for any agent.
+func WithTurnEnv(ctx context.Context, env []string) context.Context {
+	if len(env) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, turnEnvKey{}, append([]string(nil), env...))
+}
+
+// TurnEnvFromContext returns the calling agent's environment overrides, or nil.
+func TurnEnvFromContext(ctx context.Context) []string {
+	env, _ := ctx.Value(turnEnvKey{}).([]string)
+	return env
+}
+
 // PermissionOption is one choice an ACP agent offers for a session/request_permission
 // request. Kind is the ACP PermissionOptionKind ("allow_once", "allow_always",
 // "reject_once", "reject_always"); ID is the optionId echoed back in the response.

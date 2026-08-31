@@ -31,6 +31,11 @@ type acpAggregator struct {
 	approver mcp.Approver
 	mcpCfgs  []mcpclient.ServerConfig
 	logger   *slog.Logger
+	// agentEnv is the profile's own environment, carried onto every tool-call
+	// context so a bridged tool that spawns a process on this agent's behalf
+	// spawns it with the AGENT's environment rather than the daemon's. See
+	// agent.WithTurnEnv for why that distinction has teeth.
+	agentEnv []string
 
 	// The external MCP servers are opened lazily on first use (it is network I/O,
 	// kept out of gateway startup) and their tools merged with the built-ins once.
@@ -56,7 +61,15 @@ func newACPAggregator(server *mcpbridge.Server, registry *tools.Registry, resolv
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &acpAggregator{server: server, binary: binary, builtins: ts, approver: approver, mcpCfgs: mcpCfgs, logger: logger}, nil
+	return &acpAggregator{
+		server:   server,
+		binary:   binary,
+		builtins: ts,
+		approver: approver,
+		mcpCfgs:  mcpCfgs,
+		logger:   logger,
+		agentEnv: resolved.Profile.EnvOverrides(),
+	}, nil
 }
 
 // resolvedToolset opens the external MCP servers once (lazily) and returns the
@@ -88,7 +101,7 @@ func (a *acpAggregator) Close() error {
 // injected into every tool-call context so the approver posts in the right
 // thread.
 func (a *acpAggregator) RegisterSession(meta agent.SessionMetadata) (agent.MCPServerSpec, func(), error) {
-	decorate := locationDecorator(meta)
+	decorate := turnDecorator(meta, a.agentEnv)
 	token, err := a.server.Register(mcpbridge.Session{
 		Tools:       a.resolvedToolset(),
 		Approver:    a.approver,
@@ -109,16 +122,27 @@ func (a *acpAggregator) RegisterSession(meta agent.SessionMetadata) (agent.MCPSe
 	return spec, func() { a.server.Unregister(token) }, nil
 }
 
-// locationDecorator returns a context decorator that carries the session's Slack
-// location, or nil when there is none (non-chat sessions stay ungated by
-// location, matching GateApprover's headless behaviour).
-func locationDecorator(meta agent.SessionMetadata) func(context.Context) context.Context {
-	if strings.TrimSpace(meta.ChannelID) == "" {
+// turnDecorator returns a context decorator that carries what a bridged tool
+// needs to know about its caller: the session's Slack location (so an
+// interactive tool posts in the right thread) and the agent's own environment
+// (so a tool that spawns a process spawns it as the agent, not as the daemon).
+//
+// It returns nil only when there is NEITHER — a non-chat session for an agent
+// with no environment stays undecorated, matching GateApprover's headless
+// behaviour. A headless session for an agent that DOES have an environment still
+// gets it: a delegated job authenticating gcloud has the same split-brain problem
+// a chat turn does, and no thread to report it in.
+func turnDecorator(meta agent.SessionMetadata, agentEnv []string) func(context.Context) context.Context {
+	hasLocation := strings.TrimSpace(meta.ChannelID) != ""
+	if !hasLocation && len(agentEnv) == 0 {
 		return nil
 	}
 	loc := agent.TurnLocation{ChannelID: meta.ChannelID, ThreadTS: meta.ThreadTS}
 	return func(ctx context.Context) context.Context {
-		return agent.WithTurnLocation(ctx, loc)
+		if hasLocation {
+			ctx = agent.WithTurnLocation(ctx, loc)
+		}
+		return agent.WithTurnEnv(ctx, agentEnv)
 	}
 }
 

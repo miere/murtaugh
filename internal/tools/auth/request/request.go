@@ -130,18 +130,7 @@ func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 		return nil, fmt.Errorf("Error: %s", err.Error())
 	}
 
-	req := authcard.Request{
-		ToolName: toolName,
-		Profile:  profile,
-	}
-	// Outside a Slack turn (CLI/MCP) there is no requester to notify, and the
-	// flow collapses to the admin card alone.
-	if loc, ok := agent.TurnLocationFromContext(ctx); ok {
-		req.Requester = authcard.Destination{ChannelID: loc.ChannelID, ThreadTS: loc.ThreadTS}
-		req.RequesterUserID = loc.UserID
-	}
-
-	outcome, err := t.flow.Run(ctx, req)
+	outcome, err := t.flow.Run(ctx, newRequest(ctx, toolName, profile))
 	if err != nil {
 		return nil, fmt.Errorf("Error: %s", err.Error())
 	}
@@ -158,6 +147,29 @@ func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 	default:
 		return nil, fmt.Errorf("Error: authentication for %s failed: %s", toolName, fallback(outcome.Reason, "no further detail was reported"))
 	}
+}
+
+// newRequest assembles what the flow needs from the turn context.
+//
+// Both reads are of the CALLER, not of the arguments, and neither can be
+// supplied by the model: the location decides which thread hears about the
+// request, and the environment decides where the credential is written. A model
+// that could name either could redirect somebody else's sign-in.
+func newRequest(ctx context.Context, toolName string, profile auth.Profile) authcard.Request {
+	req := authcard.Request{
+		ToolName: toolName,
+		Profile:  profile,
+		// The sign-in has to run in the same environment as the agent that asked
+		// for it, or the credential lands where the agent will not look for it.
+		Env: agent.TurnEnvFromContext(ctx),
+	}
+	// Outside a Slack turn (CLI/MCP) there is no requester to notify, and the
+	// flow collapses to the admin card alone.
+	if loc, ok := agent.TurnLocationFromContext(ctx); ok {
+		req.Requester = authcard.Destination{ChannelID: loc.ChannelID, ThreadTS: loc.ThreadTS}
+		req.RequesterUserID = loc.UserID
+	}
+	return req
 }
 
 func fallback(s, alt string) string {

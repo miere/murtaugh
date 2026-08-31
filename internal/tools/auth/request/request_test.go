@@ -2,11 +2,13 @@ package request
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/miere/murtaugh/assets"
 	"github.com/miere/murtaugh/internal/agent"
+	"github.com/miere/murtaugh/internal/auth"
 	"github.com/miere/murtaugh/internal/slack/authcard"
 	slacklib "github.com/miere/murtaugh/internal/slack/client"
 )
@@ -145,4 +147,36 @@ func newFlow() *authcard.Flow {
 		"", // no admin — the fail-closed default for these tests
 		nil,
 	)
+}
+
+// TestCarriesTheCallingAgentsEnvironment is the fix for a live failure: the
+// admin completed a gcloud sign-in, it reported success, and the agent still
+// could not proceed. The tool runs inside the daemon, so without this the
+// credential is written to the DAEMON's ~/.config/gcloud while the agent reads
+// the CLOUDSDK_CONFIG its own profile sets.
+func TestCarriesTheCallingAgentsEnvironment(t *testing.T) {
+	profile, err := auth.Resolve("gcloud", "", false)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	env := []string{"CLOUDSDK_CONFIG=/srv/work/.gcloud"}
+	ctx := agent.WithTurnEnv(context.Background(), env)
+
+	req := newRequest(ctx, "gcp-mcp", profile)
+	if !slices.Equal(req.Env, env) {
+		t.Errorf("request env = %v, want the calling agent's %v", req.Env, env)
+	}
+}
+
+// TestNoAgentEnvironmentLeavesItInherited. A native agent and a CLI caller both
+// have nothing to say here, and must not pin a snapshot of the daemon's
+// environment in place of inheriting it.
+func TestNoAgentEnvironmentLeavesItInherited(t *testing.T) {
+	profile, err := auth.Resolve("gcloud", "", false)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if req := newRequest(context.Background(), "gcp-mcp", profile); req.Env != nil {
+		t.Errorf("request env = %v, want nil so the process inherits", req.Env)
+	}
 }
