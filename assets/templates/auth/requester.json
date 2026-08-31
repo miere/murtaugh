@@ -19,7 +19,7 @@
 			"is_collapsible": false,
 			"default_collapsed": false,
 			"has_header_divider": true,
-			"width": "full",
+			"width": "wide",
 			"child_blocks": [
 				{
 					"type": "rich_text",
