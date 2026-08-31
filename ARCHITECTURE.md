@@ -103,7 +103,8 @@ internal/agentbuild/  Kind-aware backend builder (native / ACP / claude_code).
 internal/election/    Leader election: the lifecycle runner, the suspend-safe
                       gate, and the journal of promotions and stand-downs.
 internal/onboarding/  The agent-setup form's domain: provider catalogue, model
-                      discovery, and the two profiles a completed form produces.
+                      discovery, the tool-family and confinement catalogues, and
+                      the two profiles a completed form produces.
 internal/jsontemplate/ JSON-document templating with JSON-safe escaping funcs.
                       The single renderer behind every Block Kit template.
 internal/llm/         Provider-agnostic LLM boundary over litellm (gemini /

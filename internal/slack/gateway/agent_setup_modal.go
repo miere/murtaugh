@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -39,6 +40,18 @@ const (
 	actionModel  = "model"
 	blockWorkDir = "murtaugh_agent_setup_workdir"
 	actionWork   = "workdir"
+	blockTools   = "murtaugh_agent_setup_tools"
+	actionTools  = "tools"
+	blockGuards  = "murtaugh_agent_setup_guards"
+	actionGuards = "guards"
+)
+
+// Values of the two guards. They share one checkbox group because they answer
+// the same question — how much of this machine the agent reaches — and reading
+// that as one list is simpler than two blocks that must both be present.
+const (
+	guardSandboxed  = "sandboxed"
+	guardRestricted = "restricted"
 )
 
 func plain(text string) *slack.TextBlockObject {
@@ -67,6 +80,8 @@ func buildSetupModal(d onboarding.Draft) (slack.ModalViewRequest, error) {
 		blocks, submit = credentialsStep(d)
 	case onboarding.StepModel:
 		blocks, submit = modelStep(d)
+	case onboarding.StepOptions:
+		blocks, submit = optionsStep(d)
 	default:
 		return slack.ModalViewRequest{}, fmt.Errorf("unknown setup step %q", d.Step)
 	}
@@ -143,7 +158,7 @@ func credentialsStep(d onboarding.Draft) ([]slack.Block, string) {
 	return blocks, "Fetch models"
 }
 
-// modelStep asks for the model and the workspace, and is the last step.
+// modelStep asks for the model and the workspace.
 func modelStep(d onboarding.Draft) ([]slack.Block, string) {
 	var blocks []slack.Block
 
@@ -168,7 +183,86 @@ func modelStep(d onboarding.Draft) ([]slack.Block, string) {
 	blocks = append(blocks, slack.NewInputBlock(blockWorkDir, plain("Work directory"),
 		plain("Where the general agent may read and write. Your tweaker profile is rooted at the config directory instead."), work))
 
+	return blocks, "Continue"
+}
+
+// optionsStep asks how far the general agent is trusted, and is the last step.
+//
+// The guards are shown only where they can be honoured: confinement needs a
+// process to confine and a host that can confine it, and pinning the cloud SDKs
+// needs a process environment to pin them in. A native backend has neither, so
+// for it this page is the tool picker alone rather than two boxes that would
+// silently do nothing.
+func optionsStep(d onboarding.Draft) ([]slack.Block, string) {
+	blocks := []slack.Block{
+		slack.NewSectionBlock(mrkdwn(
+			"Last one. This decides what the *general* agent may reach — your own `tweaker` profile always gets everything."),
+			nil, nil),
+	}
+
+	options := make([]*slack.OptionBlockObject, 0, len(onboarding.ToolFamilies))
+	initial := make([]*slack.OptionBlockObject, 0, len(onboarding.ToolFamilies))
+	chosen := make(map[string]bool, len(d.Tools))
+	for _, name := range d.EffectiveTools() {
+		chosen[name] = true
+	}
+	for _, family := range onboarding.ToolFamilies {
+		label := family.Label
+		if family.AdminOnly {
+			label += " (admin)"
+		}
+		opt := slack.NewOptionBlockObject(family.Name,
+			plain(truncate(label, 75)), plain(truncate(family.Description, 75)))
+		options = append(options, opt)
+		if chosen[family.Name] {
+			initial = append(initial, opt)
+		}
+	}
+	tools := slack.NewOptionsMultiSelectBlockElement(slack.MultiOptTypeStatic,
+		plain("Select tool families"), actionTools, options...)
+	if len(initial) > 0 {
+		tools.WithInitialOptions(initial...)
+	}
+	// Optional so the operator can clear it: an agent with no tools is a
+	// legitimate choice (it can still hold a conversation), and Slack would
+	// otherwise refuse to submit an emptied picker.
+	blocks = append(blocks, optionalInput(blockTools, "Tool families",
+		"What the general agent may call. The ones marked (admin) can reconfigure Murtaugh itself.", tools))
+
+	if guards := guardOptions(d); len(guards) > 0 {
+		group := slack.NewCheckboxGroupsBlockElement(actionGuards, guards...)
+		var checked []*slack.OptionBlockObject
+		for _, opt := range guards {
+			if (opt.Value == guardSandboxed && d.Sandboxed) || (opt.Value == guardRestricted && d.Restricted) {
+				checked = append(checked, opt)
+			}
+		}
+		group.InitialOptions = checked
+		blocks = append(blocks, optionalInput(blockGuards, "Confinement",
+			"Both apply to the general agent's process only.", group))
+	}
+
 	return blocks, "Apply"
+}
+
+// guardOptions returns the confinement checkboxes this draft can honour, in
+// display order. Empty for a backend or a host that supports neither.
+func guardOptions(d onboarding.Draft) []*slack.OptionBlockObject {
+	if !d.ProcessBacked() {
+		return nil
+	}
+	var out []*slack.OptionBlockObject
+	for _, mode := range onboarding.AvailableSandboxModes() {
+		out = append(out, slack.NewOptionBlockObject(guardSandboxed,
+			plain(truncate(mode.Label, 75)), plain(truncate(mode.Description, 75))))
+		// One checkbox, not one per mode: the profile takes a single sandbox
+		// mode, so a second option could only ever contradict the first.
+		break
+	}
+	out = append(out, slack.NewOptionBlockObject(guardRestricted,
+		plain("Agent restricted"),
+		plain("Point its gcloud, AWS and Gradle state at its workspace, not your home.")))
+	return out
 }
 
 // waitingModal is shown while a provider is asked for its models.
@@ -256,6 +350,19 @@ func readDraft(d onboarding.Draft, state *slack.ViewState) onboarding.Draft {
 		}
 		return ""
 	}
+	multiSelected := func(blockID, actionID string) []string {
+		block, ok := state.Values[blockID]
+		if !ok {
+			return nil
+		}
+		out := make([]string, 0, len(block[actionID].SelectedOptions))
+		for _, opt := range block[actionID].SelectedOptions {
+			if v := strings.TrimSpace(opt.Value); v != "" {
+				out = append(out, v)
+			}
+		}
+		return out
+	}
 
 	if v := value(blockName, actionName); v != "" {
 		d.Name = v
@@ -283,6 +390,19 @@ func readDraft(d onboarding.Draft, state *slack.ViewState) onboarding.Draft {
 	}
 	if v := value(blockWorkDir, actionWork); v != "" {
 		d.WorkDir = v
+	}
+	// Both of these are read by PRESENCE of the block, not by a non-empty
+	// value, for the same reason the endpoint is: unticking every box is a real
+	// answer, and the "leave it alone when blank" rule the fields above follow
+	// would make it impossible to give.
+	if _, shown := state.Values[blockTools]; shown {
+		d.Tools = multiSelected(blockTools, actionTools)
+		d.ToolsChosen = true
+	}
+	if _, shown := state.Values[blockGuards]; shown {
+		guards := multiSelected(blockGuards, actionGuards)
+		d.Sandboxed = slices.Contains(guards, guardSandboxed)
+		d.Restricted = slices.Contains(guards, guardRestricted)
 	}
 	return d
 }
