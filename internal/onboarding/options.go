@@ -182,7 +182,7 @@ func RestrictedEnv(workDir string) map[string]string {
 		// produces. Any other name points at something that never appears, and
 		// the SDKs fail to load ADC rather than falling back.
 		"GOOGLE_APPLICATION_CREDENTIALS": filepath.Join(workDir, ".gcloud", "application_default_credentials.json"),
-		"AWS_CONFIG_FILE":                       filepath.Join(workDir, ".aws", "config"),
-		"AWS_SHARED_CREDENTIALS_FILE":           filepath.Join(workDir, ".aws", "shared_creds"),
+		"AWS_CONFIG_FILE":                filepath.Join(workDir, ".aws", "config"),
+		"AWS_SHARED_CREDENTIALS_FILE":    filepath.Join(workDir, ".aws", "shared_creds"),
 	}
 }
