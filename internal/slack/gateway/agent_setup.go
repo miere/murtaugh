@@ -144,6 +144,9 @@ func (a *Gateway) handleAgentSetupSubmit(event socketmode.Event, interaction sla
 		go a.discoverAndAdvance(interaction.View.ID, draft)
 
 	case onboarding.StepModel:
+		a.advanceSetup(event, draft.Next())
+
+	case onboarding.StepOptions:
 		a.applySetup(event, interaction, draft)
 
 	default:
@@ -211,11 +214,17 @@ func (a *Gateway) applySetup(event socketmode.Event, interaction slack.Interacti
 	admin := strings.TrimSpace(a.access().AdminUser)
 	profiles, err := onboarding.Build(draft, a.configDir, admin)
 	if err != nil {
-		a.ackViewErrors(event, map[string]string{blockWorkDir: err.Error()})
+		// Marked against the tool picker, not the work directory: Slack drops a
+		// field error naming a block the OPEN view does not contain, and by this
+		// point the operator is looking at the options step.
+		a.ackViewErrors(event, map[string]string{blockTools: err.Error()})
 		return
 	}
 	if a.writeAgentProfiles == nil {
-		a.ackViewErrors(event, map[string]string{blockWorkDir: "This build cannot write agent profiles."})
+		// Marked against the tool picker, not the work directory: Slack drops a
+		// field error naming a block the OPEN view does not contain, and by this
+		// point the operator is looking at the options step.
+		a.ackViewErrors(event, map[string]string{blockTools: "This build cannot write agent profiles."})
 		return
 	}
 

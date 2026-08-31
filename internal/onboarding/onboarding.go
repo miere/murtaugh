@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -98,8 +99,16 @@ const (
 	// StepCredentials asks for the credential and endpoint. Skipped entirely
 	// for a backend that authenticates itself.
 	StepCredentials Step = "credentials"
-	// StepModel asks for the model and the workspace, then submits.
+	// StepModel asks for the model and the workspace.
 	StepModel Step = "model"
+	// StepOptions asks how far the general agent is trusted — which tool
+	// families it may call, whether its process is confined, and whether its
+	// cloud SDKs are pinned to its workspace — then submits.
+	//
+	// It comes last because each of its answers is scoped by an earlier one:
+	// confinement means nothing for a backend that runs in-process, and the
+	// cloud-SDK pinning needs the workspace the model step collected.
+	StepOptions Step = "options"
 )
 
 // Draft is the form's accumulated state, carried between steps.
@@ -120,10 +129,37 @@ type Draft struct {
 	Models  []string `json:"models,omitempty"`
 	Model   string   `json:"model,omitempty"`
 	WorkDir string   `json:"workdir,omitempty"`
+	// Tools is the general profile's tool allowlist, as chosen on the options
+	// step. Distinguished from "not answered yet" by ToolsChosen, because an
+	// operator clearing every box is a real answer — an agent that can hold a
+	// conversation and nothing else — and must not silently re-seed the
+	// defaults.
+	Tools       []string `json:"tools,omitempty"`
+	ToolsChosen bool     `json:"tools_chosen,omitempty"`
+	// Sandboxed confines the general agent's process. Only meaningful for a
+	// process backend on a host with a confinement to apply.
+	Sandboxed bool `json:"sandboxed,omitempty"`
+	// Restricted points the agent's cloud SDKs at its own workspace instead of
+	// the operator's home directory. See RestrictedEnv.
+	Restricted bool `json:"restricted,omitempty"`
 }
 
 // NewDraft starts a form.
-func NewDraft() Draft { return Draft{Step: StepProvider, Name: "default", Command: "claude"} }
+//
+// The tool defaults and the sandbox are pre-answered rather than left blank: a
+// form whose safe choice is the one already ticked is answered correctly by an
+// operator who clicks straight through it, and the confinement default is what
+// onboarding applied before this step existed.
+func NewDraft() Draft {
+	_, canSandbox := DefaultSandboxMode()
+	return Draft{
+		Step:      StepProvider,
+		Name:      "default",
+		Command:   "claude",
+		Tools:     DefaultToolFamilies(),
+		Sandboxed: canSandbox,
+	}
+}
 
 // Next advances the draft to the step its current answers imply.
 //
@@ -132,6 +168,15 @@ func NewDraft() Draft { return Draft{Step: StepProvider, Name: "default", Comman
 func (d Draft) Next() Draft {
 	switch d.Step {
 	case StepProvider:
+		// The backend is only known now, and it decides whether the guards can
+		// exist at all. Clearing them here rather than at Build keeps the
+		// invariant next to the answer that creates it: a native draft never
+		// carries a guard the options step will not show, so it cannot fail
+		// validation over a box the operator was never offered.
+		if !d.ProcessBacked() {
+			d.Sandboxed = false
+			d.Restricted = false
+		}
 		if p, ok := ProviderFor(d.Kind); ok && !p.NeedsKey {
 			d.Step = StepModel
 			d.Models = ClaudeCodeModels
@@ -139,11 +184,24 @@ func (d Draft) Next() Draft {
 		}
 		d.Step = StepCredentials
 		return d
+	case StepModel:
+		d.Step = StepOptions
+		return d
+	case StepOptions:
+		// The last step. Advancing past it is the caller's bug, and moving the
+		// form backwards would be a worse answer than standing still.
+		return d
 	default:
 		d.Step = StepModel
 		return d
 	}
 }
+
+// ProcessBacked reports whether the draft's backend runs as a child process,
+// which is what makes confinement and a per-agent environment meaningful. A
+// native agent has neither: it runs in-process, so there is nothing to confine
+// and no process environment of its own to set.
+func (d Draft) ProcessBacked() bool { return d.Kind == KindClaudeCode }
 
 // Validate reports whether the draft is complete enough to build profiles.
 func (d Draft) Validate() error {
@@ -174,7 +232,33 @@ func (d Draft) Validate() error {
 	if d.Kind == KindClaudeCode && strings.TrimSpace(d.Command) == "" {
 		return errors.New("the claude command is required")
 	}
+	// Refused rather than silently downgraded: an operator who asked for
+	// confinement and got none would believe the agent was confined, which is
+	// worse than either honest outcome.
+	if d.Sandboxed {
+		if !d.ProcessBacked() {
+			return errors.New("only a process-backed agent can be sandboxed; this backend runs in-process")
+		}
+		if _, ok := DefaultSandboxMode(); !ok {
+			return fmt.Errorf("sandboxing is not available on %s", runtime.GOOS)
+		}
+	}
+	if d.Restricted && !d.ProcessBacked() {
+		return errors.New("only a process-backed agent has an environment of its own to restrict")
+	}
 	return nil
+}
+
+// EffectiveTools is the general profile's allowlist: what the operator chose,
+// or the defaults until they have been asked.
+func (d Draft) EffectiveTools() []string {
+	if d.ToolsChosen {
+		return append([]string(nil), d.Tools...)
+	}
+	if len(d.Tools) > 0 {
+		return append([]string(nil), d.Tools...)
+	}
+	return DefaultToolFamilies()
 }
 
 // Encode renders the draft for a modal's private_metadata.
@@ -261,8 +345,21 @@ func Build(d Draft, configDir, adminUser string) (Profiles, error) {
 	general.WorkDir = workDir
 	general.ProgressDisplay = string(config.ProgressDisplayTasks)
 	general.Approval = config.ApprovalConfig{Terminal: "prompt", Requests: "ask"}
-	if d.Kind == KindClaudeCode {
-		general.Sandbox = config.SandboxConfig{Mode: config.SandboxModeSeatbelt}
+	// The allowlist is what decides whether the agent has any tools at all.
+	// Left empty, toolset.Resolve selects nothing and the profile comes up
+	// mute — able to talk, unable to act, with no error anywhere to say why.
+	general.Tools = d.EffectiveTools()
+	if d.ProcessBacked() {
+		if d.Sandboxed {
+			if mode, ok := DefaultSandboxMode(); ok {
+				general.Sandbox = config.SandboxConfig{Mode: mode}
+			}
+		} else {
+			general.Sandbox = config.SandboxConfig{Mode: config.SandboxModeOff}
+		}
+		if d.Restricted {
+			setBackendEnv(&general, RestrictedEnv(workDir))
+		}
 	}
 
 	tweaker := d.backend()
@@ -274,6 +371,10 @@ func Build(d Draft, configDir, adminUser string) (Profiles, error) {
 	tweaker.ProgressDisplay = string(config.ProgressDisplayTasks)
 	tweaker.Approval = config.ApprovalConfig{Terminal: "off", Requests: "auto-allow"}
 	tweaker.Sandbox = config.SandboxConfig{Mode: config.SandboxModeOff}
+	// Every tool family, for the same reason the gates are off: this profile
+	// exists to configure Murtaugh, it answers one person's DMs, and a family
+	// withheld here is an install the administrator cannot finish.
+	tweaker.Tools = AllToolFamilies()
 	// The bundled skills are what teach an agent how Murtaugh is configured, so
 	// the profile whose job is reconfiguring it gets them on disk.
 	tweaker.ExportSkillsToFS = bundledSkills()
@@ -319,6 +420,30 @@ func (d Draft) backend() config.AgentProfile {
 		BaseURL:   strings.TrimSpace(d.BaseURL),
 		APIKeyEnv: strings.TrimSpace(d.KeyEnv),
 	}}
+}
+
+// setBackendEnv layers env onto whichever process backend the profile carries,
+// leaving a native profile untouched (it has no process, so no environment).
+// Existing entries win: this adds hardening, and silently overwriting something
+// the operator set would be a surprise in the direction of breaking their agent.
+func setBackendEnv(profile *config.AgentProfile, env map[string]string) {
+	var target *map[string]string
+	switch {
+	case profile.ClaudeCode != nil:
+		target = &profile.ClaudeCode.Env
+	case profile.ACP != nil:
+		target = &profile.ACP.Env
+	default:
+		return
+	}
+	if *target == nil {
+		*target = make(map[string]string, len(env))
+	}
+	for key, value := range env {
+		if _, exists := (*target)[key]; !exists {
+			(*target)[key] = value
+		}
+	}
 }
 
 // bundledSkills lists every skill shipped in the binary, sorted so two runs

@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -104,8 +105,8 @@ func TestClaudeCodeSkipsStraightToModel(t *testing.T) {
 	if !hasBlock(ids, blockModel) || !hasBlock(ids, blockWorkDir) {
 		t.Errorf("model step is missing fields: %v", ids)
 	}
-	if view.Submit.Text != "Apply" {
-		t.Errorf("final step submit = %q, want Apply", view.Submit.Text)
+	if view.Submit.Text != "Continue" {
+		t.Errorf("model step submit = %q, want Continue", view.Submit.Text)
 	}
 }
 
@@ -214,6 +215,136 @@ func TestReadDraftFoldsInSubmittedValues(t *testing.T) {
 	// A field the step did not show must not be blanked.
 	if got.Kind != onboarding.KindOpenAI {
 		t.Errorf("kind = %q; a field absent from this step was cleared", got.Kind)
+	}
+}
+
+// optionsDraft is a form parked on the last step for the backend the guards
+// apply to.
+func optionsDraft() onboarding.Draft {
+	d := onboarding.NewDraft()
+	d.Kind = onboarding.KindClaudeCode
+	d.Model = "opus"
+	d.WorkDir = "/srv/work"
+	return d.Next().Next()
+}
+
+// TestOptionsStepIsTheLastOne pins the shape of the new page: it is where the
+// form applies, and it carries the picker that decides whether the general
+// agent has any tools at all.
+func TestOptionsStepIsTheLastOne(t *testing.T) {
+	d := optionsDraft()
+	if d.Step != onboarding.StepOptions {
+		t.Fatalf("step after the model page = %q, want %q", d.Step, onboarding.StepOptions)
+	}
+	view, err := buildSetupModal(d)
+	if err != nil {
+		t.Fatalf("buildSetupModal: %v", err)
+	}
+	ids := blockIDs(t, view)
+	if !hasBlock(ids, blockTools) {
+		t.Errorf("options step has no tool picker: %v", ids)
+	}
+	if view.Submit.Text != "Apply" {
+		t.Errorf("final step submit = %q, want Apply", view.Submit.Text)
+	}
+}
+
+// TestOptionsStepPreselectsTheDefaults. A form whose safe answer is already
+// ticked is answered correctly by an operator who clicks straight through it.
+func TestOptionsStepPreselectsTheDefaults(t *testing.T) {
+	view, err := buildSetupModal(optionsDraft())
+	if err != nil {
+		t.Fatalf("buildSetupModal: %v", err)
+	}
+	raw, err := json.Marshal(view.Blocks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var blocks []struct {
+		BlockID string `json:"block_id"`
+		Element struct {
+			InitialOptions []struct {
+				Value string `json:"value"`
+			} `json:"initial_options"`
+		} `json:"element"`
+	}
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		t.Fatal(err)
+	}
+	var initial []string
+	for _, block := range blocks {
+		if block.BlockID != blockTools {
+			continue
+		}
+		for _, opt := range block.Element.InitialOptions {
+			initial = append(initial, opt.Value)
+		}
+	}
+	for _, want := range onboarding.DefaultToolFamilies() {
+		if !slices.Contains(initial, want) {
+			t.Errorf("tool picker did not pre-select %q (got %v)", want, initial)
+		}
+	}
+}
+
+// TestGuardsAreHiddenForANativeBackend is the conditional-field rule again. A
+// native agent runs in-process: there is nothing to confine and no process
+// environment to pin, so both boxes would be controls that do nothing.
+func TestGuardsAreHiddenForANativeBackend(t *testing.T) {
+	d := onboarding.NewDraft()
+	d.Kind = onboarding.KindOpenAI
+	d.Step = onboarding.StepOptions
+	d.Model = "gpt-5"
+	d.WorkDir = "/srv/work"
+
+	view, err := buildSetupModal(d)
+	if err != nil {
+		t.Fatalf("buildSetupModal: %v", err)
+	}
+	ids := blockIDs(t, view)
+	if hasBlock(ids, blockGuards) {
+		t.Errorf("a native backend was offered confinement it cannot have: %v", ids)
+	}
+	if !hasBlock(ids, blockTools) {
+		t.Errorf("the tool picker applies to every backend and is missing: %v", ids)
+	}
+}
+
+// TestReadDraftReadsTheOptionsStep covers the two inputs whose empty state is a
+// real answer rather than an absent one.
+func TestReadDraftReadsTheOptionsStep(t *testing.T) {
+	base := optionsDraft()
+
+	state := &slack.ViewState{Values: map[string]map[string]slack.BlockAction{
+		blockTools: {actionTools: {SelectedOptions: []slack.OptionBlockObject{
+			{Value: "slack"}, {Value: "jobs"},
+		}}},
+		blockGuards: {actionGuards: {SelectedOptions: []slack.OptionBlockObject{
+			{Value: guardRestricted},
+		}}},
+	}}
+
+	got := readDraft(base, state)
+	if !slices.Equal(got.Tools, []string{"slack", "jobs"}) {
+		t.Errorf("tools = %v, want the two selected families", got.Tools)
+	}
+	if !got.ToolsChosen {
+		t.Error("a submitted picker was not recorded as answered")
+	}
+	if got.Sandboxed {
+		t.Error("an unticked sandbox box left the draft sandboxed")
+	}
+	if !got.Restricted {
+		t.Error("the ticked restricted box was not read")
+	}
+
+	// Clearing every box is an answer, not a missing field.
+	cleared := readDraft(base, &slack.ViewState{Values: map[string]map[string]slack.BlockAction{
+		blockTools: {actionTools: {}},
+	}})
+	if len(cleared.Tools) != 0 || !cleared.ToolsChosen {
+		t.Errorf("an emptied picker read as %v (chosen=%v), want no tools and an answered flag",
+			cleared.Tools, cleared.ToolsChosen)
 	}
 }
 
