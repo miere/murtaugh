@@ -23,6 +23,11 @@ type syncAPI struct {
 	updates []slacklib.UpdateMessageParams
 	postCh  chan struct{}
 	postErr error
+
+	// onPost, when set, runs inside PostMessage after the message has been
+	// recorded — standing in for the instant Slack has delivered the card and a
+	// user could already be clicking it.
+	onPost func(p slacklib.PostMessageParams)
 }
 
 func newSyncAPI() *syncAPI { return &syncAPI{postCh: make(chan struct{}, 16)} }
@@ -35,7 +40,11 @@ func (a *syncAPI) PostMessage(_ context.Context, p slacklib.PostMessageParams) (
 	}
 	a.posts = append(a.posts, p)
 	ts := fmt.Sprintf("ts-%d", len(a.posts))
+	hook := a.onPost
 	a.mu.Unlock()
+	if hook != nil {
+		hook(p)
+	}
 	select {
 	case a.postCh <- struct{}{}:
 	default:
@@ -123,6 +132,90 @@ func askInBackground(t *testing.T, f *Flow, spec Spec) <-chan Response {
 		out <- resp
 	}()
 	return out
+}
+
+// A click can arrive the moment Slack delivers the card — the corr id is
+// already in the buttons, so there is no grace period. This pins the ordering
+// that makes that safe: the session must be registered BEFORE the card is
+// posted. With the two reversed, a submission that landed in the gap was
+// rejected with "no question is waiting" and the user's answers were discarded.
+func TestSubmitDuringCardDeliveryIsNotLost(t *testing.T) {
+	api := newSyncAPI()
+	f := newTestFlow(api)
+
+	var clickErr error
+	var once sync.Once
+	api.onPost = func(p slacklib.PostMessageParams) {
+		once.Do(func() {
+			corr, err := corrFromBlocks(p.Blocks)
+			if err != nil {
+				clickErr = err
+				return
+			}
+			clickErr = f.HandleClick(context.Background(), corr, ActionSubmit, "U1",
+				map[string][]string{"q0": {"Redis"}, "q1": {"Hard delete"}})
+		})
+	}
+
+	// A short timeout so a regression fails in a second with the assertion
+	// below, rather than hanging until the default ask timeout: when the click
+	// is rejected nothing resolves the ask, so it would otherwise just sit there.
+	spec := twoQuestions()
+	spec.Timeout = 2 * time.Second
+
+	done := askInBackground(t, f, spec)
+	resp := <-done
+	if clickErr != nil {
+		t.Fatalf("a submission delivered with the card was rejected: %v", clickErr)
+	}
+	if !resp.Submitted || len(resp.Answers) != 2 {
+		t.Fatalf("the answers did not land: %+v", resp)
+	}
+}
+
+// corrFromBlocks reads the correlation id back out of a posted card's submit
+// button, which is how the gateway learns it from a real click. It returns an
+// error rather than calling t.Fatal because it runs on the Ask goroutine, where
+// a Fatal would Goexit and wedge the test instead of failing it.
+func corrFromBlocks(blocks []byte) (string, error) {
+	var payload any
+	if err := json.Unmarshal(blocks, &payload); err != nil {
+		return "", fmt.Errorf("blocks are not JSON: %w", err)
+	}
+	// The card is a container block, so the buttons are nested rather than at
+	// the top level; walk whatever nesting the template happens to use.
+	var walk func(nodes []any) string
+	walk = func(nodes []any) string {
+		for _, raw := range nodes {
+			node, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if id, ok := node["action_id"].(string); ok {
+				if corr, action, ok := ParseActionID(id); ok && action == ActionSubmit {
+					return corr
+				}
+			}
+			for _, key := range []string{"blocks", "child_blocks", "elements"} {
+				if children, ok := node[key].([]any); ok {
+					if corr := walk(children); corr != "" {
+						return corr
+					}
+				}
+			}
+		}
+		return ""
+	}
+	// The renderer emits a single container object; older shapes emit a bare
+	// array. Accept either rather than pinning the test to one of them.
+	top, ok := payload.([]any)
+	if !ok {
+		top = []any{payload}
+	}
+	if corr := walk(top); corr != "" {
+		return corr, nil
+	}
+	return "", fmt.Errorf("no submit button in the posted card:\n%s", blocks)
 }
 
 func TestSubmitResolvesWithAnswers(t *testing.T) {
