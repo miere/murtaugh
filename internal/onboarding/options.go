@@ -155,13 +155,16 @@ func DefaultSandboxMode() (string, bool) {
 
 // RestrictedEnv pins the cloud SDKs' state inside the agent's own workspace.
 //
-// Every one of these tools defaults to a path under $HOME — ~/.config/gcloud,
-// ~/.aws, ~/.gradle — which the operator's own shell also uses. An agent
-// running `gcloud auth login` or `aws configure` there does not just read the
-// operator's credentials, it rewrites the active configuration out from under
-// them. Pointing each at the workspace it is already confined to makes the
-// agent's cloud identity its own: separate from the operator's, and thrown away
-// with the workspace.
+// Both tools default to a path under $HOME — ~/.config/gcloud, ~/.aws — which
+// the operator's own shell also uses. An agent running `gcloud auth login` or
+// `aws configure` there does not just read the operator's credentials, it
+// rewrites the active configuration out from under them. Pointing each at the
+// workspace it is already confined to makes the agent's cloud identity its own:
+// separate from the operator's, and thrown away with the workspace.
+//
+// Deliberately credentials only. Redirecting a build tool's cache (Gradle,
+// npm, Go module) would isolate no secret and cost a full re-download on the
+// agent's first build, which is a tax without a benefit.
 //
 // The values are absolute paths rather than ${VAR} references because the
 // workspace is known here and an unexpanded reference would resolve against the
@@ -176,6 +179,5 @@ func RestrictedEnv(workDir string) map[string]string {
 		"GOOGLE_APPLICATION_CREDENTIALS":        filepath.Join(workDir, ".gcloud", "credentials.json"),
 		"AWS_CONFIG_FILE":                       filepath.Join(workDir, ".aws", "config"),
 		"AWS_SHARED_CREDENTIALS_FILE":           filepath.Join(workDir, ".aws", "shared_creds"),
-		"GRADLE_USER_HOME":                      filepath.Join(workDir, ".gradle"),
 	}
 }

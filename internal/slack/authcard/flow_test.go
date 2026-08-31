@@ -3,6 +3,7 @@ package authcard
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -650,5 +651,47 @@ func TestEmptyCodeIsRejected(t *testing.T) {
 	f := newTestFlow(newSyncAPI())
 	if err := f.HandleCodeSubmission("any", "   ", adminID); err == nil {
 		t.Fatal("an empty verification code should be rejected")
+	}
+}
+
+// TestCommandSpecLayersTheAgentEnvironment is the fix for a live failure: a
+// gcloud sign-in that reported success while the agent that asked for it still
+// saw no credential. The command has to run in the agent's environment, with
+// the agent's values beating anything the daemon loaded from .env.
+func TestCommandSpecLayersTheAgentEnvironment(t *testing.T) {
+	t.Setenv("CLOUDSDK_CONFIG", "/home/op/.config/gcloud")
+	t.Setenv("MURTAUGH_TEST_UNTOUCHED", "keep-me")
+
+	profile, err := auth.Resolve("gcloud", "", false)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	spec := commandSpec(Request{
+		Profile: profile,
+		Env:     []string{"CLOUDSDK_CONFIG=/srv/work/.gcloud"},
+	})
+
+	if !slices.Contains(spec.Env, "CLOUDSDK_CONFIG=/srv/work/.gcloud") {
+		t.Error("the agent's CLOUDSDK_CONFIG did not reach the spawned command")
+	}
+	if slices.Contains(spec.Env, "CLOUDSDK_CONFIG=/home/op/.config/gcloud") {
+		t.Error("the .env value survived alongside the agent's; the sign-in would be ambiguous")
+	}
+	// Layered, not replaced: the CLI still needs everything else the daemon has.
+	if !slices.Contains(spec.Env, "MURTAUGH_TEST_UNTOUCHED=keep-me") {
+		t.Error("the inherited environment was dropped instead of layered")
+	}
+}
+
+// TestCommandSpecInheritsWithoutAnAgentEnvironment. A nil Spec.Env is how proc
+// says "inherit"; pinning a snapshot instead would freeze the environment at
+// the wrong moment for every caller that has nothing to override.
+func TestCommandSpecInheritsWithoutAnAgentEnvironment(t *testing.T) {
+	profile, err := auth.Resolve("gcloud", "", false)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if spec := commandSpec(Request{Profile: profile}); spec.Env != nil {
+		t.Errorf("Spec.Env = %v, want nil so the command inherits", spec.Env)
 	}
 }

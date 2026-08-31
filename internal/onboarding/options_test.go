@@ -151,7 +151,6 @@ func TestRestrictedPinsCloudStateToTheWorkspace(t *testing.T) {
 		"GOOGLE_APPLICATION_CREDENTIALS": filepath.Join("/srv/work", ".gcloud", "credentials.json"),
 		"AWS_CONFIG_FILE":                filepath.Join("/srv/work", ".aws", "config"),
 		"AWS_SHARED_CREDENTIALS_FILE":    filepath.Join("/srv/work", ".aws", "shared_creds"),
-		"GRADLE_USER_HOME":               filepath.Join("/srv/work", ".gradle"),
 	} {
 		if env[key] != want {
 			t.Errorf("%s = %q, want %q", key, env[key], want)
@@ -159,6 +158,11 @@ func TestRestrictedPinsCloudStateToTheWorkspace(t *testing.T) {
 	}
 	if env["CLOUDSDK_CORE_DISABLE_USAGE_REPORTING"] != "true" {
 		t.Error("gcloud usage reporting was left on for an agent the operator never opted in for")
+	}
+	// Credentials only. A build tool's cache isolates no secret and costs a full
+	// re-download on the agent's first build.
+	if _, ok := env["GRADLE_USER_HOME"]; ok {
+		t.Error("the restricted set redirects a build cache; it is meant to cover credentials only")
 	}
 }
 

@@ -261,7 +261,7 @@ func guardOptions(d onboarding.Draft) []*slack.OptionBlockObject {
 	}
 	out = append(out, slack.NewOptionBlockObject(guardRestricted,
 		plain("Agent restricted"),
-		plain("Point its gcloud, AWS and Gradle state at its workspace, not your home.")))
+		plain("Point its gcloud and AWS credentials at its workspace, not your home.")))
 	return out
 }
 

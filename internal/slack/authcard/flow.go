@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -50,6 +51,19 @@ type Request struct {
 	// RequesterUserID is who triggered the turn. When it matches the admin the
 	// two cards collapse into one.
 	RequesterUserID string
+
+	// Env is the requesting agent's own environment, as KEY=VALUE pairs, layered
+	// over the daemon's when the authentication command is spawned.
+	//
+	// Without it the sign-in runs in the DAEMON's environment while the agent
+	// that asked for it runs in its own: `gcloud auth login` writes to
+	// ~/.config/gcloud, and the agent — whose CLOUDSDK_CONFIG points into its
+	// workspace — still finds nothing. The flow reports success and the agent
+	// cannot proceed, which is the worst shape a failure can take.
+	//
+	// Empty on the CLI/MCP path and for native agents, which have no process
+	// environment of their own.
+	Env []string
 
 	// Timeout bounds the whole request; zero uses DefaultTimeout.
 	Timeout time.Duration
@@ -123,6 +137,21 @@ func (s *session) submitCode(code string) error {
 	}
 }
 
+// commandSpec renders the process to spawn for a request.
+//
+// The environment is layered rather than replaced: the authentication CLI needs
+// everything the daemon has (PATH, HOME, the login keychain's reach) plus the
+// requesting agent's redirections on top. A nil Spec.Env inherits the daemon's
+// outright, which is the right answer for a request carrying none and avoids
+// materialising a copy of os.Environ for every caller.
+func commandSpec(req Request) proc.Spec {
+	spec := req.Profile.Spec()
+	if len(req.Env) > 0 {
+		spec.Env = proc.MergeEnv(os.Environ(), req.Env)
+	}
+	return spec
+}
+
 // Run posts the cards, drives the authentication process, and blocks until it
 // reaches a terminal state.
 //
@@ -191,7 +220,7 @@ func (f *Flow) Run(ctx context.Context, req Request) (Outcome, error) {
 		return finish(Outcome{}, StateFailed, "could not open a DM with the admin: "+err.Error())
 	}
 
-	h, err := proc.Start(ctx, req.Profile.Spec())
+	h, err := proc.Start(ctx, commandSpec(req))
 	if err != nil {
 		return finish(Outcome{}, StateFailed, "could not start the authentication command: "+err.Error())
 	}
