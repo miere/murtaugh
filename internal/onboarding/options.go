@@ -176,7 +176,12 @@ func RestrictedEnv(workDir string) map[string]string {
 		// more commands than a human, from a machine the operator did not opt in
 		// on their behalf.
 		"CLOUDSDK_CORE_DISABLE_USAGE_REPORTING": "true",
-		"GOOGLE_APPLICATION_CREDENTIALS":        filepath.Join(workDir, ".gcloud", "credentials.json"),
+		// The filename is not ours to choose: `gcloud auth application-default
+		// login` writes application_default_credentials.json into CLOUDSDK_CONFIG,
+		// and GOOGLE_APPLICATION_CREDENTIALS has to name the file gcloud actually
+		// produces. Any other name points at something that never appears, and
+		// the SDKs fail to load ADC rather than falling back.
+		"GOOGLE_APPLICATION_CREDENTIALS": filepath.Join(workDir, ".gcloud", "application_default_credentials.json"),
 		"AWS_CONFIG_FILE":                       filepath.Join(workDir, ".aws", "config"),
 		"AWS_SHARED_CREDENTIALS_FILE":           filepath.Join(workDir, ".aws", "shared_creds"),
 	}
