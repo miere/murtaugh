@@ -30,9 +30,15 @@ func New(client *slacklib.LazyClient, cards *Renderer) *Flow {
 // an incomplete submit can be validated and the card re-rendered without the
 // gateway having to carry any of it, and it accumulates the answers given so far.
 type session struct {
-	spec    Spec
+	spec Spec
+
+	// channel/ts identify the posted card. They are only known once
+	// PostMessage returns, but the session is registered BEFORE that (see Ask),
+	// so a click can find the session while these are still empty. posted is
+	// closed once they are set; readers on the click path wait for it.
 	channel string
 	ts      string
+	posted  chan struct{}
 
 	mu       sync.Mutex
 	resolved bool
@@ -40,6 +46,29 @@ type session struct {
 	// just the last one. See absorb.
 	answers map[string][]string
 	done    chan Response
+}
+
+// setMessage records where the card was posted and releases anyone waiting on
+// it. Called exactly once, from Ask, immediately after PostMessage returns.
+func (s *session) setMessage(channel, ts string) {
+	s.mu.Lock()
+	s.channel, s.ts = channel, ts
+	s.mu.Unlock()
+	close(s.posted)
+}
+
+// message returns the card's coordinates, blocking until Ask has recorded them.
+// The wait is bounded by ctx and is in practice instantaneous: Slack cannot have
+// delivered the card to the clicker before PostMessage returned to us.
+func (s *session) message(ctx context.Context) (channel, ts string, err error) {
+	select {
+	case <-s.posted:
+	case <-ctx.Done():
+		return "", "", ctx.Err()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.channel, s.ts, nil
 }
 
 // absorb folds one submission's answers into the running set and returns the
@@ -128,6 +157,16 @@ func (f *Flow) Ask(ctx context.Context, dest Destination, spec Spec) (Response, 
 	if err != nil {
 		return Response{}, err
 	}
+
+	// Register before the card is posted, never after. The corr id is already
+	// baked into the card's buttons, so the instant Slack has the message a
+	// click can arrive — and one that lands before this map entry exists is
+	// rejected with "no question is waiting", silently discarding an answer the
+	// user believes they gave.
+	s := &session{spec: spec, done: make(chan Response, 1), posted: make(chan struct{})}
+	f.register(corr, s)
+	defer f.unregister(corr)
+
 	posted, err := api.PostMessage(ctx, slacklib.PostMessageParams{
 		ChannelID: dest.ChannelID,
 		ThreadTS:  dest.ThreadTS,
@@ -137,10 +176,7 @@ func (f *Flow) Ask(ctx context.Context, dest Destination, spec Spec) (Response, 
 	if err != nil {
 		return Response{}, fmt.Errorf("askcard: post question card: %w", err)
 	}
-
-	s := &session{spec: spec, channel: posted.Channel, ts: posted.TS, done: make(chan Response, 1)}
-	f.register(corr, s)
-	defer f.unregister(corr)
+	s.setMessage(posted.Channel, posted.TS)
 
 	timeout := spec.Timeout
 	if timeout <= 0 {
@@ -163,7 +199,7 @@ func (f *Flow) Ask(ctx context.Context, dest Destination, spec Spec) (Response, 
 		resp, state = Response{Cancelled: true}, StateCancelled
 	}
 
-	f.settle(spec, corr, state, resp, s.channel, s.ts)
+	f.settle(spec, corr, state, resp, posted.Channel, posted.TS)
 	return resp, nil
 }
 
@@ -231,14 +267,18 @@ func (f *Flow) reprompt(ctx context.Context, corr string, s *session, answers ma
 	if err != nil {
 		return err
 	}
+	channel, ts, err := s.message(ctx)
+	if err != nil {
+		return err
+	}
 	blocks, err := f.cards.render(PendingTemplate,
 		f.data(s.spec, corr, StatePending, validationMessage(missing), "", answers))
 	if err != nil {
 		return err
 	}
 	_, err = api.UpdateMessage(ctx, slacklib.UpdateMessageParams{
-		ChannelID: s.channel,
-		TS:        s.ts,
+		ChannelID: channel,
+		TS:        ts,
 		Text:      fallbackText(s.spec),
 		Blocks:    blocks,
 	})
