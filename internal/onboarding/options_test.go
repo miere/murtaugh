@@ -148,7 +148,9 @@ func TestRestrictedPinsCloudStateToTheWorkspace(t *testing.T) {
 	env := out.Default.ClaudeCode.Env
 	for key, want := range map[string]string{
 		"CLOUDSDK_CONFIG":                filepath.Join("/srv/work", ".gcloud"),
-		"GOOGLE_APPLICATION_CREDENTIALS": filepath.Join("/srv/work", ".gcloud", "credentials.json"),
+		// Named for what gcloud actually writes, not for what reads tidily: an
+		// invented filename points at a file that never appears.
+		"GOOGLE_APPLICATION_CREDENTIALS": filepath.Join("/srv/work", ".gcloud", "application_default_credentials.json"),
 		"AWS_CONFIG_FILE":                filepath.Join("/srv/work", ".aws", "config"),
 		"AWS_SHARED_CREDENTIALS_FILE":    filepath.Join("/srv/work", ".aws", "shared_creds"),
 	} {
