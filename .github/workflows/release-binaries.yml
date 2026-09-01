@@ -33,9 +33,17 @@ jobs:
             goos: darwin
             goarch: arm64
 
+    environment: release
+
     env:
       BINARY_NAME: murtaugh
       TAG_NAME: ${{ github.ref_name }}
+      # Both of these end up inside every user's stored TCC grant. Changing
+      # either one invalidates every existing Full Disk Access grant at once, so
+      # treat them as permanent. Verified in #160 against a machine that does
+      # not trust the certificate.
+      SIGN_IDENTIFIER: dev.murtaugh
+      SIGN_LEAF_SHA1: 94f9be12bb186b1da1bc9e8b8789b01ddd8d4bce
 
     steps:
       - name: Check out repository
@@ -60,6 +68,92 @@ jobs:
 
           chmod +x "dist/${asset_name}"
           echo "ASSET_PATH=dist/${asset_name}" >> "$GITHUB_ENV"
+
+      # macOS pins a TCC grant to the code's designated requirement. Go's linker
+      # emits an ad-hoc signature, and an ad-hoc DR degenerates to
+      # `cdhash H"..."` -- so every release changes the requirement and silently
+      # invalidates the user's existing Full Disk Access grant. The daemon then
+      # blocks forever inside open() under launchd, because there is no GUI
+      # session to render the re-authorisation prompt. That is the 0.34.1
+      # outage. Signing with a real certificate anchors the DR to the
+      # certificate instead, and the grant survives the update.
+      - name: Import signing identity
+        if: matrix.goos == 'darwin'
+        shell: bash
+        env:
+          P12_B64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          P12_PW: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${P12_B64:-}" ]; then
+            echo "::error::MACOS_CERT_P12_BASE64 is empty - is the 'release' environment configured?"
+            exit 1
+          fi
+
+          KC_PW="$(uuidgen)"
+          echo "$P12_B64" | base64 --decode > /tmp/cert.p12
+
+          security create-keychain -p "$KC_PW" build.keychain
+          security default-keychain -s build.keychain
+          security list-keychains -d user -s build.keychain login.keychain
+          security unlock-keychain -p "$KC_PW" build.keychain
+          security set-keychain-settings -t 3600 -u build.keychain
+
+          security import /tmp/cert.p12 -k build.keychain -P "$P12_PW" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KC_PW" \
+            build.keychain > /dev/null
+
+          # codesign will not use an identity it considers invalid, and a
+          # self-signed root is invalid until trusted. The runner is a throwaway
+          # VM, so this is free here -- it is the step that would need a GUI
+          # prompt on a user's machine, which is why signing belongs in CI.
+          #
+          # The certificate comes from the keychain rather than the p12: a p12
+          # exported by LibreSSL uses RC2-40-CBC bag encryption, which the
+          # runner's OpenSSL 3 refuses without the legacy provider.
+          security find-certificate -a -p build.keychain > /tmp/cert.pem
+          grep -q "BEGIN CERTIFICATE" /tmp/cert.pem \
+            || { echo "::error::no certificate found in build.keychain"; exit 1; }
+
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign \
+            -k /Library/Keychains/System.keychain /tmp/cert.pem
+
+          rm -f /tmp/cert.p12 /tmp/cert.pem
+
+          # Resolve by SHA-1, not by common name: the name is incidental, since
+          # the designated requirement anchors on the leaf hash.
+          SIGN_ID=$(security find-identity -v -p codesigning build.keychain \
+            | awk '/^[[:space:]]*[0-9]+\)/{print $2; exit}')
+          [ -n "$SIGN_ID" ] \
+            || { echo "::error::no codesigning identity in build.keychain"; exit 1; }
+          echo "SIGN_ID=$SIGN_ID" >> "$GITHUB_ENV"
+
+      - name: Sign binary
+        if: matrix.goos == 'darwin'
+        shell: bash
+        run: |
+          set -euo pipefail
+          codesign --force --sign "$SIGN_ID" --identifier "$SIGN_IDENTIFIER" "$ASSET_PATH"
+          codesign -dvvv "$ASSET_PATH" 2>&1 | grep -Ei 'identifier|flags|cdhash=' || true
+          codesign -d -r- "$ASSET_PATH" 2>&1 || true
+
+      # The gate that would have caught the 0.34.1 outage before it shipped.
+      # This is the same evaluation TCC performs against the requirement stored
+      # alongside a Full Disk Access grant, so passing it means an existing
+      # grant still matches this build.
+      - name: Verify the designated requirement
+        if: matrix.goos == 'darwin'
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="identifier \"$SIGN_IDENTIFIER\" and certificate leaf = H\"$SIGN_LEAF_SHA1\""
+          echo "requiring: $expected"
+          codesign --verify -R "=$expected" "$ASSET_PATH" || {
+            echo "::error::binary does not satisfy the pinned requirement - releasing it would break every existing Full Disk Access grant"
+            exit 1
+          }
+          echo "OK - existing TCC grants survive this release."
 
       - name: Upload release asset
         uses: softprops/action-gh-release@v2
