@@ -107,13 +107,24 @@ jobs:
           rm -f /tmp/cert.p12 /tmp/cert.pem
 
           echo "--- identities visible to codesign ---"
-          security find-identity -v -p codesigning
+          security find-identity -v -p codesigning build.keychain
+
+          # Resolve the identity by SHA-1 rather than by common name. The name is
+          # whatever the certificate happened to be generated with, and macOS
+          # lists the same identity twice when it resolves in more than one
+          # keychain in the search list. The hash is unambiguous either way.
+          SIGN_ID=$(security find-identity -v -p codesigning build.keychain \
+            | awk '/^[[:space:]]*[0-9]+\)/{print $2; exit}')
+          [ -n "$SIGN_ID" ] \
+            || { echo "::error::no codesigning identity in build.keychain"; exit 1; }
+          echo "SIGN_ID=$SIGN_ID" >> "$GITHUB_ENV"
+          echo "signing with $SIGN_ID"
 
       - name: Sign
         run: |
           set -euo pipefail
           for f in dist/murtaugh-A dist/murtaugh-B; do
-            codesign --force --sign "Murtaugh Code Signing" --identifier dev.murtaugh "$f"
+            codesign --force --sign "$SIGN_ID" --identifier dev.murtaugh "$f"
             echo "--- $f ---"
             codesign -dvvv "$f" 2>&1 | grep -Ei 'identifier|flags|cdhash=|authority' || true
             codesign -d -r- "$f" 2>&1 || true
