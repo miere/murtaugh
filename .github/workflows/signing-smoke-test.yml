@@ -9,11 +9,19 @@ name: Signing smoke test
 # in release-binaries.yml.
 #
 # Requires a `release` environment holding MACOS_CERT_P12_BASE64 and
-# MACOS_CERT_PASSWORD. Manual dispatch only -- never runs on a PR, so a fork can
-# never reach the key.
+# MACOS_CERT_PASSWORD.
+#
+# The push trigger is pinned to this branch because workflow_dispatch only works
+# for files already on the default branch, and merging a throwaway to main just
+# to run it once is the wrong trade. Only someone with write access can push a
+# branch to this repo, so a fork still cannot reach the key -- fork
+# contributions arrive as pull_request events, which this deliberately ignores.
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - chore/signing-smoke-test
 
 permissions:
   contents: read
