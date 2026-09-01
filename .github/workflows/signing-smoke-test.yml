@@ -1,0 +1,141 @@
+name: Signing smoke test
+
+# Throwaway workflow. Proves that signing with a self-signed certificate gives
+# the binary a designated requirement anchored to the certificate rather than to
+# the binary's cdhash -- which is what decides whether a user's Full Disk Access
+# grant survives a self-update.
+#
+# Delete this file once the result is known and the real signing step has landed
+# in release-binaries.yml.
+#
+# Requires a `release` environment holding MACOS_CERT_P12_BASE64 and
+# MACOS_CERT_PASSWORD. Manual dispatch only -- never runs on a PR, so a fork can
+# never reach the key.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sign-test:
+    name: Sign twice, verify the requirement holds
+    runs-on: macos-latest
+    environment: release
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Two builds differing only in the version stamp. Different bytes means
+      # different cdhash, which is exactly what a self-update produces.
+      - name: Build A
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 \
+            go build -trimpath -ldflags="-s -w -X main.version=smoketest-A" \
+            -o dist/murtaugh-A ./cmd/murtaugh
+
+      - name: Build B
+        run: |
+          set -euo pipefail
+          GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 \
+            go build -trimpath -ldflags="-s -w -X main.version=smoketest-B" \
+            -o dist/murtaugh-B ./cmd/murtaugh
+
+      - name: Baseline - what Go's linker leaves us with
+        run: |
+          echo "--- A ---"; codesign -d -r- dist/murtaugh-A 2>&1 || true
+          echo "--- B ---"; codesign -d -r- dist/murtaugh-B 2>&1 || true
+
+      - name: Import signing identity
+        env:
+          P12_B64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          P12_PW: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${P12_B64:-}" ]; then
+            echo "::error::MACOS_CERT_P12_BASE64 is empty - is the 'release' environment configured?"
+            exit 1
+          fi
+
+          KC_PW="$(uuidgen)"
+          echo "$P12_B64" | base64 --decode > /tmp/cert.p12
+
+          security create-keychain -p "$KC_PW" build.keychain
+          security default-keychain -s build.keychain
+          security list-keychains -d user -s build.keychain login.keychain
+          security unlock-keychain -p "$KC_PW" build.keychain
+          security set-keychain-settings -t 3600 -u build.keychain
+
+          security import /tmp/cert.p12 -k build.keychain -P "$P12_PW" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KC_PW" build.keychain
+
+          # codesign will not use an identity it considers invalid, and a
+          # self-signed root is invalid until trusted. The runner is a throwaway
+          # VM with passwordless sudo, so this is free here -- it is the step
+          # that would need a GUI prompt on a user's machine.
+          openssl pkcs12 -in /tmp/cert.p12 -passin pass:"$P12_PW" -clcerts -nokeys -out /tmp/cert.pem
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign \
+            -k /Library/Keychains/System.keychain /tmp/cert.pem
+
+          rm -f /tmp/cert.p12 /tmp/cert.pem
+
+          echo "--- identities visible to codesign ---"
+          security find-identity -v -p codesigning
+
+      - name: Sign
+        run: |
+          set -euo pipefail
+          for f in dist/murtaugh-A dist/murtaugh-B; do
+            codesign --force --sign "Murtaugh Code Signing" --identifier dev.murtaugh "$f"
+            echo "--- $f ---"
+            codesign -dvvv "$f" 2>&1 | grep -Ei 'identifier|flags|cdhash=|authority' || true
+            codesign -d -r- "$f" 2>&1 || true
+          done
+
+      - name: Verify - bytes changed, requirement did not
+        run: |
+          set -euo pipefail
+
+          ha=$(codesign -dvvv dist/murtaugh-A 2>&1 | awk -F= '/^CDHash=/{print $2}')
+          hb=$(codesign -dvvv dist/murtaugh-B 2>&1 | awk -F= '/^CDHash=/{print $2}')
+          ra=$(codesign -d -r- dist/murtaugh-A 2>&1 | grep 'designated')
+          rb=$(codesign -d -r- dist/murtaugh-B 2>&1 | grep 'designated')
+
+          echo "cdhash A : $ha"
+          echo "cdhash B : $hb"
+          echo "DR     A : $ra"
+          echo "DR     B : $rb"
+
+          if [ "$ha" = "$hb" ]; then
+            echo "::error::builds are byte-identical, so this proves nothing"
+            exit 1
+          fi
+
+          case "$ra" in
+            *cdhash*)
+              echo "::error::designated requirement is still cdhash-pinned - signing did not take"
+              exit 1
+              ;;
+          esac
+
+          if [ "$ra" != "$rb" ]; then
+            echo "::error::designated requirement changed between builds - a TCC grant would break"
+            exit 1
+          fi
+
+          echo "PASS: cdhash changed, designated requirement held."
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: murtaugh-signed-darwin-arm64
+          path: dist/murtaugh-*
+          retention-days: 1
