@@ -84,13 +84,23 @@ jobs:
           security set-keychain-settings -t 3600 -u build.keychain
 
           security import /tmp/cert.p12 -k build.keychain -P "$P12_PW" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KC_PW" build.keychain
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KC_PW" \
+            build.keychain > /dev/null
 
           # codesign will not use an identity it considers invalid, and a
           # self-signed root is invalid until trusted. The runner is a throwaway
           # VM with passwordless sudo, so this is free here -- it is the step
           # that would need a GUI prompt on a user's machine.
-          openssl pkcs12 -in /tmp/cert.p12 -passin pass:"$P12_PW" -clcerts -nokeys -out /tmp/cert.pem
+          #
+          # The certificate comes back out of the keychain rather than out of the
+          # p12, because a p12 exported by LibreSSL uses RC2-40-CBC bag
+          # encryption and the runner's OpenSSL 3 refuses that without the legacy
+          # provider. `security` reads it happily, and this keeps the workflow
+          # independent of whichever openssl generated the cert.
+          security find-certificate -a -p build.keychain > /tmp/cert.pem
+          grep -q "BEGIN CERTIFICATE" /tmp/cert.pem \
+            || { echo "::error::no certificate found in build.keychain"; exit 1; }
+
           sudo security add-trusted-cert -d -r trustRoot -p codeSign \
             -k /Library/Keychains/System.keychain /tmp/cert.pem
 
