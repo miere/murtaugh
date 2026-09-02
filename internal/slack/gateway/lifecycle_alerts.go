@@ -88,6 +88,38 @@ func configReloadedAlert() alertcard.Spec {
 	}
 }
 
+// updateRestartingAlert announces a self-update that installed cleanly and is
+// taking the daemon down to run itself.
+//
+// It is a NOTICE for the same reason restartNoticeAlert is: the update went
+// fine, the restart is automatic, and there is no decision for the operator to
+// make. It was a bespoke one-line ":arrows_counterclockwise:" DM before, which
+// is exactly the shape this level exists to replace — the lifecycle messages
+// speak one vocabulary or they speak none.
+func updateRestartingAlert(version string) alertcard.Spec {
+	return alertcard.Spec{
+		Level:    alertcard.LevelNotice,
+		Title:    fmt.Sprintf("Updated to %s", version),
+		Subtitle: "Restarting now to run the new build.",
+	}
+}
+
+// updateInstalledAlert announces an update that landed on disk with no restart
+// coordinator to run it.
+//
+// This one is INFO rather than a notice: the new build is installed and the old
+// one is still serving, so the operator has to act before the update means
+// anything. A notice is a passing remark that needs no decision — this needs
+// one, and the card is where NextSteps can say so.
+func updateInstalledAlert(version string) alertcard.Spec {
+	return alertcard.Spec{
+		Level:     alertcard.LevelInfo,
+		Title:     fmt.Sprintf("Updated to %s", version),
+		Subtitle:  "The new build is installed but not running yet.",
+		NextSteps: "Restart Murtaugh to run it.",
+	}
+}
+
 // pongAlert is the reply to a click on the App Home's Test-communication
 // button: the round-trip completed, which is the whole content of the message.
 func pongAlert() alertcard.Spec {

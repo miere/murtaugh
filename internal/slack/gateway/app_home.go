@@ -316,11 +316,11 @@ func (a *Gateway) handleAppHomeUpdateSubmit(interaction slack.InteractionCallbac
 	}
 	if a.restart == nil {
 		a.logger.Info("app home update installed but no restart coordinator wired", "version", installed)
-		a.notifyAdminDM(ctx, fmt.Sprintf(":white_check_mark: Updated to %s. Restart Murtaugh to run it.", installed))
+		a.notifyAdminAlert(ctx, updateInstalledAlert(installed))
 		return
 	}
 	a.logger.Info("app home update installed; restarting", "version", installed, "user", user)
-	a.notifyAdminDM(ctx, fmt.Sprintf(":arrows_counterclockwise: Updated to %s — restarting now.", installed))
+	a.notifyAdminAlert(ctx, updateRestartingAlert(installed))
 	a.restart(restartSourceInteractive, user, "", fmt.Sprintf("app home update to %s", installed))
 }
 
@@ -440,23 +440,23 @@ func (a *Gateway) notifyAdminDM(ctx context.Context, text string) {
 	}
 }
 
-// notifyAdminAlert posts an alert card to the admin's DM, falling back to the
-// plain-text form when no raw-blocks client is wired or the post fails. Like
-// notifyAdminDM it is best-effort: an admin notification must never fail the
-// operation it is reporting on.
+// notifyAdminAlert posts an alert to the admin's DM at the level spec asks for:
+// a card for error/warn/info, the discreet one-line form for a notice, and the
+// plain-text degradation when no raw-blocks client is wired or the post fails.
+//
+// It delegates to postLifecycleAlert rather than posting a card directly, which
+// is what keeps the level honest — routing on the level lives in one place, so
+// an admin DM cannot render a notice as a full-width card while the same spec
+// posted anywhere else renders as a line. Like notifyAdminDM it is best-effort:
+// an admin notification must never fail the operation it is reporting on.
 func (a *Gateway) notifyAdminAlert(ctx context.Context, spec alertcard.Spec) {
 	dest, err := a.resolveSuggestionDestination(ctx, "")
 	if err != nil || dest == "" {
 		return
 	}
-	if post := newAlertPoster(a.alertAPI, a.alertCards, dest, ""); post != nil {
-		if err := post(ctx, spec); err == nil {
-			return
-		} else {
-			a.logger.Warn("failed to post admin alert card; falling back to text", "error", err)
-		}
+	if _, _, err := a.postLifecycleAlert(ctx, dest, "", spec); err != nil {
+		a.logger.Error("app home admin alert failed", "error", err)
 	}
-	a.notifyAdminDM(ctx, alertcard.PlainText(spec))
 }
 
 // displayTarget renders the target tag for human-facing copy, falling back to a

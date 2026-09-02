@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/slack/alertcard"
 	slackclient "github.com/miere/murtaugh/internal/slack/client"
 )
@@ -156,11 +157,12 @@ func TestPostLifecycleAlertFallsBackWhenTheCardPostFails(t *testing.T) {
 // repeats what is already on screen at the same cost in space.
 func TestLifecycleAlertsAreAllNotices(t *testing.T) {
 	for name, spec := range map[string]alertcard.Spec{
-		"startup":         startupAlert(),
-		"restartNotice":   restartNoticeAlert(),
-		"backOnline":      backOnlineAlert(),
-		"configReloading": configReloadingAlert(),
-		"configReloaded":  configReloadedAlert(),
+		"startup":          startupAlert(),
+		"restartNotice":    restartNoticeAlert(),
+		"backOnline":       backOnlineAlert(),
+		"configReloading":  configReloadingAlert(),
+		"configReloaded":   configReloadedAlert(),
+		"updateRestarting": updateRestartingAlert("v0.34.2"),
 	} {
 		if spec.Level != alertcard.LevelNotice {
 			t.Errorf("%s alert has level %q, want %q", name, spec.Level, alertcard.LevelNotice)
@@ -168,6 +170,65 @@ func TestLifecycleAlertsAreAllNotices(t *testing.T) {
 		if strings.TrimSpace(spec.Title) == "" || strings.TrimSpace(spec.Subtitle) == "" {
 			t.Errorf("%s alert needs both a title and a subtitle; they are the whole message while the card is collapsed", name)
 		}
+	}
+}
+
+// The update announcements carry the version in the headline, since that is the
+// half of a notice a user actually reads, and the restarting one must not be a
+// card: it was a bespoke ":arrows_counterclockwise:" DM, which is the shape the
+// notice level exists to retire.
+func TestUpdateAlertsSpeakTheSharedVocabulary(t *testing.T) {
+	restarting := updateRestartingAlert("v0.34.2")
+	if !strings.Contains(restarting.Title, "v0.34.2") {
+		t.Errorf("restarting notice %q does not name the version", restarting.Title)
+	}
+	if strings.Contains(alertcard.NoticeText(restarting), ":") {
+		t.Errorf("a notice carries no bespoke emoji: %q", alertcard.NoticeText(restarting))
+	}
+
+	// The no-coordinator branch is NOT a notice: the new build is installed but
+	// the old one is still serving, so the operator has to do something. That
+	// needs a card with next steps, which a notice cannot carry.
+	installed := updateInstalledAlert("v0.34.2")
+	if installed.Level != alertcard.LevelInfo {
+		t.Errorf("installed-not-running alert has level %q, want %q", installed.Level, alertcard.LevelInfo)
+	}
+	if strings.TrimSpace(installed.NextSteps) == "" {
+		t.Error("installed-not-running alert must tell the operator to restart")
+	}
+}
+
+// notifyAdminAlert is the only way the update announcements reach Slack, so it
+// has to honour the level rather than always posting a card: a notice through
+// the admin DM must be the same one-line context message it is everywhere else.
+func TestNotifyAdminAlertRoutesOnTheLevel(t *testing.T) {
+	newGW := func(msg *recordingMessaging, poster *fakeAlertAPI) *Gateway {
+		return &Gateway{
+			logger:     newSilentLogger(),
+			cfg:        config.AccessConfig{AdminUser: "UADMIN00"},
+			messaging:  msg,
+			alertCards: testAlertCards(),
+			alertAPI:   poster,
+		}
+	}
+
+	msg, poster := &recordingMessaging{}, &fakeAlertAPI{}
+	newGW(msg, poster).notifyAdminAlert(context.Background(), updateRestartingAlert("v0.34.2"))
+	if len(poster.posts) != 0 {
+		t.Fatalf("the update notice was posted as a card; it must take the notice path")
+	}
+	if msg.postCalls != 1 {
+		t.Fatalf("expected one notice post to the admin DM, got %d", msg.postCalls)
+	}
+	if !strings.Contains(msg.postText, "v0.34.2") {
+		t.Errorf("notice text %q does not name the installed version", msg.postText)
+	}
+
+	// An info alert still gets the card it was always getting.
+	msg, poster = &recordingMessaging{}, &fakeAlertAPI{}
+	newGW(msg, poster).notifyAdminAlert(context.Background(), updateInstalledAlert("v0.34.2"))
+	if len(poster.posts) != 1 {
+		t.Fatalf("expected the info alert to post one card, got %d", len(poster.posts))
 	}
 }
 
