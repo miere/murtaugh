@@ -98,11 +98,24 @@ var builtins = map[string]Profile{
 		Args:       []string{"auth", "login", "--no-launch-browser"},
 		urlPattern: googleAuthURL,
 	},
+	// `--quiet` is load-bearing, and only on the second run. When
+	// GOOGLE_APPLICATION_CREDENTIALS is already set — which it is for any agent
+	// whose profile points it at the ADC file this very command writes — gcloud
+	// opens with a "credentials will still be generated to [...] Do you want to
+	// continue (Y/n)?" confirmation, then aborts with "This prompt could not be
+	// answered because you are not in an interactive session". No consent URL is
+	// ever printed, so waitForURL times out and the admin card is never posted:
+	// the request fails as silence rather than as an error. `--quiet` takes the
+	// default answer (continue) and the flow proceeds as normal.
+	//
+	// It is a no-op on a first login against an empty config — there is no prompt
+	// to suppress there — which is exactly why the profile shipped working and
+	// broke only once ADC existed.
 	"gcloud-adc": {
 		Name:       "gcloud-adc",
 		NeedsCode:  true,
 		Command:    "gcloud",
-		Args:       []string{"auth", "application-default", "login", "--no-launch-browser"},
+		Args:       []string{"auth", "application-default", "login", "--no-launch-browser", "--quiet"},
 		urlPattern: googleAuthURL,
 	},
 	// claude-code re-authenticates the Claude Code CLI itself — the credential

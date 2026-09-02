@@ -31,6 +31,20 @@ func TestLookupKnownProfiles(t *testing.T) {
 	}
 }
 
+// gcloud-adc must run non-interactively. With GOOGLE_APPLICATION_CREDENTIALS
+// already set, `gcloud auth application-default login` asks to confirm the
+// overwrite before it prints anything; unanswered, it dies without a consent URL
+// and the flow stalls until waitForURL gives up, posting no card at all.
+func TestGcloudADCSuppressesPrompts(t *testing.T) {
+	p, ok := Lookup("gcloud-adc")
+	if !ok {
+		t.Fatal("Lookup(\"gcloud-adc\") missed")
+	}
+	if !slices.Contains(p.Args, "--quiet") {
+		t.Fatalf("gcloud-adc args must pin --quiet, got %v", p.Args)
+	}
+}
+
 // aws is named in the spec but not shipped yet. It must fail as an unknown
 // profile rather than resolve to something that cannot complete.
 func TestAWSProfileIsNotYetAvailable(t *testing.T) {
