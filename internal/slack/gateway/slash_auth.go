@@ -101,6 +101,16 @@ func (a *Gateway) credentialStatusText() string {
 		} else {
 			b.WriteString("    last refresh: _none this run_\n")
 		}
+		if !s.NextCheck.IsZero() {
+			if d := s.NextCheck.Sub(now).Round(time.Minute); d > 0 {
+				fmt.Fprintf(&b, "    next check: in %s\n", d.String())
+			} else {
+				b.WriteString("    next check: _due now_\n")
+			}
+		}
+		if s.Attempts > 0 {
+			fmt.Fprintf(&b, "    attempts against the current expiry: %d\n", s.Attempts)
+		}
 		if s.LastError != "" {
 			fmt.Fprintf(&b, "    :warning: %s\n", s.LastError)
 		}

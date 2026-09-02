@@ -124,7 +124,6 @@ func (a *Gateway) StartServing(ctx context.Context) error {
 		a.warmChat(serveCtx)
 		a.startChannelCache(serveCtx)
 		a.startJournalSweeper(serveCtx)
-		a.startCredWarden(serveCtx)
 		stopScheduler := a.startScheduler(serveCtx)
 		defer stopScheduler()
 

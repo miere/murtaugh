@@ -153,6 +153,26 @@ lapses, runs one minimal **unsandboxed** `claude` turn. Claude Code refreshes an
 persists normally, because nothing is denying the write, and sandboxed sessions
 only ever read a credential that is already valid.
 
+It **aims** rather than polls. Claude Code refreshes proactively only once the
+token is inside its own threshold, measured at **five minutes**: a forcing turn
+at 5m13s remaining did nothing, and the next at 3m13s refreshed. So the warden
+sleeps until three minutes before expiry and acts then, retrying every 30s until
+the stored expiry actually moves. Exit status 0 is not treated as success — the
+expiry is read back, because a turn can complete perfectly and change nothing.
+
+Every wait is capped at five minutes and every pass re-reads the real expiry
+rather than trusting elapsed time. Go timers run on the monotonic clock, which
+stops while the host sleeps, so a wait computed before a suspend fires late by
+however long the machine was away; re-reading means a credential that lapsed
+overnight is noticed on the next pass instead of after a timer that was asleep
+too.
+
+It runs for the **daemon's** lifetime, not the leader's. A Claude Code credential
+is scoped to the machine — one keychain item shared by every `claude_code` agent
+on the host — while leadership is scoped to the cluster. A standby that let its
+own credential lapse would turn the next failover into a promotion of a node that
+cannot authenticate.
+
 It is **derived, not configured**. There is no enable flag: the warden exists
 because a `claude_code` agent exists and disappears when the last one is removed.
 It is one watcher per distinct credential — the `(claude binary, HOME)` pair —
@@ -179,7 +199,9 @@ Two consequences worth knowing:
 /murtaugh auth          # admin-only: start a Claude Code sign-in now
 ```
 
-`auth status` reports timings only, never token material. `auth` posts the
+`auth status` reports timings only, never token material: observed expiry, when
+the warden next intends to look, how many turns it has spent against the current
+expiry without moving it, and the last error. `auth` posts the
 [Auth Request](agents.md#what-an-agent-can-do-tools) card to your DMs: open the
 link, sign in, paste the code back.
 

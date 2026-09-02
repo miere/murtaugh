@@ -48,33 +48,50 @@ import (
 )
 
 const (
-	// DefaultCheckEvery is how often the warden reads the credential's expiry.
-	// The read is local and cheap (no network, no inference), so this is
-	// deliberately frequent: it bounds how late the warden can notice that a
-	// token is about to lapse.
-	DefaultCheckEvery = 2 * time.Minute
-
-	// DefaultMargin is how long before expiry the warden starts forcing a
+	// DefaultForceAt is how long before expiry the warden starts forcing a
 	// refresh.
 	//
-	// It must exceed Claude Code's OWN proactive-refresh threshold, which is
-	// internal and unpublished. That is why the warden re-attempts on every tick
-	// while inside the margin rather than firing once: whatever the CLI's
-	// threshold turns out to be, one of those attempts lands inside it, and the
-	// attempts stop as soon as the observed expiry moves forward. The design
-	// therefore does not depend on guessing a number we cannot see.
-	DefaultMargin = 15 * time.Minute
+	// The number is measured, not guessed. Claude Code refreshes proactively
+	// only once the token is inside its OWN internal threshold, and an observed
+	// run pinned that threshold at five minutes: a forcing turn at 5m13s
+	// remaining did nothing, and the next at 3m13s refreshed. So the effective
+	// window is the last five minutes before expiry, and aiming at three minutes
+	// lands inside it with margin on both sides.
+	//
+	// An earlier version swept a fifteen-minute margin on a two-minute ticker.
+	// That spent five inference calls hitting nothing before the sixth worked,
+	// and — the reason this changed — it left only about two ticks inside the
+	// window that actually mattered. Losing either one to a suspend or a restart
+	// lost the credential.
+	DefaultForceAt = 3 * time.Minute
+
+	// DefaultRetryInterval is the cadence while inside the window, until the
+	// observed expiry actually moves.
+	DefaultRetryInterval = 30 * time.Second
+
+	// DefaultMaxSleep caps any single wait.
+	//
+	// It is what makes the warden robust to a suspended machine and a jumped
+	// clock. Go timers run on the monotonic clock, which stops while the host
+	// sleeps, so a long wait computed before a suspend fires late by however
+	// long the machine was away. Capping the wait means the loop re-reads the
+	// credential's real, wall-clock expiry promptly after waking and can see
+	// that it has already lapsed. The read is a local keychain lookup — no
+	// network, no inference — so a short cap is nearly free.
+	DefaultMaxSleep = 5 * time.Minute
+
+	// DefaultMaxAttemptsPerExpiry bounds how many forcing turns one unchanged
+	// expiry may provoke before the warden backs off to DefaultMaxSleep.
+	//
+	// Without it a credential that can no longer be refreshed at all — a revoked
+	// refresh token, a CLI that fails before reaching the network — would spend
+	// an inference call every RetryInterval for as long as the daemon runs.
+	DefaultMaxAttemptsPerExpiry = 6
 
 	// DefaultRefreshTimeout bounds one forcing turn. A minimal prompt answers in
 	// seconds; anything approaching this means the CLI is wedged, and holding the
 	// warden goroutine open would delay every later check.
 	DefaultRefreshTimeout = 90 * time.Second
-
-	// minForceInterval floors the gap between two forcing turns for the same
-	// credential. Without it, a credential whose expiry never advances (a revoked
-	// refresh token, a CLI that fails before reaching the network) would burn one
-	// inference call per tick for as long as the daemon runs.
-	minForceInterval = 60 * time.Second
 
 	// keychainService is the login-keychain item Claude Code stores its
 	// credential under on macOS.
@@ -121,18 +138,29 @@ type State struct {
 	LastRefresh time.Time
 	// LastError describes the most recent failure, empty when healthy.
 	LastError string
-	// Refreshes counts successful forcing turns this process.
+	// Refreshes counts refreshes this process actually achieved — turns after
+	// which the observed expiry moved forward, not turns that merely exited 0.
 	Refreshes int
+	// NextCheck is when the warden intends to look again, zero if not scheduled
+	// yet. Surfaced so an operator can see the warden is aimed at something
+	// rather than merely alive.
+	NextCheck time.Time
+	// Attempts counts forcing turns spent against the CURRENT expiry without
+	// moving it. Reset the moment a refresh lands.
+	Attempts int
 }
 
 // Options configures a Warden. Only Identities is required.
 type Options struct {
 	// Identities are the credentials to watch. Duplicates are collapsed.
 	Identities []Identity
-	// CheckEvery, Margin and RefreshTimeout override the defaults above.
-	CheckEvery     time.Duration
-	Margin         time.Duration
-	RefreshTimeout time.Duration
+	// ForceAt, RetryInterval, MaxSleep, MaxAttemptsPerExpiry and RefreshTimeout
+	// override the defaults above.
+	ForceAt              time.Duration
+	RetryInterval        time.Duration
+	MaxSleep             time.Duration
+	MaxAttemptsPerExpiry int
+	RefreshTimeout       time.Duration
 	// Model is passed to the forcing turn as --model. Empty uses the cheapest
 	// alias, since the turn's content is irrelevant — only the auth handshake
 	// matters.
@@ -149,22 +177,23 @@ type Options struct {
 
 // Warden watches one or more credentials and refreshes each before it lapses.
 type Warden struct {
-	identities []Identity
-	checkEvery time.Duration
-	margin     time.Duration
-	timeout    time.Duration
-	model      string
-	log        *slog.Logger
-	now        func() time.Time
+	identities  []Identity
+	forceAt     time.Duration
+	retry       time.Duration
+	maxSleep    time.Duration
+	maxAttempts int
+	timeout     time.Duration
+	model       string
+	log         *slog.Logger
+	now         func() time.Time
 
 	readExpiry   func(context.Context, Identity) (time.Time, error)
 	forceRefresh func(context.Context, Identity) error
 
 	// mu serialises BOTH the forcing turns and access to state. Serialising the
 	// turns is the point: concurrent refreshes race the server's token rotation.
-	mu        sync.Mutex
-	state     map[Identity]*State
-	lastForce map[Identity]time.Time
+	mu    sync.Mutex
+	state map[Identity]*State
 }
 
 // New builds a Warden. It returns nil when there is nothing to watch, which the
@@ -177,8 +206,10 @@ func New(opts Options) *Warden {
 	}
 	w := &Warden{
 		identities:   ids,
-		checkEvery:   orDuration(opts.CheckEvery, DefaultCheckEvery),
-		margin:       orDuration(opts.Margin, DefaultMargin),
+		forceAt:      orDuration(opts.ForceAt, DefaultForceAt),
+		retry:        orDuration(opts.RetryInterval, DefaultRetryInterval),
+		maxSleep:     orDuration(opts.MaxSleep, DefaultMaxSleep),
+		maxAttempts:  orInt(opts.MaxAttemptsPerExpiry, DefaultMaxAttemptsPerExpiry),
 		timeout:      orDuration(opts.RefreshTimeout, DefaultRefreshTimeout),
 		model:        strings.TrimSpace(opts.Model),
 		log:          opts.Logger,
@@ -186,7 +217,6 @@ func New(opts Options) *Warden {
 		readExpiry:   opts.readExpiry,
 		forceRefresh: opts.forceRefresh,
 		state:        make(map[Identity]*State, len(ids)),
-		lastForce:    make(map[Identity]time.Time, len(ids)),
 	}
 	if w.log == nil {
 		w.log = slog.Default()
@@ -231,97 +261,185 @@ func (w *Warden) States() []State {
 	return out
 }
 
-// Run drives the warden until ctx ends. It performs one pass immediately — a
-// daemon that has been down over an expiry boundary must not wait a full tick to
-// discover it — and then ticks.
+// Run drives the warden until ctx ends.
+//
+// It does not tick. It AIMS: each pass reads the credential's real expiry and
+// sleeps until shortly before it, so the forcing turn lands inside the window
+// where Claude Code will actually act on it. A ticker sweeping a wide margin
+// spends most of its calls too early to do anything and, worse, leaves only a
+// couple of chances inside the window that counts — lose one to a suspend or a
+// restart and the credential is gone.
+//
+// Every wait is capped (see DefaultMaxSleep) and every pass re-reads the expiry
+// from the credential store rather than trusting elapsed time, so a machine that
+// slept through its own deadline notices on the next pass instead of waiting out
+// a monotonic timer that stopped while it was away.
 func (w *Warden) Run(ctx context.Context) {
 	if w == nil {
 		return
 	}
 	w.log.Info("credential warden started",
 		"credentials", len(w.identities),
-		"check_every", w.checkEvery.String(),
-		"margin", w.margin.String())
+		"force_at", w.forceAt.String(),
+		"retry", w.retry.String(),
+		"max_sleep", w.maxSleep.String())
 
-	w.checkAll(ctx)
-	ticker := time.NewTicker(w.checkEvery)
-	defer ticker.Stop()
 	for {
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			w.log.Info("credential warden stopped")
 			return
-		case <-ticker.C:
-			w.checkAll(ctx)
+		}
+		wait := w.checkAll(ctx)
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			w.log.Info("credential warden stopped")
+			return
+		case <-timer.C:
 		}
 	}
 }
 
-// checkAll runs one pass over every identity. Identities are handled
-// sequentially, which is what keeps two refreshes from overlapping.
-func (w *Warden) checkAll(ctx context.Context) {
+// checkAll runs one pass over every identity and returns how long to wait before
+// the next pass — the soonest any credential wants attention.
+//
+// Identities are handled sequentially, which is what keeps two forcing turns
+// from overlapping: concurrent refreshes race the server's rotation of the
+// refresh token, and the loser presents one that has just been retired.
+func (w *Warden) checkAll(ctx context.Context) time.Duration {
+	wait := w.maxSleep
 	for _, id := range w.identities {
 		if ctx.Err() != nil {
-			return
+			return wait
 		}
-		w.checkOne(ctx, id)
+		if d := w.checkOne(ctx, id); d < wait {
+			wait = d
+		}
 	}
+	if wait < time.Second {
+		wait = time.Second
+	}
+	return wait
 }
 
-// checkOne reads one credential's expiry and forces a refresh when it is inside
-// the margin.
+// checkOne handles one credential and returns how long until it next wants
+// looking at.
 //
 // Every failure is logged and recorded, never propagated: the warden is a
-// background keeper, and one unreadable credential must not stop the ticker or
-// starve the other identities.
-func (w *Warden) checkOne(ctx context.Context, id Identity) {
+// background keeper, and one unreadable credential must not stop the loop or
+// starve the others.
+func (w *Warden) checkOne(ctx context.Context, id Identity) time.Duration {
 	now := w.now()
 	expiry, err := w.readExpiry(ctx, id)
 	if err != nil {
 		w.record(id, func(s *State) {
 			s.LastChecked = now
 			s.LastError = "read expiry: " + err.Error()
+			s.NextCheck = now.Add(w.retry)
 		})
 		w.log.Warn("credential warden could not read expiry", "credential", id.String(), "error", err)
-		return
+		return w.retry
 	}
 
+	// A new expiry retires whatever attempt count the previous one accumulated:
+	// the credential moved, so the reason for backing off is gone.
 	w.record(id, func(s *State) {
+		if !s.ExpiresAt.Equal(expiry) {
+			s.Attempts = 0
+		}
 		s.LastChecked = now
 		s.ExpiresAt = expiry
 		s.LastError = ""
 	})
 
 	remaining := expiry.Sub(now)
-	if remaining > w.margin {
-		return
+	if remaining > w.forceAt {
+		// Still comfortable. Sleep until the window opens, capped so a suspend
+		// cannot carry us past the deadline unnoticed.
+		return w.schedule(id, now, capDuration(remaining-w.forceAt, w.maxSleep))
 	}
 
-	// Inside the margin. Re-attempt on each tick until the observed expiry moves
-	// forward, floored by minForceInterval so a credential that can no longer be
-	// refreshed at all does not spend an inference call every tick.
-	if last, ok := w.lastForced(id); ok && now.Sub(last) < minForceInterval {
-		return
+	// Inside the window — or already lapsed, which a restart after a suspend is
+	// the usual way to arrive at, and which is still worth one attempt.
+	if attempts := w.attempts(id); attempts >= w.maxAttempts {
+		// This credential is not coming back by being asked again. Back off
+		// rather than spend an inference call every retry for as long as the
+		// daemon runs; a re-authentication is what fixes it now.
+		w.log.Warn("credential warden backing off; the expiry has not moved",
+			"credential", id.String(),
+			"attempts", attempts,
+			"expires_in", remaining.Round(time.Second).String())
+		return w.schedule(id, now, w.maxSleep)
 	}
-	w.noteForced(id, now)
 
 	w.log.Info("credential warden forcing refresh",
 		"credential", id.String(),
 		"expires_in", remaining.Round(time.Second).String())
 
 	turnCtx, cancel := context.WithTimeout(ctx, w.timeout)
-	defer cancel()
-	if err := w.forceRefresh(turnCtx, id); err != nil {
-		w.record(id, func(s *State) { s.LastError = "force refresh: " + err.Error() })
+	err = w.forceRefresh(turnCtx, id)
+	cancel()
+	if err != nil {
+		w.record(id, func(s *State) {
+			s.LastError = "force refresh: " + err.Error()
+			s.Attempts++
+		})
 		w.log.Warn("credential warden refresh failed", "credential", id.String(), "error", err)
-		return
+		return w.schedule(id, w.now(), w.retry)
 	}
+
+	// Exit status 0 is NOT success. Claude Code refreshes only once the token is
+	// inside its own threshold, so a turn can complete perfectly and leave the
+	// credential exactly as it was. The only honest evidence is the stored expiry
+	// moving forward, so read it back and say which happened.
+	after, readErr := w.readExpiry(ctx, id)
+	now = w.now()
+	if readErr != nil {
+		w.record(id, func(s *State) {
+			s.LastError = "verify refresh: " + readErr.Error()
+			s.Attempts++
+		})
+		w.log.Warn("credential warden could not verify the refresh", "credential", id.String(), "error", readErr)
+		return w.schedule(id, now, w.retry)
+	}
+	if !after.After(expiry) {
+		w.record(id, func(s *State) { s.Attempts++ })
+		w.log.Info("credential warden turn completed but the expiry did not move; retrying",
+			"credential", id.String(),
+			"expires_in", after.Sub(now).Round(time.Second).String())
+		return w.schedule(id, now, w.retry)
+	}
+
 	w.record(id, func(s *State) {
-		s.LastRefresh = w.now()
+		s.ExpiresAt = after
+		s.LastRefresh = now
 		s.Refreshes++
+		s.Attempts = 0
 		s.LastError = ""
 	})
-	w.log.Info("credential warden refresh completed", "credential", id.String())
+	w.log.Info("credential warden refreshed the credential",
+		"credential", id.String(),
+		"valid_for", after.Sub(now).Round(time.Second).String())
+	return w.schedule(id, now, capDuration(after.Sub(now)-w.forceAt, w.maxSleep))
+}
+
+// schedule records when the warden next intends to look and returns the wait.
+func (w *Warden) schedule(id Identity, now time.Time, wait time.Duration) time.Duration {
+	if wait < time.Second {
+		wait = time.Second
+	}
+	w.record(id, func(s *State) { s.NextCheck = now.Add(wait) })
+	return wait
+}
+
+func (w *Warden) attempts(id Identity) int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if s, ok := w.state[id]; ok {
+		return s.Attempts
+	}
+	return 0
 }
 
 // runForcingTurn is the real refresh mechanism: one minimal UNSANDBOXED `claude`
@@ -355,19 +473,6 @@ func (w *Warden) record(id Identity, mutate func(*State)) {
 	if s, ok := w.state[id]; ok {
 		mutate(s)
 	}
-}
-
-func (w *Warden) lastForced(id Identity) (time.Time, bool) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	t, ok := w.lastForce[id]
-	return t, ok
-}
-
-func (w *Warden) noteForced(id Identity, at time.Time) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.lastForce[id] = at
 }
 
 // --- credential reading ----------------------------------------------------
@@ -487,6 +592,24 @@ func dedupe(in []Identity) []Identity {
 		out = append(out, id)
 	}
 	return out
+}
+
+// capDuration clamps d to at most limit, and never below zero.
+func capDuration(d, limit time.Duration) time.Duration {
+	if d < 0 {
+		return 0
+	}
+	if d > limit {
+		return limit
+	}
+	return d
+}
+
+func orInt(v, fallback int) int {
+	if v <= 0 {
+		return fallback
+	}
+	return v
 }
 
 func orDuration(v, fallback time.Duration) time.Duration {
