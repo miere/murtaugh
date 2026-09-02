@@ -75,6 +75,14 @@ func (a *Application) runGateway(ctx context.Context) error {
 	// serving.
 	a.startConfigWatch(ctx, holder, runner)
 
+	// Daemon-lifetime work, started BEFORE the election and never stopped by it.
+	// The credential warden must keep a standby's Claude Code credential alive:
+	// it is scoped to this machine, not to the cluster, and a standby whose
+	// credential has lapsed is a failover that promotes a node unable to
+	// authenticate.
+	holder.get().StartBackground(ctx)
+	defer func() { holder.get().StopBackground() }()
+
 	a.logger.Info("starting Slack gateway (Socket Mode)", "config", a.configPath)
 	err = runner.Run(ctx)
 	if err != nil && ctx.Err() != nil {
@@ -119,6 +127,7 @@ func (a *Application) reloadConfig(daemonCtx, opCtx context.Context, holder *gat
 	noticeChannel, noticeTS := old.NotifyConfigReloading(ctx)
 
 	old.StopServing(ctx, "reloading the approved configuration")
+	old.StopBackground()
 	old.CloseChatSessions()
 
 	replacement := a.buildGateway(cfg)
@@ -128,6 +137,7 @@ func (a *Application) reloadConfig(daemonCtx, opCtx context.Context, holder *gat
 	holder.swap(replacement)
 	a.cfg = cfg
 
+	replacement.StartBackground(daemonCtx)
 	if err := replacement.StartServing(daemonCtx); err != nil {
 		// The daemon is now holding the lock without serving, which is the one
 		// state worse than either side of the reload. Report it loudly; the

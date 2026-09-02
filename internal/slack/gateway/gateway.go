@@ -218,6 +218,11 @@ type Gateway struct {
 	// Derived from the agent set at construction (see claudeCodeIdentities)
 	// rather than configured; nil when no claude_code agent is defined.
 	credWarden *credwarden.Warden
+	// backgroundCancel stops the daemon-lifetime work started by
+	// StartBackground (today: the credential warden). Guarded by backgroundMu;
+	// nil means nothing is running.
+	backgroundCancel context.CancelFunc
+	backgroundMu     sync.Mutex
 	// credRepair drives the admin-facing re-authentication card. Shared with the
 	// chat handler, which reaches it when a turn fails on a rejected credential;
 	// the gateway keeps a reference for the `auth` slash verb, which repairs one
