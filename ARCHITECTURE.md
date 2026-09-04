@@ -372,6 +372,16 @@ Agent profiles and the `chat` routing config now live in the store (agents as
 for `chat.channels` still decodes — `config.ChannelRules` converts it to the list
 reproducing the old precedence — and is rewritten as a list on the next save.
 
+Authorship is **not** part of that ladder. Another app that @-mentions Murtaugh
+is admitted or refused by `allowed_users` on exactly the same terms as a human,
+so a bot earns access by being on the list and nothing else — there is no second
+allowlist to keep in sync. The one authorship question the gateway does ask is
+`isSelfAuthored`: an event we wrote ourselves is always dropped, because a reply
+whose text contains our own `<@id>` re-enters as an `app_mention` and would reply
+again without end. Identity comes from `auth.test` at construction; when that
+call fails the check degrades to refusing every app-authored event, which loses
+messages but cannot recurse.
+
 Channel admission (both the `allow_anyone` waiver and the `no_mention` waiver)
 runs **off the socket goroutine**, because judging a non-allowlisted author needs
 the channel NAME and resolving an uncached one costs a `conversations.info` call.

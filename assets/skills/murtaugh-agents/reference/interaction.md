@@ -12,6 +12,11 @@ All three are gated by the `allowed_users` allowlist; messages from others are
 silently ignored. Duplicate Slack deliveries are de-duplicated so a redelivered
 message doesn't spawn a second reply.
 
+Other **apps** are on that same list — add a bot's handle or user ID to
+`allowed_users` and it can @-mention Murtaugh like anyone else. Murtaugh never
+answers its own messages, which is the only authorship rule; without it a reply
+containing its own mention would trigger another reply, forever.
+
 ## Streaming
 
 The reply streams into the thread: Murtaugh edits the message as chunks arrive,

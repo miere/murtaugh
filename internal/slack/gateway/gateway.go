@@ -95,6 +95,13 @@ type Gateway struct {
 	chat            *ChatHandler
 	chatSessions    map[string]ChatSessionManager
 	chatWarmTimeout time.Duration
+	// selfUserID and selfBotID are this bot's own Slack identity, from auth.test
+	// at construction. They exist so the event loop can tell "another app is
+	// talking to me" — answerable, subject to the ordinary allowlist — from "I am
+	// talking to myself", which is a loop and always refused. Both are empty when
+	// auth.test failed or chat is disabled; see isSelfAuthored for what that costs.
+	selfUserID string
+	selfBotID  string
 	// chatRouting and agentProfiles are config snapshots captured at construction
 	// so the startup routing summary (logStartupRouting) can report the configured
 	// agents and channel routing — and flag routes whose target agent failed to
@@ -408,6 +415,12 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 
 	var chat *ChatHandler
 	var sessions map[string]ChatSessionManager
+	// This bot's own Slack identity, resolved once by the auth.test below and
+	// used for two things: tagging the agent's prior replies as its own during
+	// thread backfill, and refusing to answer our own messages (see
+	// isSelfAuthored). Declared out here so the Gateway gets them; populated only
+	// when chat is enabled, because that is the only mode that answers anything.
+	var selfUserID, selfBotID string
 	// agentToolProblems records tool groups dropped while building each agent (a
 	// degraded feature, not a failed agent) so the startup summary can surface
 	// them in logs and the journal.
@@ -567,15 +580,20 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 		if cfg.Journal.EffectiveEnabled(journal.StreamACPSession) {
 			sessionLog = newSessionLogger(recorder, cfg.Journal.EffectiveBlobDir(cfg.BaseDir, cfg.BaseName), logger)
 		}
-		// Resolve this bot's own Slack user id once so thread backfill can mark
-		// the agent's prior replies as its own. Best-effort: a failed auth.test
-		// only costs the "(you)" tagging, not the backfill itself.
-		var botUserID string
+		// Resolve this bot's own Slack identity once, so thread backfill can mark
+		// the agent's prior replies as its own and the event loop can recognise —
+		// and refuse — its own messages.
+		//
+		// A failed auth.test used to cost only the "(you)" tagging. It now also
+		// costs the self-mention guard, which is why isSelfAuthored falls back to
+		// refusing every app-authored event when the identity is unknown: that is
+		// the old, conservative behaviour, and a message wrongly ignored is a far
+		// cheaper mistake than a reply loop with nothing to stop it.
 		authCtx, cancelAuth := context.WithTimeout(context.Background(), 10*time.Second)
 		if resp, err := api.AuthTestContext(authCtx); err != nil {
-			logger.Warn("auth.test failed; thread backfill will not tag the bot's own replies", "error", err)
+			logger.Warn("auth.test failed; thread backfill will not tag the bot's own replies, and messages from other apps will be ignored", "error", err)
 		} else {
-			botUserID = resp.UserID
+			selfUserID, selfBotID = resp.UserID, resp.BotID
 		}
 		cancelAuth()
 
@@ -588,7 +606,7 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 			logger,
 		).WithIdleTimeout(cfg.Defaults.EffectiveRequestTimeout()).WithSessionLogger(sessionLog).
 			WithProgressDisplay(cfg.EffectiveProgressDisplay).WithStatusMessenger(api).
-			WithBackfiller(NewThreadBackfiller(api, botUserID, logger)).
+			WithBackfiller(NewThreadBackfiller(api, selfUserID, logger)).
 			WithCanvasInfo(slackCanvasInfo{api: api}).
 			WithFileFetcher(api).
 			WithUploader(slackAttachmentUploader{api: api}).
@@ -643,6 +661,8 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 		delegator:    delegator,
 		chat:         chat,
 		chatSessions: sessions,
+		selfUserID:   selfUserID,
+		selfBotID:    selfBotID,
 		// Built from the whole agent set, not from the chat loop above: a
 		// claude_code agent is reachable by jobs, workflow rules and unfurls even
 		// when chat is disabled, and its credential still has to be kept alive.
@@ -1687,6 +1707,34 @@ func (a *Gateway) handleStopSlashCommand(event socketmode.Event, command slack.S
 	a.ack(event, ephemeralText("Nothing to stop."))
 }
 
+// isSelfAuthored reports whether an inbound event was written by this bot.
+//
+// This is the whole of the loop protection, and it is deliberately the ONLY
+// thing the gateway asks about authorship. Other apps are not a category:
+// Riggs tagging Murtaugh is admitted or refused by access.allowed_users on
+// exactly the same terms as a human tagging Murtaugh, because a second
+// allowlist that distinguishes bots is one more list to keep in sync and one
+// more way for the two to disagree. Our own messages are the real hazard —
+// a reply whose text contains "<@self>" re-enters the gateway as an
+// app_mention, which replies again, and nothing in the loop ever tires.
+//
+// Both identity fields empty means auth.test failed at startup, or chat is
+// disabled. In that case the check falls back to refusing every app-authored
+// event: the pre-existing behaviour, which loses Riggs' message but cannot
+// recurse. Fail toward the silence, never toward the loop.
+func (a *Gateway) isSelfAuthored(userID, botID string) bool {
+	if a.selfUserID == "" && a.selfBotID == "" {
+		return botID != ""
+	}
+	// Both are checked because the two Slack surfaces disagree about which one
+	// they populate: a message posted by a bot user carries `user`, while
+	// webhook- and app-posted variants may carry only `bot_id`.
+	if a.selfUserID != "" && userID == a.selfUserID {
+		return true
+	}
+	return a.selfBotID != "" && botID == a.selfBotID
+}
+
 func (a *Gateway) handleEventsAPI(event socketmode.Event) {
 	eventsAPI, ok := event.Data.(slackevents.EventsAPIEvent)
 	if !ok {
@@ -1705,13 +1753,16 @@ func (a *Gateway) handleEventsAPI(event socketmode.Event) {
 			a.logger.Debug("ignored app_mention because chat is disabled")
 			return
 		}
-		if inner.BotID != "" {
+		if a.isSelfAuthored(inner.User, inner.BotID) {
+			a.logger.Debug("ignored app_mention written by this bot", "channel", inner.Channel, "ts", inner.TimeStamp)
 			return
 		}
 		a.handleAppMention(eventsAPI, inner)
 	case *slackevents.MessageEvent:
-		// Bot/self messages are never answered, in DMs or channels.
-		if inner.BotID != "" {
+		// Our own messages are never answered, in DMs or channels. Everyone
+		// else — human or app — is judged by the allowlist further down.
+		if a.isSelfAuthored(inner.User, inner.BotID) {
+			a.logger.Debug("ignored message written by this bot", "channel", inner.Channel, "ts", inner.TimeStamp)
 			return
 		}
 		// Allow plain messages and file uploads ("file_share"); drop other
