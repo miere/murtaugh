@@ -10,6 +10,7 @@ import (
 
 	"github.com/miere/murtaugh/internal/agent"
 	"github.com/miere/murtaugh/internal/config"
+	"github.com/miere/murtaugh/internal/mcpbridge"
 )
 
 // fakeClient is a scripted agent.Client. It replays a fixed sequence of events on
@@ -262,5 +263,41 @@ func TestRunInitializeError(t *testing.T) {
 	}
 	if !client.closed {
 		t.Fatal("client should be closed even on init failure")
+	}
+}
+
+// The whole point of the bridged delegate: a claude_code or ACP agent reaches
+// Murtaugh's tools only through the aggregator, so a Runner that was given one
+// must pass it down to every client it builds. Losing it here is silent — the
+// agent starts fine and simply has no tools.
+func TestBuildDepsCarriesTheBridge(t *testing.T) {
+	bridge := mcpbridge.NewServer("/tmp/murtaugh-test.sock", slog.New(slog.NewTextHandler(nopWriter{}, nil)))
+	r := newTestRunner(t, &fakeClient{}, "1m").WithBridge(bridge)
+
+	deps := r.buildDeps(slog.Default())
+	if deps.Bridge != bridge {
+		t.Fatalf("bridge not passed to the client build: got %v, want %v", deps.Bridge, bridge)
+	}
+}
+
+// The CLI has no aggregator listening, so an unbridged Runner must stay
+// unbridged rather than pointing an agent at a socket nobody is serving.
+func TestBuildDepsWithoutBridgeStaysNil(t *testing.T) {
+	deps := newTestRunner(t, &fakeClient{}, "1m").buildDeps(slog.Default())
+	if deps.Bridge != nil {
+		t.Fatal("expected no bridge on a Runner that was never given one")
+	}
+}
+
+// Nobody is watching a headless run, so an approval card would block the turn
+// until the idle watchdog killed it. Delegated clients are built without an
+// approver on purpose; this pins that.
+func TestBuildDepsNeverCarriesAnApprover(t *testing.T) {
+	deps := newTestRunner(t, &fakeClient{}, "1m").buildDeps(slog.Default())
+	if deps.Approver != nil {
+		t.Fatal("delegated agents must not be gated by an approver: nobody can answer it")
+	}
+	if deps.BackgroundSink != nil {
+		t.Fatal("delegated agents have no thread to render background events into")
 	}
 }

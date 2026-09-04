@@ -42,8 +42,10 @@ func (a *Application) buildGateway(cfg config.Config) *gateway.Gateway {
 	// Scheduled jobs reuse the jobs.run execution path so a cron/every
 	// run behaves identically to a manual one (same timeout, workdir, and
 	// exit-code handling). Output streams to the daemon's stdout/stderr,
-	// which launchd captures into the Murtaugh log files.
-	gw = gw.WithScheduledRunner(newScheduledRunner(cfg, a.recorder, a.registry))
+	// which launchd captures into the Murtaugh log files. An agent job borrows
+	// the gateway's own delegate runner — the one holding the MCP aggregator —
+	// so the agent a schedule wakes up has the tools a chat agent has.
+	gw = gw.WithScheduledRunner(newScheduledRunner(cfg, a.recorder, a.registry, gw.Delegator()))
 	// Approving a held job's first run writes `confirmed: true` back to the
 	// store, so the prompt is not repeated after every restart. The gate
 	// still re-arms on change: every job write surface (jobs.define,

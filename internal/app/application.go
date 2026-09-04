@@ -439,6 +439,10 @@ func effectiveTroubleshootProviders(cfg config.Config) []string {
 // (jobs with `agent`/`prompt` instead of `command`). It returns nil when no
 // agents are configured, leaving such jobs to fail with a clear error; config
 // validation already guarantees a job's agent is defined when one is set.
+//
+// This is the CLI/MCP runner: it has no MCP aggregator, because outside the
+// daemon there is none to connect to. Inside the daemon the gateway's own
+// bridged runner is used instead (see newScheduledRunner).
 func newJobDelegator(cfg config.Config, registry *tools.Registry) run.AgentDelegator {
 	if len(cfg.Agents) == 0 {
 		return nil
@@ -452,12 +456,24 @@ func newJobDelegator(cfg config.Config, registry *tools.Registry) run.AgentDeleg
 // frontends use (streaming child output to the process stdout/stderr, which
 // launchd captures), and maps a non-zero exit code onto an error so the
 // gateway logs the run as failed.
-func newScheduledRunner(cfg config.Config, recorder journal.Recorder, registry *tools.Registry) gateway.ScheduledRunner {
+//
+// delegator is the gateway's shared one-shot runner, which carries the running
+// MCP aggregator: an agent job fired by cron therefore reaches the same tools a
+// chat agent does, and a prompt that ends "post the result to #ops" can. nil
+// (no agents configured) falls back to the unbridged CLI runner, which fails
+// such a job with a clear error rather than silently doing nothing.
+func newScheduledRunner(cfg config.Config, recorder journal.Recorder, registry *tools.Registry, delegator *agentdelegate.Runner) gateway.ScheduledRunner {
 	lookup := func(name string) (config.JobProfile, bool) {
 		j, ok := cfg.Jobs[name]
 		return j, ok
 	}
-	runTool := run.New(lookup).WithDelegator(newJobDelegator(cfg, registry)).WithRecorder(recorder)
+	// Typed nil must not become a non-nil interface: jobs.run checks its
+	// delegator for nil to report "agent delegation is unavailable".
+	jobDelegator := newJobDelegator(cfg, registry)
+	if delegator != nil {
+		jobDelegator = delegator
+	}
+	runTool := run.New(lookup).WithDelegator(jobDelegator).WithRecorder(recorder)
 	return func(ctx context.Context, name string) error {
 		result, err := runTool.Invoke(ctx, map[string]any{"name": name})
 		if err != nil {

@@ -39,9 +39,11 @@ type Deps struct {
 	Approver native.Approver
 	// Bridge is the gateway's shared MCP aggregator server. When set, an ACP
 	// agent is given a per-agent aggregator over it so it can reach Murtaugh's
-	// own tools through `murtaugh mcp-bridge`. nil (CLI/delegate paths) leaves an
-	// ACP agent with no Murtaugh tools, as before. Ignored for native agents,
-	// which hold their toolset in-process.
+	// own tools through `murtaugh mcp-bridge`. Both daemon paths set it — chat
+	// and delegation (jobs, workflow triggers, unfurls) — so a claude_code or
+	// ACP agent has the same tools either way. nil (the CLI path, where no
+	// aggregator is listening) leaves it with no Murtaugh tools. Ignored for
+	// native agents, which hold their toolset in-process.
 	Bridge *mcpbridge.Server
 	// LongRunningToolTimeout is the per-tool ceiling passed to an ACP or
 	// claude_code agent (see SessionDefaults.LongRunningToolTimeout) — both honour
