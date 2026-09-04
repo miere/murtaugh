@@ -54,7 +54,13 @@ func resolveUserIDs(ctx context.Context, api userDirectoryAPI, refs []string) ([
 			continue
 		}
 		for _, user := range users {
-			if user.Deleted || user.IsBot {
+			// Deleted accounts are skipped; bot users are NOT. An app named in
+			// allowed_users is a member of the workspace like any other, and
+			// refusing to resolve its handle here would make the entry
+			// unwritable in the only form a human would think to write it —
+			// failing closed at startup with "Slack user was not found" on a
+			// handle the operator can see in the member list.
+			if user.Deleted {
 				continue
 			}
 			if slackUserMatchesHandle(user, handle) {
