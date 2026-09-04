@@ -20,6 +20,15 @@ and operate it.
 | [CLI & MCP server](cli-and-mcp.md) | Running any tool from the terminal, and exposing the toolset to other AI clients over MCP. |
 | [Operations](operations.md) | Running the daemon, restarting it, reading its logs, and troubleshooting. |
 
+## Design specs
+
+Proposals under discussion. Unlike the guides above, these describe work that is
+planned or in progress rather than how Murtaugh behaves today.
+
+| Spec | What it proposes |
+|---|---|
+| [Claude Code authentication management](specs/01-claude-code-authentication-management.md) | Move the Claude Code credential out of the sandboxed agent's reach, and make credential failures visible to the admin instead of to the user. |
+
 ## Concepts in one minute
 
 - **The gateway** (`murtaugh slack gateway`) is the long-lived daemon. It owns
