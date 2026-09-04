@@ -28,6 +28,7 @@ import (
 	"github.com/miere/murtaugh/internal/agent"
 	"github.com/miere/murtaugh/internal/agentbuild"
 	"github.com/miere/murtaugh/internal/config"
+	"github.com/miere/murtaugh/internal/mcpbridge"
 	"github.com/miere/murtaugh/internal/tools"
 )
 
@@ -55,6 +56,14 @@ type Runner struct {
 	// MCP tools (unresolved MCP refs are skipped).
 	registry   *tools.Registry
 	mcpServers map[string]config.MCPServerConfig
+	// bridge is the gateway's shared MCP aggregator, wired by the composition
+	// root when a delegation runs inside the daemon. A claude_code or ACP agent
+	// reaches Murtaugh's own tools (slack.*, jobs, …) and the configured MCP
+	// servers ONLY through it, so a nil bridge leaves those backends with just
+	// their CLI's built-ins — correct for the CLI path, where no aggregator is
+	// listening, and wrong for a scheduled job that was told to post to Slack.
+	// Ignored by native agents, which hold their toolset in-process.
+	bridge *mcpbridge.Server
 }
 
 // NewRunner builds a Runner over the configured agents. idleTimeout is taken
@@ -95,6 +104,35 @@ func (r *Runner) WithBuildContext(registry *tools.Registry, mcpServers map[strin
 	return r
 }
 
+// WithBridge supplies the running MCP aggregator a claude_code or ACP delegated
+// agent proxies through to reach Murtaugh's tools and MCP servers — the same
+// surface the chat path gives those backends. Only the daemon has one to give;
+// the CLI leaves it nil and those agents keep their own built-ins. What it
+// deliberately does NOT carry over from chat is the approver: no human is
+// watching a scheduled run, so there is nobody to answer an approval card.
+// Returns the receiver for fluent wiring.
+func (r *Runner) WithBridge(bridge *mcpbridge.Server) *Runner {
+	r.bridge = bridge
+	return r
+}
+
+// buildDeps assembles the wiring every delegated client is built from. It is
+// the chat path's wiring minus the two pieces that need a human in a thread:
+// no Approver (no card can be answered) and no BackgroundSink (no thread to
+// render into). Everything a tool call actually needs — registry, MCP servers,
+// workspace, aggregator — is the same, so the agent's capabilities do not
+// depend on whether a schedule or a person started it.
+func (r *Runner) buildDeps(logger *slog.Logger) agentbuild.Deps {
+	return agentbuild.Deps{
+		Registry:               r.registry,
+		MCPServers:             r.mcpServers,
+		WorkspaceDir:           r.baseDir,
+		Logger:                 logger,
+		Bridge:                 r.bridge,
+		LongRunningToolTimeout: r.longRunningToolTimeout,
+	}
+}
+
 // defaultClient builds the backend for a one-shot delegation, branching on the
 // profile's kind (ACP or native) via agentbuild. A build error is deferred to
 // the client's Initialize (ErrorClient) so the factory keeps its no-error
@@ -109,13 +147,7 @@ func (r *Runner) defaultClient(profile config.AgentProfile, logger *slog.Logger)
 	for _, p := range resolved.Problems() {
 		logger.Warn("agent tool disabled", "tool", p.Group, "reason", p.Reason)
 	}
-	client, err := agentbuild.Client(resolved, agentbuild.Deps{
-		Registry:               r.registry,
-		MCPServers:             r.mcpServers,
-		WorkspaceDir:           r.baseDir,
-		Logger:                 logger,
-		LongRunningToolTimeout: r.longRunningToolTimeout,
-	})
+	client, err := agentbuild.Client(resolved, r.buildDeps(logger))
 	if err != nil {
 		return agentbuild.ErrorClient(err)
 	}

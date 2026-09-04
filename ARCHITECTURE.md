@@ -409,6 +409,19 @@ other key is rejected at parse time.
 mutually exclusive). An agent job is fire-and-forget; its prompt supports
 positional `{{ N }}` placeholders filled from the run-time/configured args.
 
+**Delegation runs at chat parity.** Every delegate-to-agent surface (jobs,
+workflow triggers, unfurls) shares ONE `agentdelegate.Runner`, built by the
+gateway with the same `agentbuild.Deps` a chat agent gets — registry, MCP
+servers, workspace, and the MCP aggregator. The aggregator matters because it is
+the only route by which an `acp`/`claude_code` agent reaches Murtaugh's tools:
+without it a scheduled agent job starts happily and then cannot post its own
+result. Two deps are withheld on purpose, both because no human is in a thread:
+the `Approver` (an approval card nobody can answer would hang the turn until the
+idle watchdog kills it — the agent's own `approval` policy is the only gate) and
+the background-events sink. `ask`/`present_plan` fail for the same reason, by
+design. The aggregator lives in the daemon, so a delegation fired straight from
+the CLI still runs on the backend's own built-ins.
+
 ## Slack gateway (`internal/slack/gateway`)
 
 `Gateway` owns the `*slack.Client`, the `*socketmode.Client`, and the four

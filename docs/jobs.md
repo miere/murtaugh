@@ -65,7 +65,14 @@ murtaugh cfg job delete --name code-review-job
   (`~/.config/murtaugh`). `--arg` is repeatable.
 - An **agent job** (`--agent` + `--prompt`) starts the named agent in an isolated
   one-shot session and sends the rendered prompt; it is fire-and-forget — the
-  agent acts through its own tools.
+  agent acts through its own tools. When the run is fired by the daemon
+  (a schedule, or `jobs run` inside the gateway) the agent gets the same tools
+  and MCP servers it has in chat, so "post the result to #ops" works. Two
+  things it does not get: an **approval gate** — nobody is in a thread to
+  answer a card, so the agent's own `approval` policy is the only gate — and
+  the `ask`/`present_plan` tools, which need a live conversation and fail with
+  a clear error. Run the same job straight from the CLI and it drops to the
+  backend's own built-ins: the aggregator only runs inside the daemon.
 - Prompts (and command args) support **positional placeholders** `{{ 1 }}`,
   `{{ 2 }}`, … that expand to the args passed at run time.
 
