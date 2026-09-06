@@ -25,11 +25,13 @@ type fakeClient struct {
 
 	initialized bool
 	closed      bool
+	gotMeta     agent.SessionMetadata
 }
 
 func (f *fakeClient) Initialize(context.Context) error { f.initialized = true; return f.initErr }
 
-func (f *fakeClient) NewSession(context.Context, agent.SessionMetadata) (agent.Session, error) {
+func (f *fakeClient) NewSession(_ context.Context, meta agent.SessionMetadata) (agent.Session, error) {
+	f.gotMeta = meta
 	return agent.Session{ID: "session-1"}, f.newSessErr
 }
 
@@ -71,6 +73,28 @@ type nopWriter struct{}
 func (nopWriter) Write(p []byte) (int, error) { return len(p), nil }
 
 func textEvent(s string) agent.Event { return agent.Event{Type: agent.EventText, Text: s} }
+
+// TestRunRequestsAnEphemeralSession pins the isolation this package promises. A
+// delegation carries no conversation, so its metadata must be marked Ephemeral:
+// without it the empty team/channel/thread triple derives ONE fixed session id
+// for every delegation ever made, and a claude_code backend --resumes the
+// previous run's transcript. The observed symptom was a daily job whose second
+// run opened with "I ran this one already" and posted nothing.
+func TestRunRequestsAnEphemeralSession(t *testing.T) {
+	client := &fakeClient{events: []agent.Event{{Type: agent.EventComplete}}}
+	r := newTestRunner(t, client, "1m")
+
+	if _, err := r.Run(context.Background(), "default", "hi"); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if !client.gotMeta.Ephemeral {
+		t.Fatalf("delegation asked for a conversation-derived session: %+v", client.gotMeta)
+	}
+	// The whole point: successive delegations must not land on the same id.
+	if a, b := agent.DeriveSessionID(client.gotMeta), agent.DeriveSessionID(client.gotMeta); a == b {
+		t.Fatalf("two delegations derived the same session id %q", a)
+	}
+}
 
 func TestRunAccumulatesTextUntilComplete(t *testing.T) {
 	client := &fakeClient{events: []agent.Event{

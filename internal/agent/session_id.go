@@ -18,7 +18,16 @@ var sessionNamespace = uuid.MustParse("6d757274-6175-6768-4363-763100000001")
 //
 // The team + channel + thread triple identifies the conversation; a DM's channel
 // id (a `D…` id) already distinguishes it, so no separate dm flag is needed.
+//
+// An Ephemeral session has no conversation behind it, so there is no identity to
+// derive from and determinism is not just meaningless but harmful: the empty
+// triple hashes to one fixed id shared by every caller, and a backend that
+// resumes by session id (claude_code's --resume) would replay the previous
+// holder's transcript into an unrelated run. Those get a fresh random id.
 func DeriveSessionID(meta SessionMetadata) string {
+	if meta.Ephemeral {
+		return uuid.NewString()
+	}
 	key := "v1|team=" + meta.TeamID + "|channel=" + meta.ChannelID + "|thread=" + meta.ThreadTS
 	return uuid.NewSHA1(sessionNamespace, []byte(key)).String()
 }

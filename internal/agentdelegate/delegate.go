@@ -209,7 +209,12 @@ func (r *Runner) Run(ctx context.Context, agentName, prompt string) (string, err
 	if err := client.Initialize(ctx); err != nil {
 		return "", fmt.Errorf("delegate-to-agent: initialize agent %q: %w", agentName, err)
 	}
-	session, err := client.NewSession(ctx, agent.SessionMetadata{Source: "delegate"})
+	// Ephemeral: a delegation is one-shot and belongs to no conversation. Without
+	// it the empty conversation triple derives one fixed session id for every
+	// delegation ever made, and a claude_code backend --resumes the previous
+	// run's transcript — so the second run of a daily job wakes up already
+	// believing it did the work.
+	session, err := client.NewSession(ctx, agent.SessionMetadata{Source: "delegate", Ephemeral: true})
 	if err != nil {
 		return "", fmt.Errorf("delegate-to-agent: create session for agent %q: %w", agentName, err)
 	}

@@ -27,6 +27,14 @@ type SessionMetadata struct {
 	// CanvasID is the canvas file id (F…) when Surface == "canvas", so tools can
 	// read or edit the document the bot was mentioned in. Empty otherwise.
 	CanvasID string `json:"canvasId,omitempty"`
+	// Ephemeral marks a session that belongs to no conversation: a one-shot
+	// delegation (job, workflow trigger, unfurl) rather than a Slack thread.
+	// There is nothing to resume and nothing to route back, so DeriveSessionID
+	// gives it a fresh random id instead of a derived one. Without this the
+	// whole conversation triple is empty, every delegation hashes to the same
+	// id, and a claude_code backend `--resume`s the previous delegation's
+	// transcript — see DeriveSessionID.
+	Ephemeral bool `json:"ephemeral,omitempty"`
 }
 
 // Aggregator hands an ACP session the MCP server it should connect to in order
