@@ -411,7 +411,7 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 	// when the admin repairs one pre-emptively. It must exist even with chat
 	// disabled, since claude_code agents still serve jobs, workflow rules and
 	// unfurls.
-	credRepair := newCredentialRepair(authFlow, cfg.Agents)
+	credRepair := newCredentialRepair(authFlow, cfg.Agents, logger)
 
 	var chat *ChatHandler
 	var sessions map[string]ChatSessionManager
