@@ -345,13 +345,15 @@ func (f *Flow) waitForURL(ctx context.Context, h *proc.Handle, p auth.Profile) (
 		select {
 		case line, ok := <-h.Lines():
 			if !ok {
-				return "", fmt.Errorf("the authentication command finished without offering a sign-in link: %s", oneLine(h.Output()))
+				return "", fmt.Errorf("the authentication command finished without offering a sign-in link: %s%s",
+					oneLine(h.Output()), driftSuffix(ctx, p))
 			}
 			if url, found := p.ExtractURL(line.Text); found {
 				return url, nil
 			}
 		case <-timer.C:
-			return "", fmt.Errorf("the authentication command did not offer a sign-in link within %s: %s", wait, oneLine(h.Output()))
+			return "", fmt.Errorf("the authentication command did not offer a sign-in link within %s: %s%s",
+				wait, oneLine(h.Output()), driftSuffix(ctx, p))
 		case <-ctx.Done():
 			return "", errors.New("the turn was cancelled before authentication started")
 		}
@@ -368,9 +370,21 @@ func (f *Flow) settle(req Request, corr, url, attemptAt string, state State, rea
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if adminChannel != "" && adminTS != "" {
-		f.updateAdmin(ctx, api, adminChannel, adminTS,
-			f.data(req, corr, url, attemptAt, state, reason, false, true), req.ToolName)
+	if adminChannel != "" {
+		data := f.data(req, corr, url, attemptAt, state, reason, false, true)
+		if adminTS == "" {
+			// The request died BEFORE the admin card existed — the command would
+			// not start, or never printed a sign-in link. There is nothing to
+			// update, and until now nothing was posted either, so the whole
+			// failure reached the operator as silence: on the credential-repair
+			// path the outcome is discarded, and an unprompted repair has no
+			// requesting thread to fall back on. Post the terminal card instead.
+			// It carries the reason, which is where the captured command output
+			// and any CLI version drift are.
+			f.postAdmin(ctx, api, adminChannel, data, req.ToolName)
+		} else {
+			f.updateAdmin(ctx, api, adminChannel, adminTS, data, req.ToolName)
+		}
 	}
 	if reqChannel == "" || reqTS == "" {
 		return
@@ -387,6 +401,34 @@ func (f *Flow) settle(req Request, corr, url, attemptAt string, state State, rea
 		Text:      fallbackText(req.ToolName),
 		Blocks:    blocks,
 	})
+}
+
+// postAdmin posts a fresh admin card. Used only for a terminal state reached
+// before the pending card existed; the happy path posts once in Run and updates
+// thereafter, so this cannot leave two live cards for one request.
+func (f *Flow) postAdmin(ctx context.Context, api slacklib.SlackAPI, channel string, data cardData, toolName string) {
+	if channel == "" {
+		return
+	}
+	blocks, err := f.cards.render(AdminTemplate, data)
+	if err != nil {
+		return
+	}
+	_, _ = api.PostMessage(ctx, slacklib.PostMessageParams{
+		ChannelID: channel,
+		Text:      fallbackText(toolName),
+		Blocks:    blocks,
+	})
+}
+
+// driftSuffix renders the profile's CLI version drift as a trailing clause, or
+// "" when there is nothing to say. Only ever called on a failure path — the
+// probe spawns a process, and the happy path has no use for it.
+func driftSuffix(ctx context.Context, p auth.Profile) string {
+	if note := p.VersionDrift(ctx); note != "" {
+		return " (" + note + ")"
+	}
+	return ""
 }
 
 func (f *Flow) updateAdmin(ctx context.Context, api slacklib.SlackAPI, channel, ts string, data cardData, toolName string) {
