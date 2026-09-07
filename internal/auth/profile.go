@@ -39,6 +39,15 @@ type Profile struct {
 	Command string
 	Args    []string
 
+	// SuppressBrowser asks the flow to run the command behind a BrowserGuard, so
+	// it cannot open a consent page on the machine hosting the daemon.
+	//
+	// It is a per-profile opt-in rather than a blanket rule because a flow that
+	// takes a --no-launch-browser switch has already said the same thing on the
+	// command line, and shadowing PATH underneath it would add a moving part
+	// that buys nothing. Set it for the flows that give us no such switch.
+	SuppressBrowser bool
+
 	// urlPattern matches the verification URL in the child's output. Kept
 	// per-profile rather than one global regex: a flow that prints several URLs
 	// (docs links, error references) needs a pattern tight enough to pick the
@@ -136,12 +145,18 @@ var builtins = map[string]Profile{
 	// process prints the consent URL, then prompts `Paste code here if prompted >`
 	// WITHOUT a trailing newline (proc surfaces that as a partial line) and reads
 	// the answer straight off stdin. No pty is needed.
+	//
+	// SuppressBrowser is set because the CLI offers no switch that would do it:
+	// `claude auth login` takes only --claudeai, --console, --email and --sso, and
+	// opens the consent page itself. See BrowserGuard for why that has to be done
+	// through PATH on macOS rather than with a BROWSER variable.
 	"claude-code": {
-		Name:       "claude-code",
-		NeedsCode:  true,
-		Command:    "claude",
-		Args:       []string{"auth", "login", "--claudeai"},
-		urlPattern: claudeAuthURL,
+		Name:            "claude-code",
+		NeedsCode:       true,
+		Command:         "claude",
+		Args:            []string{"auth", "login", "--claudeai"},
+		SuppressBrowser: true,
+		urlPattern:      claudeAuthURL,
 	},
 }
 
