@@ -99,10 +99,17 @@ internal/agent/       Agent backend interface, session manager, protocol types,
                       turn loop, system prompt, recovery.
   acp/                External ACP agent over a subprocess (kind: acp).
   claudecode/         Claude Code stream-json backend (kind: claude_code).
+  remote/             agent.Client over a link to a runtime node. Runs no
+                      model; nothing selects it yet.
 internal/agentbuild/  Kind-aware backend builder (native / ACP / claude_code).
 internal/agentwire/   The serialisable form of the agent event abstraction: the
                       protocol a runtime node speaks to the gateway, plus the
-                      Encoder/Decoder that translate to and from agent.Event.
+                      Encoder/Decoder that translate to and from agent.Event,
+                      and the request direction (the six methods and their
+                      answers).
+internal/nodelink/    The envelope that wraps those payloads: sequencing,
+                      acknowledgement, backpressure, loss detection. Imports
+                      nothing of ours.
 internal/election/    Leader election: the lifecycle runner, the suspend-safe
                       gate, and the journal of promotions and stand-downs.
 internal/onboarding/  The agent-setup form's domain: provider catalogue, model
@@ -139,6 +146,22 @@ reaches it through an interface it declares (`RPCFaulter`) that the backend
 satisfies structurally. Its types **derive from** `agent.Event` rather than being
 it: two types with an explicit translation, so renaming a field on `agent.Event`
 stays a refactor instead of becoming a wire-compatibility event.
+
+`nodelink` is the envelope that carries those payloads, and it imports **nothing**
+of ours — a test over its direct imports fails the build if that ever changes.
+That is what makes "sequencing and acknowledgement live outside the payload" a
+property rather than a convention: `agentwire` can be proven to preserve meaning
+with no transport in the room, and `nodelink` can be proven to deliver with no
+idea what it is delivering. `internal/agent/remote` is the one place they meet.
+
+`internal/agent/remote` sits **under** `internal/agent/` even though it runs no
+model, because it is an `agent.Client` implementation and that is what lives
+there. That placement is compatible with #170's proposed gateway reachability
+rule — **not yet implemented**: there is no gateway binary to check and
+`cmd/archcheck` carries only the workdir and renderclock passes — because the
+rule is specified to enumerate `internal/agent/{acp,native,claudecode}` rather
+than to ban the whole subtree. When it is built it must be written that way, or
+a gateway that imports `remote` will be read as reaching a backend.
 
 ## The Tool contract
 
@@ -632,6 +655,44 @@ an ordinary message in one channel came to kill a 45-minute turn in another.
 
 `ChatHandler.Handle` builds the key + `SessionMetadata`, sets the assistant
 status to `is thinking...`, then ranges over the prompt's event channel.
+
+### The link to a runtime node (`internal/nodelink`, `internal/agent/remote`)
+
+The request direction is `agent.Client`'s five methods plus `session.close`,
+expressed as `agentwire` messages: `initialize`, `session.new`, `prompt`,
+`cancel`, `session.close`, `close`. `prompt`'s answer is an **acceptance**, not
+the turn's outcome — both consumers read `Prompt`'s error synchronously before
+any rendering starts — and the turn's events follow as event frames on the same
+request id, ending with one that closes the consumer's Go channel.
+
+`nodelink` wraps every payload in an envelope that owns delivery and nothing
+else: a per-direction sequence from 1, a cumulative acknowledgement of the
+highest **contiguous** frame the consumer has taken (acks piggyback, and never
+consume a sequence number of their own), a byte-measured send window that
+restores the pacing a Go channel gave for free, and a retransmit buffer pruned
+by the peer's acknowledgement. A gap is fatal: on an ordered transport it means
+the framing is broken, so the link fails with `ErrSequenceGap` and every open
+turn ends with that error rather than with a hole in a sentence. A duplicate is
+dropped silently, which is legal only after a resume replayed a suffix.
+
+**The remote client is inserted at `agent.Client`, under the existing
+`SessionManager` — not in place of it.** Six optional capability surfaces are
+type-asserted on this path and only two are asserted on the client
+(`CloseSession`, `SupportsCancel`); the other four are asserted on the *manager*
+from the gateway (`Warm`, `Discard`, `Interruptible`, `io.Closer`), three of
+which fail silently when unsatisfied. Placing the client underneath keeps those
+four answered by `*SessionManager` unchanged.
+
+`CloseSession` is answered rather than degraded — on `acp` and `claude_code` a
+session owns a real process, so a no-op leaks one per evicted conversation — and
+it is **enqueued, never awaited**, because it is called while
+`SessionManager.mu` is held and has no context and no error return.
+`SupportsCancel` is folded into the `initialize` answer as a *pointer*: absent
+means unknown and degrades to interruptible, with a warning, because a plain
+bool would decode to `false` and silently disable interrupting a live turn.
+
+Nothing selects any of this yet: there is no dial, no listen, no backend kind,
+and no attachment transfer driver.
 
 ### The two translations (`chat_request_translator.go`, `chat_event_translator.go`)
 
