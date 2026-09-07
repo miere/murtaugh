@@ -74,6 +74,16 @@ func (e *RPCError) Error() string {
 	return fmt.Sprintf("ACP %s error %d: %s", e.Method, e.Code, e.Message)
 }
 
+// RPCFault exposes the structured half of this error — the faulting method and
+// the numeric code — to a caller that cannot name this type.
+//
+// It exists for the wire codec (internal/agentwire), which has to preserve the
+// code across a serialisation and must not import an agent backend to do it: the
+// gateway imports the codec while being incapable of running an agent. Matching
+// structurally on a method keeps that dependency out, the same way this package
+// is reached through agent.Client rather than by name.
+func (e *RPCError) RPCFault() (method string, code int) { return e.Method, e.Code }
+
 // IsMethodNotFound reports whether err is an RPCError carrying the JSON-RPC
 // "method not found" code, i.e. the agent does not implement the method.
 func IsMethodNotFound(err error) bool {
