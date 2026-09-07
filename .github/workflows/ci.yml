@@ -63,8 +63,10 @@ jobs:
 
       - name: Architecture guards
         # Type-precise go/analysis passes enforcing structural invariants the
-        # compiler can't — e.g. no downstream reads of config.AgentProfile.WorkDir
-        # (the validated-core rule; see specs-wip/017).
+        # compiler can't: no downstream reads of config.AgentProfile.WorkDir (the
+        # validated-core rule; see specs-wip/017), and no clock inside a
+        # chatRenderer implementation (liveness belongs at the inbound event edge;
+        # see AGENTS.md, "The renderer sees no clock").
         run: go run ./cmd/archcheck ./...
 
       - name: Build
