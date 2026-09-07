@@ -93,6 +93,17 @@ const (
 	// warden goroutine open would delay every later check.
 	DefaultRefreshTimeout = 90 * time.Second
 
+	// DefaultDegradedAfter is how many consecutive failed passes it takes before
+	// a credential is called degraded.
+	//
+	// Two, not one. A single failed read is not always a broken credential: the
+	// `security` lookup can lose to a locked keychain or a machine still waking,
+	// and an alert on the first miss would cry wolf on states that clear
+	// themselves. At the default RetryInterval two passes is about a minute —
+	// fast enough that the admin still hears about it before the token lapses,
+	// slow enough not to fire on a blip.
+	DefaultDegradedAfter = 2
+
 	// keychainService is the login-keychain item Claude Code stores its
 	// credential under on macOS.
 	keychainService = "Claude Code-credentials"
@@ -148,7 +159,46 @@ type State struct {
 	// Attempts counts forcing turns spent against the CURRENT expiry without
 	// moving it. Reset the moment a refresh lands.
 	Attempts int
+
+	// failures counts CONSECUTIVE failed passes, and degraded/degradedSince
+	// track whether this credential has crossed into a state worth telling the
+	// admin about. Unexported: they are the observer's bookkeeping, not part of
+	// the diagnostics surface States() renders.
+	failures      int
+	degraded      bool
+	degradedSince time.Time
 }
+
+// Health is what an Observer is told when a credential crosses between working
+// and not working.
+type Health struct {
+	// Identity names the credential store.
+	Identity Identity
+	// Degraded is the direction of the crossing: true on the way down, false on
+	// the way back.
+	Degraded bool
+	// Reason is the failure that tipped it over, empty on recovery.
+	Reason string
+	// Since is when it first went degraded — carried on the recovery event too,
+	// so a report can say how long the outage lasted.
+	Since time.Time
+	// ExpiresAt is the last expiry actually observed, zero if never read.
+	ExpiresAt time.Time
+}
+
+// Observer is notified on a CHANGE of health, never on every failed pass.
+//
+// The distinction is the point. The warden retries every RetryInterval, so a
+// credential that cannot be read produces a warning every thirty seconds for as
+// long as it stays broken — 76 of them during the 2026-09-07 lockout. Level-
+// triggered alerting on that is 76 DMs; edge-triggered is one, and one more when
+// it recovers.
+//
+// It is called synchronously, off the run loop and never while holding the
+// warden's lock, so an observer that posts to Slack briefly delays the next
+// pass. Transitions are rare enough for that to be the right trade against the
+// ordering an async notify would lose.
+type Observer func(Health)
 
 // Options configures a Warden. Only Identities is required.
 type Options struct {
@@ -166,6 +216,12 @@ type Options struct {
 	// matters.
 	Model  string
 	Logger *slog.Logger
+	// Observer is notified when a credential changes health. nil disables the
+	// notifications and leaves the warden logging only.
+	Observer Observer
+	// DegradedAfter is how many CONSECUTIVE failed passes count as degraded;
+	// zero uses DefaultDegradedAfter.
+	DegradedAfter int
 	// now is the clock; nil uses time.Now. Tests inject a fake.
 	now func() time.Time
 	// readExpiry and forceRefresh are the two seams onto the outside world.
@@ -187,6 +243,9 @@ type Warden struct {
 	log         *slog.Logger
 	now         func() time.Time
 
+	observer      Observer
+	degradedAfter int
+
 	readExpiry   func(context.Context, Identity) (time.Time, error)
 	forceRefresh func(context.Context, Identity) error
 
@@ -205,18 +264,20 @@ func New(opts Options) *Warden {
 		return nil
 	}
 	w := &Warden{
-		identities:   ids,
-		forceAt:      orDuration(opts.ForceAt, DefaultForceAt),
-		retry:        orDuration(opts.RetryInterval, DefaultRetryInterval),
-		maxSleep:     orDuration(opts.MaxSleep, DefaultMaxSleep),
-		maxAttempts:  orInt(opts.MaxAttemptsPerExpiry, DefaultMaxAttemptsPerExpiry),
-		timeout:      orDuration(opts.RefreshTimeout, DefaultRefreshTimeout),
-		model:        strings.TrimSpace(opts.Model),
-		log:          opts.Logger,
-		now:          opts.now,
-		readExpiry:   opts.readExpiry,
-		forceRefresh: opts.forceRefresh,
-		state:        make(map[Identity]*State, len(ids)),
+		identities:    ids,
+		forceAt:       orDuration(opts.ForceAt, DefaultForceAt),
+		retry:         orDuration(opts.RetryInterval, DefaultRetryInterval),
+		maxSleep:      orDuration(opts.MaxSleep, DefaultMaxSleep),
+		maxAttempts:   orInt(opts.MaxAttemptsPerExpiry, DefaultMaxAttemptsPerExpiry),
+		timeout:       orDuration(opts.RefreshTimeout, DefaultRefreshTimeout),
+		model:         strings.TrimSpace(opts.Model),
+		log:           opts.Logger,
+		observer:      opts.Observer,
+		degradedAfter: orInt(opts.DegradedAfter, DefaultDegradedAfter),
+		now:           opts.now,
+		readExpiry:    opts.readExpiry,
+		forceRefresh:  opts.forceRefresh,
+		state:         make(map[Identity]*State, len(ids)),
 	}
 	if w.log == nil {
 		w.log = slog.Default()
@@ -234,6 +295,23 @@ func New(opts Options) *Warden {
 		w.state[id] = &State{Identity: id}
 	}
 	return w
+}
+
+// SetObserver installs the health observer after construction.
+//
+// It exists because the observer's natural home — the gateway's alert path —
+// needs the gateway, and the gateway needs the warden. Rather than thread a
+// half-built collaborator through New, the warden is created observer-free and
+// told about one once there is something to tell. Call it before Run; it takes
+// the same lock the loop does, so a later call is safe but a transition in
+// between simply goes unobserved.
+func (w *Warden) SetObserver(o Observer) {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.observer = o
 }
 
 // Identities returns the credentials this warden watches, for the startup log.
@@ -330,6 +408,7 @@ func (w *Warden) checkAll(ctx context.Context) time.Duration {
 // background keeper, and one unreadable credential must not stop the loop or
 // starve the others.
 func (w *Warden) checkOne(ctx context.Context, id Identity) time.Duration {
+	defer w.observe(id)
 	now := w.now()
 	expiry, err := w.readExpiry(ctx, id)
 	if err != nil {
@@ -632,4 +711,57 @@ func oneLine(b []byte) string {
 		s = s[:300] + "…"
 	}
 	return s
+}
+
+// observe runs at the end of every pass and notifies the observer only when the
+// credential CROSSES between working and not working.
+//
+// A pass counts as failed when it left an error on the state, which covers both
+// shapes of lockout this has actually taken: an expiry that cannot be read (the
+// store was blanked underneath us) and a forcing turn the server refused. Both
+// mean the same thing to the admin — this credential is not going to keep itself
+// alive — and both are invisible outside the daemon log without this.
+//
+// The observer is called after the lock is released. It reaches Slack, and
+// holding the warden's mutex across a network call would block States() and
+// every other pass behind it.
+func (w *Warden) observe(id Identity) {
+	if w == nil {
+		return
+	}
+	var notify *Health
+
+	w.mu.Lock()
+	observer := w.observer
+	if s, ok := w.state[id]; ok && observer != nil {
+		if s.LastError != "" {
+			s.failures++
+			if !s.degraded && s.failures >= w.degradedAfter {
+				s.degraded = true
+				s.degradedSince = w.now()
+				notify = &Health{
+					Identity:  id,
+					Degraded:  true,
+					Reason:    s.LastError,
+					Since:     s.degradedSince,
+					ExpiresAt: s.ExpiresAt,
+				}
+			}
+		} else {
+			s.failures = 0
+			if s.degraded {
+				s.degraded = false
+				notify = &Health{
+					Identity:  id,
+					Since:     s.degradedSince,
+					ExpiresAt: s.ExpiresAt,
+				}
+			}
+		}
+	}
+	w.mu.Unlock()
+
+	if notify != nil {
+		observer(*notify)
+	}
 }
