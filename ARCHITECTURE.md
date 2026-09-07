@@ -100,6 +100,9 @@ internal/agent/       Agent backend interface, session manager, protocol types,
   acp/                External ACP agent over a subprocess (kind: acp).
   claudecode/         Claude Code stream-json backend (kind: claude_code).
 internal/agentbuild/  Kind-aware backend builder (native / ACP / claude_code).
+internal/agentwire/   The serialisable form of the agent event abstraction: the
+                      protocol a runtime node speaks to the gateway, plus the
+                      Encoder/Decoder that translate to and from agent.Event.
 internal/election/    Leader election: the lifecycle runner, the suspend-safe
                       gate, and the journal of promotions and stand-downs.
 internal/onboarding/  The agent-setup form's domain: provider catalogue, model
@@ -127,6 +130,15 @@ surface (the `workflow` engine, the `unfurl` handler, and the `jobs.run`
 tool consume it through small local interfaces). Tool packages depend on
 `config` where they need shared types (e.g. `JobProfile`), never the other way
 around.
+
+`agentwire` is a top-level sibling of `agent` for the same reason `agentbuild`
+and `agentdelegate` are: everything **under** `internal/agent/` is a backend
+implementing `agent.Client` or backend support, and a codec is neither. It
+imports `agent` and `llm` and no backend — an error's backend-specific structure
+reaches it through an interface it declares (`RPCFaulter`) that the backend
+satisfies structurally. Its types **derive from** `agent.Event` rather than being
+it: two types with an explicit translation, so renaming a field on `agent.Event`
+stays a refactor instead of becoming a wire-compatibility event.
 
 ## The Tool contract
 
