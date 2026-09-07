@@ -392,11 +392,16 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 	approvalCards := approvalcard.NewRenderer(cfg.BaseDir, assets.FS)
 	var alertAPI alertMessagePoster
 	var alertEditor alertMessageEditor
+	// alertDM finds the admin's DM for the alerts that are addressed to them
+	// personally rather than posted into a thread — currently the credential
+	// warden's. It comes from the same client that posts the card.
+	var alertDM func(context.Context, string) (string, error)
 	if alertClient, err := slackclient.NewClientWithHTTP(cfg.OAuth.BotToken, gatedHTTP); err != nil {
 		logger.Warn("alert cards disabled: could not build Slack client", "error", err)
 	} else {
 		alertAPI = alertClient
 		alertEditor = alertClient
+		alertDM = alertClient.OpenDM
 	}
 
 	// Built after the alert client because the startup greeting is itself an
@@ -707,6 +712,12 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 	// it does, teach the gate how to ask about leadership. Until an elector is
 	// wired, leaderAllows answers yes to everything.
 	leaderGate.setAllow(g.leaderAllows)
+	// Same reason the coalescer is wired below: the credential alerter reads the
+	// LIVE admin identity, which starts as a handle and is rewritten to a user ID
+	// during startup, so it has to ask g rather than close over a startup copy.
+	g.credWarden.SetObserver(credentialAlertObserver(newCredentialAlerter(
+		alertCards, alertAPI, alertEditor, alertDM,
+		func() string { return g.access().AdminUser }, logger)))
 	// The coalescer needs g's dispatch/interrupt hooks, so it is wired after the
 	// struct exists. It owns the decision of when and what to dispatch per
 	// conversation; startChat merely submits each message to it.
