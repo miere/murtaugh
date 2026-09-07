@@ -196,7 +196,7 @@ var errCredentialBlocked = errors.New(
 // repair, or returns false when this is an ordinary failure the caller should
 // report as-is.
 func (h *ChatHandler) failedOnCredential(agentName string, err error) bool {
-	return h.credRepair.Handles(agentName, err) && h.credRepair.Request(agentName)
+	return h.credRepair.Handles(agentName, err) && h.credRepair.Request(agentName).started()
 }
 
 // WithIdleTimeout sets how long a turn may go without any agent activity before

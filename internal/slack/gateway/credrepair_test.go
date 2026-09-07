@@ -2,7 +2,10 @@ package gateway
 
 import (
 	"errors"
+	"io"
+	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/slack/authcard"
@@ -20,7 +23,8 @@ var (
 // A non-nil Flow is needed only so the repair path is live; these tests never
 // reach Run, which would require a Slack client.
 func liveRepair() *credentialRepair {
-	return newCredentialRepair(&authcard.Flow{}, claudeAgents)
+	return newCredentialRepair(&authcard.Flow{}, claudeAgents,
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
 func TestCredentialRepairHandlesClaudeCodeAuthFailure(t *testing.T) {
@@ -68,10 +72,16 @@ func TestNilCredentialRepairIsInert(t *testing.T) {
 	if r.Handles("claude", authErr) {
 		t.Fatal("nil repair must not claim to handle anything")
 	}
-	if r.Request("claude") {
+	if r.Request("claude").started() {
 		t.Fatal("nil repair must not report that an admin was asked")
 	}
-	if got := newCredentialRepair(nil, claudeAgents); got != nil {
+	if status, _ := r.Restart("claude"); status != repairFailed {
+		t.Fatalf("nil repair Restart = %v, want failed", status)
+	}
+	if _, running := r.InFlightFor(); running {
+		t.Fatal("nil repair must not report a run in flight")
+	}
+	if got := newCredentialRepair(nil, claudeAgents, nil); got != nil {
 		t.Fatal("a nil flow must produce a nil repair, not a live one")
 	}
 }
@@ -85,8 +95,14 @@ func TestCredentialRepairPostsOneCardForConcurrentFailures(t *testing.T) {
 	r.mu.Unlock()
 
 	// Still true: the user is correctly told the admin has been asked...
-	if !r.Request("claude") {
+	status := r.Request("claude")
+	if !status.started() {
 		t.Fatal("a second failure should still tell the user the admin was asked")
+	}
+	// ...but it must say WHICH truth it is telling. Reporting this as "started"
+	// is the bug that let three slash commands each claim a card was on its way.
+	if status != repairAlreadyRunning {
+		t.Fatalf("Request = %v, want already-running so the caller cannot claim a fresh card", status)
 	}
 	// ...and the flag is untouched, so no second flow was started.
 	r.mu.Lock()
@@ -122,4 +138,115 @@ func contains(haystack, needle string) bool {
 		}
 	}
 	return false
+}
+
+// settle waits for any in-flight repair goroutine to finish, so a test does not
+// leave one running past its own end.
+func settle(t *testing.T, r *credentialRepair) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, running := r.InFlightFor(); !running {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("a repair was still in flight after 2s")
+}
+
+// TestRestartPreemptsAnAttemptTheAdminGaveUpOn is the 2026-09-07 fix. The admin
+// typed the auth verb three times in four minutes; each was swallowed by a lease
+// held for twenty, and each was answered "the card is on its way to your DMs".
+func TestRestartPreemptsAnAttemptTheAdminGaveUpOn(t *testing.T) {
+	r := liveRepair()
+
+	// Stand in for a repair that is under way and going nowhere.
+	cancelled := make(chan struct{})
+	done := make(chan struct{})
+	r.mu.Lock()
+	r.inFlight = true
+	r.done = done
+	r.startedAt = time.Now().Add(-3 * time.Minute)
+	r.cancel = func() {
+		close(cancelled)
+		r.release()
+		close(done)
+	}
+	r.mu.Unlock()
+
+	status, replaced := r.Restart("manual")
+	defer settle(t, r)
+
+	select {
+	case <-cancelled:
+	default:
+		t.Fatal("Restart did not cancel the attempt already in progress")
+	}
+	if status != repairStarted {
+		t.Fatalf("Restart = %v, want a fresh sign-in", status)
+	}
+	// The admin is told what it cost them, rather than having an in-progress
+	// sign-in vanish silently.
+	if replaced < 2*time.Minute {
+		t.Fatalf("replaced = %v, want the age of the cancelled attempt", replaced)
+	}
+}
+
+// A previous run that will not let go is the one case where refusing is right:
+// two `claude auth login` processes against one credential store is the
+// rotation race this whole area exists to avoid.
+func TestRestartRefusesWhenThePreviousRunWillNotStop(t *testing.T) {
+	r := liveRepair()
+	r.drain = 20 * time.Millisecond
+
+	r.mu.Lock()
+	r.inFlight = true
+	r.done = make(chan struct{}) // never closed
+	r.cancel = func() {}
+	r.startedAt = time.Now()
+	r.mu.Unlock()
+
+	if status, _ := r.Restart("manual"); status != repairFailed {
+		t.Fatalf("Restart = %v, want failed rather than a second concurrent sign-in", status)
+	}
+}
+
+// Restart on an idle repair is just a start, with nothing to report as replaced.
+func TestRestartFromIdleStartsCleanly(t *testing.T) {
+	r := liveRepair()
+	status, replaced := r.Restart("manual")
+	defer settle(t, r)
+
+	if status != repairStarted {
+		t.Fatalf("Restart = %v, want started", status)
+	}
+	if replaced != 0 {
+		t.Fatalf("replaced = %v, want zero when nothing was cancelled", replaced)
+	}
+}
+
+// The automatic path still starts one when idle — the coalescing is only for
+// the second and later failures.
+func TestRequestFromIdleStarts(t *testing.T) {
+	r := liveRepair()
+	status := r.Request("claude")
+	defer settle(t, r)
+
+	if status != repairStarted {
+		t.Fatalf("Request = %v, want started", status)
+	}
+}
+
+// The statuses have to read as themselves in a log line; that is most of why
+// they replaced a bool.
+func TestRepairStatusIsLegible(t *testing.T) {
+	for status, want := range map[repairStatus]string{
+		repairStarted:        "started",
+		repairAlreadyRunning: "already-running",
+		repairFailed:         "failed",
+	} {
+		if got := status.String(); got != want {
+			t.Errorf("String() = %q, want %q", got, want)
+		}
+	}
 }

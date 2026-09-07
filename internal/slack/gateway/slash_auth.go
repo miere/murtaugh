@@ -48,13 +48,32 @@ func (a *Gateway) handleAuthSlashCommand(event socketmode.Event, command slack.S
 			"Re-authentication is not available in this deployment (no auth flow is wired)."))
 		return
 	}
-	if !a.credRepair.Request("manual") {
+	// Restart, not Request: the admin typing this verb has usually done so
+	// because the last attempt visibly went nowhere, and deferring to it would
+	// leave them re-issuing a command that cannot do anything until the lease
+	// expires.
+	status, replaced := a.credRepair.Restart("manual")
+	a.logger.Info("claude_code re-authentication requested via slash command",
+		"user", command.UserID, "status", status, "replaced_after", replaced)
+
+	switch status {
+	case repairStarted:
+		if replaced > 0 {
+			a.ack(event, ephemeralText(fmt.Sprintf(
+				"Starting Claude Code sign-in — the card is on its way to your DMs. "+
+					"(Cancelled the attempt from %s ago.)", replaced.Round(time.Second))))
+			return
+		}
+		a.ack(event, ephemeralText("Starting Claude Code sign-in — the card is on its way to your DMs."))
+
+	case repairAlreadyRunning:
+		a.ack(event, ephemeralAlert(alertcard.LevelInfo,
+			"A Claude Code sign-in is already running and could not be replaced. Use the card already in your DMs."))
+
+	default:
 		a.ack(event, ephemeralAlert(alertcard.LevelError,
 			"Could not start the Claude Code sign-in. Check the gateway logs."))
-		return
 	}
-	a.logger.Info("claude_code re-authentication requested via slash command", "user", command.UserID)
-	a.ack(event, ephemeralText("Starting Claude Code sign-in — the card is on its way to your DMs."))
 }
 
 // authSlashWantsStatus reports whether the verb was `auth status` rather than a
