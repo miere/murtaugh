@@ -146,7 +146,48 @@ binary, unable to reach Slack, with nobody able to tell the user.
 - When a backend exposes a structured concept the other already renders (e.g. ACP's
   `plan` update vs native's per-tool task events), translate it into the existing
   `agent.Event` shape rather than dropping it or leaking it into the reply prose.
-- New surfaces are added to the `chatRenderer` interface (implemented by BOTH the
-  woven and section renderers) and emitted by BOTH backends — never wired for one
-  backend only.
+- New surfaces are added to the `chatRenderer` interface — there is ONE
+  implementation, `sectionRenderer` (the woven renderer was deleted in 959d445) —
+  and emitted by BOTH backends, never wired for one backend only.
+
+# The renderer sees no clock
+
+Two named translations sit either side of a turn, and neither reaches past the
+other:
+
+- **`requestTranslator`** (`chat_request_translator.go`) — Slack → the request an
+  agent is given: conversation key, session metadata, prompt (uploads folded in,
+  thread backfilled, canvas framed). It never touches a renderer.
+- **`eventTranslator`** (`chat_event_translator.go`) — the agent's event stream →
+  `chatRenderer` calls plus the turn's terminal. It never sees a Slack message, a
+  file upload or a routing decision.
+
+**The rule: liveness is measured where events ARRIVE, never where output is
+written.** The write path sees rendered output, not events, and some events are
+deliberately never rendered — a status heartbeat keeps a long tool's turn alive
+and produces no renderer call at all. A detector attached to the renderer is
+therefore blind during healthy work, so it can only be sized against the longest
+legitimate silence, by which point Slack has closed the message itself and there
+is nothing left to seal.
+
+So `eventTranslator` resets its window on EVERY event, before it looks at the
+kind, and `chatRenderer` is never handed a clock. Stated precisely, because two
+weaker versions of it are wrong:
+
+- It is **not** "the renderer is the only thing that writes to Slack" — the idle
+  aside and the approval card both post outside it, on purpose.
+- It is **not** "the renderer holds no state" — it owns segmentation state
+  (`seenTools`, the plan snapshot), which is rendering, not policy.
+
+It **is**: no clock, no terminal policy, and no I/O beyond its own sinks.
+
+The clock half is enforced mechanically. `internal/archtest/renderclockanalyzer`
+(run in CI via `cmd/archcheck`) fails the build on any reference to package
+`time` inside a `chatRenderer` implementation — including its helper methods,
+their signatures and its fields — and reports itself if the interface is ever
+renamed out from under it. It follows **receivers, not call graphs**, so anything
+the renderer reaches a clock *through* is out of reach: a free function, and
+equally a collaborator struct it holds and delegates the question to. It also
+deliberately leaves the sinks below the renderer alone: `StatusLineWriter`
+throttles its Slack edits on a wall clock, which is rate limiting, not liveness.
 
