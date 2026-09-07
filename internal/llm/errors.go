@@ -60,10 +60,17 @@ type Failure struct {
 // no provider vocabulary and callers should fall back to a generic message.
 //
 // It matches on litellm's typed *providers.LiteLLMError via errors.As, so the
-// fmt.Errorf wrapping every layer adds is transparent to it.
+// fmt.Errorf wrapping every layer adds is transparent to it. It also matches an
+// error that already carries a Failure (see NewFailureError), so a provider
+// failure classified once — on a runtime node, before serialisation — classifies
+// identically wherever it is read.
 func Classify(err error) (Failure, bool) {
 	if err == nil {
 		return Failure{}, false
+	}
+	var carried *failureError
+	if errors.As(err, &carried) {
+		return carried.failure, true
 	}
 	var lerr *providers.LiteLLMError
 	if !errors.As(err, &lerr) {
@@ -79,6 +86,37 @@ func Classify(err error) (Failure, bool) {
 	}
 	return f, true
 }
+
+// NewFailureError returns an error that carries f as its already-derived
+// classification and text as its message, so Classify answers with f.
+//
+// It exists for the wire. Classify's other arm matches litellm's concrete
+// *providers.LiteLLMError, and that type cannot survive serialisation: an agent
+// running on a remote node would have every provider failure arrive as an
+// unclassified error, silently downgrading "Gemini is overloaded (503) — try
+// again in a moment" to the generic "Murtaugh hit an error" card on both the
+// foreground and the background rendering paths.
+//
+// Carrying the Failure rather than rebuilding a *providers.LiteLLMError is
+// deliberate: reconstructing a third-party struct would tie the protocol to
+// litellm's internals and to whatever they change next, while the vocabulary
+// this package owns is exactly what callers act on.
+//
+// text should be the original error's full text — the alert card puts it in
+// Detail verbatim and the session journal records it as the turn's error.
+func NewFailureError(f Failure, text string) error {
+	return &failureError{failure: f, text: text}
+}
+
+// failureError is the carrier behind NewFailureError. It is unexported because
+// there is nothing to do with it but hand it to Classify: the Failure is the
+// contract, not the wrapper.
+type failureError struct {
+	failure Failure
+	text    string
+}
+
+func (e *failureError) Error() string { return e.text }
 
 // kindOf maps litellm's ErrorType onto a FailureKind, with one refinement:
 // litellm classifies every 5xx except 529 as a generic provider error, but a 503
