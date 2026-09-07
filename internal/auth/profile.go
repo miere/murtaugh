@@ -48,11 +48,40 @@ type Profile struct {
 	// that buys nothing. Set it for the flows that give us no such switch.
 	SuppressBrowser bool
 
+	// VerifiedVersion is the CLI release this profile's output shape was checked
+	// against, and versionProbe is the argv that asks the CLI what it is now.
+	//
+	// They exist because the shape is screen-scraped from an interactive TUI: the
+	// prompts, the ordering and even which component renders can change under us,
+	// and when they do the flow fails as silence rather than as an error. Left as
+	// a comment, "verified against 2.1.238" is a claim nobody re-checks; wired up,
+	// a drifted version is the first line of the failure report.
+	//
+	// The probe is only ever set on built-in profiles, never on `custom`, so the
+	// argv is ours rather than a caller's.
+	VerifiedVersion string
+	versionProbe    []string
+
 	// urlPattern matches the verification URL in the child's output. Kept
 	// per-profile rather than one global regex: a flow that prints several URLs
 	// (docs links, error references) needs a pattern tight enough to pick the
 	// right one.
 	urlPattern *regexp.Regexp
+
+	// fallbackPattern is a looser match tried ONLY when urlPattern misses.
+	//
+	// The tight pattern is anchored on a host and a path that the vendor is free
+	// to change — the Claude consent page already sits behind a /cai/ segment that
+	// has not always been there. When that happens the tight pattern stops
+	// matching, waitForURL runs out its clock, and the whole request dies without
+	// a card: the operator's symptom is that nothing happened at all. A second
+	// tier turns that into a flow that still works.
+	//
+	// It is opt-in per profile rather than a global last resort because for some
+	// flows a loose match is WORSE than no match. gcloud prints docs links and
+	// error references alongside the consent URL, and handing the admin a link to
+	// the SDK documentation to sign in with is its own kind of silence.
+	fallbackPattern *regexp.Regexp
 }
 
 // Spec renders the profile as the process spec proc.Start expects.
@@ -63,15 +92,21 @@ func (p Profile) Spec() proc.Spec {
 // ExtractURL returns the verification URL found in a line of child output.
 // Trailing punctuation is trimmed: CLIs commonly wrap the URL in quotes or end
 // the sentence with a period, neither of which belongs in the link.
+//
+// The profile's tight pattern is tried first and its fallback only if that
+// misses, so a profile carrying both never trades an exact match for a loose
+// one — the second tier is reached only on the lines where the first found
+// nothing at all.
 func (p Profile) ExtractURL(line string) (string, bool) {
-	if p.urlPattern == nil {
-		return "", false
+	for _, pattern := range []*regexp.Regexp{p.urlPattern, p.fallbackPattern} {
+		if pattern == nil {
+			continue
+		}
+		if match := pattern.FindString(line); match != "" {
+			return strings.TrimRight(match, `.,;:'")]>`), true
+		}
 	}
-	match := p.urlPattern.FindString(line)
-	if match == "" {
-		return "", false
-	}
-	return strings.TrimRight(match, `.,;:'")]>`), true
+	return "", false
 }
 
 // Succeeded reports whether the finished run authenticated successfully. A nil
@@ -94,6 +129,16 @@ var anyHTTPSURL = regexp.MustCompile(`https://\S+`)
 // carries a redirect_uri pointing at platform.claude.com, and a looser pattern
 // would happily hand the admin the callback URL instead of the consent page.
 var claudeAuthURL = regexp.MustCompile(`https://claude\.com/\S*oauth/authorize\S+`)
+
+// anyOAuthAuthorizeURL is the claude-code profile's second tier: the same
+// endpoint on any host.
+//
+// It drops the host anchor but keeps the `oauth/authorize` path, which is what
+// still separates a consent page from everything else the CLI prints. The
+// callback (`oauth/code/callback`), the docs links and Google's `oauth2/auth`
+// all fail it, so the tier that rescues us from a host change cannot start
+// handing out the wrong link.
+var anyOAuthAuthorizeURL = regexp.MustCompile(`https://\S*oauth/authorize\S+`)
 
 // builtins are the profiles that ship with the tool, keyed by the name the
 // agent passes. `aws` is intentionally absent until its flow is implemented —
@@ -156,7 +201,10 @@ var builtins = map[string]Profile{
 		Command:         "claude",
 		Args:            []string{"auth", "login", "--claudeai"},
 		SuppressBrowser: true,
+		VerifiedVersion: "2.1.238",
+		versionProbe:    []string{"--version"},
 		urlPattern:      claudeAuthURL,
+		fallbackPattern: anyOAuthAuthorizeURL,
 	},
 }
 

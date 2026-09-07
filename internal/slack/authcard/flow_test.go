@@ -809,3 +809,64 @@ func TestCommandSpecGuardOutranksTheAgentEnvironment(t *testing.T) {
 		}
 	}
 }
+
+// TestFailureBeforeTheCardStillReachesTheAdmin is the fix for the 2026-09-07
+// lockout. A sign-in whose CLI never printed a recognisable link died in
+// waitForURL — before the admin card existed, so there was nothing to update —
+// and on the credential-repair path there is no requesting thread to fall back
+// on and the outcome is discarded. The failure reached nobody: the operator's
+// only symptom was that nothing happened.
+func TestFailureBeforeTheCardStillReachesTheAdmin(t *testing.T) {
+	api := newSyncAPI()
+	f := newTestFlow(api)
+	f.urlWait = 200 * time.Millisecond
+
+	// A CLI that prints prose but no link, then parks — the shape of a login
+	// whose prompt changed under us.
+	p := script(t, true, `echo "Press enter to open the browser"; sleep 5`)
+
+	req := request(p)
+	req.Requester = Destination{} // the credential-repair shape: no thread
+	req.RequesterUserID = ""
+	req.Timeout = 5 * time.Second
+
+	out, err := f.Run(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out.Authenticated {
+		t.Fatal("a flow that never produced a link must not report success")
+	}
+
+	posts, _, _ := api.snapshot()
+	if len(posts) != 1 {
+		t.Fatalf("expected the failure to be posted to the admin, got %d posts", len(posts))
+	}
+	if posts[0].ChannelID != "D-"+adminID {
+		t.Errorf("failure card went to %q, want the admin DM", posts[0].ChannelID)
+	}
+	// The reason is the point: it carries the captured command output, which is
+	// the only evidence of what the CLI actually did.
+	if body := string(posts[0].Blocks); !strings.Contains(body, "did not offer a sign-in link") {
+		t.Errorf("failure card does not explain itself:\n%s", body)
+	}
+}
+
+// TestSuccessfulFlowStillPostsOneAdminCard. postAdmin exists for a terminal
+// state reached before the pending card; it must not leave two live cards on
+// the ordinary path.
+func TestSuccessfulFlowStillPostsOneAdminCard(t *testing.T) {
+	api := newSyncAPI()
+	f := newTestFlow(api)
+	p := script(t, false, `echo "Open https://example.com/auth?x=1"; sleep 0.2`)
+
+	req := request(p)
+	req.Requester = Destination{}
+
+	if _, err := f.Run(context.Background(), req); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if posts, _, _ := api.snapshot(); len(posts) != 1 {
+		t.Fatalf("expected exactly one admin card, got %d", len(posts))
+	}
+}
