@@ -614,6 +614,39 @@ thread maps to one persistent agent conversation.
 `ChatHandler.Handle` builds the key + `SessionMetadata`, sets the assistant
 status to `is thinking...`, then ranges over the prompt's event channel.
 
+### The two translations (`chat_request_translator.go`, `chat_event_translator.go`)
+
+A turn crosses two named boundaries, one per direction. They exist because the
+gateway/runtime-node split (#170) puts a network between them, and they are built
+first so the seam is explicit before anything is threaded through it.
+
+`requestTranslator` resolves the Slack side of a turn — the triggering message,
+its uploads, the routing decision, the thread — into the request the agent layer
+takes: `ConversationKey`, `SessionMetadata`, `PromptRequest`, and the timestamp
+the reply is posted at. It produces agent types rather than wire types because
+that direction is already wire-shaped (`SessionMetadata` carries JSON tags);
+framing them is the transport's job.
+
+`eventTranslator` runs the other way: one `agent.Event` at a time (event-at-a-time
+rather than a channel loop, so the push-driven `backgroundEventsRouter` can adopt
+it) into `chatRenderer` calls, plus the decision of how the turn ends —
+`Finish` / `Fail` / `Interrupted` / `EnsureStopped`. It reads `agent.Event`, not
+`agentwire.Event`: `agentwire.Decoder` already owns that hop, so the full inbound
+chain is `agentwire.Event → Decoder → agent.Event → eventTranslator →
+chatRenderer` and the remote and in-process paths share the last two links.
+
+It decides the terminal but carries out none of the policy that goes with one —
+dropping a wedged session, starting a credential repair, substituting the error
+the user is shown, recording the journal row. That is why `Event` returns the
+step and `Settle` renders it as two separate calls: the gap between them is where
+the caller's policy runs.
+
+**`eventTranslator` owns the liveness window; `chatRenderer` has no clock.** The
+window resets on every event before the kind is examined, so a status heartbeat
+keeps a turn alive while rendering nothing. `internal/archtest/renderclockanalyzer`
+enforces the renderer half in CI. See AGENTS.md, "The renderer sees no clock",
+for the precise statement and its limits.
+
 ## Streaming (`slack/gateway/stream_api.go` + stream writer)
 
 `StreamAPI` abstracts the Slack streaming surface so the chat handler is
