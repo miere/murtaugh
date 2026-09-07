@@ -137,19 +137,41 @@ func (s *session) submitCode(code string) error {
 	}
 }
 
-// commandSpec renders the process to spawn for a request.
+// commandSpec renders the process to spawn for a request, along with the
+// cleanup its environment requires.
 //
 // The environment is layered rather than replaced: the authentication CLI needs
 // everything the daemon has (PATH, HOME, the login keychain's reach) plus the
 // requesting agent's redirections on top. A nil Spec.Env inherits the daemon's
 // outright, which is the right answer for a request carrying none and avoids
 // materialising a copy of os.Environ for every caller.
-func commandSpec(req Request) proc.Spec {
+//
+// A profile that suppresses the browser adds one more layer, and it goes on TOP
+// of the agent's: the guard is a safety control, and an agent that could restore
+// PATH could put a consent window back on the host desktop. It is also computed
+// against the already-merged environment, so it prepends to the PATH the child
+// will really see rather than to the daemon's copy.
+//
+// The returned cleanup is always non-nil and safe to defer, including on error.
+func commandSpec(req Request) (proc.Spec, func(), error) {
 	spec := req.Profile.Spec()
-	if len(req.Env) > 0 {
-		spec.Env = proc.MergeEnv(os.Environ(), req.Env)
+	cleanup := func() {}
+
+	overrides := req.Env
+	if req.Profile.SuppressBrowser {
+		guard, err := auth.NewBrowserGuard()
+		if err != nil {
+			return proc.Spec{}, cleanup, err
+		}
+		cleanup = func() { _ = guard.Close() }
+		effective := proc.MergeEnv(os.Environ(), overrides)
+		overrides = append(append([]string(nil), overrides...), guard.Overrides(effective)...)
 	}
-	return spec
+
+	if len(overrides) > 0 {
+		spec.Env = proc.MergeEnv(os.Environ(), overrides)
+	}
+	return spec, cleanup, nil
 }
 
 // Run posts the cards, drives the authentication process, and blocks until it
@@ -220,7 +242,13 @@ func (f *Flow) Run(ctx context.Context, req Request) (Outcome, error) {
 		return finish(Outcome{}, StateFailed, "could not open a DM with the admin: "+err.Error())
 	}
 
-	h, err := proc.Start(ctx, commandSpec(req))
+	spec, cleanupSpec, err := commandSpec(req)
+	defer cleanupSpec()
+	if err != nil {
+		return finish(Outcome{}, StateFailed, "could not prepare the authentication command: "+err.Error())
+	}
+
+	h, err := proc.Start(ctx, spec)
 	if err != nil {
 		return finish(Outcome{}, StateFailed, "could not start the authentication command: "+err.Error())
 	}

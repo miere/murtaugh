@@ -3,6 +3,8 @@ package authcard
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -666,10 +668,14 @@ func TestCommandSpecLayersTheAgentEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	spec := commandSpec(Request{
+	spec, cleanup, err := commandSpec(Request{
 		Profile: profile,
 		Env:     []string{"CLOUDSDK_CONFIG=/srv/work/.gcloud"},
 	})
+	if err != nil {
+		t.Fatalf("commandSpec: %v", err)
+	}
+	defer cleanup()
 
 	if !slices.Contains(spec.Env, "CLOUDSDK_CONFIG=/srv/work/.gcloud") {
 		t.Error("the agent's CLOUDSDK_CONFIG did not reach the spawned command")
@@ -691,7 +697,115 @@ func TestCommandSpecInheritsWithoutAnAgentEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if spec := commandSpec(Request{Profile: profile}); spec.Env != nil {
+	spec, cleanup, err := commandSpec(Request{Profile: profile})
+	if err != nil {
+		t.Fatalf("commandSpec: %v", err)
+	}
+	defer cleanup()
+	if spec.Env != nil {
 		t.Errorf("Spec.Env = %v, want nil so the command inherits", spec.Env)
+	}
+}
+
+// TestCommandSpecGuardsTheBrowserForClaudeCode. `claude auth login` has no
+// --no-launch-browser switch and opens the consent page on whatever machine it
+// runs on — which, under launchd, is the admin's desktop rather than wherever
+// they are reading Slack. The guard has to be on PATH, because the darwin
+// branch of the CLI's opener spawns the bare command `open`.
+func TestCommandSpecGuardsTheBrowserForClaudeCode(t *testing.T) {
+	profile, err := auth.Resolve("claude-code", "", false)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	spec, cleanup, err := commandSpec(Request{Profile: profile})
+	if err != nil {
+		t.Fatalf("commandSpec: %v", err)
+	}
+	defer cleanup()
+
+	guardDir := ""
+	for _, entry := range spec.Env {
+		if value, ok := strings.CutPrefix(entry, "PATH="); ok {
+			guardDir, _, _ = strings.Cut(value, string(os.PathListSeparator))
+		}
+	}
+	if guardDir == "" {
+		t.Fatal("no PATH override was applied; the CLI would find the real launcher")
+	}
+	for _, name := range []string{"open", "xdg-open"} {
+		info, err := os.Stat(filepath.Join(guardDir, name))
+		if err != nil {
+			t.Fatalf("stat guard %s: %v", name, err)
+		}
+		if info.Mode().Perm()&0o100 == 0 {
+			t.Errorf("guard %s is not executable, so PATH lookup would skip past it", name)
+		}
+	}
+	// The rest of PATH must survive: the sign-in still shells out for the
+	// keychain, and a login that cannot persist is worse than one that pops a
+	// window.
+	if !slices.ContainsFunc(spec.Env, func(entry string) bool {
+		value, ok := strings.CutPrefix(entry, "PATH=")
+		return ok && strings.Contains(value, string(os.PathListSeparator))
+	}) {
+		t.Error("PATH was replaced rather than prepended to")
+	}
+}
+
+// TestCommandSpecCleanupRemovesTheGuard. The stand-ins are executables written
+// into a temp directory; leaving one behind per sign-in would litter the host
+// with shadowing binaries.
+func TestCommandSpecCleanupRemovesTheGuard(t *testing.T) {
+	profile, err := auth.Resolve("claude-code", "", false)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	spec, cleanup, err := commandSpec(Request{Profile: profile})
+	if err != nil {
+		t.Fatalf("commandSpec: %v", err)
+	}
+
+	guardDir := ""
+	for _, entry := range spec.Env {
+		if value, ok := strings.CutPrefix(entry, "PATH="); ok {
+			guardDir, _, _ = strings.Cut(value, string(os.PathListSeparator))
+		}
+	}
+	cleanup()
+	if _, err := os.Stat(guardDir); !os.IsNotExist(err) {
+		t.Errorf("guard directory %s survived cleanup (err=%v)", guardDir, err)
+	}
+}
+
+// TestCommandSpecGuardOutranksTheAgentEnvironment. The guard is a safety
+// control: an agent that could put its own PATH back could put a browser window
+// back on the host desktop.
+func TestCommandSpecGuardOutranksTheAgentEnvironment(t *testing.T) {
+	profile, err := auth.Resolve("claude-code", "", false)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	spec, cleanup, err := commandSpec(Request{
+		Profile: profile,
+		Env:     []string{"PATH=/agent/only"},
+	})
+	if err != nil {
+		t.Fatalf("commandSpec: %v", err)
+	}
+	defer cleanup()
+
+	for _, entry := range spec.Env {
+		value, ok := strings.CutPrefix(entry, "PATH=")
+		if !ok {
+			continue
+		}
+		if value == "/agent/only" {
+			t.Fatal("the agent's PATH replaced the guard; the browser would open on the host")
+		}
+		// The agent's own entry still has to be reachable — the guard shadows
+		// the launchers, it does not evict the agent's tooling.
+		if !strings.Contains(value, "/agent/only") {
+			t.Errorf("PATH = %q, want the agent's entry preserved behind the guard", value)
+		}
 	}
 }
