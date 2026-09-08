@@ -123,4 +123,29 @@
 // one drops these events at the backend, one hop before the protocol could
 // carry them, and the gateway's notice never appears with no error and no log
 // line on the gateway side — which is what it did before this was wired.
+//
+// # What this node claims, and the two paths it says it on
+//
+// Advertiser holds the node's claim: the agent profile names it serves and the
+// channels it asserts an assignment rule for. It has ToolGate's and
+// BackgroundSink's shape — built before the agent, bound to whichever server is
+// serving, dropping rather than queueing while unbound — but it is READ at one
+// specific moment rather than only called into.
+//
+// The connect-time claim rides the handshake answer, and the reason is
+// ordering. The gateway builds its registry entry the instant that answer
+// lands, so a claim carried on it is in hand exactly when there is somewhere to
+// put it; a node.advertise frame sent at the same moment races the gateway's
+// own bookkeeping, and losing that race drops the claim for a window nobody
+// would think to look at. Every LATER change is pushed as node.advertise, which
+// is what keeps the gateway from having to poll.
+//
+// Dropping while unbound is right rather than a compromise, and the reason is
+// the same fact from the other side: a fresh connection re-advertises the whole
+// claim on its handshake, so a queued push would replay a stale claim on top of
+// a current one. The VALUE is kept; only the send is dropped.
+//
+// What decides the claim is internal/nodeclaim, not this package. It is the
+// only thing that reads a node's configuration, and it is where the rule that a
+// node may not advertise a gateway access decision is applied.
 package nodeserve

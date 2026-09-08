@@ -24,6 +24,13 @@ import (
 // a place a trust decision can live.
 type toolServer struct {
 	host *Host
+	// node is the connection this server answers for. With a registry rather
+	// than one slot it is no longer enough to say "the node": a tool call's
+	// turn is looked up on the client that made the call, and consulting
+	// whichever node happens to be newest would resolve one node's stream id
+	// against another node's streams — which does not fail, it silently finds
+	// nothing and ungates the call.
+	node *attached
 	log  *slog.Logger
 }
 
@@ -94,7 +101,7 @@ func (s *toolServer) Call(ctx context.Context, call agentwire.ToolCall) (agentwi
 		return agentwire.ToolResult{}, fmt.Errorf("the gateway has no tool named %q", name)
 	}
 
-	ctx = s.host.locate(ctx, call.Stream)
+	ctx = s.host.locate(ctx, s.node, call.Stream)
 	if denied, note := s.gate(ctx, tool, call.Args); denied {
 		// A denial is a RESULT, not a fault. The note is the call's result
 		// string handed to the model, which is what both in-process paths do —
@@ -183,15 +190,17 @@ func render(v any) string {
 // An EMPTY stream is not an anomaly today: only a native agent's call carries
 // one. See nodeserve.ToolProxy.Call, which explains why an acp/claude_code call
 // cannot name its turn yet and what that costs.
-func (h *Host) locate(ctx context.Context, stream string) context.Context {
-	if stream == "" {
+//
+// The stream is resolved against the CALLING connection, which is why the
+// toolServer holds one. Stream ids are minted per client, so two nodes prompted
+// at the same moment hold the same id for different turns; resolving one node's
+// id against another's map finds nothing, and finding nothing here does not
+// fail — it ungates.
+func (h *Host) locate(ctx context.Context, node *attached, stream string) context.Context {
+	if stream == "" || node == nil || node.client == nil {
 		return ctx
 	}
-	client, err := h.client()
-	if err != nil {
-		return ctx
-	}
-	location, ok := client.StreamLocation(stream)
+	location, ok := node.client.StreamLocation(stream)
 	if !ok {
 		h.log.Warn("a node's tool call named a turn this gateway does not know; it will run without a thread to ask in", "stream", stream)
 		return ctx

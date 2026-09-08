@@ -1,6 +1,6 @@
 // Package nodehost is the gateway's inbound edge for runtime nodes: the one
-// endpoint a node dials, the one place a node token is verified, and the slot
-// the resulting agent.Client lives in.
+// endpoint a node dials, the one place a node token is verified, and the
+// registry the resulting connections live in.
 //
 // # This is the daemon's first listener
 //
@@ -12,15 +12,75 @@
 // an address is passed explicitly, and never from `murtaugh slack gateway`,
 // which remains the shipping default and binds nothing.
 //
-// # One node is the whole world
+// # The registry: who is connected, and what each one claims
 //
-// There is no registry (#195), no delegation (#196) and no failover (#197), so
-// this holds exactly one attached node and every configured agent name resolves
-// to it. A second node replaces the first. That is a deliberate simplification
-// for #193 — the item exists to find out whether a turn survives the hop, and
-// an addressing scheme invented here would be replaced by item 9 before it was
-// used. Everything that will become per-node state is behind one mutex and one
-// struct, which is the shape a map is grown from.
+// A node's identity comes from the CREDENTIAL it presented, never from anything
+// it said — there is no node id anywhere in the wire format, because inside a
+// fleet a node that announces who it is can announce somebody else. What a node
+// does say is its ADVERTISEMENT: the agent profile names it serves and the
+// channels it claims an assignment rule for. It rides the handshake answer at
+// connect and arrives as node.advertise on every later change, so the gateway
+// matches locally against a cached copy and never asks a node anything at
+// delegation time. That is #170's push-not-poll rule, and the reason for it is
+// that an N-way fan-out on the first message of every conversation lets one
+// wedged node add a timeout to every delegation in the workspace. The cost is a
+// staleness window one configuration edit wide.
+//
+// The registry is IN MEMORY, deliberately. #170's table puts it in the
+// gateway's column, which says who owns it and not where it is written down; an
+// entry is a live socket plus a claim, and both die with the process. Only the
+// elected leader accepts node connections, so a persisted registry read by a
+// standby is guaranteed stale. The half that genuinely outlives a process is the
+// conversation PIN, which #170 says to store and item 10 does, as a side store
+// in the family internal/config/nodetokens.go established.
+//
+// # A connection is the unit; a node is what you ask about
+//
+// The map is keyed per connection because #170 requires two credentials to be
+// valid at once so a token rotates with no downtime, and CloseCredential closes
+// by selector so revoking the old one does not drop the node. Keying by node id
+// would make a rotation's second connection evict the first. Nodes() collapses
+// the other way, to one entry per node id, because delegation must never see one
+// machine twice and round-robin it against itself.
+//
+// What is NOT here is the CHOICE. A new conversation opens on the most recently
+// attached node, because picking between them properly needs a conversation
+// key, a fleet and a stored pin — item 10. Writing a choice here would have
+// meant writing one to be replaced before it was ever relied on.
+//
+// What IS here is the BINDING, and it could not wait for the choice. The
+// session a conversation opens is bound to the connection that minted it, and
+// every later prompt, cancel and close for that session goes back to that
+// connection. Without it a second node attaching would silently take over every
+// live conversation on the first — session ids are minted per node, so the
+// newcomer is handed ids it never issued: a prompt fails in front of the user,
+// and a cancel is answered as success while the turn runs on unimpeded and the
+// gateway blocks draining a stream that will never close. A session whose
+// connection has gone is agent.ErrSessionGone, distinct from ErrNoNode because
+// it means THIS session cannot run while a new one could; re-opening it
+// elsewhere is item 10's re-election.
+//
+// # What a node is not allowed to say
+//
+// An advertisement carries match patterns and profile names. It does not carry
+// `allow_anyone`, which waives the gateway's own access list for a channel's
+// chat surface: a node admin — possibly a guest holding a grant — writes that
+// file, and letting it cross would let them open the gateway to the whole
+// workspace from their laptop. It does not carry `reply_on_thread`, which
+// decides the conversation key a pin is keyed by. The rule is the one
+// internal/toolset/partition.go states for tools: enforcement is gateway-side
+// because a node cannot be trusted to filter itself. internal/nodeclaim is
+// where the node-side half of that is applied, and agentwire.Advertisement's
+// shape is what makes the rule checkable by reading a struct.
+//
+// # A node that goes quiet is still "connected"
+//
+// nodesocket sets no read deadline and there is no ping/pong; the link's
+// keepalive is the node's own AckInterval. A laptop that sleeps without sending
+// a FIN therefore stays in this registry until a write to it fails at the
+// transport's write timeout or TCP gives up. That is a real property of the
+// registry and not a bug in it, and delegation has to expect a node that is
+// listed and unreachable.
 //
 // # The tool channel, and the one place the partition is enforced
 //
@@ -87,4 +147,18 @@
 // It closes by SELECTOR, never by node — during a rotation a node holds two
 // live credentials and closing "every connection of node X" would drop it in
 // the middle of the operation the overlap exists to make seamless.
+//
+// One revocation hole is open and is named rather than left to be found: a
+// connection whose handshake is in flight when its credential is revoked is
+// verified before it is published, so it attaches after the sweep and nothing
+// closes it. The ordering is unchanged since item 7; closing it means
+// re-checking the credential at publication.
+//
+// # Nothing about a node is announced
+//
+// Attach, detach, revocation and every change to what a node claims go to the
+// journal, on the gateway stream, as kind `node`. #170 is explicit that
+// disconnects are journalled and not announced, because a laptop sleeping at
+// six o'clock disconnects every evening and a nightly message trains the admin
+// to ignore the one that matters.
 package nodehost

@@ -15,7 +15,9 @@ import (
 
 	"github.com/miere/murtaugh/internal/agent"
 	"github.com/miere/murtaugh/internal/agentruntime"
+	"github.com/miere/murtaugh/internal/agentwire"
 	"github.com/miere/murtaugh/internal/config"
+	"github.com/miere/murtaugh/internal/journal"
 	"github.com/miere/murtaugh/internal/nodehost"
 	"github.com/miere/murtaugh/internal/nodeserve"
 	"github.com/miere/murtaugh/internal/nodesocket"
@@ -58,6 +60,10 @@ type loopback struct {
 	// rig was built with withTools. Its registry is what a node's agent would
 	// have been built from.
 	proxy *nodeserve.ToolProxy
+	// claim is the NODE's advertiser — what it tells the gateway it serves. It
+	// is always present, because a node that claims nothing is a real state and
+	// not a disabled feature.
+	claim *nodeserve.Advertiser
 	// nodeStopped closes when the node's Serve returns, however it ended.
 	nodeStopped chan struct{}
 }
@@ -86,6 +92,12 @@ type rigOption func(*rigConfig)
 
 type rigConfig struct {
 	waitForAttach bool
+	// claim is what the node claims before it dials, so the handshake answer
+	// carries it — which is the path a connect-time claim actually takes.
+	claim agentwire.Advertisement
+	// journal is the gateway's recorder. nil discards, which is what a Host
+	// built without one does.
+	journal journal.Recorder
 	// registry is the GATEWAY's tool registry, and serving it is opt-in: a node
 	// built with no ToolProxy never asks for a tool list, which is the state
 	// every test above this one is in and the state a node was in before #194.
@@ -104,6 +116,17 @@ func withTools(registry *tools.Registry) rigOption {
 	return func(c *rigConfig) { c.registry = registry }
 }
 
+// claiming gives the node something to advertise before it dials.
+func claiming(ad agentwire.Advertisement) rigOption {
+	return func(c *rigConfig) { c.claim = ad }
+}
+
+// journalling gives the gateway a recorder, so a test can read what a node's
+// arrival and departure wrote.
+func journalling(rec journal.Recorder) rigOption {
+	return func(c *rigConfig) { c.journal = rec }
+}
+
 func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *loopback {
 	t.Helper()
 	cfg := rigConfig{waitForAttach: true}
@@ -118,7 +141,7 @@ func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *lo
 
 	approved := make(chan approval, 4)
 	notices := make(chan notice, 8)
-	host, err := nodehost.New(nodehost.Options{Tokens: store, Logger: testLogger()})
+	host, err := nodehost.New(nodehost.Options{Tokens: store, Logger: testLogger(), Journal: cfg.journal})
 	if err != nil {
 		t.Fatalf("host: %v", err)
 	}
@@ -155,6 +178,10 @@ func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *lo
 
 	gate := nodeserve.NewToolGate(testLogger())
 	background := nodeserve.NewBackgroundSink(testLogger())
+	claim := nodeserve.NewAdvertiser(testLogger())
+	// Set while unbound, exactly as cmd/murtaugh-runtime sets it before its
+	// first dial: the value is held and the handshake answer carries it.
+	claim.Publish(ctx, cfg.claim)
 	var proxy *nodeserve.ToolProxy
 	if cfg.registry != nil {
 		proxy = nodeserve.NewToolProxy(testLogger())
@@ -177,6 +204,7 @@ func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *lo
 			Gate:        gate,
 			Background:  background,
 			Tools:       proxy,
+			Advertise:   claim,
 			WindowBytes: nodesocket.DefaultWindowBytes,
 		})
 	}()
@@ -206,6 +234,7 @@ func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *lo
 		approved:   approved,
 		notices:    notices,
 		proxy:      proxy,
+		claim:      claim,
 
 		nodeStopped: nodeStopped,
 	}
@@ -704,31 +733,297 @@ func TestANodeWhoseAgentWillNotInitializeIsNotPublished(t *testing.T) {
 	}
 }
 
-// A second node REPLACES the first. There is one slot, and refusing the
-// newcomer instead would lock a node whose laptop slept out behind a half-dead
-// connection the gateway has not noticed yet — until the gateway is restarted.
-// That is the exact scenario cmd/murtaugh-runtime's jittered redial loop exists
-// to handle.
-func TestASecondNodeReplacesTheFirst(t *testing.T) {
+// A second node JOINS the first. This is the behaviour #195 replaces: #193
+// shipped one slot, where the newcomer evicted the incumbent and the gateway
+// forgot a machine that was still connected and still willing to work.
+func TestASecondNodeJoinsRatherThanEvicting(t *testing.T) {
 	rig := dialLoopback(t, newScriptedAgent(func(*scriptedTurn) {}))
 	if nodeID, _ := rig.host.Attached(); nodeID != "node-1" {
 		t.Fatalf("the first node attached as %q", nodeID)
 	}
 
 	attachAnother(t, rig, "node-2")
-
-	waitFor(t, "the second node to take the slot", func() bool {
-		nodeID, ok := rig.host.Attached()
-		return ok && nodeID == "node-2"
+	waitFor(t, "both nodes to be in the registry", func() bool {
+		return len(rig.host.Nodes()) == 2
 	})
-	// The incumbent is not merely shadowed: its connection is closed, so a
-	// half-dead one does not linger holding a goroutine and a socket, and the
-	// node itself learns to redial.
+
+	// The incumbent's connection is untouched. A registry that evicted it would
+	// look identical from the newcomer's side and be wrong from the user's.
+	select {
+	case <-rig.nodeStopped:
+		t.Fatal("the first node's connection was closed; a second node must join the registry, not replace the first")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	nodes := rig.host.Nodes()
+	if nodes[0].NodeID != "node-1" || nodes[1].NodeID != "node-2" {
+		t.Fatalf("the registry lists %q and %q; it must be ordered so two gateways given one fleet choose alike", nodes[0].NodeID, nodes[1].NodeID)
+	}
+	// Identity comes from the credential each connection presented, never from
+	// anything the node said — there is no node id on the wire at all.
+	for _, node := range nodes {
+		if node.UserID == "" || node.Selector == "" || node.AttachedAt.IsZero() {
+			t.Fatalf("registry entry %+v is missing what the credential established", node)
+		}
+	}
+}
+
+// A conversation stays on the node that opened it, and the second node that
+// attaches does not inherit it.
+//
+// With one slot this could not be posed: a second node evicted the first, so
+// there was never another node for a conversation to leak onto. With a registry
+// the first node is still connected and still serving, and routing every call to
+// "whichever node is newest" hands the newcomer a session id it never minted —
+// so the user's next message in a thread is answered by a machine with none of
+// the conversation's history, working directory or files.
+func TestAConversationStaysOnItsOwnNodeWhenASecondAttaches(t *testing.T) {
+	first := newScriptedAgent(func(turn *scriptedTurn) {
+		turn.emit(agent.Event{Type: agent.EventText, Text: "the first node"})
+	})
+	rig := dialLoopback(t, first)
+
+	manager := rig.sessions["default"]
+	key := agent.ConversationKey{ChannelID: "C1", ThreadTS: "123.4"}
+	meta := agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4", UserID: "U9"}
+	drainPrompt(t, manager, key, meta, "turn one")
+
+	// A second node joins and is now the most recently attached — the answer
+	// every unbound lookup gives.
+	second := attachScripted(t, rig, "node-2", newScriptedAgent(func(turn *scriptedTurn) {
+		turn.emit(agent.Event{Type: agent.EventText, Text: "the second node"})
+	}))
+
+	if got := drainPrompt(t, manager, key, meta, "turn two"); got != "the first node" {
+		t.Fatalf("the second turn of a live conversation was answered by %q; a node that attached mid-conversation took it over", got)
+	}
+	if n := second.agent.prompts(); n != 0 {
+		t.Fatalf("the node that joined later was prompted %d times for a conversation it never opened", n)
+	}
+	if n := first.prompts(); n != 2 {
+		t.Fatalf("the conversation's own node served %d of its 2 turns", n)
+	}
+}
+
+// And a cancel reaches the node actually running the turn.
+//
+// This is the failure that costs more than a wrong answer. The gateway's /stop
+// and its idle path both do `cancel(); for range events {}`; a cancel delivered
+// to a node that holds no such session is answered as SUCCESS — remote cancel of
+// an unknown session is idempotent by design — so the gateway reports the turn
+// interrupted, the turn keeps running on the other node, and the drain blocks
+// until the full idle timeout.
+func TestACancelReachesTheNodeRunningTheTurnRatherThanTheNewestOne(t *testing.T) {
+	started := make(chan struct{})
+	script := newScriptedAgent(func(turn *scriptedTurn) {
+		turn.emit(agent.Event{Type: agent.EventText, Text: "working"})
+		close(started)
+		<-turn.cancelled
+		turn.emit(agent.Event{Type: agent.EventError, Error: context.Canceled})
+	})
+	rig := dialLoopback(t, script)
+
+	manager := rig.sessions["default"]
+	key := agent.ConversationKey{ChannelID: "C1", ThreadTS: "123.4"}
+	events, err := manager.Prompt(context.Background(), key,
+		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4"},
+		agent.PromptRequest{Text: "long job", Channel: "C1", Thread: "123.4"})
+	if err != nil {
+		t.Fatalf("prompt: %v", err)
+	}
+	if first := receiveEvent(t, events); first.Text != "working" {
+		t.Fatalf("first event was %+v", first)
+	}
+	<-started
+
+	// The turn is in flight on the first node when the second one arrives.
+	attachAnother(t, rig, "node-2")
+
+	sessionID, ok := manager.Lookup(key)
+	if !ok {
+		t.Fatal("the manager did not record the node's session")
+	}
+	cancelCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := manager.Cancel(cancelCtx, sessionID); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		for range events {
+		}
+	}()
+	select {
+	case <-drained:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the turn's channel never closed after a cancel; the cancel went to a node that was not running it, was answered as success, and the gateway would block for its full idle timeout")
+	}
+	if n := script.cancels(); n != 1 {
+		t.Fatalf("the node running the turn was cancelled %d times, want 1", n)
+	}
+}
+
+// A session id whose node has gone is ErrSessionGone — this session cannot run —
+// and not ErrNoNode, which would say the turn cannot run at all while another
+// node is connected and idle. Re-opening the conversation on that other node is
+// item 10's re-election.
+func TestASessionOnADepartedNodeIsGoneRatherThanServedByAnother(t *testing.T) {
+	rig := dialLoopback(t, newScriptedAgent(func(turn *scriptedTurn) {
+		turn.emit(agent.Event{Type: agent.EventComplete, StopReason: "end_turn"})
+	}))
+
+	manager := rig.sessions["default"]
+	key := agent.ConversationKey{ChannelID: "C1", ThreadTS: "123.4"}
+	meta := agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4", UserID: "U9"}
+	drainPrompt(t, manager, key, meta, "turn one")
+
+	survivor := attachAnother(t, rig, "node-2")
+	if err := rig.host.CloseCredential(context.Background(), rig.selector); err != nil {
+		t.Fatalf("close credential: %v", err)
+	}
+	waitFor(t, "the conversation's node to go", func() bool {
+		nodes := rig.host.Nodes()
+		return len(nodes) == 1 && nodes[0].NodeID == "node-2"
+	})
+
+	_, err := manager.Prompt(context.Background(), key, meta,
+		agent.PromptRequest{Text: "turn two", Channel: "C1", Thread: "123.4"})
+	if !errors.Is(err, agent.ErrSessionGone) {
+		t.Fatalf("a turn on a session whose node has gone failed with %v, want agent.ErrSessionGone", err)
+	}
+	if n := survivor.agent.prompts(); n != 0 {
+		t.Fatalf("the surviving node was handed %d prompts for a session another node minted", n)
+	}
+}
+
+// drainPrompt runs one turn to completion and returns the prose it produced.
+func drainPrompt(t *testing.T, manager *agent.SessionManager, key agent.ConversationKey, meta agent.SessionMetadata, text string) string {
+	t.Helper()
+	events, err := manager.Prompt(context.Background(), key, meta,
+		agent.PromptRequest{Text: text, Channel: meta.ChannelID, Thread: meta.ThreadTS, User: meta.UserID})
+	if err != nil {
+		t.Fatalf("prompt %q: %v", text, err)
+	}
+	var prose string
+	for ev := range events {
+		if ev.Type == agent.EventText {
+			prose += ev.Text
+		}
+		if ev.Type == agent.EventError {
+			t.Fatalf("the turn failed: %v", ev.Error)
+		}
+	}
+	return prose
+}
+
+// The SAME credential dialling back in does replace, and must: a node whose
+// laptop slept is very often behind a half-dead socket the gateway has not
+// noticed, and refusing the newcomer would lock it out until the gateway
+// restarted. That is what cmd/murtaugh-runtime's jittered redial loop meets.
+func TestARedialOnTheSameCredentialReplacesItsOwnConnection(t *testing.T) {
+	rig := dialLoopback(t, newScriptedAgent(func(*scriptedTurn) {}))
+
+	redial(t, rig)
+
 	select {
 	case <-rig.nodeStopped:
 	case <-time.After(10 * time.Second):
-		t.Fatal("the replaced node's connection was never closed; it would sit there believing it was still serving")
+		t.Fatal("the previous connection was never closed; it would sit there believing it was still serving")
 	}
+	waitFor(t, "one entry for the one node", func() bool {
+		nodes := rig.host.Nodes()
+		return len(nodes) == 1 && nodes[0].NodeID == "node-1"
+	})
+}
+
+// ONE machine on two live connections is one node.
+//
+// This is the rotation the overlap window exists for: the node has dialled back
+// in on its new credential while the old connection is still up. The registry
+// keeps both, because closing by selector is what makes revoking the old one
+// safe — but enumeration collapses them, because a fleet list that named the
+// same machine twice would round-robin a node against itself and call the result
+// balance, and the symptom of that is a machine quietly taking twice its share
+// of the work. The tie-break is the attach time, so the entry is the connection
+// that would actually be used.
+func TestOneNodeOnTwoConnectionsIsListedOnce(t *testing.T) {
+	rig := dialLoopback(t, newScriptedAgent(func(*scriptedTurn) {}))
+	first := rig.host.Nodes()
+	if len(first) != 1 {
+		t.Fatalf("the registry holds %d nodes before the rotation, want 1", len(first))
+	}
+
+	// The same NODE on a second credential — a rotation in progress, which is
+	// the only state in which this can arise.
+	rotated := attachScripted(t, rig, "node-1", newScriptedAgent(func(*scriptedTurn) {}))
+	if rotated.selector == rig.selector {
+		t.Fatal("the two credentials share a selector; the rig cannot pose a rotation")
+	}
+	// Both connections are genuinely live: the point is a collapse of two
+	// entries, not the eviction of one.
+	select {
+	case <-rig.nodeStopped:
+		t.Fatal("the rotation's second connection displaced the first; the overlap window exists so it does not")
+	case <-rotated.stopped:
+		t.Fatal("the rotation's second connection ended")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	nodes := rig.host.Nodes()
+	if len(nodes) != 1 {
+		t.Fatalf("one machine on two live connections is listed %d times; delegation would round-robin it against itself", len(nodes))
+	}
+	if !nodes[0].AttachedAt.After(first[0].AttachedAt) {
+		t.Fatalf("the entry is the OLDER connection (%s, was %s); the tie-break must name the one a turn would be sent to",
+			nodes[0].AttachedAt, first[0].AttachedAt)
+	}
+	// And revoking the retired credential leaves the machine listed, which is
+	// the whole reason the registry keeps both in the first place.
+	if err := rig.host.CloseCredential(context.Background(), rig.selector); err != nil {
+		t.Fatalf("close credential: %v", err)
+	}
+	waitFor(t, "the retired connection to close", func() bool {
+		select {
+		case <-rig.nodeStopped:
+			return true
+		default:
+			return false
+		}
+	})
+	if got := rig.host.Nodes(); len(got) != 1 || got[0].NodeID != "node-1" {
+		t.Fatalf("after revoking the retired credential the registry holds %+v", got)
+	}
+}
+
+// Revocation closes the connection on the revoked credential and leaves the
+// rest of the fleet alone.
+//
+// It is deliberately NOT named "every connection on the credential": there can
+// only ever be one, because insert removes any existing entry sharing a selector
+// before publishing the newcomer. These two connections hold DIFFERENT
+// credentials, which is the state that can actually arise, and the property
+// worth pinning is that one node's revocation is not the fleet's.
+func TestRevocationClosesTheRevokedConnectionAndLeavesTheFleet(t *testing.T) {
+	rig := dialLoopback(t, newScriptedAgent(func(*scriptedTurn) {}))
+	attachAnother(t, rig, "node-2")
+	waitFor(t, "both nodes to be in the registry", func() bool {
+		return len(rig.host.Nodes()) == 2
+	})
+
+	if err := rig.host.CloseCredential(context.Background(), rig.selector); err != nil {
+		t.Fatalf("close credential: %v", err)
+	}
+	select {
+	case <-rig.nodeStopped:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the revoked node kept serving")
+	}
+	waitFor(t, "only the other node to remain", func() bool {
+		nodes := rig.host.Nodes()
+		return len(nodes) == 1 && nodes[0].NodeID == "node-2"
+	})
 }
 
 // redial brings the SAME node back after its connection dropped: the same
@@ -750,10 +1045,13 @@ func redial(t *testing.T, rig *loopback) {
 	served := make(chan error, 1)
 	go func() {
 		served <- nodeserve.Serve(ctx, conn, rig.agent, nodeserve.Options{
-			Logger:      testLogger(),
-			Gate:        rig.gate,
-			Background:  rig.background,
-			Tools:       rig.proxy,
+			Logger:     testLogger(),
+			Gate:       rig.gate,
+			Background: rig.background,
+			Tools:      rig.proxy,
+			// The same advertiser: a reconnect re-advertises from scratch,
+			// which is what makes dropping a push while unbound harmless.
+			Advertise:   rig.claim,
 			WindowBytes: nodesocket.DefaultWindowBytes,
 		})
 	}()
@@ -767,8 +1065,26 @@ func redial(t *testing.T, rig *loopback) {
 	})
 }
 
+// peer is a SECOND node on the same gateway: its own credential, its own
+// connection, and its own agent the test can question. The rig's own node is the
+// first; this is how a test poses a fleet.
+type peer struct {
+	nodeID   string
+	selector string
+	agent    *scriptedAgent
+	stopped  chan struct{}
+}
+
 // attachAnother dials a second node into the same gateway.
-func attachAnother(t *testing.T, rig *loopback, nodeID string) {
+func attachAnother(t *testing.T, rig *loopback, nodeID string) *peer {
+	t.Helper()
+	return attachScripted(t, rig, nodeID, newScriptedAgent(func(*scriptedTurn) {}))
+}
+
+// attachScripted is attachAnother with an agent the caller can observe — which
+// is what it takes to tell "the turn went to the right node" from "the turn
+// went somewhere and came back".
+func attachScripted(t *testing.T, rig *loopback, nodeID string, script *scriptedAgent) *peer {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -778,17 +1094,28 @@ func attachAnother(t *testing.T, rig *loopback, nodeID string) {
 	if err != nil {
 		t.Fatalf("dial the second node: %v", err)
 	}
-	served := make(chan error, 1)
+	stopped := make(chan struct{})
 	go func() {
-		served <- nodeserve.Serve(ctx, conn, newScriptedAgent(func(*scriptedTurn) {}), nodeserve.Options{
+		defer close(stopped)
+		_ = nodeserve.Serve(ctx, conn, script, nodeserve.Options{
 			Logger:      testLogger(),
 			WindowBytes: nodesocket.DefaultWindowBytes,
 		})
 	}()
 	t.Cleanup(func() {
 		cancel()
-		<-served
+		<-stopped
 	})
+	joined := &peer{nodeID: nodeID, selector: minted.Selector, agent: script, stopped: stopped}
+	waitFor(t, "the second node to attach", func() bool {
+		for _, node := range rig.host.Nodes() {
+			if node.NodeID == nodeID {
+				return true
+			}
+		}
+		return false
+	})
+	return joined
 }
 
 // ---- fakes -----------------------------------------------------------------
@@ -810,6 +1137,7 @@ type scriptedAgent struct {
 	mu        sync.Mutex
 	sessions  map[string]*scriptedTurn
 	last      agent.PromptRequest
+	prompted  int
 	cancelled int
 	initCalls int
 	// The two moments a real backend latches its toolset, recorded as the names
@@ -886,6 +1214,7 @@ func (a *scriptedAgent) Prompt(ctx context.Context, sessionID string, req agent.
 	}
 	a.mu.Lock()
 	a.last = req
+	a.prompted++
 	a.sessions[sessionID] = turn
 	a.mu.Unlock()
 
@@ -915,6 +1244,14 @@ func (a *scriptedAgent) lastPrompt() agent.PromptRequest {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.last
+}
+
+// prompts is how many turns this node's agent was asked to run. It is the only
+// way to tell which of two connected nodes a turn actually reached.
+func (a *scriptedAgent) prompts() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.prompted
 }
 
 func (a *scriptedAgent) cancels() int {

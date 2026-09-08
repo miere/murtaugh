@@ -44,6 +44,16 @@ type Options struct {
 	// nil leaves the node's agent with its backend's own tools and none of
 	// Murtaugh's, which is what every node did before #194.
 	Tools *ToolProxy
+	// Advertise holds what this node claims to serve. Like the three above it
+	// is built before the agent and bound for as long as the connection lasts,
+	// but it is read at a specific moment rather than called back into: the
+	// handshake answer carries whatever it holds, and every later change is
+	// pushed through it.
+	//
+	// nil advertises nothing, which is what every node did before #195 and is
+	// indistinguishable to the gateway from a node that has never been
+	// configured.
+	Advertise *Advertiser
 	// WindowBytes, AckThreshold, AckInterval and Epoch go to the link. Zero
 	// takes the link's defaults — which is wrong over a real socket; see
 	// nodesocket.DefaultWindowBytes.
@@ -61,6 +71,7 @@ type Server struct {
 	link   *nodelink.Link
 	ready  chan struct{}
 	proxy  *ToolProxy
+	claim  *Advertiser
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -123,6 +134,9 @@ func Serve(ctx context.Context, conn nodelink.Conn, client agent.Client, opts Op
 		// that loop, so assigning it afterwards is a data race with the first
 		// frame the gateway sends.
 		proxy: opts.Tools,
+		// Same reason: serveInitialize reads the claim to put on the handshake
+		// answer, and that runs off the read loop before the binds below.
+		claim: opts.Advertise,
 	}
 	s.ctx, s.cancel = context.WithCancel(ctx)
 	defer s.cancel()
@@ -150,6 +164,10 @@ func Serve(ctx context.Context, conn nodelink.Conn, client agent.Client, opts Op
 	if opts.Tools != nil {
 		opts.Tools.bind(s)
 		defer opts.Tools.unbind(s)
+	}
+	if opts.Advertise != nil {
+		opts.Advertise.bind(s)
+		defer opts.Advertise.unbind(s)
 	}
 
 	select {
@@ -342,6 +360,16 @@ func (s *Server) serveInitialize(msg agentwire.Message) {
 	}); ok {
 		answer := prober.SupportsCancel(s.ctx)
 		result.Interruptible = &answer
+	}
+	// What this node claims rides the handshake answer, and it rides it for an
+	// ordering reason rather than for economy. The gateway builds its registry
+	// entry the instant this reply lands, so a claim carried here is in hand
+	// exactly when there is somewhere to put it; a node.advertise frame sent at
+	// the same moment would be racing the gateway's own bookkeeping, and losing
+	// that race drops the claim for a window nobody would think to look at.
+	// Changes, which have no such problem, are pushed.
+	if s.claim != nil {
+		result.Advertisement = s.claim.Current()
 	}
 	s.replyResult(msg.ID, result)
 }
