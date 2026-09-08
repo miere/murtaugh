@@ -9,6 +9,7 @@ defaults:
     idle_timeout: 30m           # quiet sessions only; a running turn is never idle
     busy_timeout: 18h           # runaway guard for a session stuck in one turn
     request_timeout: 10m        # idle-bounded: reset by every agent event
+    background_idle_timeout: 15m   # idle-bounded, for work landing after the turn ended
     long_running_tool_timeout: 1h  # total cap on a single tool call (ACP)
     max_concurrent: 100
   rendering:

@@ -11,8 +11,13 @@
 // longest legitimate silence rather than against actual inactivity; sized that way
 // it can only fire long after Slack has closed the message on its own (#170
 // Concern 4). Liveness belongs at the inbound event edge, where every frame
-// resets it — that is eventTranslator's job, and it owns the only timer on this
-// path.
+// resets it, and every edge that feeds a renderer owns one: the chat turn loop
+// resets its window before its type switch (eventTranslator is that switch
+// extracted, and carries the window with it), and backgroundEventsRouter.Handle
+// resets its stretch's window before its own switch (#192). The rule is about
+// which LAYER may hold a timer, not about how many there are — a background
+// stretch is fed by a different edge, and had no timer at all until it got its
+// own.
 //
 // That argument is easy to agree with and easy to forget. The renderer holds a
 // message open and knows when a section was last written to, so "just seal it if
@@ -89,7 +94,7 @@ var Analyzer = &analysis.Analyzer{
 	Run:      run,
 }
 
-const diagnostic = "a chatRenderer implementation must not observe time: the Slack write path sees rendered output, not events, so a detector here is blind during healthy work (#170 Concern 4). Put the timer at the inbound event edge (eventTranslator) instead"
+const diagnostic = "a chatRenderer implementation must not observe time: the Slack write path sees rendered output, not events, so a detector here is blind during healthy work (#170 Concern 4). Put the timer at the inbound event edge that feeds this renderer (eventTranslator for a chat turn, backgroundEventsRouter for a background stretch) instead"
 
 func run(pass *analysis.Pass) (any, error) {
 	iface := rendererIface(pass.Pkg)

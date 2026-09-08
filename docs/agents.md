@@ -335,6 +335,7 @@ murtaugh cfg defaults show
 session:
   idle_timeout: 30m
   request_timeout: 10m       # idle-bounded: reset by each agent event, not total wall-clock
+  background_idle_timeout: 15m  # same, for work that lands after the turn ended
   max_concurrent: 100
 rendering:
   progress_display: simplified
@@ -350,6 +351,15 @@ approval:                    # global default, overridden per agent by --approva
 
 > `request_timeout` is **idle-bounded** — it's reset by every agent event, so a
 > long-but-active turn won't time out; only a genuinely stalled one will.
+
+> `background_idle_timeout` is the same idea for a background completion — a
+> Claude Code subagent finishing after its turn ended, rendered into the thread
+> with no turn loop watching it. If that stream goes quiet for the whole window,
+> the message is sealed with a short "closed this out" note rather than left
+> streaming — a notice, not an error, because nothing is known to have failed. It
+> never cancels the agent: expiry ends a Slack message, and later output simply
+> opens a new one. It defaults higher than `request_timeout` because the tool heartbeat
+> that keeps a turn's window alive is scoped to a turn and never reaches this one.
 
 An agent's `--workdir` defaults to the workspace (`~/.config/murtaugh`) when
 unset, so it starts where the bundled skills and templates live.
