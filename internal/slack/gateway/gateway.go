@@ -17,14 +17,10 @@ import (
 
 	"github.com/miere/murtaugh/assets"
 	"github.com/miere/murtaugh/internal/agent"
-	"github.com/miere/murtaugh/internal/agent/native"
-	"github.com/miere/murtaugh/internal/agentbuild"
-	"github.com/miere/murtaugh/internal/agentdelegate"
+	"github.com/miere/murtaugh/internal/agentruntime"
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/credwarden"
 	"github.com/miere/murtaugh/internal/journal"
-	"github.com/miere/murtaugh/internal/mcpbridge"
-	"github.com/miere/murtaugh/internal/nodetoken"
 	"github.com/miere/murtaugh/internal/onboarding"
 	"github.com/miere/murtaugh/internal/slack/agentcard"
 	"github.com/miere/murtaugh/internal/slack/alertcard"
@@ -34,7 +30,6 @@ import (
 	slackclient "github.com/miere/murtaugh/internal/slack/client"
 	"github.com/miere/murtaugh/internal/slack/configcard"
 	askbroker "github.com/miere/murtaugh/internal/slack/interaction"
-	"github.com/miere/murtaugh/internal/tools"
 	"github.com/miere/murtaugh/internal/toolset"
 	"github.com/miere/murtaugh/internal/unfurl"
 	"github.com/miere/murtaugh/internal/updates"
@@ -83,16 +78,16 @@ type Gateway struct {
 	auth *authcard.Flow
 	// askCards routes ask-card clicks back into the blocked `ask` tool call.
 	askCards *askcard.Flow
-	// bridge is the shared per-agent MCP aggregator. ACP and claude_code agents
-	// are handed a `murtaugh mcp-bridge` stdio server that proxies to it, so they
-	// can reach Murtaugh's own tools — in chat and in delegation alike. nil when
-	// no agent is configured. Started in Run.
-	bridge *mcpbridge.Server
+	// serveTools runs the agent runtime's tool surface — today the MCP
+	// aggregator an acp/claude_code agent reaches through `murtaugh mcp-bridge` —
+	// until its context ends. Called on every promotion, so it must be
+	// restartable. nil when the runtime has nothing to serve.
+	serveTools func(context.Context) error
 	// delegator is the shared one-shot runner behind every delegate-to-agent
 	// surface (jobs, workflow triggers, unfurls). Exposed via Delegator so the
 	// composition root can hand the scheduler the same bridged runner instead of
 	// building a second, tool-less one. nil when no agent is configured.
-	delegator       *agentdelegate.Runner
+	delegator       agentruntime.Delegator
 	chat            *ChatHandler
 	chatSessions    map[string]ChatSessionManager
 	chatWarmTimeout time.Duration
@@ -340,7 +335,7 @@ type Gateway struct {
 	nodeReport func(ctx context.Context) NodeReport
 }
 
-func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recorder journal.Recorder, broker *askbroker.Broker, authFlow *authcard.Flow, askFlow *askcard.Flow) *Gateway {
+func New(cfg config.Config, logger *slog.Logger, recorder journal.Recorder, broker *askbroker.Broker, authFlow *authcard.Flow, askFlow *askcard.Flow, buildRuntime agentruntime.Builder) *Gateway {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -422,10 +417,6 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 	// isSelfAuthored). Declared out here so the Gateway gets them; populated only
 	// when chat is enabled, because that is the only mode that answers anything.
 	var selfUserID, selfBotID string
-	// agentToolProblems records tool groups dropped while building each agent (a
-	// degraded feature, not a failed agent) so the startup summary can surface
-	// them in logs and the journal.
-	agentToolProblems := make(map[string][]toolset.Problem)
 	if !cfg.Chat.Enabled {
 		logger.Warn("chat disabled: set chat.enabled: true to enable DM and app_mention replies (delegation still runs)")
 	}
@@ -434,44 +425,34 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 	// keys to Slack IDs at startup and the routing decision has to see the
 	// resolved map, not the one New was handed.
 	chatDefaults := &cfg.Chat.Defaults
-	// The aggregator lets ACP and claude_code agents reach Murtaugh's own tools
-	// over a private socket; built here, bound and torn down in Run. An agent
-	// that fails to reach it simply gets no Murtaugh tools. It is built for any
-	// configured agent, not just a chat one, because delegated agents (jobs,
-	// workflow triggers, unfurls) run even when chat is disabled and need the
-	// same surface — a job told to post its result has to be able to.
-	var bridge *mcpbridge.Server
-	if len(cfg.Agents) > 0 {
-		bridge = mcpbridge.NewServer(bridgeSocketPath(), logger)
-	}
 	var bgRouter *backgroundEventsRouter
+	// Chat agents are gated: a side-effecting tool call asks the user for
+	// approval in the thread. nil broker leaves them ungated. Headless and
+	// delegated agents never get an approver.
+	//
+	// Both gates are built per agent because each carries that agent's approval
+	// settings — approval.keep_resolved decides whether its settled cards are
+	// kept or swept, and one shared gate could only ever honour one agent's
+	// choice. profile.Approval is already the resolved policy: both config
+	// loaders bake defaults.approval into every agent before this point. They all
+	// share the one renderer built above.
+	var approvers map[string]agentruntime.Approver
+	acpPermissionAskers := make(map[string]agent.PermissionAsker, len(cfg.Agents))
 	if cfg.Chat.Enabled {
-		sessions = make(map[string]ChatSessionManager)
 		// Renders claude_code background completions (subagents finishing after a
 		// turn ends) into their thread; shared across agents, bound to the chat
 		// handler's renderer below.
 		bgRouter = newBackgroundEventsRouter(logger)
-		// Chat agents are gated: a side-effecting tool call asks the user for
-		// approval in the thread. nil broker leaves them ungated. Headless and
-		// delegated agents (built elsewhere) never get an approver.
-		//
-		// Both gates are built per agent, inside the loop below, because each
-		// carries that agent's approval settings — approval.keep_resolved decides
-		// whether its settled cards are kept or swept, and one shared gate could
-		// only ever honour one agent's choice. profile.Approval is already the
-		// resolved policy: both config loaders bake defaults.approval into every
-		// agent before this point. They all share the one renderer built above.
-		acpPermissionAskers := make(map[string]agent.PermissionAsker, len(cfg.Agents))
-		for name, profile := range cfg.Agents {
-			var approver native.Approver
-			if broker != nil {
+		if broker != nil {
+			approvers = make(map[string]agentruntime.Approver, len(cfg.Agents))
+			for name, profile := range cfg.Agents {
 				keepResolved := profile.Approval.KeepsResolved()
 				// One always-allow set per agent, shared by both of that agent's
-				// approval paths: the gate below records a grant, and the permission
-				// gate honours it rather than re-asking about a call the user has
-				// already allowed through Murtaugh's own tools.
+				// approval paths: the gate records a grant, and the permission gate
+				// honours it rather than re-asking about a call the user has already
+				// allowed through Murtaugh's own tools.
 				grants := askbroker.NewGrants()
-				approver = askbroker.NewApprover(broker, approvalCards, keepResolved, grants)
+				approvers[name] = askbroker.NewApprover(broker, approvalCards, keepResolved, grants)
 				// ACP agents' permission requests are resolved through the same broker:
 				// the ACP client raises an EventPermission on the turn's event stream and
 				// the chat handler asks here, posting the card in the thread (ordered with
@@ -480,65 +461,32 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 				// interactive path.
 				acpPermissionAskers[name] = askbroker.NewPermissionGate(broker, approvalCards, keepResolved, grants)
 			}
-			// Resolve the agent's workspace once (workdir → base dir fallback),
-			// validated here at the build seam. Any workdir-rooted tool that
-			// cannot be rooted is dropped (degraded) rather than failing the
-			// agent; the dropped features are surfaced at startup below.
-			resolved, err := agentbuild.Resolve(name, profile, cfg.BaseDir)
-			if err != nil {
-				logger.Error("agent disabled: could not resolve agent", "agent", name, "kind", profile.ResolvedKind(), "error", err)
-				continue
-			}
-			agentWorkDir := resolved.Dir()
-			if problems := resolved.Problems(); len(problems) > 0 {
-				agentToolProblems[name] = problems
-				for _, p := range problems {
-					logger.Warn("agent tool disabled", "agent", name, "tool", p.Group, "reason", p.Reason)
-				}
-			}
-			// Mirror the bundled skills this agent opted to export into its
-			// workdir so a filesystem-discovering backend can load them; the
-			// default (empty) leaves them in-binary only. Non-fatal: a failure
-			// just means no filesystem skills for this agent. Skipped when the
-			// agent has no workspace (nothing to export into).
-			if agentWorkDir != "" {
-				if exported, err := config.ReconcileExportedSkills(agentWorkDir, profile.ExportSkillsToFS); err != nil {
-					logger.Warn("skill export failed", "agent", name, "error", err)
-				} else if len(exported) > 0 {
-					logger.Info("exported bundled skills to workdir", "agent", name, "skills", exported, "dir", filepath.Join(agentWorkDir, ".agents", "skills"))
-				}
-			}
-			client, err := agentbuild.Client(resolved, agentbuild.Deps{
-				Registry:               registry,
-				MCPServers:             cfg.MCPServers,
-				WorkspaceDir:           cfg.BaseDir,
-				Logger:                 logger.With("agent", name),
-				Approver:               approver,
-				Bridge:                 bridge,
-				LongRunningToolTimeout: cfg.Defaults.EffectiveLongRunningToolTimeout(),
-				BackgroundSink:         bgRouter.Handle,
-				// Blind a confined agent to this host's node credential. Passed
-				// whether or not the file exists: it names the path the enrolment
-				// will use, and a rule for a path that is not there yet costs
-				// nothing, whereas a rule added only once the file appears would
-				// leave a window with the file present and the deny absent.
-				NodeTokenPath: nodetoken.PathFor(cfg.BaseDir),
-			})
-			if err != nil {
-				logger.Error("agent disabled: could not build client", "agent", name, "kind", profile.ResolvedKind(), "error", err)
-				continue
-			}
-			var interruptible *bool
-			if profile.ACP != nil {
-				interruptible = profile.ACP.Interruptible
-			}
-			sessions[name] = agent.NewSessionManager(
-				client,
-				cfg.Defaults.EffectiveSessionIdleTimeout(),
-				cfg.Defaults.EffectiveMaxSessions(),
-			).WithLogger(logger.With("agent", name)).
-				WithCancelOverride(interruptible).
-				WithDescriptor(string(profile.ResolvedKind()), profile.ResolvedApproval())
+		}
+	}
+
+	// Everything that can actually run an agent is built out there, not here.
+	// The gateway contributes the two things only a Slack-facing process can
+	// supply — the approval gates and the background-event sink — and receives
+	// session managers, a delegation runner and a tool surface it can start. A
+	// nil builder is a gateway that cannot run an agent at all, which is where
+	// #170 is going; every consumer below already handles the empty runtime,
+	// because it is also what a deployment with no agents configured produces.
+	var runtime agentruntime.Runtime
+	if buildRuntime != nil {
+		hooks := agentruntime.Hooks{Chat: cfg.Chat.Enabled, Approvers: approvers}
+		if bgRouter != nil {
+			hooks.BackgroundEvents = bgRouter.Handle
+		}
+		runtime = buildRuntime(hooks)
+	}
+	// agentToolProblems records the tool groups dropped while building each agent
+	// (a degraded feature, not a failed agent) so the startup summary can surface
+	// them in logs and the journal.
+	agentToolProblems := runtime.ToolProblems
+	if cfg.Chat.Enabled {
+		sessions = make(map[string]ChatSessionManager, len(runtime.Sessions))
+		for name, mgr := range runtime.Sessions {
+			sessions[name] = mgr
 		}
 
 		// The resolver runs on the Slack socket goroutine, so it must not do any
@@ -626,21 +574,15 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 		// so a background reply looks exactly like a foreground one.
 		bgRouter.bind(chat.newChatRenderer)
 	}
-	// One shared runner backs every delegate-to-agent surface (jobs, workflow
-	// triggers, unfurls). Each delegation spins its own isolated agent process,
-	// so this is safe to share. Built only when agents are configured; config
-	// validation guarantees any delegate-to-agent rule names a known agent.
+	// The runtime's one shared runner backs every delegate-to-agent surface
+	// (jobs, workflow triggers, unfurls). Each surface takes it through its own
+	// narrower interface, so the typed-nil trap is avoided by branching once
+	// here: an empty runtime leaves all three unset and each reports delegation
+	// as unavailable rather than dereferencing nothing.
 	var unfurlDelegator UnfurlDelegator
 	var workflowDelegator workflow.AgentDelegator
-	var delegator *agentdelegate.Runner
-	if len(cfg.Agents) > 0 {
-		// Same build context as a chat agent, bridge included, so a delegated
-		// claude_code/ACP agent gets Murtaugh's tools instead of only its own
-		// built-ins. No approver: nobody is watching a headless run to answer an
-		// approval card, so the agent's own policy is the only gate.
-		delegator = agentdelegate.NewRunner(cfg.Agents, cfg.Defaults, cfg.BaseDir, logger).
-			WithBuildContext(registry, cfg.MCPServers).
-			WithBridge(bridge)
+	delegator := runtime.Delegator
+	if delegator != nil {
 		unfurlDelegator = delegator
 		workflowDelegator = delegator
 	}
@@ -664,7 +606,7 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 		interactions: broker,
 		auth:         authFlow,
 		askCards:     askFlow,
-		bridge:       bridge,
+		serveTools:   runtime.ServeTools,
 		delegator:    delegator,
 		chat:         chat,
 		chatSessions: sessions,
@@ -875,32 +817,36 @@ func (a *Gateway) closeChatSessions() {
 	}
 }
 
-// Delegator returns the shared one-shot agent runner, already carrying this
-// gateway's build context and MCP aggregator, or nil when no agent is
-// configured. The composition root wires it into the scheduled-job executor so
-// a cron-fired agent job gets the same tools as every other delegation; callers
-// must nil-check before storing it in an interface.
-func (a *Gateway) Delegator() *agentdelegate.Runner { return a.delegator }
+// Delegator returns the runtime's shared one-shot agent runner, already
+// carrying this gateway's build context and MCP aggregator, or nil when no
+// agent is configured. The composition root wires it into the scheduled-job
+// executor so a cron-fired agent job gets the same tools as every other
+// delegation; callers must nil-check before storing it in an interface.
+func (a *Gateway) Delegator() agentruntime.Delegator { return a.delegator }
 
-// startBridge binds the MCP aggregator socket and tears it down when ctx ends.
-// A bind failure is logged and degrades to ACP agents having no Murtaugh tools,
-// never blocking gateway startup.
+// startBridge binds the agent runtime's tool surface (the MCP aggregator socket)
+// and tears it down when ctx ends. It runs on EVERY promotion, so the surface
+// has to be restartable — a demoted-then-repromoted gateway that came back
+// without it would leave every acp/claude_code agent tool-less for the rest of
+// the process.
+//
+// A bind failure degrades rather than blocking startup: those agents keep their
+// own built-ins and lose Murtaugh's tools. It is recorded on the gateway journal
+// stream as well as logged, because the symptom — an agent that answers but
+// cannot post, hours later — is otherwise untraceable to a line that scrolled
+// past at promotion time.
 func (a *Gateway) startBridge(ctx context.Context) {
-	if a.bridge == nil {
+	if a.serveTools == nil {
 		return
 	}
 	go func() {
-		if err := a.bridge.Start(ctx); err != nil {
-			a.logger.Warn("mcp aggregator disabled: could not start", "error", err)
+		if err := a.serveTools(ctx); err != nil {
+			a.logger.Error("mcp aggregator disabled: could not start; acp and claude_code agents have no Murtaugh tools", "error", err)
+			a.record(ctx, "bridge.start", journal.LevelError,
+				"mcp aggregator did not start: acp and claude_code agents have no Murtaugh tools",
+				journal.Keys{}, map[string]any{"error": err.Error()})
 		}
 	}()
-}
-
-// bridgeSocketPath returns the per-process aggregator socket path. It lives under
-// the temp dir (kept short — unix socket paths are length-capped) and carries the
-// pid so concurrent gateways do not collide.
-func bridgeSocketPath() string {
-	return filepath.Join(os.TempDir(), "murtaugh", fmt.Sprintf("mcp-agg-%d.sock", os.Getpid()))
 }
 
 func (a *Gateway) warmChat(ctx context.Context) {

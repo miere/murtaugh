@@ -257,8 +257,8 @@ func TestRunForJSONNonJSON(t *testing.T) {
 	r := newTestRunner(t, client, "1m")
 
 	_, err := r.RunForJSON(context.Background(), "default", "hi")
-	if !errors.Is(err, ErrNonJSONOutput) {
-		t.Fatalf("expected ErrNonJSONOutput, got %v", err)
+	if !errors.Is(err, agent.ErrNonJSONOutput) {
+		t.Fatalf("expected agent.ErrNonJSONOutput, got %v", err)
 	}
 }
 

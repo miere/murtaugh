@@ -8,6 +8,7 @@ import (
 
 	"github.com/miere/murtaugh/internal/agent"
 	"github.com/miere/murtaugh/internal/agentdelegate"
+	"github.com/miere/murtaugh/internal/agentruntime/local"
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/journal"
 	"github.com/miere/murtaugh/internal/tools"
@@ -46,6 +47,17 @@ func agentJobConfig() config.Config {
 	}
 }
 
+// testApp is the composition root a scheduled-run test needs: a real registry
+// and recorder, plus the agent machinery cmd/murtaugh links, so the fallback
+// path under test is the one that binary actually takes.
+func testApp() *Application {
+	return &Application{
+		recorder: journal.NopRecorder{},
+		registry: tools.NewRegistry(),
+		agents:   Agents{Runtime: local.Builder, Delegator: local.Delegator},
+	}
+}
+
 // A scheduled agent job must run through the gateway's own delegate runner —
 // the one holding the MCP aggregator — not a second one built without it. If
 // the scheduler ever builds its own again, the job still "succeeds" while the
@@ -59,7 +71,7 @@ func TestScheduledRunnerUsesTheGatewayDelegator(t *testing.T) {
 			return client
 		})
 
-	exec := newScheduledRunner(agentJobConfig(), journal.NopRecorder{}, tools.NewRegistry(), gatewayRunner)
+	exec := testApp().newScheduledRunner(agentJobConfig(), gatewayRunner)
 	if err := exec(context.Background(), "digest"); err != nil {
 		t.Fatalf("scheduled run failed: %v", err)
 	}
@@ -78,7 +90,7 @@ func TestScheduledRunnerWithoutAgentsReportsTheMisconfiguration(t *testing.T) {
 	cfg := agentJobConfig()
 	cfg.Agents = nil
 
-	exec := newScheduledRunner(cfg, journal.NopRecorder{}, tools.NewRegistry(), nil)
+	exec := testApp().newScheduledRunner(cfg, nil)
 	err := exec(context.Background(), "digest")
 	if err == nil {
 		t.Fatal("expected an error for an agent job with no agents configured")

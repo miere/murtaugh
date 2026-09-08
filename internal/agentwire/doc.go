@@ -25,7 +25,10 @@
 // package. Keeping it out of internal/agent/ keeps that rule a clean prefix
 // instead of a rule with an exception on its first day.
 //
-// It imports internal/agent and internal/llm and nothing else of ours. It
+// It imports internal/agent and internal/providerfail and nothing else of ours
+// — providerfail being the leaf that owns the provider-failure vocabulary, so
+// that classifying an error here does not drag internal/llm (and every provider
+// HTTP client under it) into the gateway. It
 // imports no backend: an error's backend-specific structure reaches it through
 // a small interface declared here (RPCFaulter) that the backend satisfies
 // structurally, the same way internal/agent declares Aggregator rather than

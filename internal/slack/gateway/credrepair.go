@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/miere/murtaugh/internal/agent/claudecode"
 	"github.com/miere/murtaugh/internal/auth"
+	"github.com/miere/murtaugh/internal/claudeauth"
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/slack/authcard"
 )
@@ -61,7 +61,7 @@ func (c *credentialRepair) Handles(agentName string, err error) bool {
 	if !ok || profile.ResolvedKind() != config.AgentKindClaudeCode {
 		return false
 	}
-	return claudecode.IsAuthFailure(err)
+	return claudeauth.IsAuthFailure(err)
 }
 
 // Request starts a repair if one is not already running, and reports whether the

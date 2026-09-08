@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/miere/murtaugh/internal/llm"
+	"github.com/miere/murtaugh/internal/providerfail"
 	"github.com/miere/murtaugh/internal/slack/alertcard"
 	slackclient "github.com/miere/murtaugh/internal/slack/client"
 )
@@ -110,7 +110,7 @@ func failSpec(err error) alertcard.Spec {
 		spec.Detail = err.Error()
 	}
 
-	if failure, ok := llm.Classify(err); ok {
+	if failure, ok := providerfail.Classify(err); ok {
 		spec.Subtitle = "The agent is not available."
 		spec.Reason = failure.String()
 		spec.Text = sanitizeSlackInline(failure.Message)

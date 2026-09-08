@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 
+	"github.com/miere/murtaugh/internal/agentruntime"
 	"github.com/miere/murtaugh/internal/config"
 	gateway "github.com/miere/murtaugh/internal/slack/gateway"
 	setupupdate "github.com/miere/murtaugh/internal/tools/setup/update"
@@ -21,7 +22,17 @@ import (
 // managers, MCP servers, tool sets, routing — is decided here at construction,
 // which is precisely why a reload has to rebuild rather than mutate.
 func (a *Application) buildGateway(cfg config.Config) *gateway.Gateway {
-	gw := gateway.New(cfg, a.registry, a.logger, a.recorder, a.interactionBroker, a.authFlow, a.askFlow)
+	// The agent runtime is built out of tree and handed in: this package is
+	// shared with cmd/murtaugh-gateway, which must not be able to reach an agent
+	// backend at all. A nil builder (that binary's case today) yields a gateway
+	// with no session managers and no delegator — which is exactly the state
+	// #170 Concern 1 is driving towards, reached here without un-wiring the
+	// gateway that is still serving.
+	var buildRuntime agentruntime.Builder
+	if a.agents.Runtime != nil {
+		buildRuntime = a.agents.Runtime(cfg, a.registry, a.logger)
+	}
+	gw := gateway.New(cfg, a.logger, a.recorder, a.interactionBroker, a.authFlow, a.askFlow, buildRuntime)
 	if rc := a.restart; rc != nil {
 		// Adapt the coordinator's Request method into the gateway's
 		// stringly-typed trigger so the gateway package stays free
@@ -45,7 +56,7 @@ func (a *Application) buildGateway(cfg config.Config) *gateway.Gateway {
 	// which launchd captures into the Murtaugh log files. An agent job borrows
 	// the gateway's own delegate runner — the one holding the MCP aggregator —
 	// so the agent a schedule wakes up has the tools a chat agent has.
-	gw = gw.WithScheduledRunner(newScheduledRunner(cfg, a.recorder, a.registry, gw.Delegator()))
+	gw = gw.WithScheduledRunner(a.newScheduledRunner(cfg, gw.Delegator()))
 	// Approving a held job's first run writes `confirmed: true` back to the
 	// store, so the prompt is not repeated after every restart. The gate
 	// still re-arms on change: every job write surface (jobs.define,

@@ -2,24 +2,34 @@ package gateway
 
 import (
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 
-	"github.com/voocel/litellm/providers"
-
+	"github.com/miere/murtaugh/internal/providerfail"
 	"github.com/miere/murtaugh/internal/slack/alertcard"
 )
+
+// geminiOverload is the error a native agent hands the gateway when its provider
+// is overloaded: the original chain's text, carrying the classification the
+// backend derived at the point of failure (internal/agent/native's eventError,
+// via llm.CarryFailure — see TestEventErrorCarriesTheProviderClassification for
+// the producing half). The gateway classifies nothing itself; it links no
+// provider client and cannot.
+func geminiOverload() error {
+	return providerfail.New(providerfail.Failure{
+		Kind:       providerfail.Overloaded,
+		Provider:   "gemini",
+		StatusCode: 503,
+		Message:    "This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.",
+		Retryable:  true,
+	}, `native: provider stream: llm: gemini stream: provider error (HTTP 503): {"error":{"code":503,"message":"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.","status":"UNAVAILABLE"}}`)
+}
 
 // TestFailSpecProviderFailure pins what the user actually reads when a native
 // agent's provider is down — the incident this replaced was a three-layer Go
 // error chain wrapped around a pretty-printed JSON body.
 func TestFailSpecProviderFailure(t *testing.T) {
-	body := `{"error":{"code":503,"message":"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.","status":"UNAVAILABLE"}}`
-	err := fmt.Errorf("native: provider stream: %w",
-		fmt.Errorf("llm: gemini stream: %w", providers.NewHTTPError("gemini", 503, body)))
-
-	spec := failSpec(err)
+	spec := failSpec(geminiOverload())
 
 	if spec.Level != alertcard.LevelError {
 		t.Errorf("Level = %q, want error", spec.Level)
@@ -46,8 +56,7 @@ func TestFailSpecProviderFailure(t *testing.T) {
 // no screen space until someone opens it, and it is exactly what diagnosing the
 // failure needs.
 func TestFailSpecKeepsTheUnabridgedError(t *testing.T) {
-	err := fmt.Errorf("native: provider stream: %w",
-		fmt.Errorf("llm: gemini stream: %w", providers.NewHTTPError("gemini", 503, `{"error":{"code":503}}`)))
+	err := geminiOverload()
 
 	if got := failSpec(err).Detail; got != err.Error() {
 		t.Errorf("Detail = %q, want the full error chain %q", got, err.Error())

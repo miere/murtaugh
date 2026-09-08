@@ -19,7 +19,6 @@ package agentdelegate
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -32,11 +31,6 @@ import (
 	"github.com/miere/murtaugh/internal/nodetoken"
 	"github.com/miere/murtaugh/internal/tools"
 )
-
-// ErrNonJSONOutput is returned by RunForJSON when the agent completed its turn
-// but its output was not a valid JSON document. The Runner logs a warning with
-// the raw output before returning it, so callers should simply skip rendering.
-var ErrNonJSONOutput = errors.New("delegate-to-agent: agent output was not valid JSON")
 
 // ClientFactory builds a fresh client for a single one-shot session. Production
 // wires the kind-aware agentbuild.Client (ACP or native); tests inject a fake.
@@ -160,7 +154,7 @@ func (r *Runner) defaultClient(profile config.AgentProfile, logger *slog.Logger)
 
 // RunForJSON runs a delegation and requires the agent's output to be a single
 // valid JSON document. When the output is not valid JSON it logs a warning
-// naming the agent and the raw output, then returns ErrNonJSONOutput so the
+// naming the agent and the raw output, then returns agent.ErrNonJSONOutput so the
 // caller can skip rendering without treating it as a hard failure.
 func (r *Runner) RunForJSON(ctx context.Context, agentName, prompt string) ([]byte, error) {
 	out, err := r.Run(ctx, agentName, prompt)
@@ -171,7 +165,7 @@ func (r *Runner) RunForJSON(ctx context.Context, agentName, prompt string) ([]by
 	if !json.Valid([]byte(trimmed)) {
 		r.logger.Warn("delegate-to-agent expected a JSON response but the agent produced something else; skipping render",
 			"agent", agentName, "output", trimmed)
-		return nil, ErrNonJSONOutput
+		return nil, agent.ErrNonJSONOutput
 	}
 	return []byte(trimmed), nil
 }
