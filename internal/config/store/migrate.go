@@ -68,6 +68,33 @@ func migrations(d Dialect) [][]string {
 				PRIMARY KEY (job, occurrence)
 			)`, d.TimestampType()),
 		},
+		// v4 — issued node credentials. One row per TOKEN, keyed by the public
+		// selector, so two live credentials for one node (a rotation in
+		// progress) is simply two rows sharing node_id.
+		//
+		// secret_hash is the SHA-256 of the token's secret half and is the only
+		// trace of the credential that survives minting. It is NOT the key:
+		// keying on it would perform the secret comparison inside the database
+		// index, where it cannot be done in constant time.
+		//
+		// The three timestamps are TEXT in every dialect, for the same reason
+		// job_runs.occurrence is: they are read back and compared in Go against
+		// a caller-supplied instant, and a fixed sortable layout makes that one
+		// parse rather than three drivers' worth of timestamp scanning. The
+		// empty string is the zero time — "never expires", "not revoked".
+		{
+			`CREATE TABLE IF NOT EXISTS node_tokens (
+				selector    TEXT PRIMARY KEY,
+				secret_hash TEXT NOT NULL,
+				node_id     TEXT NOT NULL,
+				user_id     TEXT NOT NULL,
+				label       TEXT NOT NULL,
+				created_at  TEXT NOT NULL,
+				expires_at  TEXT NOT NULL,
+				revoked_at  TEXT NOT NULL
+			)`,
+			`CREATE INDEX IF NOT EXISTS node_tokens_by_node ON node_tokens (node_id)`,
+		},
 	}
 }
 

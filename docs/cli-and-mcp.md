@@ -42,6 +42,24 @@ Like the rest, the gateway reads the store **once at startup** — restart to
 apply. See [Configuration → the `cfg` surface](configuration.md#the-murtaugh-cfg-surface)
 for the full command list.
 
+### The `node` namespace
+
+`murtaugh node token …` administers the bearer credentials **runtime nodes**
+present to the gateway. A node never asserts its own identity: it sends the
+token, and the gateway resolves which node and user that token belongs to.
+
+```sh
+murtaugh node token mint --node mac-mini --user U012ABCDEF --label "office mac"
+murtaugh node token list --node mac-mini
+murtaugh node token revoke --selector 1a2b3c4d5e6f7a8b
+```
+
+The token is printed **once** — only its SHA-256 is stored — and carries the
+prefix `mrtg_node_` so a leaked one is greppable and scrubbed from troubleshoot
+bundles. Two credentials may be live for one node at a time, which is what makes
+a rotation need no downtime. Nothing connects with one yet: this is the
+credential half of the gateway/runtime split, ahead of the transport.
+
 ### Discovering commands
 
 The binary documents itself — this is the fastest reference:

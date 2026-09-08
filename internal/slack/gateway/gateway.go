@@ -24,6 +24,7 @@ import (
 	"github.com/miere/murtaugh/internal/credwarden"
 	"github.com/miere/murtaugh/internal/journal"
 	"github.com/miere/murtaugh/internal/mcpbridge"
+	"github.com/miere/murtaugh/internal/nodetoken"
 	"github.com/miere/murtaugh/internal/onboarding"
 	"github.com/miere/murtaugh/internal/slack/agentcard"
 	"github.com/miere/murtaugh/internal/slack/alertcard"
@@ -537,6 +538,12 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 				Bridge:                 bridge,
 				LongRunningToolTimeout: cfg.Defaults.EffectiveLongRunningToolTimeout(),
 				BackgroundSink:         bgRouter.Handle,
+				// Blind a confined agent to this host's node credential. Passed
+				// whether or not the file exists: it names the path the enrolment
+				// will use, and a rule for a path that is not there yet costs
+				// nothing, whereas a rule added only once the file appears would
+				// leave a window with the file present and the deny absent.
+				NodeTokenPath: nodetoken.PathFor(cfg.BaseDir),
 			})
 			if err != nil {
 				logger.Error("agent disabled: could not build client", "agent", name, "kind", profile.ResolvedKind(), "error", err)
