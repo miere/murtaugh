@@ -97,7 +97,7 @@ func decodePermission(req PermissionRequest) (agent.Event, *PendingDecision) {
 		},
 		Decision: decision,
 	}}
-	return ev, &PendingDecision{ID: req.ID, Decision: decision}
+	return ev, &PendingDecision{ID: req.ID, Gate: req.Gate, Decision: decision}
 }
 
 // decodeAttachment materialises the side transfer into the local byte source the

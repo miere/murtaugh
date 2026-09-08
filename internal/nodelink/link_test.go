@@ -275,6 +275,36 @@ func TestWindowBlocksUntilAcknowledged(t *testing.T) {
 	}
 }
 
+// A few large frames must be acknowledged on bytes, not only on a frame count.
+//
+// This is a deadlock, not a stall, and it was found by sending a real
+// attachment over a real socket: four 64 KiB chunks fill a 256 KiB window while
+// the frame count is still three short of its threshold, so the sender waits
+// for an acknowledgement that consuming more frames would trigger — and no more
+// frames can be sent. The consumed-byte trigger is what breaks the cycle.
+func TestLargeFramesAreAcknowledgedBeforeTheWindowFills(t *testing.T) {
+	ctx := context.Background()
+	a, b := Pipe(32)
+
+	// A window of four frames, and an ack threshold that would never be reached
+	// within it.
+	frame := payload(1)
+	window := len(frame) * 4
+	consumer := New(b, Options{Handler: (&sink{}).handle, WindowBytes: window, AckThreshold: 1000})
+	defer consumer.Close()
+	sender := New(a, Options{Handler: (&sink{}).handle, WindowBytes: window, AckThreshold: 1000})
+	defer sender.Close()
+
+	for i := range 12 {
+		send, cancel := context.WithTimeout(ctx, 3*time.Second)
+		err := sender.Send(send, frame)
+		cancel()
+		if err != nil {
+			t.Fatalf("frame %d wedged the window: %v", i+1, err)
+		}
+	}
+}
+
 // A blocked send must come back when its caller gives up, or a cancelled turn
 // leaks the goroutine that was writing it.
 func TestBlockedSendReturnsOnContextCancel(t *testing.T) {

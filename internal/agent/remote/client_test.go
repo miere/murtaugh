@@ -329,6 +329,11 @@ func TestBackgroundEventsReachTheSinkNotTheStream(t *testing.T) {
 // A permission request is the one event that is half of a request/response
 // pair. The answer has to travel back under the id the node minted, or the
 // goroutine blocked on it never wakes.
+//
+// The gate is GateAgent because that is the surface this path serves: the
+// agent's own harness asking, answered by the chat handler off the turn's event
+// stream. A GateTool request never reaches the stream at all — see
+// TestToolApprovalCarriesItsNoteBack.
 func TestPermissionAnswerTravelsBack(t *testing.T) {
 	client, node, _ := dial(t, nodeConfig{}, Options{})
 	events, err := client.Prompt(context.Background(), "session-42", agent.PromptRequest{Text: "rm -rf"})
@@ -337,7 +342,7 @@ func TestPermissionAnswerTravelsBack(t *testing.T) {
 	}
 	stream := receive(t, "the accepted stream", node.streams)
 	node.emit(stream, agentwire.Event{Type: agentwire.EventPermission, Permission: &agentwire.PermissionRequest{
-		ID: "perm-1", Gate: agentwire.GateTool, ToolKind: "terminal", ToolTitle: "rm -rf /", PolicyOwned: true,
+		ID: "perm-1", Gate: agentwire.GateAgent, ToolKind: "terminal", ToolTitle: "rm -rf /", PolicyOwned: true,
 	}})
 
 	ev := receive(t, "the permission event", events)
@@ -352,6 +357,82 @@ func TestPermissionAnswerTravelsBack(t *testing.T) {
 	answer := receive(t, "the decision to reach the node", node.decisions)
 	if answer.ID != "perm-1" || answer.OptionID != agent.PermissionDeny {
 		t.Fatalf("node received %+v", answer)
+	}
+	node.end(stream)
+	for range events {
+	}
+}
+
+// The native loop's inline gate is answered by the gateway's tool approver, not
+// by the chat handler, and its note has to arrive verbatim: for a native tool
+// call the note IS the call's result, so a denial that loses it tells the model
+// nothing and renders an empty failure.
+func TestToolApprovalCarriesItsNoteBack(t *testing.T) {
+	type asked struct {
+		tool     string
+		summary  string
+		location agent.TurnLocation
+	}
+	asks := make(chan asked, 1)
+	client, node, _ := dial(t, nodeConfig{}, Options{
+		Approve: func(ctx context.Context, toolName, summary string) (bool, string) {
+			loc, _ := agent.TurnLocationFromContext(ctx)
+			asks <- asked{tool: toolName, summary: summary, location: loc}
+			return false, "Denied by the user. The action was not run."
+		},
+	})
+	events, err := client.Prompt(context.Background(), "session-42", agent.PromptRequest{
+		Text: "rm -rf", Channel: "C1", Thread: "123.4", User: "U9",
+	})
+	if err != nil {
+		t.Fatalf("prompt: %v", err)
+	}
+	stream := receive(t, "the accepted stream", node.streams)
+	node.emit(stream, agentwire.Event{Type: agentwire.EventPermission, Permission: &agentwire.PermissionRequest{
+		ID: "perm-2", Gate: agentwire.GateTool, ToolKind: "terminal", ToolTitle: "rm -rf /", PolicyOwned: true,
+	}})
+
+	got := receive(t, "the gate to be consulted", asks)
+	if got.tool != "terminal" || got.summary != "rm -rf /" {
+		t.Fatalf("gate was asked about %+v", got)
+	}
+	// Without the turn's location the gateway's real approver short-circuits to
+	// "allowed" and posts nothing, which would ungate every remote tool call.
+	if got.location.ChannelID != "C1" || got.location.ThreadTS != "123.4" || got.location.UserID != "U9" {
+		t.Fatalf("gate was asked with location %+v", got.location)
+	}
+
+	answer := receive(t, "the decision to reach the node", node.decisions)
+	if answer.ID != "perm-2" || answer.OptionID != agent.PermissionDeny {
+		t.Fatalf("node received %+v", answer)
+	}
+	if answer.Note != "Denied by the user. The action was not run." {
+		t.Fatalf("the note did not survive the hop: %q", answer.Note)
+	}
+
+	node.end(stream)
+	for ev := range events {
+		t.Fatalf("a tool approval reached the renderer as an event: %+v", ev)
+	}
+}
+
+// A gateway with no tool gate wired must deny rather than allow: the request
+// exists because the call is side-effecting, and "nobody could be asked" is not
+// consent.
+func TestToolApprovalWithNoGateDenies(t *testing.T) {
+	client, node, _ := dial(t, nodeConfig{}, Options{})
+	events, err := client.Prompt(context.Background(), "session-42", agent.PromptRequest{Text: "rm -rf"})
+	if err != nil {
+		t.Fatalf("prompt: %v", err)
+	}
+	stream := receive(t, "the accepted stream", node.streams)
+	node.emit(stream, agentwire.Event{Type: agentwire.EventPermission, Permission: &agentwire.PermissionRequest{
+		ID: "perm-3", Gate: agentwire.GateTool, ToolKind: "terminal", ToolTitle: "rm -rf /", PolicyOwned: true,
+	}})
+
+	answer := receive(t, "the decision to reach the node", node.decisions)
+	if answer.OptionID != agent.PermissionDeny || answer.Note == "" {
+		t.Fatalf("an ungated approval answered %+v", answer)
 	}
 	node.end(stream)
 	for range events {

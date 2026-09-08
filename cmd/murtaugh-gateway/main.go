@@ -8,13 +8,16 @@
 // internal/llm or any of internal/agent/{acp,native,claudecode}. CI checks that
 // on every change (see .github/workflows/ci.yml, "Gateway reachability rule").
 //
-// That makes it, today, a gateway that answers Slack but has no agent to give a
-// conversation to: chat reports no agent, and delegate-to-agent surfaces report
-// that delegation is unavailable. It is built this way on purpose. The broker
-// that hands conversations to runtime nodes is #170 Change G, and until it
-// lands nothing selects this binary — `murtaugh slack gateway` keeps serving,
-// unchanged. Building the clean one alongside means the rule guards it from
-// birth, and nothing has to be un-wired later under pressure.
+// With no -node-listen it is a gateway that answers Slack but has no agent to
+// give a conversation to: chat reports no agent, and delegate-to-agent surfaces
+// report that delegation is unavailable. Given one, it opens the daemon's first
+// inbound listener, accepts one authenticated runtime node, and hands every
+// conversation to it — #170 item 7, the new path working but not the default.
+//
+// The flag defaults to empty and there is deliberately no configuration key for
+// it. Binding a port is a new attack surface on the machine, and it must not be
+// possible to acquire one by editing a config file that `murtaugh slack
+// gateway` — the shipping default, which binds nothing — also reads.
 package main
 
 import (
@@ -26,12 +29,14 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/miere/murtaugh/internal/app"
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/config/migrate"
 	configstore "github.com/miere/murtaugh/internal/config/store"
+	"github.com/miere/murtaugh/internal/nodehost"
 )
 
 var version = "dev"
@@ -46,6 +51,7 @@ func main() {
 func run(args []string) error {
 	fs := flag.NewFlagSet("murtaugh-gateway", flag.ContinueOnError)
 	configPath := fs.String("config", "", "path to config.yaml (default ~/.config/murtaugh/config.yaml)")
+	nodeListen := fs.String("node-listen", "", "address to accept runtime node connections on, e.g. 127.0.0.1:8787 (empty: accept none)")
 	showVersion := fs.Bool("version", false, "print the version and exit")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -92,10 +98,34 @@ func run(args []string) error {
 	store, recorder, closeJournal := app.OpenJournal(cfg, logger)
 	defer closeJournal()
 
-	// app.Agents is left zero: this binary carries no agent machinery, and that
-	// is the property CI enforces. Everything else is wired exactly as the
-	// combined binary wires it for ModeGateway.
-	application := app.New(app.ModeGateway, nil, cfg, cfgStore, path, version, logger, recorder, app.Agents{}).
+	// The runtime is a broker over attached nodes, or nothing at all. Either
+	// way this binary carries no agent machinery — nodehost reaches the
+	// protocol, the link and the remote client, none of which can run a model —
+	// and that is the property CI enforces. Everything else is wired exactly as
+	// the combined binary wires it for ModeGateway.
+	agents := app.Agents{}
+	if addr := strings.TrimSpace(*nodeListen); addr != "" {
+		tokens, err := configstore.OpenNodeTokens(ctx, cfg.Database, cfg.BaseDir, cfg.BaseName)
+		if err != nil {
+			return fmt.Errorf("open the node credential store: %w", err)
+		}
+		host, err := nodehost.New(nodehost.Options{Tokens: tokens, Logger: logger})
+		if err != nil {
+			return err
+		}
+		agents.Runtime = nodehost.Runtime(host)
+		go func() {
+			if err := host.Listen(ctx, addr); err != nil {
+				// The gateway keeps serving Slack: a broken listener means no
+				// node can attach, which chat already reports as having no
+				// agent. Taking Slack down as well would turn a degraded
+				// gateway into a silent one.
+				logger.Error("runtime node endpoint stopped", "error", err, "addr", addr)
+			}
+		}()
+	}
+
+	application := app.New(app.ModeGateway, nil, cfg, cfgStore, path, version, logger, recorder, agents).
 		// stop is reused as the restart coordinator's cancel hook so a
 		// user-triggered restart looks identical to a SIGTERM from the outside
 		// (launchd, systemd): the process exits 0 and the supervisor respawns it.

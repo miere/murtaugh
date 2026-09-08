@@ -55,10 +55,11 @@ Module path: `github.com/miere/murtaugh`.
   agent backend; each entry point hands it an `app.Agents` (a pair of
   constructors). `cmd/murtaugh` passes `internal/agentruntime/local`, so the CLI
   and today's `murtaugh slack gateway` behave exactly as before.
-  `cmd/murtaugh-gateway` passes the zero value and therefore links nothing that
-  can run a model — CI proves it (see "The gateway reachability rule"). A third
-  binary, `cmd/murtaugh-runtime`, is the runtime-node entry point; it has no
-  link to a gateway yet and exits with an error saying so.
+  `cmd/murtaugh-gateway` passes either the zero value or a **broker** over
+  attached runtime nodes, and therefore links nothing that can run a model
+  either way — CI proves it (see "The gateway reachability rule"). A third
+  binary, `cmd/murtaugh-runtime`, is the runtime-node entry point: it dials a
+  gateway, holds the connection open and serves one agent over it.
 
 ## Repository layout
 
@@ -66,10 +67,10 @@ Module path: `github.com/miere/murtaugh`.
 cmd/murtaugh/         Entry point: flag parsing, mode selection, signal handling.
                       The one binary that ships today; keeps its local agent.
 cmd/murtaugh-gateway/ The Slack gateway alone, linking no agent machinery.
-                      Nothing selects it yet; built so the reachability rule
-                      guards it from birth.
+                      `-node-listen ADDR` opens the node endpoint; empty (the
+                      default) accepts none and the process binds nothing.
 cmd/murtaugh-runtime/ The runtime-node entry point. May reach the agent
-                      packages; has no gateway link yet.
+                      packages. `-gateway URL` is required: it dials in.
 internal/app/         Composition root + Registry wiring. Names no agent
                       backend: `app.Agents` is injected by the entry point.
 internal/frontends/   CLI and MCP adapters over the Tool registry.
@@ -89,6 +90,14 @@ internal/tools/       Shared Tool interface + one package per tool.
                       withdraw the bearer credentials runtime nodes present.
 internal/nodetoken/   Node credentials: mint, hash at rest, constant-time
                       verify, and the on-disk credential file's location/mode.
+internal/nodesocket/  The WebSocket transport under a link: one dialler (node),
+                      one upgrader (gateway), a write deadline per write.
+internal/nodehost/    The gateway's inbound edge: the accept endpoint, the one
+                      nodetoken.Verify on a serving path, the attached node,
+                      and the runtime builder that brokers to it.
+internal/nodeserve/   The node's half: answers the six requests over one link,
+                      streams a turn's events back, and gates native tool calls
+                      through the gateway's approver.
 internal/config/      Config schema, validation, bootstrap-file loader, and the
                       config-store seam.
   store/              SQLite/Postgres store implementation + YAML→DB migration.
@@ -235,10 +244,11 @@ than to ban the whole subtree. When it is built it must be written that way, or
 a gateway that imports `remote` will be read as reaching a backend.
 
 `internal/nodetoken` mints, hashes and verifies the bearer credential a runtime
-node will present (#190). It imports nothing of ours but `internal/config`, for
-the store contract alone, and it has **no caller on any serving path**: nothing
-dials the gateway yet, so verification exists, is tested, and is reached only by
-`node token …`. Its one arch rule — a digest is never compared with `==` — is a
+node presents (#190). It imports nothing of ours but `internal/config`, for the
+store contract alone. `Verify` is now called on the serving path, exactly once,
+by `nodehost` at the handshake and **before** the socket is upgraded — an
+upgrade first would hand an unauthenticated peer a connection to hold and turn
+the refusal into a close frame instead of an HTTP status. Its one arch rule — a digest is never compared with `==` — is a
 `go/analysis` pass rather than a test, because a constant-time comparison and a
 leaky one return identical verdicts and only a static check can tell them apart.
 
@@ -781,8 +791,74 @@ it is **enqueued, never awaited**, because it is called while
 means unknown and degrades to interruptible, with a warning, because a plain
 bool would decode to `false` and silently disable interrupting a live turn.
 
-Nothing selects any of this yet: there is no dial, no listen, no backend kind,
-and no attachment transfer driver.
+### The session channel end to end (`internal/nodesocket`, `internal/nodehost`, `internal/nodeserve`)
+
+The node dials; the gateway never dials a node. `nodehost` is the daemon's
+**first inbound listener** — nothing in Murtaugh had ever bound a port — so it
+is reached only from `cmd/murtaugh-gateway -node-listen`, never from
+`murtaugh slack gateway`, which remains the shipping default and binds nothing.
+There is deliberately no configuration key: a port must not be acquirable by
+editing a file the default daemon also reads.
+
+`nodesocket` is `nodelink.Conn` over gorilla/websocket, and its two rules are
+measured rather than defensive. A deaf peer — one that upgrades and never reads
+— absorbs about **549 KB** before `WriteMessage` blocks, which is
+`SO_SNDBUF + SO_RCVBUF` and nothing else: there is no library queue, so the
+pacing signal survives the hop. But the block is permanent, and gorilla's own
+`SetWriteDeadline` cannot rescue a write already in flight, so the deadline is
+set immediately before every write and a timeout **tears the link down** rather
+than failing one frame — gorilla latches the first write error and returns it
+for every write afterwards.
+
+That measurement is why `DefaultWindowBytes` is 256 KiB. `nodelink`'s own 4 MiB
+default is larger than the socket buffers, so the socket would fill first and
+the block would land in `Link.write`, which takes no context; under a 256 KiB
+window it lands in `awaitRoom`, which honours one. Both are asserted against a
+real deaf peer, because `nodelink.Pipe` cannot pose "the peer is alive and not
+reading" at all.
+
+The same measurement produced a fix in `nodelink`: acknowledgements now trigger
+on **consumed bytes as well as consumed frames**. A byte-measured window and a
+frame-counted ack policy deadlock each other — four 64 KiB attachment chunks
+fill a 256 KiB window three frames short of the threshold, and the ack that
+would open it can only come from consuming more frames.
+
+`nodeserve` runs the node's half. Requests are dispatched off the read loop
+(a prompt must not hold up the cancel that stops it) while events stay inline,
+so the ack-after-the-handler-returns rule keeps applying backpressure in the
+direction that has volume. An attachment's chunks are sent **before** the event
+that references them, because the gateway materialises an attachment from
+inside its own read loop and a deliverer that pulled chunks arriving on that
+loop would deadlock it.
+
+**Approvals cross as one frame in each direction, and the note comes back.**
+The native backend — the default one — never raises a permission event: it calls
+an `Approver` inline. `nodeserve.ToolGate` is what that call reaches on a node;
+it raises a `GateTool` request on the current turn's stream and returns the
+`(allowed, note)` pair the loop expects. The note is not diagnostics — for a
+native tool call it IS the result string handed to the model — so the gateway
+answers with a full `PermissionResponse` rather than a bare option id, and the
+decoded request carries its `Gate` so a tool approval is never routed to the
+agent-harness asker. A tool approval is answered off the turn's stream and is
+never rendered, exactly as in process.
+
+**A background stretch's events cross too, addressed by session rather than by
+turn.** A `claude_code` session emits after its turn's `result` — a subagent
+finishing, an auto-continue completing minutes later — and in process those go
+to the gateway's `backgroundEventsRouter`, which is what renders the "went
+quiet" notice. Across a link they have no stream to ride, so they travel as
+`agentwire.BackgroundEvent`, keyed by the session id. The node's end is
+`nodeserve.BackgroundSink`, bound to the serving connection the way the tool
+gate is, because a backend captures its sink when its process starts and the
+connection comes and goes; unbound it drops, since no gateway is attached and
+the session id then names nothing. A node built without one drops the events at
+the backend, one hop before the protocol could carry them — with the gateway
+side fully plumbed, which makes it look like a routing bug on the only side
+anyone would think to debug.
+
+One node is the whole world: the protocol carries no agent name, so a link IS an
+agent, every configured agent name resolves to the attached node, and a second
+node replaces the first. The registry that ends that is #170 item 9.
 
 ### The two translations (`chat_request_translator.go`, `chat_event_translator.go`)
 
