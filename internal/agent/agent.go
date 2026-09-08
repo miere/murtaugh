@@ -1,6 +1,22 @@
 package agent
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrNonJSONOutput is returned by a delegation runner's RunForJSON when the
+// agent completed its turn but its output was not a valid JSON document. The
+// runner logs a warning with the raw output before returning it, so callers
+// should simply skip rendering.
+//
+// It lives here rather than beside the runner because the runner reaches its
+// callers through small local interfaces (workflow.AgentDelegator,
+// gateway.UnfurlDelegator) and this sentinel is part of that contract. Keeping
+// it here is what lets a caller branch on it without importing the runner —
+// which, for the Slack gateway, would mean reaching an agent backend three hops
+// down (#170 Change E).
+var ErrNonJSONOutput = errors.New("delegate-to-agent: agent output was not valid JSON")
 
 type Client interface {
 	Initialize(context.Context) error

@@ -69,6 +69,36 @@ jobs:
         # see AGENTS.md, "The renderer sees no clock").
         run: go run ./cmd/archcheck ./...
 
+      # #170 Change E: the gateway must be INCAPABLE of serving an AI-backed
+      # request, which is a property of its whole import closure and so cannot be
+      # a go/analysis pass (those run per package). `go list -deps` computes the
+      # closure; this greps it.
+      #
+      # The `if` form is mandatory. A pipeline ending in `grep … && exit 1` also
+      # fails in the CLEAN case, because the pipeline's status is grep's
+      # non-match status — and a guard that fails when nothing is wrong gets
+      # disabled within a week.
+      #
+      # The pattern is generated from internal/archtest/reachability.Forbidden;
+      # TestTheCommittedCIStepMatchesTheRule fails if this copy drifts from it.
+      - name: Gateway reachability rule
+        run: |
+          set -euo pipefail
+          forbidden='^(github\.com/miere/murtaugh/internal/agentbuild|github\.com/miere/murtaugh/internal/llm|github\.com/miere/murtaugh/internal/agent/acp|github\.com/miere/murtaugh/internal/agent/native|github\.com/miere/murtaugh/internal/agent/claudecode)$'
+          # Listed into a variable first, so `set -e` catches a `go list` that
+          # exits non-zero — an unresolvable import path, a missing package.
+          # Inside the pipeline that failure would be indistinguishable from
+          # grep's "no match" and the guard would report clean. (It does NOT
+          # extend to code that will not compile: `go list -deps` prints the
+          # whole closure and exits 0 through a syntax error or a type error.
+          # The Build step below is what catches those.)
+          deps="$(go list -deps ./cmd/murtaugh-gateway)"
+          if reached="$(printf '%s\n' "$deps" | grep -E "$forbidden")"; then
+            echo "::error::the gateway binary reaches a package it must not:"
+            echo "$reached"
+            exit 1
+          fi
+
       - name: Build
         run: go build ./...
 

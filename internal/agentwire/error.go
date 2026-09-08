@@ -5,7 +5,7 @@ import (
 	"errors"
 
 	"github.com/miere/murtaugh/internal/agent"
-	"github.com/miere/murtaugh/internal/llm"
+	"github.com/miere/murtaugh/internal/providerfail"
 )
 
 // ErrorKind is the wire's discriminant vocabulary: the condition an error
@@ -25,12 +25,12 @@ import (
 //     this wire, so it is not a consumer of this vocabulary.
 //   - errors.Is(err, agent.ErrToolCeiling) — drops the session binding when a
 //     backend cannot stop a wedged tool → ErrorToolCeiling.
-//   - llm.Classify(err) — gateway/alert.go's failSpec, reached from every
-//     renderer.Fail on both the foreground and background paths. It does not
-//     merely branch: it reads five structured fields off a third-party concrete
-//     error to build the user-facing card → ErrorProvider.
+//   - providerfail.Classify(err) — gateway/alert.go's failSpec, reached from
+//     every renderer.Fail on both the foreground and background paths. It does
+//     not merely branch: it reads five structured fields off the failure to
+//     build the user-facing card → ErrorProvider.
 //   - acp.IsMethodNotFound-shaped reads of a JSON-RPC code → ErrorRPC.
-//   - claudecode.IsAuthFailure(err) — gateway/credrepair.go. This one matches on
+//   - claudeauth.IsAuthFailure(err) — gateway/credrepair.go. This one matches on
 //     PROSE, not identity, which is why Message is the full original text
 //     verbatim rather than a summary, and why it needs no discriminant of its
 //     own. (It must not have one: credrepair deliberately also checks the
@@ -55,7 +55,7 @@ const (
 	// error that satisfies errors.Is(err, agent.ErrToolCeiling).
 	ErrorToolCeiling ErrorKind = "tool_ceiling"
 	// ErrorProvider — the model provider failed, already classified into the
-	// llm.Failure vocabulary. Carries Provider.
+	// providerfail.Failure vocabulary. Carries Provider.
 	ErrorProvider ErrorKind = "provider"
 	// ErrorRPC — a JSON-RPC fault from an external agent process. Carries RPC.
 	ErrorRPC ErrorKind = "rpc"
@@ -75,9 +75,9 @@ type Error struct {
 	RPC      *RPCFailure      `json:"rpc,omitempty"`
 }
 
-// ProviderFailure is llm.Failure on the wire: the classification the producer
-// already derived, carried so the consumer does not have to re-derive it from a
-// third-party error type that cannot survive serialisation.
+// ProviderFailure is providerfail.Failure on the wire: the classification the
+// producer already derived, carried so the consumer does not have to re-derive
+// it from a third-party error type that cannot survive serialisation.
 type ProviderFailure struct {
 	Kind       string `json:"kind"`
 	Provider   string `json:"provider,omitempty"`
@@ -107,11 +107,16 @@ type RPCFaulter interface {
 	RPCFault() (method string, code int)
 }
 
-// encodeError classifies err once, at the producer, and records the result.
+// encodeError reads the discriminants off err and records them.
 //
 // The order matters and mirrors the gateway's own branching: chat_handler tests
 // cancellation before the tool ceiling, so an error that somehow satisfied both
 // is a cancellation to the consumer and must be one on the wire too.
+//
+// The provider arm reads a classification the BACKEND already attached
+// (internal/agent/native's eventError, via llm.CarryFailure); it does not derive
+// one. Deriving it here would mean matching litellm's concrete error type, and
+// this package must stay importable by a gateway that links no provider client.
 func encodeError(err error) *Error {
 	if err == nil {
 		return nil
@@ -127,7 +132,7 @@ func encodeError(err error) *Error {
 		return w
 	}
 
-	if failure, ok := llm.Classify(err); ok {
+	if failure, ok := providerfail.Classify(err); ok {
 		w.Kind = ErrorProvider
 		w.Provider = &ProviderFailure{
 			Kind:       string(failure.Kind),
@@ -164,8 +169,8 @@ func decodeError(w *Error) error {
 		return &wireError{msg: w.Message, sentinel: agent.ErrToolCeiling}
 	case ErrorProvider:
 		if w.Provider != nil {
-			return llm.NewFailureError(llm.Failure{
-				Kind:       llm.FailureKind(w.Provider.Kind),
+			return providerfail.New(providerfail.Failure{
+				Kind:       providerfail.Kind(w.Provider.Kind),
 				Provider:   w.Provider.Provider,
 				StatusCode: w.Provider.StatusCode,
 				Message:    w.Provider.Message,

@@ -25,7 +25,7 @@ import (
 // (toolset's synthesized native groups, and `manage`, which registers no tool
 // at all), but never the reverse.
 func TestToolFamilyCatalogueCoversTheRegistry(t *testing.T) {
-	registry := buildRegistry(config.Config{}, nil, "", "test", nil, nil, nil, nil)
+	registry := buildRegistry(config.Config{}, nil, "", "test", nil, nil, nil, nil, Agents{})
 	// Without this the whole test passes vacuously if buildRegistry ever starts
 	// returning nothing for a zero config — which is exactly the state a drift
 	// guard must not be able to reach quietly.
@@ -60,7 +60,7 @@ func TestToolFamilyCatalogueCoversTheRegistry(t *testing.T) {
 // named in the catalogue but not in toolset.NativeGroups would resolve to
 // nothing, offering the operator a family that quietly grants no tool.
 func TestCataloguedNativeGroupsExist(t *testing.T) {
-	registry := buildRegistry(config.Config{}, nil, "", "test", nil, nil, nil, nil)
+	registry := buildRegistry(config.Config{}, nil, "", "test", nil, nil, nil, nil, Agents{})
 
 	registered := make(map[string]bool)
 	for _, tool := range registry.All() {

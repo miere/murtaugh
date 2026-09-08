@@ -1,4 +1,4 @@
-package claudecode
+package claudeauth
 
 import (
 	"errors"

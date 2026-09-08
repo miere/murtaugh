@@ -3,56 +3,46 @@ package llm
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 
 	"github.com/voocel/litellm/providers"
+
+	"github.com/miere/murtaugh/internal/providerfail"
 )
 
-// FailureKind is the coarse reason a provider call failed. It is the vocabulary
-// the UI reasons about: every kind answers "is this the user's problem, ours, or
-// the provider's, and is retrying worth anything?".
-type FailureKind string
+// The failure vocabulary itself lives in internal/providerfail, a leaf that
+// links no provider client, because the Slack gateway and the node protocol both
+// paint these words and neither may reach litellm (#170 Change E). This package
+// keeps the half that cannot leave: the mapping from litellm's concrete error
+// onto that vocabulary.
+//
+// The aliases below are not a compatibility shim to be removed later — they are
+// how a caller that already imports this package (it is making provider calls)
+// spells the vocabulary without importing two packages to describe one failure.
+type (
+	// Failure is providerfail.Failure. See that package for the contract.
+	Failure = providerfail.Failure
+	// FailureKind is providerfail.Kind.
+	FailureKind = providerfail.Kind
+)
 
 const (
-	// FailureAuth — the credential was rejected (401/403). Ours to fix.
-	FailureAuth FailureKind = "auth"
-	// FailureRateLimit — we are sending too fast (429). Transient.
-	FailureRateLimit FailureKind = "rate_limit"
-	// FailureOverloaded — the provider is out of capacity (503/529). Transient
-	// and not our fault; the canonical "try again in a minute" case.
-	FailureOverloaded FailureKind = "overloaded"
-	// FailureQuota — billing/quota exhausted (402). Ours to fix, not transient.
-	FailureQuota FailureKind = "quota"
-	// FailureContextOverflow — the conversation exceeds the model's window.
-	FailureContextOverflow FailureKind = "context_overflow"
-	// FailureModel — the model name is unknown to the provider (404).
-	FailureModel FailureKind = "model"
-	// FailureValidation — the provider rejected the request shape (400).
-	FailureValidation FailureKind = "validation"
-	// FailureNetwork — we could not reach the provider at all.
-	FailureNetwork FailureKind = "network"
-	// FailureTimeout — the provider did not answer in time.
-	FailureTimeout FailureKind = "timeout"
-	// FailureProvider — a server-side error that is none of the above (5xx).
-	FailureProvider FailureKind = "provider"
+	FailureAuth            = providerfail.Auth
+	FailureRateLimit       = providerfail.RateLimit
+	FailureOverloaded      = providerfail.Overloaded
+	FailureQuota           = providerfail.Quota
+	FailureContextOverflow = providerfail.ContextOverflow
+	FailureModel           = providerfail.Model
+	FailureValidation      = providerfail.Validation
+	FailureNetwork         = providerfail.Network
+	FailureTimeout         = providerfail.Timeout
+	FailureProvider        = providerfail.Provider
 )
 
-// Failure is a provider error reduced to what a caller can act on: what went
-// wrong (Kind), who said so (Provider/StatusCode), the provider's own sentence
-// for a human (Message), and whether retrying the identical request could
-// plausibly succeed (Retryable).
-//
-// It exists so callers — the agent loop deciding whether to retry, the Slack
-// renderer deciding what to paint — never sniff error strings. Classify does the
-// one string-shaped job (digging the sentence out of a JSON body) exactly once.
-type Failure struct {
-	Kind       FailureKind
-	Provider   string
-	StatusCode int
-	Message    string
-	Retryable  bool
-}
+// NewFailureError is providerfail.New: an error carrying an already-derived
+// classification, for the far side of a wire where the original error does not
+// exist.
+func NewFailureError(f Failure, text string) error { return providerfail.New(f, text) }
 
 // Classify reduces any error returned by a Provider to a Failure. It reports
 // false for anything that did not originate at the provider boundary (our own
@@ -61,62 +51,45 @@ type Failure struct {
 //
 // It matches on litellm's typed *providers.LiteLLMError via errors.As, so the
 // fmt.Errorf wrapping every layer adds is transparent to it. It also matches an
-// error that already carries a Failure (see NewFailureError), so a provider
+// error that already carries a Failure (providerfail.Classify), so a provider
 // failure classified once — on a runtime node, before serialisation — classifies
 // identically wherever it is read.
 func Classify(err error) (Failure, bool) {
-	if err == nil {
-		return Failure{}, false
-	}
-	var carried *failureError
-	if errors.As(err, &carried) {
-		return carried.failure, true
+	if f, ok := providerfail.Classify(err); ok {
+		return f, true
 	}
 	var lerr *providers.LiteLLMError
 	if !errors.As(err, &lerr) {
 		return Failure{}, false
 	}
 
-	f := Failure{
+	return Failure{
 		Kind:       kindOf(lerr),
 		Provider:   lerr.Provider,
 		StatusCode: lerr.StatusCode,
 		Message:    humanMessage(lerr.Message),
 		Retryable:  lerr.Retryable,
+	}, true
+}
+
+// CarryFailure classifies err and, when it is a provider failure, returns err
+// with that classification attached — same text, same unwrap chain, so nothing
+// downstream that compares by identity is disturbed. An error that is not a
+// provider failure, and a nil error, are returned unchanged.
+//
+// It is called at the seam where a provider error stops being litellm's and
+// becomes the agent layer's, and it is what lets every reader past that seam —
+// the Slack alert card, the wire encoder, a log — use providerfail.Classify
+// without linking a provider client. Classifying at the source is also the only
+// way the local and remote paths can agree: on the wire there is no
+// *providers.LiteLLMError left to classify.
+func CarryFailure(err error) error {
+	f, ok := Classify(err)
+	if !ok {
+		return err
 	}
-	return f, true
+	return providerfail.Carrying(f, err)
 }
-
-// NewFailureError returns an error that carries f as its already-derived
-// classification and text as its message, so Classify answers with f.
-//
-// It exists for the wire. Classify's other arm matches litellm's concrete
-// *providers.LiteLLMError, and that type cannot survive serialisation: an agent
-// running on a remote node would have every provider failure arrive as an
-// unclassified error, silently downgrading "Gemini is overloaded (503) — try
-// again in a moment" to the generic "Murtaugh hit an error" card on both the
-// foreground and the background rendering paths.
-//
-// Carrying the Failure rather than rebuilding a *providers.LiteLLMError is
-// deliberate: reconstructing a third-party struct would tie the protocol to
-// litellm's internals and to whatever they change next, while the vocabulary
-// this package owns is exactly what callers act on.
-//
-// text should be the original error's full text — the alert card puts it in
-// Detail verbatim and the session journal records it as the turn's error.
-func NewFailureError(f Failure, text string) error {
-	return &failureError{failure: f, text: text}
-}
-
-// failureError is the carrier behind NewFailureError. It is unexported because
-// there is nothing to do with it but hand it to Classify: the Failure is the
-// contract, not the wrapper.
-type failureError struct {
-	failure Failure
-	text    string
-}
-
-func (e *failureError) Error() string { return e.text }
 
 // kindOf maps litellm's ErrorType onto a FailureKind, with one refinement:
 // litellm classifies every 5xx except 529 as a generic provider error, but a 503
@@ -148,92 +121,6 @@ func kindOf(e *providers.LiteLLMError) FailureKind {
 		return FailureTimeout
 	default:
 		return FailureProvider
-	}
-}
-
-// Headline is a one-line human summary naming the provider and what it did —
-// "Gemini is overloaded", "OpenAI rejected the credentials". It carries no
-// markup: the transport (Slack, a log line) decorates it.
-func (f Failure) Headline() string {
-	who := f.providerLabel()
-	switch f.Kind {
-	case FailureAuth:
-		return who + " rejected the credentials"
-	case FailureRateLimit:
-		return who + " is rate limiting us"
-	case FailureOverloaded:
-		return who + " is overloaded"
-	case FailureQuota:
-		return "the " + who + " account is out of quota"
-	case FailureContextOverflow:
-		return "the conversation is too long for this model"
-	case FailureModel:
-		return who + " does not know this model"
-	case FailureValidation:
-		return who + " rejected the request"
-	case FailureNetwork:
-		return who + " is unreachable"
-	case FailureTimeout:
-		return who + " timed out"
-	default:
-		return who + " returned an error"
-	}
-}
-
-// Remedy is what the person reading the failure should do about it, in one
-// sentence. It sits beside Headline because it follows from the Kind and nothing
-// else: whose quota ran out is a fact about the provider, not about the surface
-// the message is painted on.
-//
-// It is deliberately addressed to the reader rather than to the operator: on a
-// personal deployment they are the same person, and on a shared one the reader
-// still needs to know whether to wait, rephrase, or fetch somebody.
-func (f Failure) Remedy() string {
-	switch f.Kind {
-	case FailureAuth:
-		return "The configured credentials need attention — notify your admin user."
-	case FailureRateLimit, FailureOverloaded:
-		return "Try again in a moment."
-	case FailureQuota:
-		return "The account needs more quota — notify your admin user."
-	case FailureContextOverflow:
-		return "Start a fresh thread: this conversation no longer fits the model's context."
-	case FailureModel:
-		return "The configured model name looks wrong — notify your admin user."
-	case FailureValidation:
-		return "Try rephrasing. If it keeps happening, notify your admin user."
-	case FailureNetwork, FailureTimeout:
-		return "Try again. If it keeps happening, check the network path to the provider."
-	default:
-		return "Try again. If it keeps happening, notify your admin user."
-	}
-}
-
-// String renders the headline with the status code appended when there is one:
-// "Gemini is overloaded (503)". This is the label form callers paint.
-func (f Failure) String() string {
-	if f.StatusCode > 0 {
-		return fmt.Sprintf("%s (%d)", f.Headline(), f.StatusCode)
-	}
-	return f.Headline()
-}
-
-// providerLabel renders the litellm provider name the way a human writes it.
-// An unknown or compat-endpoint name is passed through as-is (it is whatever the
-// operator configured); an absent one becomes a neutral noun so a headline never
-// reads "  is overloaded".
-func (f Failure) providerLabel() string {
-	switch strings.ToLower(strings.TrimSpace(f.Provider)) {
-	case "":
-		return "the model provider"
-	case "gemini":
-		return "Gemini"
-	case "anthropic":
-		return "Anthropic"
-	case "openai":
-		return "OpenAI"
-	default:
-		return f.Provider
 	}
 }
 

@@ -26,22 +26,23 @@ Module path: `github.com/miere/murtaugh`.
 ## High-level architecture
 
 ```
-                          ┌──────────────┐
-                          │ cmd/murtaugh │
-                          └──────┬───────┘
-                                 │
-                          ┌──────▼───────┐
-                          │ internal/app │   ← composition root
-                          └──────┬───────┘
-                  builds Registry + selects Mode
-        ┌────────────────────────┼────────────────────────┐
-        │                        │                        │
-┌───────▼────────┐      ┌────────▼────────┐      ┌──────────▼─────────┐
-│ frontends/cli  │      │ frontends/mcp   │      │ slack/gateway      │
-└───────┬────────┘      └────────┬────────┘      └────────────────────┘
-        │                        │
-        └──────► Tool ◄──────────┘
-                  (internal/tools/*)
+       ┌──────────────┐        ┌──────────────────────┐
+       │ cmd/murtaugh │        │ cmd/murtaugh-gateway │
+       └──────┬───────┘        └──────────┬───────────┘
+              │  app.Agents{local}        │  app.Agents{} (empty)
+              └────────────┬──────────────┘
+                    ┌──────▼───────┐
+                    │ internal/app │   ← composition root
+                    └──────┬───────┘
+            builds Registry + selects Mode
+   ┌───────────────────────┼───────────────────────┐
+   │                       │                       │
+┌──▼─────────────┐  ┌──────▼──────────┐  ┌─────────▼──────────┐
+│ frontends/cli  │  │ frontends/mcp   │  │ slack/gateway      │
+└──┬─────────────┘  └──────┬──────────┘  └────────────────────┘
+   │                       │
+   └──────► Tool ◄─────────┘
+             (internal/tools/*)
 ```
 
 - `internal/app` is the only place tools are wired into the registry.
@@ -50,12 +51,27 @@ Module path: `github.com/miere/murtaugh`.
 - The Slack gateway does not use the Tool registry today; it runs side-by-side
   as a third frontend selected by mode (`ModeGateway`). The `slack.*` tools,
   by contrast, are ordinary registry tools shared by the CLI and MCP frontends.
+- **The agent machinery is injected, not imported.** `internal/app` names no
+  agent backend; each entry point hands it an `app.Agents` (a pair of
+  constructors). `cmd/murtaugh` passes `internal/agentruntime/local`, so the CLI
+  and today's `murtaugh slack gateway` behave exactly as before.
+  `cmd/murtaugh-gateway` passes the zero value and therefore links nothing that
+  can run a model — CI proves it (see "The gateway reachability rule"). A third
+  binary, `cmd/murtaugh-runtime`, is the runtime-node entry point; it has no
+  link to a gateway yet and exits with an error saying so.
 
 ## Repository layout
 
 ```
 cmd/murtaugh/         Entry point: flag parsing, mode selection, signal handling.
-internal/app/         Composition root + Registry wiring.
+                      The one binary that ships today; keeps its local agent.
+cmd/murtaugh-gateway/ The Slack gateway alone, linking no agent machinery.
+                      Nothing selects it yet; built so the reachability rule
+                      guards it from birth.
+cmd/murtaugh-runtime/ The runtime-node entry point. May reach the agent
+                      packages; has no gateway link yet.
+internal/app/         Composition root + Registry wiring. Names no agent
+                      backend: `app.Agents` is injected by the entry point.
 internal/frontends/   CLI and MCP adapters over the Tool registry.
   cli/                Human frontend: kebab → snake flag mapping, render dispatch.
   mcp/                MCP stdio adapter wrapping the same Registry.
@@ -106,6 +122,12 @@ internal/agent/       Agent backend interface, session manager, protocol types,
   remote/             agent.Client over a link to a runtime node. Runs no
                       model; nothing selects it yet.
 internal/agentbuild/  Kind-aware backend builder (native / ACP / claude_code).
+internal/agentruntime/ The seam between the gateway and the machinery that
+                      builds and runs agents: the types both ends name, and
+                      nothing that can run a model.
+  local/              The in-process implementation: backends, session managers,
+                      the delegation runner and the MCP aggregator. The one
+                      package that decides whether a binary can run an agent.
 internal/agentwire/   The serialisable form of the agent event abstraction: the
                       protocol a runtime node speaks to the gateway, plus the
                       Encoder/Decoder that translate to and from agent.Event,
@@ -122,7 +144,14 @@ internal/onboarding/  The agent-setup form's domain: provider catalogue, model
 internal/jsontemplate/ JSON-document templating with JSON-safe escaping funcs.
                       The single renderer behind every Block Kit template.
 internal/llm/         Provider-agnostic LLM boundary over litellm (gemini /
-                      anthropic-compat / openai-compat).
+                      anthropic-compat / openai-compat), and the mapping from
+                      litellm's error onto the providerfail vocabulary.
+internal/providerfail/ What a provider failure is reduced to (kind, provider,
+                      status, message, retryable) and how it is worded for a
+                      human. A leaf: no litellm, nothing of ours.
+internal/claudeauth/  Recognises, from its prose, a Claude Code failure a
+                      re-authentication would fix. Read by the gateway's
+                      credential-repair path, not by the backend.
 internal/toolset/     Per-agent toolset resolver (native tools + registry + MCP).
 internal/mcpclient/   External MCP client: remote tools as tools.Tool.
 internal/agentdelegate/ One-shot isolated agent runner (delegate-to-agent).
@@ -132,22 +161,59 @@ assets/               Embedded reference config, JSON templates, agent skills.
 ```
 
 `internal/*` is private to this module. Cross-package dependencies flow in one
-direction: `slack/gateway` orchestrates `config`, `acp`, `agentdelegate`,
-`workflow`, `unfurl`, `slack/interaction`, and `slack/authcard`; those packages
-do not import `slack/gateway`. `jsontemplate` sits at the bottom — it knows
-nothing of Slack and is imported by every template renderer above it. The
-`agentdelegate` runner builds on `acp` and backs every delegate-to-agent
-surface (the `workflow` engine, the `unfurl` handler, and the `jobs.run`
-tool consume it through small local interfaces). Tool packages depend on
-`config` where they need shared types (e.g. `JobProfile`), never the other way
-around.
+direction: `slack/gateway` orchestrates `config`, `agentruntime`, `workflow`,
+`unfurl`, `slack/interaction`, and `slack/authcard`; those packages do not
+import `slack/gateway`. It reaches no agent backend and no delegation runner:
+what it has is an `agentruntime.Runtime` handed to `New`, whose session
+managers, delegator and tool surface it consumes without knowing what built
+them. `jsontemplate` sits at the bottom — it knows nothing of Slack and is
+imported by every template renderer above it. The `agentdelegate` runner builds
+on `agentbuild` and backs every delegate-to-agent surface (the `workflow`
+engine, the `unfurl` handler, and the `jobs.run` tool consume it through small
+local interfaces). Tool packages depend on `config` where they need shared types
+(e.g. `JobProfile`), never the other way around.
+
+### The gateway reachability rule
+
+`cmd/murtaugh-gateway` must not be able to reach `internal/agentbuild`,
+`internal/llm` or `internal/agent/{acp,native,claudecode}` **by any import
+path** (#170 Change E: the gateway is *incapable* of serving an AI-backed
+request, not merely disinclined to). That is a property of the whole import
+closure, so it is not a `go/analysis` pass — those run per package. It is a
+`go list -deps` grep, run in CI ("Gateway reachability rule") and mirrored by
+`internal/archtest/reachability`, whose decay test fails if the two copies of
+the forbidden list drift apart.
+
+`cmd/murtaugh` is the positive control and always violates the pattern: the CLI
+keeps its local agent on purpose, so `murtaugh jobs run x` works with no gateway
+and no node. A check that cannot demonstrate a failure is not a check.
+
+Three consequences are load-bearing and easy to undo by accident:
+
+- The gateway wants the *words* for a provider failure without the machinery
+  that produces one, so the vocabulary lives in `internal/providerfail` and
+  `internal/llm` keeps only the litellm mapping. `internal/agent/native`
+  classifies at the point of failure (`eventError` → `llm.CarryFailure`) and
+  every reader downstream — the alert card, the wire encoder — reads the carried
+  classification. Classifying at the reader would work in-process and silently
+  stop working across a node link, where no `*providers.LiteLLMError` survives.
+- Deciding whether a Claude Code failure warrants re-authentication is gateway
+  policy, so the prose matcher lives in `internal/claudeauth`, outside the
+  backend it describes.
+- `agentdelegate.ErrNonJSONOutput` moved to `internal/agent`, because a caller
+  branching on it (the workflow engine) would otherwise reach `agentbuild` three
+  hops down for one sentinel.
 
 `agentwire` is a top-level sibling of `agent` for the same reason `agentbuild`
 and `agentdelegate` are: everything **under** `internal/agent/` is a backend
 implementing `agent.Client` or backend support, and a codec is neither. It
-imports `agent` and `llm` and no backend — an error's backend-specific structure
-reaches it through an interface it declares (`RPCFaulter`) that the backend
-satisfies structurally. Its types **derive from** `agent.Event` rather than being
+imports `agent` and `providerfail` and no backend, and no provider client — an
+error's backend-specific structure reaches it through an interface it declares
+(`RPCFaulter`) that the backend satisfies structurally, and a provider failure
+reaches it already classified. That is what makes it importable by a gateway
+that may not link litellm; before the vocabulary was split out of `llm`, this
+package's own stated goal was one it did not meet. Its types **derive from**
+`agent.Event` rather than being
 it: two types with an explicit translation, so renaming a field on `agent.Event`
 stays a refactor instead of becoming a wire-compatibility event.
 
@@ -285,7 +351,9 @@ defaults, mutual exclusions, the boolean-needs-a-value CLI quirk, examples).
    dominates the terminal).
 6. Creates a `signal.NotifyContext` for `SIGINT`/`SIGTERM`.
 7. `app.New(...)` builds the Registry and the chosen frontend; `Run(ctx)`
-   blocks until the context is cancelled or the frontend returns.
+   blocks until the context is cancelled or the frontend returns. The last
+   argument is the `app.Agents` this binary is willing to link — for
+   `cmd/murtaugh`, `internal/agentruntime/local`.
 
 ## Configuration (`internal/config` + `internal/config/store`)
 
@@ -468,9 +536,10 @@ mutually exclusive). An agent job is fire-and-forget; its prompt supports
 positional `{{ N }}` placeholders filled from the run-time/configured args.
 
 **Delegation runs at chat parity.** Every delegate-to-agent surface (jobs,
-workflow triggers, unfurls) shares ONE `agentdelegate.Runner`, built by the
-gateway with the same `agentbuild.Deps` a chat agent gets — registry, MCP
-servers, workspace, and the MCP aggregator. The aggregator matters because it is
+workflow triggers, unfurls) shares ONE `agentdelegate.Runner`, built by
+`agentruntime/local` with the same `agentbuild.Deps` a chat agent gets —
+registry, MCP servers, workspace, and the MCP aggregator — and handed to the
+gateway on the `Runtime` as a `Delegator` interface. The aggregator matters because it is
 the only route by which an `acp`/`claude_code` agent reaches Murtaugh's tools:
 without it a scheduled agent job starts happily and then cannot post its own
 result. Two deps are withheld on purpose, both because no human is in a thread:
@@ -532,6 +601,21 @@ Three decisions carry the safety argument:
 
 Session managers survive demotion — a standby may be promoted again, and a torn
 down agent backend cannot be revived. They are closed only on process exit.
+
+**The MCP aggregator must therefore be restartable.** `startBridge` runs on
+every promotion, on that promotion's serve context, and a demotion cancels it.
+Because the session managers and their agents survive, the aggregator has to
+come back on the *same socket path* — no agent restart is involved. So
+`mcpbridge.Server` numbers each run: a run's context watcher tears down only the
+listener it started, and unlinks the socket only if it is still the current run
+when it gets there. Both halves matter, because the watcher goroutine is not
+waited on by `StopServing`, so a fast demote/promote genuinely does run an old
+watcher after a new bind. (For the same reason the listener is created with
+`SetUnlinkOnClose(false)`: Go's default would have a closing listener remove
+whatever file is at its path, which after a re-promotion is its successor's.)
+A failure to bind is journalled at error level under kind `bridge.start`, not
+just logged — the symptom is an agent that answers normally and then cannot post
+its result hours later.
 
 A new leader announces itself to the admin DM with hostname, local and public
 IP, version, PID, and the leadership epoch, plus whether it is the first leader
@@ -608,7 +692,7 @@ context. Long work must never block the event loop.
 `agent.Client` is the backend interface (`Initialize`, `NewSession`, `Prompt`,
 `Cancel`, `Close`). There are **two implementations**, selected per agent by
 each stored agent's `kind:` (default `native`); `agentbuild.Client` is the single place
-the choice is made, shared by the gateway and the `agentdelegate` runner:
+the choice is made, shared by `agentruntime/local` and the `agentdelegate` runner:
 
 - **`agent.ProcessClient`** (`kind: acp`) drives an **external** agent process by
   speaking **JSON-RPC over its stdio** (NDJSON): requests carry an incrementing

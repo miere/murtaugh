@@ -3,5 +3,7 @@ bin/
 dist/
 coverage.out
 /murtaugh
+/murtaugh-gateway
+/murtaugh-runtime
 /murtaugh-slack
 ignore/

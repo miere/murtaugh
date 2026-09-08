@@ -19,7 +19,7 @@ func HelpReference(version string) *help.Reference {
 
 // docsRegistry builds the registry from a zero config, for metadata only.
 func docsRegistry(version string) *tools.Registry {
-	return buildRegistry(config.Config{}, nil, "", version, nil, nil, nil, nil)
+	return buildRegistry(config.Config{}, nil, "", version, nil, nil, nil, nil, Agents{})
 }
 
 // HelpDocs adapts a registry to the reference's Doc view. Every tools.Tool
