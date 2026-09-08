@@ -115,6 +115,18 @@ func NativeApproval(id, toolName, summary string) PermissionRequest {
 // sends Response(ID, decision) back — that goroutine belongs to the transport,
 // not to a translation.
 type PendingDecision struct {
-	ID       string
+	ID string
+	// Gate is which of the gateway's two approval surfaces must answer. It is
+	// carried here rather than on the rebuilt agent.PermissionRequest because
+	// that type has no such field and should not grow one — it is the internal
+	// abstraction, and in process there is nothing to route: the two paths are
+	// two different function calls. On a wire they are one frame, so the
+	// discriminant has to reach the side that dispatches.
+	//
+	// Dropping it is not a visible failure, which is why it is spelled out
+	// here: a GateTool request answered by the agent-harness asker returns an
+	// option id and no note, and the note is the whole answer a native tool
+	// call gets handed back to the model.
+	Gate     PermissionGate
 	Decision <-chan string
 }

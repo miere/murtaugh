@@ -66,6 +66,14 @@ type Options struct {
 	// AckThreshold is how many consumed frames may go unacknowledged before a
 	// standalone ack is sent. Acks piggyback on outbound traffic; this covers
 	// the direction that is only listening.
+	//
+	// It is a frame count, and frame counts alone are not enough: the WINDOW is
+	// measured in bytes, so a peer sending a few large frames — four 64 KiB
+	// attachment chunks against a 256 KiB window — fills the window before this
+	// many frames have been consumed, and waits for an acknowledgement that a
+	// frame count will never trigger. That is a deadlock, not a stall, and it
+	// was found by sending a real attachment over a real socket. A consumed-byte
+	// trigger runs alongside this one; see receive.
 	AckThreshold uint64
 	// AckInterval sends a standalone ack when nothing has been sent for that
 	// long. It is a TRANSPORT keepalive — it proves the socket is alive and
@@ -126,8 +134,12 @@ type Link struct {
 	peerAck      uint64
 	lastSeen     uint64
 	ackedThrough uint64
-	room         chan struct{}
-	err          error
+	// sinceAck is the payload bytes delivered since the last acknowledgement
+	// this side emitted, piggybacked or standalone. It is what makes a
+	// byte-sized window and a frame-counted ack policy agree.
+	sinceAck int
+	room     chan struct{}
+	err      error
 
 	done      chan struct{}
 	closeOnce sync.Once
@@ -223,6 +235,7 @@ func (l *Link) Send(ctx context.Context, payload []byte) error {
 	}
 	l.nextSeq = seq
 	l.ackedThrough = l.lastSeen
+	l.sinceAck = 0
 	l.unacked = append(l.unacked, frame{seq: seq, raw: raw, size: len(payload)})
 	l.unackedBytes += len(payload)
 	l.mu.Unlock()
@@ -355,9 +368,17 @@ func (l *Link) receive(env Envelope) error {
 
 	l.mu.Lock()
 	l.lastSeen = env.Seq
+	l.sinceAck += len(env.Payload)
 	behind := l.lastSeen - l.ackedThrough
+	bytesBehind := l.sinceAck
 	l.mu.Unlock()
-	if behind >= l.ackAt {
+	// Either trigger. The frame count keeps a chatty stream's acknowledgements
+	// timely; the byte count is what stops a peer sending large frames from
+	// filling the window before the frame count is reached, which is a deadlock
+	// because the acknowledgement that would open it is the one being waited
+	// for. Half the window, so the peer has room to keep sending while the
+	// acknowledgement is in flight.
+	if behind >= l.ackAt || bytesBehind >= l.window/2 {
 		l.sendAck()
 	}
 	return nil
@@ -403,6 +424,7 @@ func (l *Link) sendAck() {
 	}
 	ack := l.lastSeen
 	l.ackedThrough = ack
+	l.sinceAck = 0
 	l.mu.Unlock()
 	raw, err := Encode(Ack(ack))
 	if err != nil {

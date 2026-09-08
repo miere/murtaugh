@@ -83,9 +83,10 @@ func build(cfg config.Config, registry *tools.Registry, logger *slog.Logger, hoo
 
 	if hooks.Chat {
 		rt.Sessions = make(map[string]*agent.SessionManager, len(cfg.Agents))
+		rt.Clients = make(map[string]agent.Client, len(cfg.Agents))
 		rt.ToolProblems = make(map[string][]toolset.Problem)
 		for name, profile := range cfg.Agents {
-			mgr, problems, ok := buildAgent(cfg, registry, logger, hooks, bridge, name, profile)
+			mgr, client, problems, ok := buildAgent(cfg, registry, logger, hooks, bridge, name, profile)
 			if len(problems) > 0 {
 				rt.ToolProblems[name] = problems
 			}
@@ -93,6 +94,7 @@ func build(cfg config.Config, registry *tools.Registry, logger *slog.Logger, hoo
 				continue
 			}
 			rt.Sessions[name] = mgr
+			rt.Clients[name] = client
 		}
 	}
 
@@ -113,6 +115,10 @@ func build(cfg config.Config, registry *tools.Registry, logger *slog.Logger, hoo
 // session manager. It reports the tool groups dropped along the way whether or
 // not the agent itself built: a degraded agent still answers, and a failed one
 // still explains what it lost.
+//
+// It returns the raw client alongside the manager because a runtime node serves
+// the client directly — the gateway on the other end of its link is running the
+// session manager for that conversation already.
 func buildAgent(
 	cfg config.Config,
 	registry *tools.Registry,
@@ -121,7 +127,7 @@ func buildAgent(
 	bridge *mcpbridge.Server,
 	name string,
 	profile config.AgentProfile,
-) (*agent.SessionManager, []toolset.Problem, bool) {
+) (*agent.SessionManager, agent.Client, []toolset.Problem, bool) {
 	// Resolve the agent's workspace once (workdir → base dir fallback),
 	// validated here at the build seam. Any workdir-rooted tool that cannot be
 	// rooted is dropped (degraded) rather than failing the agent; the dropped
@@ -129,7 +135,7 @@ func buildAgent(
 	resolved, err := agentbuild.Resolve(name, profile, cfg.BaseDir)
 	if err != nil {
 		logger.Error("agent disabled: could not resolve agent", "agent", name, "kind", profile.ResolvedKind(), "error", err)
-		return nil, nil, false
+		return nil, nil, nil, false
 	}
 	problems := resolved.Problems()
 	for _, p := range problems {
@@ -175,7 +181,7 @@ func buildAgent(
 	})
 	if err != nil {
 		logger.Error("agent disabled: could not build client", "agent", name, "kind", profile.ResolvedKind(), "error", err)
-		return nil, problems, false
+		return nil, nil, problems, false
 	}
 	var interruptible *bool
 	if profile.ACP != nil {
@@ -189,5 +195,5 @@ func buildAgent(
 		WithBusyTimeout(cfg.Defaults.EffectiveSessionBusyTimeout()).
 		WithCancelOverride(interruptible).
 		WithDescriptor(string(profile.ResolvedKind()), profile.ResolvedApproval())
-	return mgr, problems, true
+	return mgr, client, problems, true
 }
