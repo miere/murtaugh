@@ -119,12 +119,14 @@ type fakeChatSessions struct {
 	// directly — the happens-before is established by the sequential call.
 	mu     sync.Mutex
 	key    agent.ConversationKey
+	meta   agent.SessionMetadata
 	prompt string
 }
 
-func (f *fakeChatSessions) Prompt(_ context.Context, key agent.ConversationKey, _ agent.SessionMetadata, req agent.PromptRequest) (<-chan agent.Event, error) {
+func (f *fakeChatSessions) Prompt(_ context.Context, key agent.ConversationKey, meta agent.SessionMetadata, req agent.PromptRequest) (<-chan agent.Event, error) {
 	f.mu.Lock()
 	f.key = key
+	f.meta = meta
 	f.prompt = req.Text
 	f.mu.Unlock()
 	ch := make(chan agent.Event, 2)
@@ -132,6 +134,14 @@ func (f *fakeChatSessions) Prompt(_ context.Context, key agent.ConversationKey, 
 	ch <- agent.Event{Type: agent.EventComplete}
 	close(ch)
 	return ch, nil
+}
+
+// metadata returns the last SessionMetadata the manager was handed, safe to
+// read while the startChat goroutine may still be invoking Prompt.
+func (f *fakeChatSessions) metadata() agent.SessionMetadata {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.meta
 }
 
 // promptText returns the last prompt text, safe to read while the startChat

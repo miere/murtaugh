@@ -59,6 +59,15 @@ type Options struct {
 	// disconnects every evening, and a nightly DM about it trains the one admin
 	// who would act on the message that matters to ignore it.
 	Journal journal.Recorder
+	// Pins remembers which node a conversation was delegated to, so turn two
+	// lands where turn one did and the choice survives a restart or a failover.
+	//
+	// nil disables pinning, and the degradation is honest rather than silent: a
+	// conversation is re-elected on every cold session, which shows up as the
+	// round robin moving a conversation between nodes. Delegation itself still
+	// works, which is what makes a gateway without a pin store worth running at
+	// all — and every gateway that opens the node endpoint opens this too.
+	Pins config.ConversationPinStore
 	// Background receives events belonging to a session rather than a turn.
 	Background func(sessionID string, ev agent.Event)
 	// Approve answers a native agent's inline tool approval. It is set by the
@@ -77,6 +86,13 @@ type Host struct {
 
 	// conns numbers connections. It names a socket and never crosses the wire.
 	conns atomic.Int64
+	// cursor is the delegation round robin. It lives here, not in the runtime
+	// builder's closure, because a configuration reload re-runs that builder
+	// while the connections survive — see roundRobin.
+	cursor atomic.Uint64
+	// pins is where an election is written down. Fixed for the Host's life: it
+	// is a database handle, not a live gateway reference.
+	pins config.ConversationPinStore
 
 	mu sync.Mutex
 	// nodes is the registry, keyed per CONNECTION. See registry.go for why that
@@ -84,14 +100,21 @@ type Host struct {
 	nodes map[string]*attached
 	// sessions binds an agent session id to the connection that minted it.
 	//
-	// With one slot there was nothing to bind: every call went to the one node
-	// there was. With a registry a session id is meaningless anywhere but on
-	// the connection that issued it — ids are minted per node — so this is the
-	// only place a later Prompt, Cancel or CloseSession can be resolved back to
-	// a machine. Choosing which node a NEW conversation opens on is delegation
-	// and is item 10; keeping a conversation on the node it started on is not,
-	// and cannot wait for it.
-	sessions   map[string]*attached
+	// It is what makes a warm turn stay on its node without re-reading the pin:
+	// the session manager caches conversation → session id and calls Prompt
+	// with only the id, so this is the only place the id can be resolved back
+	// to a machine. An id whose connection has gone is ErrSessionGone, which
+	// the manager answers by opening a fresh session — and THAT is what runs
+	// the re-election.
+	sessions map[string]*attached
+	// takeovers marks the sessions whose first prompt must tell the model the
+	// conversation moved. Keyed by session id, valued by the node it came from,
+	// consumed on use. See takeover.go.
+	takeovers map[string]string
+	// access carries the node grants. Live rather than captured, like the
+	// approver: a gateway admin adding a grant must take effect on the next
+	// election and not on the next restart.
+	access     config.AccessConfig
 	approve    func(ctx context.Context, toolName, summary string) (bool, string)
 	background func(sessionID string, ev agent.Event)
 	// tools is the gateway's registry, from which a node is served the
@@ -124,6 +147,7 @@ func New(opts Options) (*Host, error) {
 		now:        now,
 		opts:       opts,
 		rec:        rec,
+		pins:       opts.Pins,
 		nodes:      make(map[string]*attached),
 		sessions:   make(map[string]*attached),
 		approve:    opts.Approve,
@@ -378,13 +402,14 @@ func (n *attached) close() {
 	_ = n.client.Close()
 }
 
-// anyClient answers the questions that are about the FLEET rather than about
-// one conversation: is anything attached at all, and does it interrupt.
+// anyClient answers the questions that are about the FLEET rather than about a
+// conversation: is there anything attached at all, and does it interrupt.
 //
-// It is not a route and must never be used as one. Its two callers — the
-// session manager's initialize probe and its interruptible probe — ask a
-// question no particular node owns, so answering with the most recently
-// attached one is as good as answering with any.
+// It is not delegation and must never be used as it. A conversation's node is
+// chosen by delegate and then addressed through its session binding; the two
+// callers here — the session manager's initialize probe and its interruptible
+// probe — ask a question no particular node owns, and answering with the most
+// recently attached one is as good as answering with any.
 func (h *Host) anyClient() (*remote.Client, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -393,24 +418,6 @@ func (h *Host) anyClient() (*remote.Client, error) {
 		return nil, ErrNoNode
 	}
 	return node.client, nil
-}
-
-// openOn is the node a NEW conversation opens on.
-//
-// It is the most recently attached, which is a placeholder and is named as one:
-// CHOOSING between connected nodes for a conversation is delegation, which
-// needs a conversation key, a fleet and a stored pin — item 10's, none of which
-// exist here. What this commit does settle is the half that cannot wait for it:
-// whichever node is picked, the conversation stays on THAT node, because the
-// session it mints is bound to it below.
-func (h *Host) openOn() (*attached, error) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	node := h.newest()
-	if node == nil {
-		return nil, ErrNoNode
-	}
-	return node, nil
 }
 
 // bindSession records which connection minted a session id.
@@ -426,17 +433,16 @@ func (h *Host) bindSession(sessionID string, node *attached) {
 // sessionNode resolves a session id back to the connection that minted it.
 //
 // An id this gateway never minted, or one whose connection has since gone, is
-// agent.ErrSessionGone rather than ErrNoNode, and the distinction is the one a
-// user needs: ErrNoNode says nothing can run this turn, ErrSessionGone says
-// THIS session cannot while a new one could. Nothing re-opens it here — that is
-// item 10's re-election, which is what makes the recovery invisible — so today
-// it reaches the user as an error naming the conversation's own node rather than
-// as a stranger's "unknown session".
+// agent.ErrSessionGone rather than ErrNoNode, and the distinction is the whole
+// recovery path: ErrNoNode says the turn cannot run, while ErrSessionGone says
+// this SESSION cannot run and a new one can. The session manager answers the
+// second by discarding the binding and opening a fresh session, which is what
+// re-runs the election and overwrites the stale pin.
 //
-// The entry is re-checked against the live registry rather than trusted,
-// because a disconnect races a turn: the map is pruned on detach, but a lookup
-// that happened to read the pointer first would otherwise hand a turn to a dead
-// link and wait out its write timeout.
+// The entry is checked against the live registry rather than trusted, because a
+// disconnect races a turn: the map is pruned on detach, but a lookup that
+// happened to read the pointer first would otherwise hand a turn to a dead
+// link and wait for its write timeout.
 func (h *Host) sessionNode(sessionID string) (*attached, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -462,15 +468,32 @@ func (h *Host) unbindSession(sessionID string) {
 // Callers hold the mutex.
 //
 // sessionNode would answer correctly without this — it re-checks the registry —
-// but a gateway that never forgets is a gateway whose map grows by one entry
-// for every session of every node that ever attached, and a fleet of laptops
-// attaches and detaches all day.
+// but a gateway that never forgets is a gateway whose map grows for every
+// session of every node that ever attached.
 func (h *Host) pruneSessionsLocked(node *attached) {
 	for id, held := range h.sessions {
 		if held == node {
 			delete(h.sessions, id)
+			delete(h.takeovers, id)
 		}
 	}
+}
+
+// setAccess replaces the gateway access policy delegation reads its grants
+// from. Like the approver it is a live reference: a configuration reload
+// rebuilds the gateway while the node connections survive, and a grant added by
+// the gateway admin must reach the next election.
+func (h *Host) setAccess(access config.AccessConfig) {
+	h.mu.Lock()
+	h.access = access
+	h.mu.Unlock()
+}
+
+// accessConfig reads the current access policy.
+func (h *Host) accessConfig() config.AccessConfig {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.access
 }
 
 // SetApprover replaces the tool-approval gate the attached node's native agent

@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -17,6 +19,7 @@ import (
 	"github.com/miere/murtaugh/internal/agentruntime"
 	"github.com/miere/murtaugh/internal/agentwire"
 	"github.com/miere/murtaugh/internal/config"
+	configstore "github.com/miere/murtaugh/internal/config/store"
 	"github.com/miere/murtaugh/internal/journal"
 	"github.com/miere/murtaugh/internal/nodehost"
 	"github.com/miere/murtaugh/internal/nodeserve"
@@ -102,6 +105,10 @@ type rigConfig struct {
 	// built with no ToolProxy never asks for a tool list, which is the state
 	// every test above this one is in and the state a node was in before #194.
 	registry *tools.Registry
+	// pins is where delegation writes its choice. nil means the gateway does
+	// not pin, which is a supported state: every conversation is re-elected on
+	// its next cold session.
+	pins config.ConversationPinStore
 }
 
 // withoutWaitingForAttach is for the tests whose point is that the node does
@@ -127,6 +134,12 @@ func journalling(rec journal.Recorder) rigOption {
 	return func(c *rigConfig) { c.journal = rec }
 }
 
+// pinning gives the gateway somewhere to record which node it delegated a
+// conversation to.
+func pinning(pins config.ConversationPinStore) rigOption {
+	return func(c *rigConfig) { c.pins = pins }
+}
+
 func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *loopback {
 	t.Helper()
 	cfg := rigConfig{waitForAttach: true}
@@ -141,7 +154,7 @@ func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *lo
 
 	approved := make(chan approval, 4)
 	notices := make(chan notice, 8)
-	host, err := nodehost.New(nodehost.Options{Tokens: store, Logger: testLogger(), Journal: cfg.journal})
+	host, err := nodehost.New(nodehost.Options{Tokens: store, Logger: testLogger(), Journal: cfg.journal, Pins: cfg.pins})
 	if err != nil {
 		t.Fatalf("host: %v", err)
 	}
@@ -240,7 +253,35 @@ func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *lo
 	}
 }
 
+// reload rebuilds the gateway's runtime over the SAME live node connection,
+// which is what a configuration reload does: buildGateway runs again while the
+// node's socket is untouched.
+func (l *loopback) reload(t *testing.T, access config.AccessConfig) *agent.SessionManager {
+	t.Helper()
+	cfg := config.Config{
+		Agents: map[string]config.AgentProfile{"default": {}},
+		Chat:   config.ChatConfig{Enabled: true, Defaults: config.ChatDefaults{Agent: "default"}},
+		Access: access,
+	}
+	rt := nodehost.Runtime(l.host)(cfg, nil, testLogger())(agentruntime.Hooks{Chat: true})
+	manager := rt.Sessions["default"]
+	if manager == nil {
+		t.Fatal("the reloaded runtime built no session manager")
+	}
+	l.sessions = rt.Sessions
+	return manager
+}
+
 // mintInto adds one usable credential to the store and returns it.
+// nodeOwner is the Murtaugh user every credential in this file is minted for.
+//
+// It is named rather than spelled inline because delegation is keyed on it: a
+// conversation is served by the initiating user's OWN nodes, so a turn whose
+// metadata names somebody else is not a routing near-miss — it has no fleet at
+// all and is refused. The tests below say so by using this constant on both
+// sides.
+const nodeOwner = "U-owner"
+
 func mintInto(t *testing.T, store *memTokens, nodeID string) nodetoken.Minted {
 	t.Helper()
 	minted, err := nodetoken.Mint()
@@ -251,7 +292,7 @@ func mintInto(t *testing.T, store *memTokens, nodeID string) nodetoken.Minted {
 		Selector:   minted.Selector,
 		SecretHash: string(minted.SecretHash),
 		NodeID:     nodeID,
-		UserID:     "U-owner",
+		UserID:     nodeOwner,
 		CreatedAt:  time.Now(),
 	}); err != nil {
 		t.Fatalf("store credential: %v", err)
@@ -278,7 +319,7 @@ func TestAChatTurnIsServedByAConnectedNode(t *testing.T) {
 	}
 	key := agent.ConversationKey{ChannelID: "C1", ThreadTS: "123.4"}
 	events, err := manager.Prompt(context.Background(), key,
-		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4", UserID: "U9"},
+		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4", UserID: nodeOwner},
 		agent.PromptRequest{Text: "hello", Channel: "C1", Thread: "123.4", User: "U9"})
 	if err != nil {
 		t.Fatalf("prompt: %v", err)
@@ -326,7 +367,7 @@ func TestCancellationMidTurnReachesTheNodeAndClosesTheStream(t *testing.T) {
 	manager := rig.sessions["default"]
 	key := agent.ConversationKey{ChannelID: "C1", ThreadTS: "123.4"}
 	events, err := manager.Prompt(context.Background(), key,
-		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4"},
+		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4", UserID: nodeOwner},
 		agent.PromptRequest{Text: "long job", Channel: "C1", Thread: "123.4"})
 	if err != nil {
 		t.Fatalf("prompt: %v", err)
@@ -388,7 +429,7 @@ func TestApprovalRoundTripCarriesTheDecisionAndTheNote(t *testing.T) {
 	manager := rig.sessions["default"]
 	events, err := manager.Prompt(context.Background(),
 		agent.ConversationKey{ChannelID: "C1", ThreadTS: "123.4"},
-		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4"},
+		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4", UserID: nodeOwner},
 		agent.PromptRequest{Text: "delete it", Channel: "C1", Thread: "123.4", User: "U9"})
 	if err != nil {
 		t.Fatalf("prompt: %v", err)
@@ -446,7 +487,7 @@ func TestATornDownTurnAnswersItsOutstandingApproval(t *testing.T) {
 	manager := rig.sessions["default"]
 	key := agent.ConversationKey{ChannelID: "C1", ThreadTS: "123.4"}
 	events, err := manager.Prompt(context.Background(), key,
-		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4"},
+		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4", UserID: nodeOwner},
 		agent.PromptRequest{Text: "delete it", Channel: "C1", Thread: "123.4"})
 	if err != nil {
 		t.Fatalf("prompt: %v", err)
@@ -497,7 +538,7 @@ func TestAnAttachmentCrossesAsASideTransfer(t *testing.T) {
 
 	events, err := rig.sessions["default"].Prompt(context.Background(),
 		agent.ConversationKey{ChannelID: "C1", ThreadTS: "123.4"},
-		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4"},
+		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4", UserID: nodeOwner},
 		agent.PromptRequest{Text: "send me the report", Channel: "C1", Thread: "123.4"})
 	if err != nil {
 		t.Fatalf("prompt: %v", err)
@@ -545,7 +586,7 @@ func TestABackgroundEventReachesTheGatewaysRouter(t *testing.T) {
 	manager := rig.sessions["default"]
 	key := agent.ConversationKey{ChannelID: "C1", ThreadTS: "123.4"}
 	events, err := manager.Prompt(context.Background(), key,
-		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4"},
+		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4", UserID: nodeOwner},
 		agent.PromptRequest{Text: "start something long", Channel: "C1", Thread: "123.4"})
 	if err != nil {
 		t.Fatalf("prompt: %v", err)
@@ -685,7 +726,7 @@ func TestRevokingADifferentCredentialLeavesTheConnectionUp(t *testing.T) {
 	// Attached is a flag; a turn is the proof the link still carries anything.
 	events, err := rig.sessions["default"].Prompt(context.Background(),
 		agent.ConversationKey{ChannelID: "C1", ThreadTS: "123.4"},
-		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4"},
+		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4", UserID: nodeOwner},
 		agent.PromptRequest{Text: "are you there", Channel: "C1", Thread: "123.4"})
 	if err != nil {
 		t.Fatalf("the node stopped serving after an unrelated credential was revoked: %v", err)
@@ -785,7 +826,7 @@ func TestAConversationStaysOnItsOwnNodeWhenASecondAttaches(t *testing.T) {
 
 	manager := rig.sessions["default"]
 	key := agent.ConversationKey{ChannelID: "C1", ThreadTS: "123.4"}
-	meta := agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4", UserID: "U9"}
+	meta := agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4", UserID: nodeOwner}
 	drainPrompt(t, manager, key, meta, "turn one")
 
 	// A second node joins and is now the most recently attached — the answer
@@ -826,7 +867,7 @@ func TestACancelReachesTheNodeRunningTheTurnRatherThanTheNewestOne(t *testing.T)
 	manager := rig.sessions["default"]
 	key := agent.ConversationKey{ChannelID: "C1", ThreadTS: "123.4"}
 	events, err := manager.Prompt(context.Background(), key,
-		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4"},
+		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4", UserID: nodeOwner},
 		agent.PromptRequest{Text: "long job", Channel: "C1", Thread: "123.4"})
 	if err != nil {
 		t.Fatalf("prompt: %v", err)
@@ -865,21 +906,43 @@ func TestACancelReachesTheNodeRunningTheTurnRatherThanTheNewestOne(t *testing.T)
 	}
 }
 
-// A session id whose node has gone is ErrSessionGone — this session cannot run —
-// and not ErrNoNode, which would say the turn cannot run at all while another
-// node is connected and idle. Re-opening the conversation on that other node is
-// item 10's re-election.
-func TestASessionOnADepartedNodeIsGoneRatherThanServedByAnother(t *testing.T) {
+// A conversation whose node is gone MOVES, and the model that inherits it is
+// told so — on the real path, end to end.
+//
+// This is the whole of #196's "recovers VISIBLY" and #170's "a conversation is
+// never lost silently", and it is also the justification for not building #170
+// Change G's card: the move is made visible by the model itself. The notice
+// reaching the node is therefore not a detail of takeover.go — it is the
+// feature. It travels through four seams that each look harmless alone: the
+// binding answers ErrSessionGone, the session manager opens a fresh session,
+// the election marks the takeover against that session, and the next prompt
+// folds it into the user message. A test that called foldTakeover directly
+// would assert the notice's SHAPE while every one of those seams could be
+// deleted with the suite green.
+func TestAConversationWhoseNodeIsGoneMovesAndTheModelIsToldInsideTheTurn(t *testing.T) {
+	pins, err := configstore.OpenConversationPins(context.Background(),
+		config.DatabaseConfig{Backend: config.BackendSQLite,
+			SQLite: config.SQLiteConfig{Path: filepath.Join(t.TempDir(), "config.db")}}, "", "")
+	if err != nil {
+		t.Fatalf("open pins: %v", err)
+	}
+	t.Cleanup(func() { _ = pins.Close() })
+	rec := &recordingJournal{}
+
 	rig := dialLoopback(t, newScriptedAgent(func(turn *scriptedTurn) {
-		turn.emit(agent.Event{Type: agent.EventComplete, StopReason: "end_turn"})
-	}))
+		turn.emit(agent.Event{Type: agent.EventText, Text: "the first node"})
+	}), pinning(pins), journalling(rec))
 
 	manager := rig.sessions["default"]
-	key := agent.ConversationKey{ChannelID: "C1", ThreadTS: "123.4"}
-	meta := agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4", UserID: "U9"}
+	key := agent.ConversationKey{TeamID: "T1", ChannelID: "C1", ThreadTS: "123.4"}
+	meta := agent.SessionMetadata{TeamID: "T1", ChannelID: "C1", ThreadTS: "123.4", UserID: nodeOwner}
 	drainPrompt(t, manager, key, meta, "turn one")
 
-	survivor := attachAnother(t, rig, "node-2")
+	successor := attachScripted(t, rig, "node-2", newScriptedAgent(func(turn *scriptedTurn) {
+		turn.emit(agent.Event{Type: agent.EventText, Text: "the second node"})
+	}))
+	// The conversation's node goes: a revoked credential is a real drop, and it
+	// is the shape a laptop's lid has.
 	if err := rig.host.CloseCredential(context.Background(), rig.selector); err != nil {
 		t.Fatalf("close credential: %v", err)
 	}
@@ -888,13 +951,82 @@ func TestASessionOnADepartedNodeIsGoneRatherThanServedByAnother(t *testing.T) {
 		return len(nodes) == 1 && nodes[0].NodeID == "node-2"
 	})
 
-	_, err := manager.Prompt(context.Background(), key, meta,
-		agent.PromptRequest{Text: "turn two", Channel: "C1", Thread: "123.4"})
-	if !errors.Is(err, agent.ErrSessionGone) {
-		t.Fatalf("a turn on a session whose node has gone failed with %v, want agent.ErrSessionGone", err)
+	// The user's next message in the SAME thread. It is served rather than
+	// failed — the conversation is not lost with the machine.
+	if got := drainPrompt(t, manager, key, meta, "what did we decide?"); got != "the second node" {
+		t.Fatalf("the turn after the node left was answered by %q", got)
 	}
-	if n := survivor.agent.prompts(); n != 0 {
-		t.Fatalf("the surviving node was handed %d prompts for a session another node minted", n)
+
+	moved := successor.agent.lastPrompt()
+	if !strings.Contains(moved.Text, "<conversation-takeover>") {
+		t.Fatalf("the node that inherited the conversation was told nothing about the move; the model answers confidently about work it cannot see:\n%q", moved.Text)
+	}
+	if !strings.Contains(moved.Text, "node-1") {
+		t.Fatalf("the notice does not say where the conversation came from:\n%q", moved.Text)
+	}
+	if !strings.HasSuffix(moved.Text, "what did we decide?") {
+		t.Fatalf("the user's own words are not the tail of the message:\n%q", moved.Text)
+	}
+
+	// The pin was overwritten rather than bypassed: left naming the dead
+	// machine, every later turn re-elects and lands somewhere new.
+	pin, found, err := pins.Get(context.Background(),
+		config.ConversationRef{TeamID: "T1", ChannelID: "C1", ThreadTS: "123.4"})
+	if err != nil || !found {
+		t.Fatalf("the moved conversation left no pin: found=%v err=%v", found, err)
+	}
+	if pin.NodeID != "node-2" {
+		t.Fatalf("the stored pin still names %q", pin.NodeID)
+	}
+
+	// Journalled, because nothing about a node is announced — this record is
+	// what somebody debugging "why did the agent forget" comes for.
+	takeover := rec.find("takeover")
+	if takeover.Kind != "delegation" {
+		t.Fatal("the conversation moved machines and nothing was journalled; the only other trace is the model's own sentence, which is not queryable")
+	}
+	if takeover.Payload["previous_node_id"] != "node-1" || takeover.Payload["node_id"] != "node-2" {
+		t.Fatalf("the record does not say what moved where: %+v", takeover.Payload)
+	}
+
+	// And the notice is consumed: a model told on every message that it has
+	// just arrived and can see nothing behaves as though that were true.
+	drainPrompt(t, manager, key, meta, "and the third turn")
+	if strings.Contains(successor.agent.lastPrompt().Text, "conversation-takeover") {
+		t.Fatalf("the notice was repeated on a later turn:\n%q", successor.agent.lastPrompt().Text)
+	}
+}
+
+// A grant written in the gateway's configuration reaches an election, and it
+// reaches it through the RUNTIME BUILDER.
+//
+// The grant tests next door call host.setAccess directly, so deleting that one
+// line from the builder leaves them all green — and the cost of losing it is not
+// subtle: Host.access stays the zero value for the process's life, GrantsOn
+// always answers false, and every guest holding a grant is told "no runtime node
+// of yours is connected" while the machine they were granted is sitting there
+// connected and idle.
+func TestAGrantInTheGatewaysConfigurationReachesAnElection(t *testing.T) {
+	rig := dialLoopback(t, newScriptedAgent(func(turn *scriptedTurn) {
+		turn.emit(agent.Event{Type: agent.EventText, Text: "the granted node"})
+	}))
+
+	// A guest with no node of their own. Without the grant this is ErrNoFleet.
+	const guest = "U-guest"
+	key := agent.ConversationKey{ChannelID: "C1", ThreadTS: "123.4"}
+	meta := agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4", UserID: guest}
+	if _, err := rig.sessions["default"].Prompt(context.Background(), key, meta,
+		agent.PromptRequest{Text: "before the grant"}); !errors.Is(err, nodehost.ErrNoFleet) {
+		t.Fatalf("a guest with no grant got %v, want ErrNoFleet", err)
+	}
+
+	// The gateway admin adds the grant and the configuration is reloaded, which
+	// re-runs the runtime builder over the surviving node connection. This is
+	// the only way a grant is ever added.
+	granted := rig.reload(t, config.AccessConfig{NodeGrants: map[string][]string{"node-1": {guest}}})
+
+	if got := drainPrompt(t, granted, key, meta, "after the grant"); got != "the granted node" {
+		t.Fatalf("the granted guest was answered by %q", got)
 	}
 }
 
@@ -1382,4 +1514,64 @@ func contains(haystack, needle string) bool {
 		}
 	}
 	return false
+}
+
+// TestARealTurnIsDelegatedAndPinned is delegation on the real path: a real
+// socket, a real handshake, a real session manager, and a pin written to a real
+// SQLite store.
+//
+// The unit tests next door prove the algorithm. This proves it is WIRED — that
+// the conversation key reaches the broker at all, which it can only do by
+// travelling on the context the session manager sets, and that the node id in
+// the pin is the one the credential resolved to rather than anything the node
+// said about itself.
+func TestARealTurnIsDelegatedAndPinned(t *testing.T) {
+	pins, err := configstore.OpenConversationPins(context.Background(),
+		config.DatabaseConfig{Backend: config.BackendSQLite,
+			SQLite: config.SQLiteConfig{Path: filepath.Join(t.TempDir(), "config.db")}}, "", "")
+	if err != nil {
+		t.Fatalf("open pins: %v", err)
+	}
+	t.Cleanup(func() { _ = pins.Close() })
+
+	script := newScriptedAgent(func(turn *scriptedTurn) {
+		turn.emit(agent.Event{Type: agent.EventText, Text: "ready."})
+		turn.emit(agent.Event{Type: agent.EventComplete, StopReason: "end_turn"})
+	})
+	rig := dialLoopback(t, script, pinning(pins),
+		claiming(agentwire.Advertisement{
+			Profiles: []string{"default"},
+			Claims:   []agentwire.AssignmentClaim{{Match: "nc-*", Profile: "default"}},
+		}))
+
+	key := agent.ConversationKey{TeamID: "T1", ChannelID: "C1", ThreadTS: "123.4", DM: false}
+	events, err := rig.sessions["default"].Prompt(context.Background(), key,
+		agent.SessionMetadata{TeamID: "T1", ChannelID: "C1", ChannelName: "nc-releases",
+			ThreadTS: "123.4", UserID: nodeOwner},
+		agent.PromptRequest{Text: "hello"})
+	if err != nil {
+		t.Fatalf("prompt: %v", err)
+	}
+	for ev := range events {
+		if ev.Type == agent.EventError {
+			t.Fatalf("the turn failed: %v", ev.Error)
+		}
+	}
+
+	pin, found, err := pins.Get(context.Background(),
+		config.ConversationRef{TeamID: "T1", ChannelID: "C1", ThreadTS: "123.4"})
+	if err != nil || !found {
+		t.Fatalf("the served turn left no pin: found=%v err=%v", found, err)
+	}
+	if pin.NodeID != "node-1" {
+		t.Fatalf("the pin names %q; the credential resolved to node-1", pin.NodeID)
+	}
+	if pin.UserID != nodeOwner {
+		t.Fatalf("the pin records %q as the electing user, want %q", pin.UserID, nodeOwner)
+	}
+	// The prompt the node actually received must be the user's, unadorned: this
+	// conversation was never anywhere else, so there is nothing to announce.
+	if got := script.lastPrompt(); got.Text != "hello" {
+		t.Fatalf("an ordinary turn carried something extra: %q", got.Text)
+	}
 }

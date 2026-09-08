@@ -95,6 +95,39 @@ func migrations(d Dialect) [][]string {
 			)`,
 			`CREATE INDEX IF NOT EXISTS node_tokens_by_node ON node_tokens (node_id)`,
 		},
+		// v5 — conversation pins. One row per delegated Slack conversation: the
+		// node a conversation was elected onto, so turn two lands where turn one
+		// did and so the choice survives a gateway restart or a failover.
+		//
+		// The primary key IS the conversation key — the same four fields
+		// agent.ConversationKey carries — which is what makes a re-election an
+		// upsert rather than a delete-then-insert. #170 requires the stored pin
+		// to be OVERWRITTEN when a node goes away rather than bypassed, and a
+		// key that already identifies the row is how that becomes one statement
+		// with no window where the conversation has no pin at all.
+		//
+		// dm is an INTEGER 0/1 rather than a boolean because SQLite has no
+		// boolean type and the two drivers disagree about what to do with one;
+		// it is part of the key, so a representation both engines index the same
+		// way matters more than a nicer column.
+		//
+		// elected_at is TEXT in every dialect, for the reason node_tokens'
+		// timestamps are: it is read back and compared in Go, and one fixed
+		// sortable layout is one parse rather than three drivers' worth of
+		// timestamp scanning.
+		{
+			`CREATE TABLE IF NOT EXISTS conversation_pins (
+				team_id    TEXT    NOT NULL,
+				channel_id TEXT    NOT NULL,
+				thread_ts  TEXT    NOT NULL,
+				dm         INTEGER NOT NULL,
+				node_id    TEXT    NOT NULL,
+				user_id    TEXT    NOT NULL,
+				elected_at TEXT    NOT NULL,
+				PRIMARY KEY (team_id, channel_id, thread_ts, dm)
+			)`,
+			`CREATE INDEX IF NOT EXISTS conversation_pins_by_node ON conversation_pins (node_id)`,
+		},
 	}
 }
 

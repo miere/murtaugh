@@ -18,20 +18,20 @@ import (
 // down (#170 Change E).
 var ErrNonJSONOutput = errors.New("delegate-to-agent: agent output was not valid JSON")
 
-// ErrSessionGone means the session id a call named no longer resolves to
+// ErrSessionGone means the session id a Prompt named no longer resolves to
 // anything that could serve it, and that opening a fresh session would.
 //
 // It exists because of the split. In process a session id is only ever invalid
-// because the agent died, and there is nothing better to do than report it.
-// With a broker in front of several runtime nodes a session id is minted BY a
-// node, so a node disconnecting invalidates every id it minted while the
-// conversation itself is perfectly servable — by somebody else. It is part of
-// the Client contract rather than nodehost's own error so that a caller can
-// tell it apart from ErrNoNode without importing the broker: ErrNoNode says the
-// turn cannot run, this says this SESSION cannot and a new one could.
+// because the agent died, and the manager has nothing better to do than report
+// it. With a broker in front of several runtime nodes, a session id is minted BY
+// a node, so a node disconnecting invalidates every id it minted while the
+// conversation itself is perfectly servable — by somebody else. SessionManager
+// answers this one error by discarding the binding and opening a new session,
+// once. Every other error is still the caller's to render.
 //
-// Nothing acts on the distinction yet beyond what the user is told. Answering it
-// by re-opening the conversation on another node is #196's re-election.
+// It is a sentinel rather than a string match for the reason #170 gives about
+// error identity crossing a wire: text survives serialisation and identity does
+// not, so anything that has to be compared by identity needs a name.
 var ErrSessionGone = errors.New("the runtime node holding this session is no longer connected")
 
 type Client interface {
@@ -49,9 +49,18 @@ type Session struct {
 type SessionMetadata struct {
 	TeamID    string `json:"teamId,omitempty"`
 	ChannelID string `json:"channelId,omitempty"`
-	ThreadTS  string `json:"threadTs,omitempty"`
-	UserID    string `json:"userId,omitempty"`
-	Source    string `json:"source,omitempty"`
+	// ChannelName is the channel's Slack name without the leading '#', when the
+	// gateway had resolved it. Empty for a DM, and empty for a channel whose
+	// name the gateway's cache had not learned yet.
+	//
+	// It is carried because delegation matches a node's channel claims, and a
+	// claim is an exact channel id, an exact channel NAME, or a glob over the
+	// name — so an id alone can only ever match the first of the three, and the
+	// worked example in #170 (`nc-*`, `review-*`) is entirely the other two.
+	ChannelName string `json:"channelName,omitempty"`
+	ThreadTS    string `json:"threadTs,omitempty"`
+	UserID      string `json:"userId,omitempty"`
+	Source      string `json:"source,omitempty"`
 	// Surface names the Slack surface the turn originates from when it is not an
 	// ordinary channel/DM — currently "canvas" for a canvas comment thread. Empty
 	// means an ordinary surface. Set by the gateway's cold-session discovery.
@@ -238,6 +247,35 @@ type TurnLocation struct {
 	ChannelID string
 	ThreadTS  string
 	UserID    string
+}
+
+type conversationKeyCtx struct{}
+
+// WithConversation returns ctx carrying the conversation key a turn belongs to.
+//
+// SessionManager puts it there on every Prompt, because the manager is the only
+// thing that holds both the key and the client: the key never crosses
+// agent.Client (NewSession takes metadata, Prompt takes a session id), and
+// SessionMetadata cannot stand in for it — it carries no DM flag, so the two
+// surfaces a conversation key deliberately keeps apart would collapse.
+//
+// It exists for delegation (#196): the gateway's broker has to know WHICH
+// conversation it is electing a runtime node for, and it is reached at
+// agent.Client. Every in-process backend ignores it, exactly as they ignore
+// TurnLocation on the paths that do not carry one.
+func WithConversation(ctx context.Context, key ConversationKey) context.Context {
+	return context.WithValue(ctx, conversationKeyCtx{}, key)
+}
+
+// ConversationFromContext returns the conversation key stashed on ctx.
+//
+// ok is false for a caller with no conversation at all — a job, an unfurl, a
+// workflow trigger — which is a real state and not a failure: those are
+// #170's item 13, and a client that cannot identify a conversation must not
+// invent one to pin.
+func ConversationFromContext(ctx context.Context) (ConversationKey, bool) {
+	key, ok := ctx.Value(conversationKeyCtx{}).(ConversationKey)
+	return key, ok && key.ChannelID != ""
 }
 
 type turnLocationKey struct{}

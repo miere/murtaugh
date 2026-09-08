@@ -254,6 +254,12 @@ func (m *SessionManager) Warm(ctx context.Context) error {
 }
 
 func (m *SessionManager) Prompt(ctx context.Context, key ConversationKey, metadata SessionMetadata, request PromptRequest) (<-chan Event, error) {
+	// The client is told WHICH conversation this is, which the two Client
+	// methods below cannot say on their own: NewSession is handed metadata that
+	// carries no DM flag, and Prompt is handed only a session id. A broker in
+	// front of several runtime nodes needs the conversation to elect and pin
+	// one (#196); every in-process backend ignores it.
+	ctx = WithConversation(ctx, key)
 	session, err := m.session(ctx, key, metadata)
 	if err != nil {
 		return nil, err
@@ -271,6 +277,22 @@ func (m *SessionManager) Prompt(ctx context.Context, key ConversationKey, metada
 		request.User = metadata.UserID
 	}
 	events, err := m.client.Prompt(ctx, session.ID, request)
+	if errors.Is(err, ErrSessionGone) {
+		// The session id belonged to a runtime node that has since disconnected, so
+		// it names nothing anywhere. Overwriting the stored pin is not enough on its
+		// own: this map still binds the conversation to the dead node's id, and
+		// handing that id to the node that takes over produces an error the user
+		// sees on every turn from here on. Drop the binding and open one fresh
+		// session, once — a second failure is a genuine one and is reported.
+		m.logger.Info("the agent session was lost with its runtime node; opening a new one",
+			"type", m.kind, "team", key.TeamID, "channel", key.ChannelID, "thread", key.ThreadTS, "dm", key.DM)
+		m.Discard(key)
+		session, err = m.session(ctx, key, metadata)
+		if err != nil {
+			return nil, err
+		}
+		events, err = m.client.Prompt(ctx, session.ID, request)
+	}
 	if err != nil {
 		// The turn was marked busy when the session was acquired; it never
 		// started, so release it here rather than leaving the slot pinned.
