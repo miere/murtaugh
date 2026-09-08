@@ -155,6 +155,51 @@ type AccessConfig struct {
 	AdminUser    string   `yaml:"admin_user" json:"admin_user"`
 	AllowedUsers []string `yaml:"allowed_users" json:"allowed_users,omitempty"`
 	Debug        bool     `yaml:"debug" json:"debug"`
+	// NodeGrants records who, besides its owner, may have a conversation
+	// delegated to a runtime node. The key is a NODE ID; the value is the Slack
+	// user IDs holding a grant on it.
+	//
+	// It lives in access rather than in a section of its own because #170 puts
+	// grants in the gateway's column: a grant is the gateway deciding whose
+	// conversation may land on whose machine, which is the same kind of
+	// statement admin_user and allowed_users make. It is deliberately NOT on the
+	// node's own configuration — a node admin writing their own grant list
+	// would be authorising themselves.
+	//
+	// It is manual configuration for now, which #170 permits: the vocabulary and
+	// the enforcement point are what item 10 needs settled, and a self-service
+	// grant surface (with the node owner, not the gateway admin, holding the
+	// pen) is later work. Two consequences of that follow, and both are
+	// deliberate. There is no owner check here, because the only writer is the
+	// gateway admin. And keys and values are Slack IDs rather than handles:
+	// nothing rewrites a handle in this map the way resolveAllowSet rewrites the
+	// allow list, so a handle here silently matches nobody.
+	//
+	// This is the GRANT of #170's vocabulary — a node owner letting another user
+	// run on their node, revocable by removing the entry. It is unrelated to
+	// internal/slack/interaction's Grants, which are the tool calls one user
+	// chose to always allow.
+	NodeGrants map[string][]string `yaml:"node_grants" json:"node_grants,omitempty"`
+}
+
+// GrantsOn reports whether userID holds a grant on the node.
+//
+// A grant is checked per NODE and not per owner, because that is what the
+// vocabulary says it is: permission to run on a machine. An owner who wants to
+// share two nodes grants twice, which is worth the repetition — the alternative
+// silently widens as they enrol a third.
+func (a AccessConfig) GrantsOn(nodeID, userID string) bool {
+	nodeID = strings.TrimSpace(nodeID)
+	userID = strings.TrimSpace(userID)
+	if nodeID == "" || userID == "" {
+		return false
+	}
+	for _, granted := range a.NodeGrants[nodeID] {
+		if strings.TrimSpace(granted) == userID {
+			return true
+		}
+	}
+	return false
 }
 
 type ChatConfig struct {

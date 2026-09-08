@@ -32,6 +32,10 @@ func Runtime(host *Host) func(config.Config, *tools.Registry, *slog.Logger) agen
 		}
 		return func(hooks agentruntime.Hooks) agentruntime.Runtime {
 			host.SetApprover(approverFor(cfg, hooks))
+			// The gateway's access policy carries the node GRANTS delegation
+			// reads, and a reload is the only way one is ever added, so it is
+			// re-bound here rather than captured when the Host was built.
+			host.setAccess(cfg.Access)
 			// Bound here because this is where the gateway hands its registry
 			// over, and a reload runs this builder again while the node
 			// connection survives. It re-binds the same pointer: the registry is
@@ -102,15 +106,16 @@ func approverFor(cfg config.Config, hooks agentruntime.Hooks) func(context.Conte
 	return nil
 }
 
-// nodeClient is agent.Client over the registry: a conversation opens on one
-// node and every later call for it goes back to that node.
+// nodeClient is agent.Client over the fleet, with delegation underneath it.
 //
 // It is a thin indirection rather than the remote client itself because the
 // session managers outlive any one connection: a node that drops and dials back
 // in must be picked up by the managers that are already there, and a captured
-// client would be a dead one. The registry adds the second reason — there is
-// now more than one client it could mean, and only one of them minted the
-// session in hand.
+// client would be a dead one. With a registry behind it the indirection carries
+// the second thing #196 needs — which of several nodes this conversation is on
+// — and that is why the choice lives here rather than in the gateway. It is
+// under *agent.SessionManager, not in place of it, so the four capability
+// surfaces the gateway type-asserts on the MANAGER are untouched.
 type nodeClient struct {
 	host *Host
 }
@@ -126,43 +131,51 @@ func (c *nodeClient) Initialize(context.Context) error {
 	return err
 }
 
-// NewSession opens a session on a node and binds it there.
+// NewSession elects the node this conversation runs on, and binds the session
+// it opens to that node.
 //
-// WHICH node is still "the most recently attached" — the choice is item 10 —
-// but the binding is not deferred with it. Without it every later call for this
-// conversation would be sent to whichever node happened to be newest at the
-// time, so a second node attaching would take over a live conversation on the
-// first: its prompts, and its cancels, which would be delivered to a node that
-// has no such session and answered as success.
+// This is delegation's one entry point on the turn path, and it is reached only
+// when the session manager has no live session for the conversation — a cold
+// conversation, an idle-evicted one, or one whose node has just gone. So an
+// election is once per session and not once per message, and the pin store sees
+// one read and at most one write in the same place.
 func (c *nodeClient) NewSession(ctx context.Context, meta agent.SessionMetadata) (agent.Session, error) {
-	node, err := c.host.openOn()
+	chosen, err := c.host.delegate(ctx, meta)
 	if err != nil {
 		return agent.Session{}, err
 	}
-	session, err := node.client.NewSession(ctx, meta)
+	session, err := chosen.node.client.NewSession(ctx, meta)
 	if err != nil {
 		return agent.Session{}, err
 	}
-	c.host.bindSession(session.ID, node)
+	c.host.bindSession(session.ID, chosen.node)
+	if chosen.takeover {
+		// Recorded against the SESSION rather than the conversation because the
+		// notice belongs to the first prompt this session serves, and a session
+		// is what Prompt is handed. It is consumed once; every later turn on
+		// this node is an ordinary one.
+		c.host.markTakeover(session.ID, chosen.previous)
+	}
 	return session, nil
 }
 
 // Prompt sends the turn to the node holding the session.
 //
-// A session id names a machine: ids are minted per node, so sending one to any
-// other node is at best an error the user sees and at worst — for a node whose
-// own id happens to collide — somebody else's conversation.
+// It never re-elects. A session id names a machine, so honouring the pin here
+// would be honouring it twice — and disagreeing with the binding would send a
+// node a session id it never minted, which it answers with an error the user
+// sees.
 func (c *nodeClient) Prompt(ctx context.Context, sessionID string, req agent.PromptRequest) (<-chan agent.Event, error) {
 	node, err := c.host.sessionNode(sessionID)
 	if err != nil {
-		// agent.ErrSessionGone. #170's stated position is that a dropped node
-		// loses its sessions; the recovery — re-electing the conversation onto
-		// another node and telling the model it moved — is #196's, item 10.
-		// Until then this surfaces to the user, which is what the single slot
-		// did too, and it now names the right node.
+		// agent.ErrSessionGone, which the session manager answers by discarding
+		// the binding and opening a fresh session — and THAT re-runs the
+		// election, overwrites the stale pin, and marks the takeover. #170's
+		// position is that a dropped node loses its sessions; what it must not
+		// lose is the conversation.
 		return nil, err
 	}
-	return node.client.Prompt(ctx, sessionID, req)
+	return node.client.Prompt(ctx, sessionID, c.host.preparePrompt(sessionID, req))
 }
 
 func (c *nodeClient) Cancel(ctx context.Context, sessionID string) error {
@@ -184,6 +197,7 @@ func (c *nodeClient) Close() error { return nil }
 func (c *nodeClient) CloseSession(sessionID string) {
 	node, err := c.host.sessionNode(sessionID)
 	c.host.unbindSession(sessionID)
+	c.host.takeTakeover(sessionID)
 	if err != nil {
 		return
 	}

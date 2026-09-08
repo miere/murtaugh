@@ -23,11 +23,16 @@ import "github.com/miere/murtaugh/internal/agent"
 type SessionMetadata struct {
 	TeamID    string `json:"team_id,omitempty"`
 	ChannelID string `json:"channel_id,omitempty"`
-	ThreadTS  string `json:"thread_ts,omitempty"`
-	UserID    string `json:"user_id,omitempty"`
-	Source    string `json:"source,omitempty"`
-	Surface   string `json:"surface,omitempty"`
-	CanvasID  string `json:"canvas_id,omitempty"`
+	// ChannelName travels because the gateway is the only side that can resolve
+	// it and the node's own logs are otherwise a wall of channel ids. It plays
+	// no part in delegation, which is decided before this frame is built and on
+	// the gateway's copy of the value.
+	ChannelName string `json:"channel_name,omitempty"`
+	ThreadTS    string `json:"thread_ts,omitempty"`
+	UserID      string `json:"user_id,omitempty"`
+	Source      string `json:"source,omitempty"`
+	Surface     string `json:"surface,omitempty"`
+	CanvasID    string `json:"canvas_id,omitempty"`
 	// Ephemeral must survive the hop. A node that loses it derives the session
 	// id from an empty conversation triple, every delegation hashes to the same
 	// id, and a claude_code backend resumes the previous delegation's
@@ -38,28 +43,30 @@ type SessionMetadata struct {
 // EncodeSessionMetadata renders the metadata for the wire.
 func EncodeSessionMetadata(m agent.SessionMetadata) SessionMetadata {
 	return SessionMetadata{
-		TeamID:    m.TeamID,
-		ChannelID: m.ChannelID,
-		ThreadTS:  m.ThreadTS,
-		UserID:    m.UserID,
-		Source:    m.Source,
-		Surface:   m.Surface,
-		CanvasID:  m.CanvasID,
-		Ephemeral: m.Ephemeral,
+		TeamID:      m.TeamID,
+		ChannelID:   m.ChannelID,
+		ChannelName: m.ChannelName,
+		ThreadTS:    m.ThreadTS,
+		UserID:      m.UserID,
+		Source:      m.Source,
+		Surface:     m.Surface,
+		CanvasID:    m.CanvasID,
+		Ephemeral:   m.Ephemeral,
 	}
 }
 
 // Decode rebuilds the metadata the node's backend is given.
 func (m SessionMetadata) Decode() agent.SessionMetadata {
 	return agent.SessionMetadata{
-		TeamID:    m.TeamID,
-		ChannelID: m.ChannelID,
-		ThreadTS:  m.ThreadTS,
-		UserID:    m.UserID,
-		Source:    m.Source,
-		Surface:   m.Surface,
-		CanvasID:  m.CanvasID,
-		Ephemeral: m.Ephemeral,
+		TeamID:      m.TeamID,
+		ChannelID:   m.ChannelID,
+		ChannelName: m.ChannelName,
+		ThreadTS:    m.ThreadTS,
+		UserID:      m.UserID,
+		Source:      m.Source,
+		Surface:     m.Surface,
+		CanvasID:    m.CanvasID,
+		Ephemeral:   m.Ephemeral,
 	}
 }
 

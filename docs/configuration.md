@@ -284,6 +284,32 @@ allowlist, are what limits an opened channel.
 > An opened channel is a spend and resource surface: anyone who joins can start
 > agent turns. There is no per-user rate limit yet — scope the glob accordingly.
 
+#### Node grants
+
+`access.node_grants` records who, besides its owner, may have a conversation
+delegated to a runtime node. The key is a **node id**; the value is the Slack
+user IDs holding a grant on it:
+
+```yaml
+access:
+  node_grants:
+    laptop-mira: ["U0ALEX", "U0SAM"]
+```
+
+A conversation is served by the initiating user's **own** connected nodes, or —
+only when they have none connected — by the nodes they hold a grant on. Never a
+mixture: a user with a node of their own never lands on somebody else's, however
+many grants they hold.
+
+Two limits while this is manual configuration. Keys and values are Slack IDs, not
+handles — nothing rewrites a handle here the way it does in `allowed_users`, so a
+handle silently matches nobody. And there is no ownership check, because the only
+writer is the gateway admin.
+
+Grants apply only to the runtime-node split (`murtaugh-gateway -node-listen`).
+They have nothing to do with the tool-approval "always allow" grants a user
+accumulates in a conversation.
+
 ### Workflow rules and unfurl rules
 
 These carry richer nested structure, so they are set from a YAML fragment on
