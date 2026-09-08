@@ -7,12 +7,16 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/miere/murtaugh/internal/agent"
 	"github.com/miere/murtaugh/internal/agent/remote"
+	"github.com/miere/murtaugh/internal/agentwire"
 	"github.com/miere/murtaugh/internal/config"
+	"github.com/miere/murtaugh/internal/journal"
 	"github.com/miere/murtaugh/internal/nodesocket"
 	"github.com/miere/murtaugh/internal/nodetoken"
 	"github.com/miere/murtaugh/internal/tools"
@@ -47,6 +51,14 @@ type Options struct {
 	WindowBytes int
 	// AckInterval is the link's transport keepalive.
 	AckInterval time.Duration
+	// Journal records a node's arrival, its departure and every change to what
+	// it claims. nil discards them.
+	//
+	// #170 says disconnects are journalled, NOT announced, and the reason is
+	// worth keeping next to the field: a laptop that sleeps at six o'clock
+	// disconnects every evening, and a nightly DM about it trains the one admin
+	// who would act on the message that matters to ignore it.
+	Journal journal.Recorder
 	// Background receives events belonging to a session rather than a turn.
 	Background func(sessionID string, ev agent.Event)
 	// Approve answers a native agent's inline tool approval. It is set by the
@@ -55,15 +67,31 @@ type Options struct {
 	Approve func(ctx context.Context, toolName, summary string) (bool, string)
 }
 
-// Host owns the accept endpoint and the attached node.
+// Host owns the accept endpoint and the registry of connected nodes.
 type Host struct {
 	tokens config.NodeTokenStore
 	log    *slog.Logger
 	now    func() time.Time
 	opts   Options
+	rec    journal.Recorder
 
-	mu         sync.Mutex
-	current    *attached
+	// conns numbers connections. It names a socket and never crosses the wire.
+	conns atomic.Int64
+
+	mu sync.Mutex
+	// nodes is the registry, keyed per CONNECTION. See registry.go for why that
+	// is not per node, and why enumeration collapses the other way.
+	nodes map[string]*attached
+	// sessions binds an agent session id to the connection that minted it.
+	//
+	// With one slot there was nothing to bind: every call went to the one node
+	// there was. With a registry a session id is meaningless anywhere but on
+	// the connection that issued it — ids are minted per node — so this is the
+	// only place a later Prompt, Cancel or CloseSession can be resolved back to
+	// a machine. Choosing which node a NEW conversation opens on is delegation
+	// and is item 10; keeping a conversation on the node it started on is not,
+	// and cannot wait for it.
+	sessions   map[string]*attached
 	approve    func(ctx context.Context, toolName, summary string) (bool, string)
 	background func(sessionID string, ev agent.Event)
 	// tools is the gateway's registry, from which a node is served the
@@ -71,14 +99,6 @@ type Host struct {
 	// approver is: a configuration reload rebuilds it under a surviving node
 	// connection.
 	tools *tools.Registry
-}
-
-// attached is one live node connection.
-type attached struct {
-	client   *remote.Client
-	selector string
-	nodeID   string
-	closed   chan struct{}
 }
 
 // New builds a Host. It listens for nothing until Listen or Handler is used.
@@ -94,11 +114,18 @@ func New(opts Options) (*Host, error) {
 	if now == nil {
 		now = time.Now
 	}
+	var rec journal.Recorder = journal.NopRecorder{}
+	if opts.Journal != nil {
+		rec = opts.Journal
+	}
 	return &Host{
 		tokens:     opts.Tokens,
 		log:        log,
 		now:        now,
 		opts:       opts,
+		rec:        rec,
+		nodes:      make(map[string]*attached),
+		sessions:   make(map[string]*attached),
 		approve:    opts.Approve,
 		background: opts.Background,
 	}, nil
@@ -196,16 +223,37 @@ func (h *Host) serveLink(w http.ResponseWriter, r *http.Request) {
 	if window <= 0 {
 		window = nodesocket.DefaultWindowBytes
 	}
+	log := h.log.With("node_id", record.NodeID)
+
+	// The registry entry is built BEFORE the client, not after, and the order
+	// is load-bearing. Two things the node does during the handshake have to
+	// reach a specific connection rather than "the node": its opening claim,
+	// which arrives from inside Initialize, and its tool calls, whose turn is
+	// looked up on the client that made them. Building the entry afterwards
+	// would leave both with nothing to name.
+	node := &attached{
+		connID:     strconv.FormatInt(h.conns.Add(1), 10),
+		selector:   record.Selector,
+		nodeID:     record.NodeID,
+		userID:     record.UserID,
+		attachedAt: h.now(),
+		closed:     make(chan struct{}),
+	}
 	client := remote.New(conn, remote.Options{
-		Logger:     h.log.With("node_id", record.NodeID),
+		Logger:     log,
 		Background: h.deliverBackground,
 		Approve:    h.askApproval,
 		// Murtaugh's own tools, served back down the connection the node
 		// dialled — never a second one. The gateway still never dials a node.
-		Tools:       &toolServer{host: h, log: h.log.With("node_id", record.NodeID)},
+		Tools: &toolServer{host: h, node: node, log: log},
+		// What this node says it can serve. Bound per connection because that
+		// is what the claim belongs to: a node holding two live credentials
+		// through a rotation advertises on each of them.
+		Advertise:   remote.AdvertiserFunc(func(ad agentwire.Advertisement) { h.advertise(node, ad) }),
 		WindowBytes: window,
 		AckInterval: h.opts.AckInterval,
 	})
+	node.client = client
 
 	// Initialized here rather than lazily on the first turn, because the
 	// gateway's session manager latches "initialized" and would never retry it
@@ -214,13 +262,12 @@ func (h *Host) serveLink(w http.ResponseWriter, r *http.Request) {
 	err = client.Initialize(initCtx)
 	cancel()
 	if err != nil {
-		h.log.Error("runtime node could not initialize its agent", "error", err, "node_id", record.NodeID)
+		log.Error("runtime node could not initialize its agent", "error", err)
 		_ = client.Close()
 		return
 	}
 
-	node := h.attach(client, record)
-	h.log.Info("runtime node attached", "node_id", record.NodeID, "user_id", record.UserID, "selector", record.Selector)
+	h.attach(node)
 
 	// Holding the HTTP handler goroutine for the connection's life is
 	// deliberate: it keeps the server's own connection accounting honest, and
@@ -230,72 +277,200 @@ func (h *Host) serveLink(w http.ResponseWriter, r *http.Request) {
 	case <-node.closed:
 	}
 	h.detach(node)
-	h.log.Info("runtime node detached", "node_id", record.NodeID)
 }
 
-func (h *Host) attach(client *remote.Client, record config.NodeToken) *attached {
-	node := &attached{client: client, selector: record.Selector, nodeID: record.NodeID, closed: make(chan struct{})}
-	h.mu.Lock()
-	previous := h.current
-	h.current = node
-	h.mu.Unlock()
-	if previous != nil {
-		// One slot, so the newcomer wins. When there is a registry this becomes
-		// an insert; until then, replacing rather than refusing is what lets a
-		// node that reconnected after a network drop take over from the
-		// half-dead connection the gateway has not noticed yet.
-		h.log.Warn("a second runtime node connected; replacing the first", "replaced", previous.nodeID, "with", record.NodeID)
-		previous.close()
+// attach publishes a connection to the registry.
+//
+// The opening claim is already on the entry: it arrived from inside Initialize,
+// so a node is never published in a state where the gateway knows it is there
+// and not what it serves.
+func (h *Host) attach(node *attached) {
+	displaced := h.insert(node)
+	if displaced != nil {
+		// Same credential, so this is the same node dialling back in — very
+		// often over a socket the gateway is still holding and has not noticed
+		// is dead. Replacing rather than refusing is what lets it recover
+		// without waiting for a TCP timeout. A DIFFERENT credential is a
+		// rotation and both connections stay; see Host.insert.
+		h.log.Info("a runtime node redialled on the same credential; replacing the previous connection",
+			"node_id", displaced.nodeID, "selector", displaced.selector)
+		displaced.close()
 	}
-	return node
+	h.mu.Lock()
+	ad := node.ad.Clone()
+	count := len(h.nodes)
+	h.mu.Unlock()
+	h.log.Info("runtime node attached", "node_id", node.nodeID, "user_id", node.userID, "selector", node.selector,
+		"profiles", len(ad.Profiles), "claims", len(ad.Claims), "connected", count)
+	h.record(journal.LevelInfo, "attached", "A runtime node attached", node, ad)
 }
 
 func (h *Host) detach(node *attached) {
-	h.mu.Lock()
-	if h.current == node {
-		h.current = nil
-	}
-	h.mu.Unlock()
+	h.remove(node)
 	node.close()
+	h.log.Info("runtime node detached", "node_id", node.nodeID, "selector", node.selector)
+	// Journalled, never announced. See Options.Journal.
+	h.record(journal.LevelInfo, "detached", "A runtime node disconnected", node, agentwire.Advertisement{})
+}
+
+// advertise records a node's claim, at the handshake and on every later change.
+//
+// Nothing here decides anything: delegation (#196) reads the registry, and the
+// staleness this design accepts is one configuration edit wide — its worst
+// outcome is one conversation delegated to the wrong node. The alternative #170
+// rejects is asking every node at delegation time, which puts an N-way fan-out
+// on the first message of every conversation, where one wedged node adds a
+// timeout to every delegation in the workspace.
+func (h *Host) advertise(node *attached, ad agentwire.Advertisement) {
+	if !h.setAdvertisement(node, ad) {
+		// The opening claim, arriving from inside the handshake. attach records
+		// it as part of the arrival; a second journal line saying the same
+		// thing is the noise that makes a journal unreadable.
+		return
+	}
+	h.log.Info("a runtime node changed what it claims", "node_id", node.nodeID,
+		"profiles", len(ad.Profiles), "claims", len(ad.Claims))
+	h.record(journal.LevelInfo, "advertised", "A runtime node changed what it claims", node, ad)
+}
+
+// record puts one node lifecycle event on the gateway stream.
+//
+// The stream is the gateway's because that is whose fleet this is, and the kind
+// is `node` so a disconnect at 18:00 every evening is one query away rather than
+// one DM away.
+func (h *Host) record(level journal.Level, state, summary string, node *attached, ad agentwire.Advertisement) {
+	payload := map[string]any{
+		"state":    state,
+		"node_id":  node.nodeID,
+		"selector": node.selector,
+	}
+	if !ad.Empty() {
+		payload["profiles"] = ad.Profiles
+		claims := make([]string, 0, len(ad.Claims))
+		for _, claim := range ad.Claims {
+			claims = append(claims, claim.Match)
+		}
+		payload["claims"] = claims
+	}
+	h.rec.Record(context.Background(), journal.Event{
+		Stream:  journal.StreamGateway,
+		Kind:    "node",
+		Level:   level,
+		Summary: summary,
+		Keys:    journal.Keys{UserID: node.userID},
+		Payload: payload,
+	})
 }
 
 func (h *Host) detachAll() {
-	h.mu.Lock()
-	node := h.current
-	h.current = nil
-	h.mu.Unlock()
-	if node != nil {
+	for _, node := range h.takeAll() {
 		node.close()
 	}
 }
 
+// close ends one connection. It is safe to call concurrently and repeatedly,
+// which is a requirement rather than tidiness: see attached.closeOnce for the
+// four callers and what a check-then-close costs when two of them race.
 func (n *attached) close() {
-	select {
-	case <-n.closed:
-	default:
-		close(n.closed)
-	}
+	n.closeOnce.Do(func() { close(n.closed) })
+	// Outside the Once because remote.Client.Close already latches and a second
+	// caller is a no-op; what has to happen exactly once is the channel close.
 	_ = n.client.Close()
 }
 
-// Attached reports the node currently serving, if any.
-func (h *Host) Attached() (nodeID string, ok bool) {
+// anyClient answers the questions that are about the FLEET rather than about
+// one conversation: is anything attached at all, and does it interrupt.
+//
+// It is not a route and must never be used as one. Its two callers — the
+// session manager's initialize probe and its interruptible probe — ask a
+// question no particular node owns, so answering with the most recently
+// attached one is as good as answering with any.
+func (h *Host) anyClient() (*remote.Client, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.current == nil {
-		return "", false
-	}
-	return h.current.nodeID, true
-}
-
-// client returns the attached node's client, or ErrNoNode.
-func (h *Host) client() (*remote.Client, error) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.current == nil {
+	node := h.newest()
+	if node == nil {
 		return nil, ErrNoNode
 	}
-	return h.current.client, nil
+	return node.client, nil
+}
+
+// openOn is the node a NEW conversation opens on.
+//
+// It is the most recently attached, which is a placeholder and is named as one:
+// CHOOSING between connected nodes for a conversation is delegation, which
+// needs a conversation key, a fleet and a stored pin — item 10's, none of which
+// exist here. What this commit does settle is the half that cannot wait for it:
+// whichever node is picked, the conversation stays on THAT node, because the
+// session it mints is bound to it below.
+func (h *Host) openOn() (*attached, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	node := h.newest()
+	if node == nil {
+		return nil, ErrNoNode
+	}
+	return node, nil
+}
+
+// bindSession records which connection minted a session id.
+func (h *Host) bindSession(sessionID string, node *attached) {
+	if sessionID == "" {
+		return
+	}
+	h.mu.Lock()
+	h.sessions[sessionID] = node
+	h.mu.Unlock()
+}
+
+// sessionNode resolves a session id back to the connection that minted it.
+//
+// An id this gateway never minted, or one whose connection has since gone, is
+// agent.ErrSessionGone rather than ErrNoNode, and the distinction is the one a
+// user needs: ErrNoNode says nothing can run this turn, ErrSessionGone says
+// THIS session cannot while a new one could. Nothing re-opens it here — that is
+// item 10's re-election, which is what makes the recovery invisible — so today
+// it reaches the user as an error naming the conversation's own node rather than
+// as a stranger's "unknown session".
+//
+// The entry is re-checked against the live registry rather than trusted,
+// because a disconnect races a turn: the map is pruned on detach, but a lookup
+// that happened to read the pointer first would otherwise hand a turn to a dead
+// link and wait out its write timeout.
+func (h *Host) sessionNode(sessionID string) (*attached, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	node, ok := h.sessions[sessionID]
+	if !ok {
+		return nil, agent.ErrSessionGone
+	}
+	if h.nodes[node.connID] != node {
+		delete(h.sessions, sessionID)
+		return nil, agent.ErrSessionGone
+	}
+	return node, nil
+}
+
+// unbindSession forgets a session id the gateway has closed.
+func (h *Host) unbindSession(sessionID string) {
+	h.mu.Lock()
+	delete(h.sessions, sessionID)
+	h.mu.Unlock()
+}
+
+// pruneSessionsLocked drops every session id a departing connection minted.
+// Callers hold the mutex.
+//
+// sessionNode would answer correctly without this — it re-checks the registry —
+// but a gateway that never forgets is a gateway whose map grows by one entry
+// for every session of every node that ever attached, and a fleet of laptops
+// attaches and detaches all day.
+func (h *Host) pruneSessionsLocked(node *attached) {
+	for id, held := range h.sessions {
+		if held == node {
+			delete(h.sessions, id)
+		}
+	}
 }
 
 // SetApprover replaces the tool-approval gate the attached node's native agent
@@ -349,20 +524,16 @@ func (h *Host) askApproval(ctx context.Context, toolName, summary string) (bool,
 // This is nodetoken.ConnectionCloser: it is what turns revocation from "the
 // next handshake fails" into "the live connection ends", which is what #170
 // says revocation means.
+//
+// It closes every connection the registry holds on that selector. There can
+// only be one — see Host.takeCredential for why, and for the revocation hole
+// that is genuinely open.
 func (h *Host) CloseCredential(_ context.Context, selector string) error {
-	h.mu.Lock()
-	node := h.current
-	if node != nil && node.selector == selector {
-		h.current = nil
-	} else {
-		node = nil
+	for _, node := range h.takeCredential(selector) {
+		h.log.Info("closing a runtime node whose credential was revoked", "node_id", node.nodeID, "selector", selector)
+		h.record(journal.LevelWarn, "revoked", "A runtime node's credential was revoked and its connection closed", node, agentwire.Advertisement{})
+		node.close()
 	}
-	h.mu.Unlock()
-	if node == nil {
-		return nil
-	}
-	h.log.Info("closing a runtime node whose credential was revoked", "node_id", node.nodeID, "selector", selector)
-	node.close()
 	return nil
 }
 

@@ -77,6 +77,14 @@ type Options struct {
 	// with a silently empty toolset — the exact regression #194 exists to
 	// prevent.
 	Tools ToolHost
+	// Advertise receives what this node claims to serve: at the handshake, from
+	// inside Initialize, and again on every node-side configuration change.
+	//
+	// nil drops the claim, which is what a gateway with no registry does. It
+	// is not an error: the node cannot know whether the gateway keeps one, and
+	// failing its push would make the node's own logs blame it for the
+	// gateway's shape.
+	Advertise Advertiser
 	// EventBuffer is a turn's channel depth. Zero takes defaultEventBuffer.
 	EventBuffer int
 	// WindowBytes, AckThreshold, AckInterval and Epoch are passed through to
@@ -97,6 +105,7 @@ type Client struct {
 	background func(sessionID string, ev agent.Event)
 	approve    func(ctx context.Context, toolName, summary string) (bool, string)
 	tools      ToolHost
+	advertiser Advertiser
 	transfers  *transfers
 	buffer     int
 
@@ -114,6 +123,9 @@ type Client struct {
 	answers       map[string]*agentwire.PendingDecision
 	interruptible *bool
 	resolved      bool
+	// advertisedOnce is set by the first claim to land, whichever path it came
+	// in on. See applyAdvertisement: it is the whole of the ordering rule.
+	advertisedOnce bool
 }
 
 // New builds a client over conn and starts reading. conn belongs to the client
@@ -138,6 +150,7 @@ func New(conn nodelink.Conn, opts Options) *Client {
 		background: opts.Background,
 		approve:    opts.Approve,
 		tools:      opts.Tools,
+		advertiser: opts.Advertise,
 		transfers:  incoming,
 		buffer:     buffer,
 		closes:     make(chan string, closeQueueDepth),
@@ -169,6 +182,12 @@ func (c *Client) Initialize(ctx context.Context) error {
 	c.interruptible = result.Interruptible
 	c.resolved = true
 	c.mu.Unlock()
+	// Delivered here, synchronously, before Initialize returns: the caller
+	// publishes the node the instant this succeeds, so the claim has to be in
+	// hand by then or the node is briefly attached and mute. A node pushing its
+	// opening claim as a node.advertise request instead would be racing exactly
+	// that window — see agentwire.InitializeResult.
+	c.applyAdvertisement(result.Advertisement, true)
 	if result.Interruptible == nil {
 		// Visible degradation. The verdict defaults the way the session
 		// manager's own unresolved probe does, and it is not left to be

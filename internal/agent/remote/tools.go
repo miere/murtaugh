@@ -44,6 +44,8 @@ func (c *Client) serveRequest(msg agentwire.Message) {
 		c.serveToolList(msg)
 	case agentwire.MethodToolCall:
 		c.serveToolCall(msg)
+	case agentwire.MethodAdvertise:
+		c.serveAdvertise(msg)
 	default:
 		c.rejectRequest(msg)
 	}

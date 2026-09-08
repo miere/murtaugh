@@ -274,6 +274,52 @@ func TestAProxiedCallCarriesTheTurnsSlackLocation(t *testing.T) {
 	}
 }
 
+// And it resolves that location against the CONNECTION that made the call, not
+// against whichever node is newest.
+//
+// Stream ids are minted per client, so two connected nodes hold the same ids for
+// different turns. Looking one up on the wrong node does not error — it finds
+// nothing, and finding nothing here leaves the context bare, which is what
+// ungates the call: the approval gate short-circuits to ALLOWED with no card,
+// and `ask` and `present_plan` stop being interactive. The failure is invisible
+// from the node's end and from the gateway's logs alike, which is why the fix
+// item 9 made is pinned rather than trusted.
+func TestAToolCallResolvesItsTurnOnTheConnectionThatMadeIt(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(&locationTool{})
+
+	joined := make(chan struct{})
+	located := make(chan any, 1)
+	script := newScriptedAgent(func(turn *scriptedTurn) {
+		// The tool call is made only once a second node is attached and is the
+		// most recent — the answer any unbound lookup would give.
+		<-joined
+		where, err := turn.invoke("ask", nil)
+		if err != nil {
+			t.Errorf("ask over the tool channel: %v", err)
+		}
+		located <- where
+		turn.emit(agent.Event{Type: agent.EventComplete, StopReason: "end_turn"})
+	})
+	rig := dialLoopback(t, script, withTools(registry))
+
+	events, err := rig.sessions["default"].Prompt(context.Background(),
+		agent.ConversationKey{ChannelID: "C1", ThreadTS: "123.4"},
+		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4"},
+		agent.PromptRequest{Text: "ask me something", Channel: "C1", Thread: "123.4", User: "U9"})
+	if err != nil {
+		t.Fatalf("prompt: %v", err)
+	}
+	attachAnother(t, rig, "node-2")
+	close(joined)
+	for range events {
+	}
+
+	if got := receiveAny(t, located); got != "C1/123.4" {
+		t.Fatalf("the tool ran with location %#v; the calling node's stream was resolved against another node's turns, which ungates the approval card", got)
+	}
+}
+
 // The approval gate runs on the GATEWAY, once, for a proxied call — and a denial
 // comes back as the call's result rather than as a fault.
 //

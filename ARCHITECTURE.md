@@ -93,12 +93,16 @@ internal/nodetoken/   Node credentials: mint, hash at rest, constant-time
 internal/nodesocket/  The WebSocket transport under a link: one dialler (node),
                       one upgrader (gateway), a write deadline per write.
 internal/nodehost/    The gateway's inbound edge: the accept endpoint, the one
-                      nodetoken.Verify on a serving path, the attached node,
-                      and the runtime builder that brokers to it.
+                      nodetoken.Verify on a serving path, the registry of
+                      connected nodes and what each claims, and the runtime
+                      builder that brokers to them.
 internal/nodeserve/   The node's half: answers the six requests over one link,
                       streams a turn's events back, gates native tool calls
-                      through the gateway's approver, and proxies Murtaugh's own
-                      tools back to the gateway one call at a time.
+                      through the gateway's approver, proxies Murtaugh's own
+                      tools back to the gateway one call at a time, and holds
+                      what this node advertises.
+internal/nodeclaim/   The node's claim: what its configuration means as an
+                      advertisement, and the poller that notices an edit.
 internal/config/      Config schema, validation, bootstrap-file loader, and the
                       config-store seam.
   store/              SQLite/Postgres store implementation + YAML→DB migration.
@@ -876,9 +880,93 @@ the backend, one hop before the protocol could carry them — with the gateway
 side fully plumbed, which makes it look like a routing bug on the only side
 anyone would think to debug.
 
-One node is the whole world: the protocol carries no agent name, so a link IS an
-agent, every configured agent name resolves to the attached node, and a second
-node replaces the first. The registry that ends that is #170 item 9.
+A link is still an agent: the protocol carries no agent name, so every
+configured agent name resolves to a node and a node serves one profile. What
+ended with #170 item 9 is the single slot — see the registry below.
+
+### The node registry and what a node advertises (`internal/nodehost`, `internal/nodeclaim`)
+
+The gateway keeps a registry of connected nodes and what each one claims,
+updated **at connect and on every node-side configuration change**. Identity
+comes from the credential a connection presented, never from anything the node
+said: there is no `node_id` anywhere in the wire format, because inside a fleet a
+node that announces who it is can announce somebody else.
+
+**Push, not poll.** A node's claim rides the `initialize` answer at connect and
+arrives as a `node.advertise` request on every later change; the gateway matches
+locally against the cached copy. Asking every node at delegation time would put
+an N-way fan-out on the first message of every conversation, where one wedged
+node adds a timeout to every delegation in the workspace. The cost is a
+staleness window one configuration edit wide, and its worst outcome is one
+conversation delegated to the wrong node.
+
+**The connect-time claim rides the handshake answer for an ordering reason.**
+The gateway builds the registry entry the instant `initialize` returns, so a
+claim carried on that answer is in hand exactly when there is somewhere to put
+it. A node pushing its opening claim as a request instead would race the
+gateway's own bookkeeping. The two paths converge in `remote.Client`, which is
+the only place that can tell them apart, and where the newest claim wins
+whichever way it arrived.
+
+**The registry is in memory, and that is a decision.** #170's table puts it in
+the *gateway holds* column, which states ownership rather than storage. An entry
+is a live socket plus a claim and both die with the process; only the elected
+leader accepts node connections, so a persisted registry read by a standby is
+guaranteed stale. The half that outlives a process is the conversation **pin**,
+which item 10 stores as a side store in the `NodeTokenStore` family.
+
+**Keyed per connection, enumerated per node.** Rotation means two credentials
+are valid at once, and `CloseCredential` closes by selector so revoking the old
+one does not drop the node — so a map keyed by node id would make the second
+connection evict the first. `Nodes()` collapses back to one entry per node id,
+because delegation must never see one machine twice and round-robin it against
+itself. Choosing between them is item 10: a new conversation still opens on the
+most recently attached node.
+
+**A session is bound to the connection that minted it.** The choice waits for
+item 10; the binding cannot. Session ids are minted per node, so once a second
+node can be connected, sending a conversation's next turn to "whichever node is
+newest" hands a machine an id it never issued — the prompt fails in front of the
+user, and a `Cancel` is answered as success while the turn runs on and the
+gateway blocks draining a stream that will never close. Every prompt, cancel and
+close therefore goes back to the session's own connection, and a session whose
+connection has gone is `agent.ErrSessionGone` — distinct from `ErrNoNode`
+because it means *this session* cannot run while a new one could. Re-opening it
+elsewhere, and telling the model it moved, is item 10.
+
+**`allow_anyone` deliberately does not cross**, and neither does
+`reply_on_thread`. The first waives the gateway's own access list for a
+channel's chat surface; the second decides the conversation key a pin is keyed
+by. Both are written by a node admin — possibly a guest holding a grant — so
+accepting either would let a node owner make a gateway decision by editing a
+file on their laptop. Same rule as the tool partition: enforcement is
+gateway-side because a node cannot be trusted to filter itself.
+
+**A node advertises what it SERVES, not what it has configured.**
+`internal/nodeclaim` derives the claim from the node's own configuration and the
+profile names the process actually serves, and drops any channel rule routing to
+a profile it does not serve. Advertising the rest would be a claim the gateway
+could act on and the node could not honour.
+
+**The node's watcher is the only poll in the design, and it is not a reload.**
+`nodeclaim.Watcher` compares `config.Store.Snapshot` renderings and re-reads the
+CLAIM SET on a change — applied unconditionally, because a node admin editing
+their own node is the authority and there is no Slack surface on a node to ask
+through. It deliberately does not rebuild the agent: both backend families latch
+their toolset and the redial loop reuses the client captured at startup, so
+rebuilding under a live connection would strand every open session. While the
+configuration split (item 12) is unbuilt a gateway and node on one machine share
+one store, so a "node-side" edit on a `--role both` box is also seen by the
+gateway's approval-card watcher and may be rolled back.
+
+**A sleeping node stays connected.** `nodesocket` sets no read deadline and
+there is no ping/pong, so a laptop that sleeps without a FIN remains in the
+registry until a write fails at the transport's write timeout or TCP gives up.
+
+**Attach, detach, revocation and re-advertisement are journalled, not
+announced** — gateway stream, kind `node`. A laptop sleeping at six o'clock
+disconnects every evening, and a nightly message trains the admin to ignore the
+one that matters.
 
 ### The tool channel (`internal/toolset` partition, `internal/nodehost`, `internal/nodeserve`)
 
