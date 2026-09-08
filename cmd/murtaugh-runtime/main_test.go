@@ -9,6 +9,7 @@ import (
 
 	"github.com/miere/murtaugh/internal/agentruntime"
 	"github.com/miere/murtaugh/internal/config"
+	"github.com/miere/murtaugh/internal/mcpbridge"
 	"github.com/miere/murtaugh/internal/nodeserve"
 )
 
@@ -117,5 +118,33 @@ func TestRunRefusesToStartWithNoGatewayToDial(t *testing.T) {
 	// The direction is the part an operator gets wrong, so the error says it.
 	if !strings.Contains(err.Error(), "a node dials in") {
 		t.Errorf("run() = %q, want it to say which end dials", err)
+	}
+}
+
+// The bridge subcommand has to exist on THIS binary, not only on `murtaugh`.
+//
+// An acp or claude_code agent reaches Murtaugh's tools through a subprocess the
+// aggregator advertises as os.Executable() with argv `mcp-bridge` — and on a
+// node that executable is murtaugh-runtime. Without this branch the flag parser
+// rejects the positional argument, the agent spawns a process that exits
+// instantly, every session, and the only symptom is an agent with no Murtaugh
+// tools and nothing in any log naming the cause.
+//
+// The assertion is on the error, because reaching the environment check proves
+// the dispatch happened: the flag parser's refusal has different words.
+func TestTheBridgeSubcommandIsDispatchedOnANode(t *testing.T) {
+	t.Setenv(mcpbridge.EnvSocket, "")
+	t.Setenv(mcpbridge.EnvToken, "")
+
+	err := run([]string{mcpbridge.Subcommand})
+
+	if err == nil {
+		t.Fatal("mcp-bridge with no socket in the environment did not fail")
+	}
+	if strings.Contains(err.Error(), "unexpected argument") {
+		t.Fatalf("murtaugh-runtime still rejects `mcp-bridge` as a stray argument, so an acp agent on this node spawns a bridge that dies: %v", err)
+	}
+	if !strings.Contains(err.Error(), mcpbridge.EnvSocket) {
+		t.Fatalf("mcp-bridge failed for some reason other than its missing environment: %v", err)
 	}
 }

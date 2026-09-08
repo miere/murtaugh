@@ -9,15 +9,25 @@
 // Unlike cmd/murtaugh-gateway, this binary MAY reach the agent packages — it is
 // the half of the split whose whole job is running a model.
 //
-// # What it does not have yet
+// # Murtaugh's own tools reach this node over the link
 //
-// A node's agent has its backend's own tools and NONE of Murtaugh's. The tool
-// channel — an agent on a node reaching the gateway's tool surface — is #170
-// Change D, item 8, and it is the next thing built. Until it exists the
-// registry handed to the runtime here is empty on purpose rather than
-// half-wired: a node that silently offered a subset of the tools a local agent
-// has would be the "refactor that is really a regression" the spec warns about,
-// discovered by a user rather than by a maintainer.
+// A node's agent gets Murtaugh's tools — the ones the gateway will let it have —
+// through nodeserve.ToolProxy: a registry of stand-ins whose Invoke is one
+// round trip over the connection this process already holds open. The gateway
+// decides what is in that registry; see internal/toolset's partition and
+// internal/nodehost, which is the one place it is enforced.
+//
+// Two consequences worth knowing before reading the wiring below. The proxy is
+// built BEFORE the runtime, because both backend families latch: a native agent
+// resolves its toolset at its first Initialize, and an acp/claude_code agent's
+// aggregator resolves it when its first session is registered. The gateway
+// handshake fills the proxy ahead of both; a registry filled after either is one
+// that backend never looks at again. And ServeTools is started here, which it
+// was not before: an
+// acp/claude_code agent reaches tools through a local MCP aggregator socket, and
+// nothing on a node was binding it — so those two backends were not merely
+// tool-less, they were spawning a bridge subprocess against a socket nobody was
+// listening on.
 package main
 
 import (
@@ -41,10 +51,10 @@ import (
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/config/migrate"
 	configstore "github.com/miere/murtaugh/internal/config/store"
+	"github.com/miere/murtaugh/internal/mcpbridge"
 	"github.com/miere/murtaugh/internal/nodeserve"
 	"github.com/miere/murtaugh/internal/nodesocket"
 	"github.com/miere/murtaugh/internal/nodetoken"
-	"github.com/miere/murtaugh/internal/tools"
 )
 
 var version = "dev"
@@ -71,6 +81,18 @@ func main() {
 }
 
 func run(args []string) error {
+	// `murtaugh-runtime mcp-bridge` is the transparent stdio↔socket proxy an
+	// acp/claude_code agent spawns to reach this node's MCP aggregator. The
+	// aggregator advertises os.Executable() as the command, which on a node is
+	// THIS binary — so without this branch the agent spawns a subprocess that
+	// exits immediately with "unexpected argument", every session, and the
+	// symptom is an agent with no Murtaugh tools and nothing in any log that
+	// names the cause. Dispatched before any config or logging is wired,
+	// because stdout belongs to MCP.
+	if len(args) > 0 && args[0] == mcpbridge.Subcommand {
+		return runMCPBridge()
+	}
+
 	fs := flag.NewFlagSet("murtaugh-runtime", flag.ContinueOnError)
 	configPath := fs.String("config", "", "path to config.yaml (default ~/.config/murtaugh/config.yaml)")
 	gatewayURL := fs.String("gateway", "", "gateway address to attach to, ws:// or wss:// (required)")
@@ -137,6 +159,24 @@ func run(args []string) error {
 	}
 	logger.Info("runtime node serving one agent", "agent", name, "gateway", *gatewayURL)
 
+	// The node's own MCP aggregator socket, which an acp/claude_code agent's
+	// bridge subprocess dials. It is local to this machine and never crosses the
+	// network: the tool CALLS cross, one frame each, not the MCP byte stream —
+	// which is what keeps a reconnect from leaving a half-initialised MCP
+	// session on the far side (#170 Concern 5).
+	//
+	// A failure here degrades those two backends and does not stop the node: a
+	// native agent needs no aggregator, and a node that refused to start over it
+	// would take chat down for an agent that never used it.
+	if served.serveTools != nil {
+		go func() {
+			if err := served.serveTools(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				logger.Error("the local tool aggregator stopped; acp and claude_code agents on this node will have no Murtaugh tools",
+					"error", err)
+			}
+		}()
+	}
+
 	return attach(ctx, logger, attachment{
 		gateway:    *gatewayURL,
 		token:      token,
@@ -144,6 +184,7 @@ func run(args []string) error {
 		client:     served.client,
 		gate:       served.gate,
 		background: served.background,
+		tools:      served.tools,
 	})
 }
 
@@ -153,6 +194,11 @@ type servedAgent struct {
 	client     agent.Client
 	gate       *nodeserve.ToolGate
 	background *nodeserve.BackgroundSink
+	tools      *nodeserve.ToolProxy
+	// serveTools binds this node's LOCAL aggregator socket, the one an
+	// acp/claude_code agent's bridge subprocess dials. nil when there is nothing
+	// to serve.
+	serveTools func(context.Context) error
 }
 
 // serveAgent builds the node's in-process runtime and picks the agent it will
@@ -168,17 +214,30 @@ func serveAgent(cfg config.Config, logger *slog.Logger, requested string) (serve
 		return servedAgent{}, "", err
 	}
 
-	// Both collaborators are built before the agent because the backends want
-	// them at construction, and bound to a connection when one arrives.
+	// All three collaborators are built before the agent because the backends
+	// want them at construction, and bound to a connection when one arrives.
+	// The proxy especially: its registry is what the agent's toolset is resolved
+	// from, and both backend families latch that resolution — native at its
+	// first Initialize, acp/claude_code when their aggregator registers its first
+	// session. The registry handed over here is EMPTY; the handshake fills it
+	// before either latch, which is the whole reason the aggregator resolves
+	// lazily rather than at construction.
 	gate := nodeserve.NewToolGate(logger)
 	background := nodeserve.NewBackgroundSink(logger)
+	proxy := nodeserve.NewToolProxy(logger)
 
-	runtime := local.Builder(cfg, tools.NewRegistry(), logger)(nodeHooks(cfg, gate, background))
+	runtime := local.Builder(cfg, proxy.Registry(), logger)(nodeHooks(cfg, gate, background))
 	client, ok := runtime.Clients[name]
 	if !ok {
 		return servedAgent{}, "", fmt.Errorf("agent %q did not build; see the errors above", name)
 	}
-	return servedAgent{client: client, gate: gate, background: background}, name, nil
+	return servedAgent{
+		client:     client,
+		gate:       gate,
+		background: background,
+		tools:      proxy,
+		serveTools: runtime.ServeTools,
+	}, name, nil
 }
 
 // nodeHooks is everything a node contributes to its own in-process runtime.
@@ -235,6 +294,7 @@ type attachment struct {
 	client     agent.Client
 	gate       *nodeserve.ToolGate
 	background *nodeserve.BackgroundSink
+	tools      *nodeserve.ToolProxy
 }
 
 // attach dials the gateway and serves it, redialling until the process is
@@ -257,6 +317,7 @@ func attach(ctx context.Context, logger *slog.Logger, a attachment) error {
 				Logger:      logger,
 				Gate:        a.gate,
 				Background:  a.background,
+				Tools:       a.tools,
 				WindowBytes: nodesocket.DefaultWindowBytes,
 				AckInterval: 30 * time.Second,
 			})
@@ -279,6 +340,25 @@ func attach(ctx context.Context, logger *slog.Logger, a attachment) error {
 			backoff = reconnectCeiling
 		}
 	}
+}
+
+// runMCPBridge runs the `murtaugh-runtime mcp-bridge` subcommand: a transparent
+// pipe between the spawning agent's stdio and this node's own aggregator socket.
+// It is byte-for-byte the same job `murtaugh mcp-bridge` does, and it stays a
+// local hop — the socket is on this machine, and it is the tool CALLS that cross
+// the network, one frame each.
+//
+// The socket path and session token arrive via the environment, so there is no
+// argument parsing to collide with this binary's flags.
+func runMCPBridge() error {
+	socket := os.Getenv(mcpbridge.EnvSocket)
+	token := os.Getenv(mcpbridge.EnvToken)
+	if socket == "" || token == "" {
+		return fmt.Errorf("%s requires %s and %s in the environment", mcpbridge.Subcommand, mcpbridge.EnvSocket, mcpbridge.EnvToken)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return mcpbridge.RunBridge(ctx, socket, token, os.Stdin, os.Stdout)
 }
 
 // jitter spreads a fleet's reconnections over the window rather than firing
