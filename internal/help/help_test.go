@@ -80,6 +80,7 @@ func TestEveryCommandDocumented(t *testing.T) {
 		"journal query", "journal stats", "journal prune",
 		"slack send-msg", "slack create-channel", "slack fetch-msgs", "slack fetch-reactions", "slack update-msg",
 		"slack gateway",
+		"node token mint", "node token list", "node token revoke",
 		"mcp",
 		"setup bootstrap", "setup slack", "setup agents", "setup env",
 		"setup mcp-register", "setup launchd", "setup update",

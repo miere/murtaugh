@@ -696,6 +696,84 @@ murtaugh auth request --tool gcp-mcp --profile gcloud-adc
 murtaugh auth request --tool vendor-mcp --profile custom --command "vendor-cli login --headless" --needs-code false
 ```
 
+## murtaugh node token mint
+
+Issue a bearer token for a **runtime node** — a host that runs agents on the
+gateway's behalf. The token is displayed **once**: only its hash is stored, so
+it cannot be recovered afterwards, and a lost one is replaced by minting another
+rather than looked up.
+
+A node never tells the gateway who it is. It presents the token, and the gateway
+resolves which node and which user that token was minted for — which is why
+`--node` and `--user` are recorded here and are not something a node can assert
+later.
+
+| Flag           | Required | Type     | Notes                                                                                  |
+|----------------|----------|----------|----------------------------------------------------------------------------------------|
+| `--node`       | yes      | string   | Node id this credential identifies.                                                    |
+| `--user`       | yes      | string   | Murtaugh user the node acts for.                                                       |
+| `--label`      | no       | string   | Free-text note about where the credential lives (`mac mini`, `rotation 2026-09`).      |
+| `--expires-in` | no       | duration | Go duration (e.g. `720h`). Omitted means the credential lasts until it is revoked.      |
+| `--token-file` | no       | string   | Write the token to this file (mode `0600`) instead of printing it. Refuses to overwrite.|
+
+- Tokens carry the prefix `mrtg_node_`, so a leaked one is greppable in a log and
+  matchable by a secret scanner. `troubleshoot bundle` redacts on that prefix.
+- Put the file on the node, mode `0600`. A seatbelt-confined agent is denied it
+  unconditionally — reads and writes both, wherever the file sits — but the
+  sandbox is off by default and exists only on macOS. **Where it is off, nothing
+  protects the token from the agents this node runs**: they run as the daemon's
+  own uid, so `0600` does not exclude them, and the default agent workdir is the
+  very directory the token lives in. The sandbox is the only mitigation there is.
+- Node credentials live in a side table of the configured database, alongside
+  job runs and leader locks. They are **not** part of the config, so `cfg show`
+  never prints them and `cfg db migrate` does not carry them: after switching
+  backends, re-enrol the nodes.
+- Minting is an approval-gated tool, so an agent that has been given it still
+  needs a human's yes.
+
+```
+murtaugh node token mint --node mac-mini --user U012ABCDEF --label "office mac"
+murtaugh node token mint --node ci-box --user U012ABCDEF --expires-in 720h --token-file /etc/murtaugh/node-token
+```
+
+## murtaugh node token list
+
+List issued node credentials with their state (`live`, `expired`, `revoked`).
+Never shows a token — only a hash is stored — and does not show the hash either;
+credentials are addressed by their **selector**, the public half printed here.
+
+| Flag     | Required | Type   | Notes                                                     |
+|----------|----------|--------|-----------------------------------------------------------|
+| `--node` | no       | string | Only this node's credentials. Omitted lists every node's.  |
+
+```
+murtaugh node token list
+murtaugh node token list --node mac-mini
+```
+
+## murtaugh node token revoke
+
+Withdraw a credential. Revoke one by selector during a rotation, or every
+credential a node holds when the node itself is compromised.
+
+| Flag         | Required | Type   | Notes                                                              |
+|--------------|----------|--------|--------------------------------------------------------------------|
+| `--selector` | one of   | string | The credential to revoke, from `node token list`.                  |
+| `--node`     | one of   | string | Revoke every live credential this node holds.                      |
+
+- `--selector` and `--node` are **mutually exclusive**, and one is required: a
+  revoke that guessed would be worse than one that refuses.
+- Two credentials may be live for one node at once, which is what makes rotation
+  need no downtime: mint the replacement, install it, then revoke the old one.
+- A revoked credential stops verifying immediately, but **a connection already
+  authenticated with it stays open** until the gateway learns to close it (#193).
+  Revoking is not yet the same as disconnecting.
+
+```
+murtaugh node token revoke --selector 1a2b3c4d5e6f7a8b
+murtaugh node token revoke --node mac-mini
+```
+
 ## murtaugh version
 
 Print the binary's version string (e.g. `v0.4.1` or `dev`). Takes no flags.

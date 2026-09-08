@@ -29,6 +29,7 @@ import (
 	"github.com/miere/murtaugh/internal/agentbuild"
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/mcpbridge"
+	"github.com/miere/murtaugh/internal/nodetoken"
 	"github.com/miere/murtaugh/internal/tools"
 )
 
@@ -130,6 +131,9 @@ func (r *Runner) buildDeps(logger *slog.Logger) agentbuild.Deps {
 		Logger:                 logger,
 		Bridge:                 r.bridge,
 		LongRunningToolTimeout: r.longRunningToolTimeout,
+		// A delegated agent is as capable of reading a file as a chat one, so it
+		// is blinded to the node credential on exactly the same terms.
+		NodeTokenPath: nodetoken.PathFor(r.baseDir),
 	}
 }
 

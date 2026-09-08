@@ -65,6 +65,30 @@ func seatbeltProfile(spec Spec) (string, error) {
 		}
 	}
 
+	// --- The node's own bearer token: denied on its own terms. ---------------
+	//
+	// Emitted here, outside the list above, and not by adding the path to
+	// `deny`: spec.DenyRead REPLACES defaultDenyRead when a profile sets it, so
+	// an agent carrying `deny_read: []` — a legal profile that denies nothing —
+	// would take its node's credential out of the policy with it. An agent that
+	// can read this file can impersonate its own node.
+	//
+	// Writes are denied alongside reads, and that is load-bearing rather than
+	// tidy: nodetoken.PathFor puts the credential in the config directory, which
+	// is the workdir an agent with no `workdir:` of its own resolves onto — and
+	// the workdir went into the always-on WRITE carve-out above. Without this
+	// second line a boxed agent could delete or replace its node's credential
+	// without ever reading it.
+	//
+	// Last, so SBPL's last-match-wins keeps both in force: no carve-out written
+	// above can re-open it.
+	if token := strings.TrimSpace(spec.NodeTokenPath); token != "" {
+		path := subpathAndLiteral(realPath(token))
+		b.WriteString("\n; --- the node's bearer token: never readable or writable, whatever the profile says ---\n")
+		fmt.Fprintf(&b, "(deny file-read* %s)\n", path)
+		fmt.Fprintf(&b, "(deny file-write* %s)\n", path)
+	}
+
 	return b.String(), nil
 }
 

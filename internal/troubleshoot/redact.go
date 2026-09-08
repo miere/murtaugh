@@ -7,7 +7,8 @@ import "regexp"
 // recognises — it cannot scrub secrets that only the user knows the shape of
 // (API keys pasted into a chat, tokens inside a provider's transcript DB, or
 // credentials carried in ACP traffic). Treat a bundle as sensitive regardless.
-const RedactionLimitations = "Redaction removes Slack tokens (xoxb-/xapp-/xoxp-/xoxa-/xoxe-/xoxr-) and the " +
+const RedactionLimitations = "Redaction removes Slack tokens (xoxb-/xapp-/xoxp-/xoxa-/xoxe-/xoxr-), Murtaugh " +
+	"node tokens (mrtg_node_…), and the " +
 	"values of obviously-secret YAML keys (app_token, bot_token, *secret*, *api[_-]?key*, password, " +
 	"*credential*). It does NOT and cannot remove credentials embedded in conversation transcripts, " +
 	"binary session databases (*.db), or arbitrary strings whose secrecy Murtaugh has no way to know. " +
@@ -20,6 +21,22 @@ const redactedToken = "‹redacted›"
 // scrubbed wherever they appear (config values, command args, log lines), which
 // is the backstop for secrets sitting under keys we don't recognise.
 var slackTokenPattern = regexp.MustCompile(`xox[bpaerso]-[A-Za-z0-9-]{6,}|xapp-[A-Za-z0-9-]{6,}`)
+
+// nodeTokenPattern matches the bearer tokens runtime nodes authenticate with
+// (nodetoken.Prefix + a hex selector + a base64url secret). This is what the
+// recognisable prefix is FOR: the token itself is opaque, so without a shape to
+// match, a token that reached a log line would travel into every bundle taken
+// afterwards.
+//
+// It matches the selector alone as well as a whole token — the trailing part is
+// optional — so a partially-copied token is still scrubbed. The selector is not
+// a secret, but over-redaction is the safe direction in a diagnostics bundle.
+//
+// The literal is spelled out rather than built from nodetoken.Prefix on purpose:
+// this package is imported by the bundler and has no other reason to depend on
+// the credential package, and TestNodeTokenPatternMatchesAMintedToken pins the
+// two together against a real minted token instead.
+var nodeTokenPattern = regexp.MustCompile(`mrtg_node_[A-Za-z0-9_-]{6,}`)
 
 // secretKeyPattern matches a YAML "key: value" line whose key names something
 // secret. Group 1 is the "  key: " prefix (preserved); the value is replaced.
@@ -35,6 +52,7 @@ var secretKeyPattern = regexp.MustCompile(
 func redactText(in []byte) (out []byte, changed bool) {
 	redacted := secretKeyPattern.ReplaceAll(in, []byte("${1}"+redactedToken))
 	redacted = slackTokenPattern.ReplaceAll(redacted, []byte(redactedToken))
+	redacted = nodeTokenPattern.ReplaceAll(redacted, []byte(redactedToken))
 	return redacted, len(redacted) != len(in) || !equalBytes(redacted, in)
 }
 

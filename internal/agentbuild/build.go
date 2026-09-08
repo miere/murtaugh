@@ -56,6 +56,12 @@ type Deps struct {
 	// auto-continuing. The gateway renders them into the originating Slack thread.
 	// nil (CLI/delegate paths, other backends) drops them. Ignored by acp/native.
 	BackgroundSink func(sessionID string, ev agent.Event)
+	// NodeTokenPath is the bearer token this process authenticates to the
+	// gateway with (nodetoken.PathFor of the config dir). A confined agent is
+	// blinded to it unconditionally — see sandbox.Spec.NodeTokenPath, which also
+	// records the two cases where the sandbox cannot help. Empty on the CLI
+	// path, which is not a node.
+	NodeTokenPath string
 }
 
 // Client builds the backend for a resolved agent. It does no network/process I/O
@@ -70,11 +76,12 @@ func Client(resolved ResolvedAgent, deps Deps) (agent.Client, error) {
 	profile := resolved.Profile
 
 	// Resolve the sandbox once, here, where the profile and the runtime facts it
-	// cannot know (the resolved workdir, the bridge socket path) first co-exist —
+	// cannot know (the resolved workdir, the bridge socket, the node token path)
+	// first co-exist —
 	// the same validated-core rule the workspace root follows. A failure is fatal
 	// rather than a degrade: dropping a security boundary silently is worse than an
 	// agent that refuses to start.
-	box, err := resolveSandbox(profile, resolved, deps.Bridge)
+	box, err := resolveSandbox(profile, resolved, deps)
 	if err != nil {
 		return nil, err
 	}

@@ -25,7 +25,7 @@ func TestResolveSandboxSkipsNativeAgents(t *testing.T) {
 		Sandbox: config.SandboxConfig{Mode: config.SandboxModeSeatbelt},
 	}
 
-	box, err := resolveSandbox(profile, resolvedProfile(t, profile), nil)
+	box, err := resolveSandbox(profile, resolvedProfile(t, profile), Deps{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -40,7 +40,7 @@ func TestResolveSandboxSkipsNativeAgents(t *testing.T) {
 func TestResolveSandboxOffReturnsNilInterface(t *testing.T) {
 	profile := config.AgentProfile{ClaudeCode: &config.ClaudeCodeProfile{Command: "claude"}}
 
-	box, err := resolveSandbox(profile, resolvedProfile(t, profile), nil)
+	box, err := resolveSandbox(profile, resolvedProfile(t, profile), Deps{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestResolveSandboxFailsClosed(t *testing.T) {
 		Sandbox:    config.SandboxConfig{Mode: config.SandboxModeSeatbelt},
 	}
 
-	box, err := resolveSandbox(profile, resolvedProfile(t, profile), nil)
+	box, err := resolveSandbox(profile, resolvedProfile(t, profile), Deps{})
 
 	if runtime.GOOS == "darwin" {
 		if err != nil {
@@ -85,7 +85,7 @@ func TestResolveSandboxRejectsUnknownMode(t *testing.T) {
 		Sandbox:    config.SandboxConfig{Mode: "bwrap"},
 	}
 
-	if _, err := resolveSandbox(profile, resolvedProfile(t, profile), nil); err == nil {
+	if _, err := resolveSandbox(profile, resolvedProfile(t, profile), Deps{}); err == nil {
 		t.Fatal("expected an error for an unsupported mode")
 	}
 }

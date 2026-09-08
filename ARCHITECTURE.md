@@ -69,6 +69,10 @@ internal/tools/       Shared Tool interface + one package per tool.
   cfg/                Tools `cfg.*`: read/write the config store (agents, mcp,
                       jobs, chat, access, rules, defaults, db migrate) with
                       validate-and-rollback on every mutation.
+  node/               Tools `node.token.mint`/`.list`/`.revoke`: issue and
+                      withdraw the bearer credentials runtime nodes present.
+internal/nodetoken/   Node credentials: mint, hash at rest, constant-time
+                      verify, and the on-disk credential file's location/mode.
 internal/config/      Config schema, validation, bootstrap-file loader, and the
                       config-store seam.
   store/              SQLite/Postgres store implementation + YAML→DB migration.
@@ -158,10 +162,19 @@ idea what it is delivering. `internal/agent/remote` is the one place they meet.
 model, because it is an `agent.Client` implementation and that is what lives
 there. That placement is compatible with #170's proposed gateway reachability
 rule — **not yet implemented**: there is no gateway binary to check and
-`cmd/archcheck` carries only the workdir and renderclock passes — because the
+`cmd/archcheck` carries only the workdir, renderclock and nodetoken passes —
+because the
 rule is specified to enumerate `internal/agent/{acp,native,claudecode}` rather
 than to ban the whole subtree. When it is built it must be written that way, or
 a gateway that imports `remote` will be read as reaching a backend.
+
+`internal/nodetoken` mints, hashes and verifies the bearer credential a runtime
+node will present (#190). It imports nothing of ours but `internal/config`, for
+the store contract alone, and it has **no caller on any serving path**: nothing
+dials the gateway yet, so verification exists, is tested, and is reached only by
+`node token …`. Its one arch rule — a digest is never compared with `==` — is a
+`go/analysis` pass rather than a test, because a constant-time comparison and a
+leaky one return identical verdicts and only a static check can tell them apart.
 
 ## The Tool contract
 
@@ -555,6 +568,18 @@ Not implemented: **catch-up for missed occurrences**. If no leader exists when a
 cron is due, that run is skipped entirely rather than replayed on the next
 promotion — replaying raises policy questions (should a 03:00 backup run at
 09:00?) that want an explicit answer.
+
+**Node credentials are a third side store** (`config.NodeTokenStore`, #190),
+sitting beside the leader lock and the run claim for the same reason: whichever
+gateway a node's connection lands on must resolve that node's token, and the
+store their shared configuration came from is the only place they already agree.
+Like those two it is deliberately **not** a config section — absent from
+`AllSections`/`AllSingletons`, so records never enter the `Config` a process
+loads, never appear in `cfg show`, and are **not carried by Snapshot/Restore**.
+The consequence is worth stating rather than discovering: `cfg db migrate` does
+not move node credentials, so nodes are re-enrolled after a backend change. One
+row per **token**, keyed by the token's public selector, which is what makes two
+live credentials for one node — a rotation in flight — two ordinary rows.
 
 ### Event loop
 

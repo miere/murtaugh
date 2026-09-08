@@ -66,6 +66,7 @@ var ToolFamilies = []ToolFamily{
 	{Name: "version", Label: "Version", Description: "Report the running version."},
 	{Name: toolset.GroupManage, Label: "Manage", Description: "See the skills that teach configuring Murtaugh.", AdminOnly: true},
 	{Name: "cfg", Label: "Config", Description: "Read and rewrite Murtaugh's own configuration.", AdminOnly: true},
+	{Name: "node", Label: "Nodes", Description: "Issue and revoke the credentials runtime nodes authenticate with.", AdminOnly: true},
 	{Name: "setup", Label: "Setup", Description: "Install and reconfigure Murtaugh. Never bridged to a process agent.", AdminOnly: true},
 	{Name: "restart", Label: "Restart", Description: "Restart the daemon.", AdminOnly: true},
 }

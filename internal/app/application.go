@@ -22,6 +22,7 @@ import (
 	"github.com/miere/murtaugh/assets"
 	"github.com/miere/murtaugh/internal/agentdelegate"
 	"github.com/miere/murtaugh/internal/config"
+	"github.com/miere/murtaugh/internal/config/store"
 	"github.com/miere/murtaugh/internal/frontends/cli"
 	"github.com/miere/murtaugh/internal/frontends/mcp"
 	"github.com/miere/murtaugh/internal/journal"
@@ -39,6 +40,7 @@ import (
 	journalprune "github.com/miere/murtaugh/internal/tools/journal/prune"
 	journalquery "github.com/miere/murtaugh/internal/tools/journal/query"
 	journalstats "github.com/miere/murtaugh/internal/tools/journal/stats"
+	nodetools "github.com/miere/murtaugh/internal/tools/node"
 	"github.com/miere/murtaugh/internal/tools/ping"
 	"github.com/miere/murtaugh/internal/tools/plan"
 	"github.com/miere/murtaugh/internal/tools/restart"
@@ -418,6 +420,24 @@ func buildRegistry(cfg config.Config, cfgStore config.Store, configPath, version
 		)
 	}
 	reg.Register(troubleshootbundle.New(troubleshootSources, func() []string { return effectiveTroubleshootProviders(cfg) }))
+
+	// `node token …` administers the bearer credentials runtime nodes will
+	// authenticate with (#190). The store is opened per invocation rather than
+	// held: these are rare administrative acts, and a handle kept open for the
+	// daemon's lifetime would be a connection every gateway pays for whether or
+	// not it ever enrols a node. It is deliberately NOT the config store — node
+	// credentials are a side table like job_runs and leader_locks, outside the
+	// Config every process loads (see config.NodeTokenStore).
+	nodeTokens := func(ctx context.Context) (config.NodeTokenStore, error) {
+		base := baseDirFor(cfg, configPath)
+		if base == "" {
+			return nil, errors.New("node credential store is unavailable: no config directory resolved")
+		}
+		return store.OpenNodeTokens(ctx, cfg.Database, base, config.BaseNameOf(configPath))
+	}
+	for _, t := range nodetools.All(nodeTokens) {
+		reg.Register(t)
+	}
 
 	return reg
 }
