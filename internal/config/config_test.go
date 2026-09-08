@@ -184,6 +184,29 @@ func TestValidateRejectsBadLongRunningToolTimeout(t *testing.T) {
 	}
 }
 
+func TestBackgroundIdleTimeout(t *testing.T) {
+	var d RuntimeDefaults
+	if got := d.EffectiveBackgroundIdleTimeout(); got != 15*time.Minute {
+		t.Fatalf("default = %s, want 15m", got)
+	}
+	d.Session.BackgroundIdleTimeout = "45m"
+	if got := d.EffectiveBackgroundIdleTimeout(); got != 45*time.Minute {
+		t.Fatalf("override = %s, want 45m", got)
+	}
+}
+
+func TestValidateRejectsBadBackgroundIdleTimeout(t *testing.T) {
+	cfg, err := Parse(testConfig(""))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	cfg.Defaults.Session.BackgroundIdleTimeout = "nope"
+	err = cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "defaults.session.background_idle_timeout") {
+		t.Fatalf("expected duration validation error, got: %v", err)
+	}
+}
+
 func TestParseRequiresSlackTokens(t *testing.T) {
 	cfg, err := Parse([]byte("oauth: {}\n"))
 	if err != nil {
