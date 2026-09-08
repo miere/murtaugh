@@ -115,6 +115,48 @@ func TestBridgeUnsafe(t *testing.T) {
 	}
 }
 
+// The aggregator must read the registry when a SESSION is registered, not when
+// it is built. This is the acp/claude_code half of #194 and the one a rig that
+// only models `native` cannot see.
+//
+// On a runtime node the registry handed to the agent builder is
+// nodeserve.ToolProxy's, and it is empty at that moment: the node builds its
+// agent before it has a gateway connection, and the proxy is filled at the
+// handshake. An aggregator that snapshotted its built-ins at construction served
+// zero tools forever — the exact regression this item exists to end, in the two
+// backends it was written for, while `native` looked fine because it resolves
+// inside its own Initialize, after the handshake.
+//
+// The registry below is therefore filled AFTER the aggregator is built, in that
+// order deliberately.
+func TestTheAggregatorReadsTheRegistryWhenASessionStartsNotWhenItIsBuilt(t *testing.T) {
+	reg := tools.NewRegistry() // a node's proxy registry: empty until the handshake
+	srv := mcpbridge.NewServer("/tmp/murtaugh-test-agg3.sock", nil)
+	aggr, err := newACPAggregator(srv, reg, resolvedFor(t, "", "ask", "ping"), nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("newACPAggregator: %v", err)
+	}
+
+	// What nodeserve.ToolProxy.refresh does at the handshake, one hop before the
+	// agent's first session.
+	reg.Register(fakeTool{name: "ask"})
+	reg.Register(fakeTool{name: "ping"})
+
+	if _, _, err := aggr.RegisterSession(agent.SessionMetadata{ChannelID: "C1", ThreadTS: "1.2"}, nil); err != nil {
+		t.Fatalf("RegisterSession: %v", err)
+	}
+	served, err := aggr.resolvedToolset()
+	if err != nil {
+		t.Fatalf("resolvedToolset: %v", err)
+	}
+	got := toolNames(served)
+	for _, want := range []string{"ask", "ping"} {
+		if !slices.Contains(got, want) {
+			t.Fatalf("an acp/claude_code agent was served %v, so it reaches no Murtaugh tools at all on a node", got)
+		}
+	}
+}
+
 func TestACPAggregatorRegisterSession(t *testing.T) {
 	reg := registryWith("ask")
 	srv := mcpbridge.NewServer("/tmp/murtaugh-test-agg.sock", nil)
@@ -154,7 +196,11 @@ func TestACPAggregatorToolsetAndClose(t *testing.T) {
 	if err := aggr.Close(); err != nil {
 		t.Fatalf("Close before use: %v", err)
 	}
-	got := toolNames(aggr.resolvedToolset())
+	served, err := aggr.resolvedToolset()
+	if err != nil {
+		t.Fatalf("resolvedToolset: %v", err)
+	}
+	got := toolNames(served)
 	if len(got) != 2 || !slices.Contains(got, "ask") || !slices.Contains(got, "slack.send_msg") {
 		t.Fatalf("resolved toolset = %v, want the two built-ins", got)
 	}

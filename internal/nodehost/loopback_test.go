@@ -20,6 +20,7 @@ import (
 	"github.com/miere/murtaugh/internal/nodeserve"
 	"github.com/miere/murtaugh/internal/nodesocket"
 	"github.com/miere/murtaugh/internal/nodetoken"
+	"github.com/miere/murtaugh/internal/tools"
 )
 
 // This file is #193's verification, over a real WebSocket on loopback: a chat
@@ -40,6 +41,9 @@ type loopback struct {
 	store    *memTokens
 	addr     string
 	selector string
+	// token is the credential this node dialled with, kept so a test can dial
+	// the SAME node back in after a drop.
+	token    string
 	sessions map[string]*agent.SessionManager
 	agent    *scriptedAgent
 	gate     *nodeserve.ToolGate
@@ -50,6 +54,10 @@ type loopback struct {
 	// notices is what the GATEWAY's background hook received. It is the far end
 	// of the same path.
 	notices chan notice
+	// proxy is the NODE's stand-in registry for Murtaugh's tools; nil unless the
+	// rig was built with withTools. Its registry is what a node's agent would
+	// have been built from.
+	proxy *nodeserve.ToolProxy
 	// nodeStopped closes when the node's Serve returns, however it ended.
 	nodeStopped chan struct{}
 }
@@ -76,12 +84,24 @@ type notice struct {
 // than one healthy attached node.
 type rigOption func(*rigConfig)
 
-type rigConfig struct{ waitForAttach bool }
+type rigConfig struct {
+	waitForAttach bool
+	// registry is the GATEWAY's tool registry, and serving it is opt-in: a node
+	// built with no ToolProxy never asks for a tool list, which is the state
+	// every test above this one is in and the state a node was in before #194.
+	registry *tools.Registry
+}
 
 // withoutWaitingForAttach is for the tests whose point is that the node does
 // NOT get published.
 func withoutWaitingForAttach() rigOption {
 	return func(c *rigConfig) { c.waitForAttach = false }
+}
+
+// withTools gives the gateway a registry and the node a proxy for it — the tool
+// channel switched on.
+func withTools(registry *tools.Registry) rigOption {
+	return func(c *rigConfig) { c.registry = registry }
 }
 
 func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *loopback {
@@ -116,7 +136,7 @@ func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *lo
 		Agents: map[string]config.AgentProfile{"default": {}},
 		Chat:   config.ChatConfig{Enabled: true, Defaults: config.ChatDefaults{Agent: "default"}},
 	}
-	runtime := nodehost.Runtime(host)(agentCfg, nil, testLogger())(agentruntime.Hooks{
+	runtime := nodehost.Runtime(host)(agentCfg, cfg.registry, testLogger())(agentruntime.Hooks{
 		Chat: true,
 		Approvers: map[string]agentruntime.Approver{
 			"default": approverFunc(func(_ context.Context, tool, summary string) (bool, string) {
@@ -135,6 +155,13 @@ func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *lo
 
 	gate := nodeserve.NewToolGate(testLogger())
 	background := nodeserve.NewBackgroundSink(testLogger())
+	var proxy *nodeserve.ToolProxy
+	if cfg.registry != nil {
+		proxy = nodeserve.NewToolProxy(testLogger())
+		// What a node's runtime builder would be handed. The scripted agent
+		// reaches for tools out of it exactly as a real backend's toolset does.
+		script.tools = proxy.Registry()
+	}
 	script.gate = gate
 	conn, err := nodesocket.Dial(ctx, "ws://"+listener.Addr().String(), nodesocket.DialOptions{Token: minted.Token})
 	if err != nil {
@@ -149,6 +176,7 @@ func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *lo
 			Logger:      testLogger(),
 			Gate:        gate,
 			Background:  background,
+			Tools:       proxy,
 			WindowBytes: nodesocket.DefaultWindowBytes,
 		})
 	}()
@@ -170,12 +198,14 @@ func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *lo
 		store:      store,
 		addr:       listener.Addr().String(),
 		selector:   minted.Selector,
+		token:      minted.Token,
 		sessions:   runtime.Sessions,
 		agent:      script,
 		gate:       gate,
 		background: background,
 		approved:   approved,
 		notices:    notices,
+		proxy:      proxy,
 
 		nodeStopped: nodeStopped,
 	}
@@ -701,6 +731,42 @@ func TestASecondNodeReplacesTheFirst(t *testing.T) {
 	}
 }
 
+// redial brings the SAME node back after its connection dropped: the same
+// agent, the same tool proxy and the same credential, over a NEW socket.
+//
+// It is what cmd/murtaugh-runtime's redial loop does about a second after a
+// laptop wakes up, and it is the only way a test can observe whether anything on
+// either side repeats a call that was in flight when the previous connection
+// died — with one connection there is no path by which a repeat could arrive.
+func redial(t *testing.T, rig *loopback) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	conn, err := nodesocket.Dial(ctx, "ws://"+rig.addr, nodesocket.DialOptions{Token: rig.token})
+	if err != nil {
+		t.Fatalf("redial: %v", err)
+	}
+	served := make(chan error, 1)
+	go func() {
+		served <- nodeserve.Serve(ctx, conn, rig.agent, nodeserve.Options{
+			Logger:      testLogger(),
+			Gate:        rig.gate,
+			Background:  rig.background,
+			Tools:       rig.proxy,
+			WindowBytes: nodesocket.DefaultWindowBytes,
+		})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-served
+	})
+	waitFor(t, "the node to attach again", func() bool {
+		_, ok := rig.host.Attached()
+		return ok
+	})
+}
+
 // attachAnother dials a second node into the same gateway.
 func attachAnother(t *testing.T, rig *loopback, nodeID string) {
 	t.Helper()
@@ -733,6 +799,10 @@ func attachAnother(t *testing.T, rig *loopback, nodeID string) {
 type scriptedAgent struct {
 	script func(*scriptedTurn)
 	gate   *nodeserve.ToolGate
+	// tools is the node-side registry a real backend's toolset would be
+	// resolved from. A scripted turn reaches into it the way a model's tool call
+	// would.
+	tools *tools.Registry
 	// initErr makes the agent refuse to come up, which is a real state — a
 	// backend binary that is not installed on the node's machine.
 	initErr error
@@ -742,14 +812,35 @@ type scriptedAgent struct {
 	last      agent.PromptRequest
 	cancelled int
 	initCalls int
+	// The two moments a real backend latches its toolset, recorded as the names
+	// visible in the node's registry at each. native resolves inside Initialize;
+	// an acp/claude_code agent's aggregator resolves when its first session is
+	// registered, which is inside NewSession. Both must already see the
+	// gateway's tools or that backend is tool-less for the life of the process.
+	atInitialize []string
+	atNewSession []string
 }
 
 type scriptedTurn struct {
 	ctx       context.Context
 	gate      *nodeserve.ToolGate
+	tools     *tools.Registry
 	events    chan agent.Event
 	cancelled chan struct{}
 	once      sync.Once
+}
+
+// invoke calls a tool out of the node's registry, which is what a backend does
+// with the toolset toolset.Resolve handed it.
+func (t *scriptedTurn) invoke(name string, args map[string]any) (any, error) {
+	if t.tools == nil {
+		return nil, errors.New("this rig was built without a tool channel")
+	}
+	tool, ok := t.tools.Get(name)
+	if !ok {
+		return nil, fmt.Errorf("no tool named %q reached the node", name)
+	}
+	return tool.Invoke(t.ctx, args)
 }
 
 func newScriptedAgent(script func(*scriptedTurn)) *scriptedAgent {
@@ -759,19 +850,37 @@ func newScriptedAgent(script func(*scriptedTurn)) *scriptedAgent {
 func (a *scriptedAgent) Initialize(context.Context) error {
 	a.mu.Lock()
 	a.initCalls++
+	a.atInitialize = registryNames(a.tools)
 	err := a.initErr
 	a.mu.Unlock()
 	return err
 }
 
 func (a *scriptedAgent) NewSession(_ context.Context, _ agent.SessionMetadata) (agent.Session, error) {
+	a.mu.Lock()
+	a.atNewSession = registryNames(a.tools)
+	a.mu.Unlock()
 	return agent.Session{ID: "node-session-1"}, nil
+}
+
+// registryNames is what a backend resolving its toolset out of the node's
+// registry would see at that instant.
+func registryNames(reg *tools.Registry) []string {
+	if reg == nil {
+		return nil
+	}
+	var names []string
+	for _, t := range reg.All() {
+		names = append(names, t.Name())
+	}
+	return names
 }
 
 func (a *scriptedAgent) Prompt(ctx context.Context, sessionID string, req agent.PromptRequest) (<-chan agent.Event, error) {
 	turn := &scriptedTurn{
 		ctx:       ctx,
 		gate:      a.gate,
+		tools:     a.tools,
 		events:    make(chan agent.Event, 8),
 		cancelled: make(chan struct{}),
 	}
@@ -818,6 +927,18 @@ func (a *scriptedAgent) initializes() int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.initCalls
+}
+
+func (a *scriptedAgent) toolsAtInitialize() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]string(nil), a.atInitialize...)
+}
+
+func (a *scriptedAgent) toolsAtNewSession() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]string(nil), a.atNewSession...)
 }
 
 func (t *scriptedTurn) emit(ev agent.Event) {

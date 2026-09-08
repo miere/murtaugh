@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/miere/murtaugh/internal/agent"
@@ -34,6 +36,14 @@ type Options struct {
 	// lasts. nil drops them, which is what a node whose runtime was built with
 	// no background hook already does.
 	Background *BackgroundSink
+	// Tools is the node's proxy for Murtaugh's own tools, which live on the
+	// gateway. Like the gate it is built before the agent — the agent's toolset
+	// is resolved and LATCHED at its first Initialize, so a proxy populated
+	// after that point would be a registry the agent never looks at again.
+	//
+	// nil leaves the node's agent with its backend's own tools and none of
+	// Murtaugh's, which is what every node did before #194.
+	Tools *ToolProxy
 	// WindowBytes, AckThreshold, AckInterval and Epoch go to the link. Zero
 	// takes the link's defaults — which is wrong over a real socket; see
 	// nodesocket.DefaultWindowBytes.
@@ -50,13 +60,21 @@ type Server struct {
 	enc    *agentwire.Encoder
 	link   *nodelink.Link
 	ready  chan struct{}
+	proxy  *ToolProxy
 
 	ctx    context.Context
 	cancel context.CancelFunc
 
+	// nextID numbers the requests this side mints — today only the tool
+	// channel's. Ids are per DIRECTION: the gateway's counter also starts at
+	// "1", and the two are never compared, which is why calls below is a
+	// separate map from anything the gateway's ids index.
+	nextID atomic.Int64
+
 	mu    sync.Mutex
 	turns map[string]*turn
 	asks  map[string]*ask
+	calls map[string]chan agentwire.Message
 }
 
 // turn is one in-flight prompt.
@@ -99,6 +117,12 @@ func Serve(ctx context.Context, conn nodelink.Conn, client agent.Client, opts Op
 		ready:  make(chan struct{}),
 		turns:  make(map[string]*turn),
 		asks:   make(map[string]*ask),
+		calls:  make(map[string]chan agentwire.Message),
+		// Set at construction, not alongside the binds below: the read loop
+		// starts inside nodelink.New and serveInitialize reads this field off
+		// that loop, so assigning it afterwards is a data race with the first
+		// frame the gateway sends.
+		proxy: opts.Tools,
 	}
 	s.ctx, s.cancel = context.WithCancel(ctx)
 	defer s.cancel()
@@ -122,6 +146,10 @@ func Serve(ctx context.Context, conn nodelink.Conn, client agent.Client, opts Op
 	if opts.Background != nil {
 		opts.Background.bind(s)
 		defer opts.Background.unbind(s)
+	}
+	if opts.Tools != nil {
+		opts.Tools.bind(s)
+		defer opts.Tools.unbind(s)
 	}
 
 	select {
@@ -153,10 +181,109 @@ func (s *Server) consume(payload []byte) error {
 		go s.serve(msg)
 	case agentwire.MessagePermission:
 		s.answer(msg)
+	case agentwire.MessageResponse:
+		// The tool channel's answers. Applied on the read loop because it is a
+		// buffered channel send that cannot block — exactly as a permission
+		// answer is. Handing this to a goroutine would reorder nothing and cost
+		// one per call.
+		s.deliverResponse(msg)
 	default:
 		s.log.Warn("nodeserve: unexpected frame from gateway", "kind", msg.Kind, "id", msg.ID)
 	}
 	return nil
+}
+
+// deliverResponse routes an answer to the call that is waiting for it.
+func (s *Server) deliverResponse(msg agentwire.Message) {
+	s.mu.Lock()
+	waiting := s.calls[msg.ID]
+	delete(s.calls, msg.ID)
+	s.mu.Unlock()
+	if waiting == nil {
+		// The caller gave up, or the turn ended under it. Ordinary, not an
+		// error: a tool call abandoned mid-flight still gets its answer.
+		s.log.Debug("nodeserve: response for a call nobody is waiting on", "id", msg.ID)
+		return
+	}
+	waiting <- msg
+	close(waiting)
+}
+
+// callGateway performs one node → gateway round trip and returns the answer.
+//
+// It is called from the goroutine running a tool's Invoke — which is inside the
+// agent's own turn, never on the link's read loop. That matters: nodelink acks a
+// frame only once its handler returns, so a call issued from the read loop and
+// waiting on the gateway's answer would deadlock the link in both directions.
+func (s *Server) callGateway(ctx context.Context, method agentwire.Method, body any) (agentwire.Message, error) {
+	id := strconv.FormatInt(s.nextID.Add(1), 10)
+	answer := make(chan agentwire.Message, 1)
+	s.mu.Lock()
+	s.calls[id] = answer
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.calls, id)
+		s.mu.Unlock()
+	}()
+
+	msg, err := agentwire.Request(id, method, body)
+	if err != nil {
+		return agentwire.Message{}, err
+	}
+	if err := s.sendOn(ctx, msg); err != nil {
+		return agentwire.Message{}, err
+	}
+
+	select {
+	case <-ctx.Done():
+		// Both can fire together, and which one the model is told about
+		// matters. A turn's context on a node is cancelled BY the link dying —
+		// shutdown ends every turn before it fails the calls — so when both are
+		// ready the link's verdict is the true one and the more actionable.
+		// Go's select picks at random among ready cases, so the priority is
+		// spelled out rather than left to chance.
+		select {
+		case <-s.link.Done():
+			return agentwire.Message{}, errLinkGone
+		default:
+		}
+		return agentwire.Message{}, ctx.Err()
+	case <-s.ctx.Done():
+		return agentwire.Message{}, errLinkGone
+	case <-s.link.Done():
+		return agentwire.Message{}, errLinkGone
+	case response, delivered := <-answer:
+		if !delivered {
+			// failCalls closed it: the connection ended while this call was in
+			// flight. A closed channel rather than a fault frame, because the
+			// answer never came and inventing one that looks like the gateway's
+			// would be a lie about where the failure happened.
+			return agentwire.Message{}, errLinkGone
+		}
+		if fault := response.Fault(); fault != nil {
+			return agentwire.Message{}, fault
+		}
+		return response, nil
+	}
+}
+
+// failCalls ends every outstanding tool call when the connection does.
+//
+// It is the node-side half of the no-retry abort policy, and the reason it is
+// unconditional is that nothing in the tool surface says whether a call may be
+// repeated: tools.Tool is Name/Description/InputSchema/Invoke, and neither of
+// the two optional interfaces beside it is about retryability. With no
+// idempotency information the only sound policy is to fail everything and retry
+// nothing. The wording the model sees is written once, in tools.go.
+func (s *Server) failCalls() {
+	s.mu.Lock()
+	waiting := s.calls
+	s.calls = make(map[string]chan agentwire.Message)
+	s.mu.Unlock()
+	for _, ch := range waiting {
+		close(ch)
+	}
 }
 
 // serve answers one request. It runs on its own goroutine; see the package doc.
@@ -182,6 +309,25 @@ func (s *Server) serve(msg agentwire.Message) {
 }
 
 func (s *Server) serveInitialize(msg agentwire.Message) {
+	// The tool surface is fetched HERE, immediately before the agent comes up,
+	// and the ordering is load-bearing rather than tidy. Both backend families
+	// latch, at different moments: a native agent resolves its toolset on its
+	// first Initialize, and an acp/claude_code agent's aggregator resolves it
+	// when its first session is registered (agentbuild.acpAggregator's
+	// resolvedToolset, which is lazy for exactly this reason). A proxy populated
+	// after either point would be a registry that backend never consults again —
+	// the same construct-once, latch, warn-only shape that made #185 invisible.
+	//
+	// A gateway that cannot answer fails the handshake. That is deliberate: the
+	// node's redial loop retries in about a second, whereas publishing an agent
+	// with an empty toolset would look like working software to everyone except
+	// the user asking it to do something.
+	if s.proxy != nil {
+		if err := s.proxy.refresh(s.ctx, s); err != nil {
+			s.fault(msg.ID, fmt.Errorf("nodeserve: could not fetch this gateway's tool surface: %w", err))
+			return
+		}
+	}
 	if err := s.client.Initialize(s.ctx); err != nil {
 		s.fault(msg.ID, err)
 		return
@@ -379,6 +525,7 @@ func (s *Server) shutdown() {
 		// down. The gateway's own failAll is what tells the user.
 		s.endTurn(id, false)
 	}
+	s.failCalls()
 	s.cancel()
 }
 
