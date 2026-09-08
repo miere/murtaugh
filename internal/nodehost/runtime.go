@@ -102,57 +102,78 @@ func approverFor(cfg config.Config, hooks agentruntime.Hooks) func(context.Conte
 	return nil
 }
 
-// nodeClient is agent.Client bound to whichever node is attached.
+// nodeClient is agent.Client over the registry: a conversation opens on one
+// node and every later call for it goes back to that node.
 //
 // It is a thin indirection rather than the remote client itself because the
 // session managers outlive any one connection: a node that drops and dials back
 // in must be picked up by the managers that are already there, and a captured
-// client would be a dead one.
+// client would be a dead one. The registry adds the second reason — there is
+// now more than one client it could mean, and only one of them minted the
+// session in hand.
 type nodeClient struct {
 	host *Host
 }
 
-// Initialize answers for the attached node.
+// Initialize answers for the fleet.
 //
-// The real initialize already happened at the handshake, and it had to: the
-// session manager latches "initialized" on first success and would never repeat
-// it for a node that connected afterwards. What is left here is the question
-// the manager is really asking — is there anything to talk to.
+// The real initialize already happened at each node's handshake, and it had to:
+// the session manager latches "initialized" on first success and would never
+// repeat it for a node that connected afterwards. What is left here is the
+// question the manager is really asking — is there anything to talk to.
 func (c *nodeClient) Initialize(context.Context) error {
-	_, err := c.host.client()
+	_, err := c.host.anyClient()
 	return err
 }
 
+// NewSession opens a session on a node and binds it there.
+//
+// WHICH node is still "the most recently attached" — the choice is item 10 —
+// but the binding is not deferred with it. Without it every later call for this
+// conversation would be sent to whichever node happened to be newest at the
+// time, so a second node attaching would take over a live conversation on the
+// first: its prompts, and its cancels, which would be delivered to a node that
+// has no such session and answered as success.
 func (c *nodeClient) NewSession(ctx context.Context, meta agent.SessionMetadata) (agent.Session, error) {
-	client, err := c.host.client()
+	node, err := c.host.openOn()
 	if err != nil {
 		return agent.Session{}, err
 	}
-	return client.NewSession(ctx, meta)
+	session, err := node.client.NewSession(ctx, meta)
+	if err != nil {
+		return agent.Session{}, err
+	}
+	c.host.bindSession(session.ID, node)
+	return session, nil
 }
 
+// Prompt sends the turn to the node holding the session.
+//
+// A session id names a machine: ids are minted per node, so sending one to any
+// other node is at best an error the user sees and at worst — for a node whose
+// own id happens to collide — somebody else's conversation.
 func (c *nodeClient) Prompt(ctx context.Context, sessionID string, req agent.PromptRequest) (<-chan agent.Event, error) {
-	client, err := c.host.client()
+	node, err := c.host.sessionNode(sessionID)
 	if err != nil {
+		// agent.ErrSessionGone. #170's stated position is that a dropped node
+		// loses its sessions; the recovery — re-electing the conversation onto
+		// another node and telling the model it moved — is #196's, item 10.
+		// Until then this surfaces to the user, which is what the single slot
+		// did too, and it now names the right node.
 		return nil, err
 	}
-	// A session id minted by a node that has since been replaced means nothing
-	// to the newcomer, and the node answers with an error the user sees. That
-	// is #170's stated position — a dropped node loses its sessions, and the
-	// recovery path is the takeover card (#196), not a silent re-creation that
-	// would look to the user like the agent forgetting the conversation.
-	return client.Prompt(ctx, sessionID, req)
+	return node.client.Prompt(ctx, sessionID, req)
 }
 
 func (c *nodeClient) Cancel(ctx context.Context, sessionID string) error {
-	client, err := c.host.client()
+	node, err := c.host.sessionNode(sessionID)
 	if err != nil {
 		// Nothing is running, so nothing failed to be interrupted. Reporting an
 		// error here would put a failure card on the idle path's five-second
 		// cancel for a node that is simply gone.
 		return nil
 	}
-	return client.Cancel(ctx, sessionID)
+	return node.client.Cancel(ctx, sessionID)
 }
 
 // Close releases the gateway's side of the conversation, not the node. The node
@@ -161,15 +182,16 @@ func (c *nodeClient) Cancel(ctx context.Context, sessionID string) error {
 func (c *nodeClient) Close() error { return nil }
 
 func (c *nodeClient) CloseSession(sessionID string) {
-	client, err := c.host.client()
+	node, err := c.host.sessionNode(sessionID)
+	c.host.unbindSession(sessionID)
 	if err != nil {
 		return
 	}
-	client.CloseSession(sessionID)
+	node.client.CloseSession(sessionID)
 }
 
 func (c *nodeClient) SupportsCancel(ctx context.Context) bool {
-	client, err := c.host.client()
+	client, err := c.host.anyClient()
 	if err != nil {
 		// Unknown degrades to interruptible, the same way the session manager's
 		// own unresolved probe does: a missing answer must never be the one that

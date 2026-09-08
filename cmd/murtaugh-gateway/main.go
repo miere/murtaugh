@@ -109,7 +109,12 @@ func run(args []string) error {
 		if err != nil {
 			return fmt.Errorf("open the node credential store: %w", err)
 		}
-		host, err := nodehost.New(nodehost.Options{Tokens: tokens, Logger: logger})
+		// The journal is handed over because #170 says node disconnects are
+		// journalled and not announced: a laptop sleeping at six o'clock
+		// disconnects every evening, and a DM about it trains the admin to
+		// ignore the one that matters. The binary already opened it above; the
+		// Host had no way to reach it before #195.
+		host, err := nodehost.New(nodehost.Options{Tokens: tokens, Logger: logger, Journal: recorder})
 		if err != nil {
 			return err
 		}

@@ -128,8 +128,29 @@ type Empty struct{}
 // cannot be interrupted" — a lie that silently disables interrupting an
 // in-flight turn. Absent means unknown, and unknown degrades to interruptible,
 // which is exactly what the session manager does with an unresolved probe.
+//
+// Advertisement rides here for a different reason, and the reason is ordering.
+// It is what the node claims to serve, and the gateway builds its registry entry
+// immediately after this answer returns — so a claim carried here is guaranteed
+// to be in hand at exactly the moment there is somewhere to put it. A node that
+// pushed its opening claim as a MethodAdvertise request instead would be racing
+// its own handshake: the frame can reach a gateway whose registry has no entry
+// for the connection yet, and the claim is then dropped for a window nobody
+// would think to look at. Later changes have no such problem and travel as
+// MethodAdvertise.
+//
+// What it does NOT unlock is addressing a profile. Nothing on the wire names an
+// agent — SessionMetadata and PromptBody carry none — so a node listing profile
+// names tells the gateway what exists without giving it a way to ask for one.
+// That is stated here rather than implied: item 9 records the names, and the
+// field on session.new that would make them addressable is a later item's.
 type InitializeResult struct {
 	Interruptible *bool `json:"interruptible,omitempty"`
+	// Advertisement is the node's opening claim. A zero value means the node
+	// claims nothing, which is a legitimate answer and not an absence — an
+	// unconfigured node is exactly that, and #170 makes it the onboarding
+	// trigger rather than an error.
+	Advertisement Advertisement `json:"advertisement,omitzero"`
 }
 
 // NewSessionResult answers MethodNewSession with the id every later call names.

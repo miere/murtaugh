@@ -65,6 +65,16 @@ const (
 	// that names a tool it was not offered is refused rather than filtered,
 	// because a node cannot be trusted to filter itself.
 	MethodToolCall Method = "tool.call"
+	// MethodAdvertise replaces what the gateway believes this node claims. Its
+	// body is an Advertisement and its answer is Empty.
+	//
+	// It is a request rather than a fire-and-forget event so the node learns
+	// whether the claim landed: a node whose advertisement was rejected and
+	// which cannot tell would go on believing it serves channels the gateway
+	// will never send it. It carries only CHANGES — the connect-time snapshot
+	// rides InitializeResult, because a node-initiated frame at handshake time
+	// can beat the gateway's own registry entry into existence.
+	MethodAdvertise Method = "node.advertise"
 )
 
 // Message is one payload: what the envelope wraps.

@@ -52,6 +52,7 @@ import (
 	"github.com/miere/murtaugh/internal/config/migrate"
 	configstore "github.com/miere/murtaugh/internal/config/store"
 	"github.com/miere/murtaugh/internal/mcpbridge"
+	"github.com/miere/murtaugh/internal/nodeclaim"
 	"github.com/miere/murtaugh/internal/nodeserve"
 	"github.com/miere/murtaugh/internal/nodesocket"
 	"github.com/miere/murtaugh/internal/nodetoken"
@@ -159,6 +160,34 @@ func run(args []string) error {
 	}
 	logger.Info("runtime node serving one agent", "agent", name, "gateway", *gatewayURL)
 
+	// What this node claims, set BEFORE the first dial so the handshake answer
+	// carries it. A node that advertised after attaching would be attached and
+	// mute for a window, and the gateway builds its registry entry inside that
+	// window.
+	serving := []string{name}
+	served.claim.Publish(ctx, nodeclaim.Advertise(cfg, serving))
+
+	// And the only reason a node ever changes its claim afterwards. Nothing
+	// else on this binary notices a configuration edit at all: the agent is
+	// built once from the snapshot above and stays built, because both backend
+	// families latch their toolset and the redial loop reuses the client it
+	// captured. This re-reads the claim and nothing else.
+	//
+	// A watcher that cannot be built is reported and skipped rather than fatal:
+	// a node that cannot notice an edit still serves every conversation it is
+	// given, and one that refused to start serves none.
+	if watcher, err := nodeclaim.NewWatcher(ctx, nodeclaim.Options{
+		Store:   cfgStore,
+		Base:    cfg,
+		Serving: serving,
+		Publish: served.claim.Publish,
+		Logger:  logger,
+	}); err != nil {
+		logger.Warn("this node will not notice configuration changes", "error", err)
+	} else {
+		go watcher.Run(ctx)
+	}
+
 	// The node's own MCP aggregator socket, which an acp/claude_code agent's
 	// bridge subprocess dials. It is local to this machine and never crosses the
 	// network: the tool CALLS cross, one frame each, not the MCP byte stream —
@@ -185,6 +214,7 @@ func run(args []string) error {
 		gate:       served.gate,
 		background: served.background,
 		tools:      served.tools,
+		claim:      served.claim,
 	})
 }
 
@@ -195,6 +225,11 @@ type servedAgent struct {
 	gate       *nodeserve.ToolGate
 	background *nodeserve.BackgroundSink
 	tools      *nodeserve.ToolProxy
+	// claim holds what this node tells the gateway it serves. Like the three
+	// above it is built before the agent and bound to whichever connection is
+	// serving; unlike them it is also read at one specific moment, when the
+	// handshake answer is assembled.
+	claim *nodeserve.Advertiser
 	// serveTools binds this node's LOCAL aggregator socket, the one an
 	// acp/claude_code agent's bridge subprocess dials. nil when there is nothing
 	// to serve.
@@ -225,6 +260,7 @@ func serveAgent(cfg config.Config, logger *slog.Logger, requested string) (serve
 	gate := nodeserve.NewToolGate(logger)
 	background := nodeserve.NewBackgroundSink(logger)
 	proxy := nodeserve.NewToolProxy(logger)
+	claim := nodeserve.NewAdvertiser(logger)
 
 	runtime := local.Builder(cfg, proxy.Registry(), logger)(nodeHooks(cfg, gate, background))
 	client, ok := runtime.Clients[name]
@@ -236,6 +272,7 @@ func serveAgent(cfg config.Config, logger *slog.Logger, requested string) (serve
 		gate:       gate,
 		background: background,
 		tools:      proxy,
+		claim:      claim,
 		serveTools: runtime.ServeTools,
 	}, name, nil
 }
@@ -295,6 +332,7 @@ type attachment struct {
 	gate       *nodeserve.ToolGate
 	background *nodeserve.BackgroundSink
 	tools      *nodeserve.ToolProxy
+	claim      *nodeserve.Advertiser
 }
 
 // attach dials the gateway and serves it, redialling until the process is
@@ -318,6 +356,7 @@ func attach(ctx context.Context, logger *slog.Logger, a attachment) error {
 				Gate:        a.gate,
 				Background:  a.background,
 				Tools:       a.tools,
+				Advertise:   a.claim,
 				WindowBytes: nodesocket.DefaultWindowBytes,
 				AckInterval: 30 * time.Second,
 			})

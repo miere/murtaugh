@@ -18,6 +18,22 @@ import (
 // down (#170 Change E).
 var ErrNonJSONOutput = errors.New("delegate-to-agent: agent output was not valid JSON")
 
+// ErrSessionGone means the session id a call named no longer resolves to
+// anything that could serve it, and that opening a fresh session would.
+//
+// It exists because of the split. In process a session id is only ever invalid
+// because the agent died, and there is nothing better to do than report it.
+// With a broker in front of several runtime nodes a session id is minted BY a
+// node, so a node disconnecting invalidates every id it minted while the
+// conversation itself is perfectly servable — by somebody else. It is part of
+// the Client contract rather than nodehost's own error so that a caller can
+// tell it apart from ErrNoNode without importing the broker: ErrNoNode says the
+// turn cannot run, this says this SESSION cannot and a new one could.
+//
+// Nothing acts on the distinction yet beyond what the user is told. Answering it
+// by re-opening the conversation on another node is #196's re-election.
+var ErrSessionGone = errors.New("the runtime node holding this session is no longer connected")
+
 type Client interface {
 	Initialize(context.Context) error
 	NewSession(context.Context, SessionMetadata) (Session, error)
