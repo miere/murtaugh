@@ -432,7 +432,14 @@ type SessionDefaults struct {
 	// alive (so request_timeout never trips), and this is what stops a wedged tool.
 	// Empty takes a 1h default. Applies to ACP agents (native tools are in-process).
 	LongRunningToolTimeout string `yaml:"long_running_tool_timeout" json:"long_running_tool_timeout"`
-	MaxConcurrent          int    `yaml:"max_concurrent" json:"max_concurrent"`
+	// BackgroundIdleTimeout is RequestTimeout's counterpart for work that lands
+	// AFTER a turn ends — a claude_code subagent completing, then the model
+	// auto-continuing — which renders into the thread with no turn loop watching
+	// it. Also idle-bounded, and longer than RequestTimeout on purpose: the tool
+	// heartbeat that props a turn's window up is scoped to the turn, so nothing
+	// keeps this one alive but real output. Empty takes a 15m default.
+	BackgroundIdleTimeout string `yaml:"background_idle_timeout" json:"background_idle_timeout"`
+	MaxConcurrent         int    `yaml:"max_concurrent" json:"max_concurrent"`
 }
 
 // RenderingDefaults tune how a streaming turn renders in Slack (both backends).
@@ -1330,6 +1337,7 @@ func (c RuntimeDefaults) Validate() error {
 		"defaults.session.request_timeout":           c.Session.RequestTimeout,
 		"defaults.session.idle_timeout":              c.Session.IdleTimeout,
 		"defaults.session.long_running_tool_timeout": c.Session.LongRunningToolTimeout,
+		"defaults.session.background_idle_timeout":   c.Session.BackgroundIdleTimeout,
 		"defaults.rendering.stream_append_interval":  c.Rendering.StreamAppendInterval,
 		"defaults.acp.cancel_grace_period":           c.ACP.CancelGracePeriod,
 	} {
@@ -1517,6 +1525,15 @@ func (c RuntimeDefaults) EffectiveStartupTimeout() time.Duration {
 // every event, so it bounds inactivity rather than total turn duration.
 func (c RuntimeDefaults) EffectiveRequestTimeout() time.Duration {
 	return durationOrDefault(c.Session.RequestTimeout, 10*time.Minute)
+}
+
+// EffectiveBackgroundIdleTimeout is the idle timeout for a background stretch:
+// the longest a background completion may go with no agent activity before its
+// Slack message is closed out. Like EffectiveRequestTimeout it is reset by every
+// event, so it bounds inactivity; unlike it, no heartbeat feeds it, which is why
+// its default is the longer of the two.
+func (c RuntimeDefaults) EffectiveBackgroundIdleTimeout() time.Duration {
+	return durationOrDefault(c.Session.BackgroundIdleTimeout, 15*time.Minute)
 }
 
 func (c RuntimeDefaults) EffectiveSessionIdleTimeout() time.Duration {

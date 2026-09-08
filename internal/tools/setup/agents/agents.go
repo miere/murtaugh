@@ -119,7 +119,7 @@ func (r Result) String() string {
 // runtimeDefaults is the runtime tuning the installer establishes on first run,
 // split by the concern each knob serves.
 var runtimeDefaults = config.RuntimeDefaults{
-	Session:   config.SessionDefaults{IdleTimeout: "30m", RequestTimeout: "10m", LongRunningToolTimeout: "1h", MaxConcurrent: 100},
+	Session:   config.SessionDefaults{IdleTimeout: "30m", RequestTimeout: "10m", LongRunningToolTimeout: "1h", BackgroundIdleTimeout: "15m", MaxConcurrent: 100},
 	Rendering: config.RenderingDefaults{ProgressDisplay: "simplified", StreamMinChunkChars: 96, StreamAppendInterval: "750ms"},
 	ACP:       config.ACPDefaults{StartupTimeout: "10s", CancelGracePeriod: "2s"},
 }

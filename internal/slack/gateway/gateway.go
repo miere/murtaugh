@@ -441,8 +441,10 @@ func New(cfg config.Config, logger *slog.Logger, recorder journal.Recorder, brok
 	if cfg.Chat.Enabled {
 		// Renders claude_code background completions (subagents finishing after a
 		// turn ends) into their thread; shared across agents, bound to the chat
-		// handler's renderer below.
-		bgRouter = newBackgroundEventsRouter(logger)
+		// handler's renderer below. Its window is the background counterpart of the
+		// handler's request_timeout: no turn loop is watching a background stretch,
+		// so this is the only thing that can close its message.
+		bgRouter = newBackgroundEventsRouter(logger, cfg.Defaults.EffectiveBackgroundIdleTimeout())
 		if broker != nil {
 			approvers = make(map[string]agentruntime.Approver, len(cfg.Agents))
 			for name, profile := range cfg.Agents {
