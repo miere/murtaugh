@@ -20,8 +20,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
+	"github.com/miere/murtaugh/internal/agentruntime/local"
 	"github.com/miere/murtaugh/internal/app"
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/config/migrate"
@@ -136,7 +136,13 @@ func run(rawArgs []string) error {
 	store, recorder, closeJournal := openJournal(cfg, mode, rest, logger)
 	defer closeJournal()
 
-	application := app.New(mode, rest, cfg, cfgStore, configPath, version, logger, recorder).
+	// The CLI keeps its local agent, and so does this binary's gateway mode: it
+	// is the one that serves today, and #170 Stage 1 removes nothing from it.
+	// Naming the implementation here rather than inside internal/app is what
+	// makes "which binaries can run an agent" answerable by reading the imports
+	// of a main package — cmd/murtaugh-gateway names none, and CI proves it.
+	agents := app.Agents{Runtime: local.Builder, Delegator: local.Delegator}
+	application := app.New(mode, rest, cfg, cfgStore, configPath, version, logger, recorder, agents).
 		WithJSONOutput(jsonOutput)
 	// The Slack gateway is the only long-running mode that needs a
 	// user-triggered restart path. stop is reused as the cancel hook so
@@ -146,26 +152,12 @@ func run(rawArgs []string) error {
 		application = application.WithRestartCoordinator(
 			app.NewRestartCoordinator(stop, logger, 0, 0),
 		)
-		if path, err := defaultResumeMarkerPath(); err != nil {
+		if path, err := app.DefaultResumeMarkerPath(); err != nil {
 			logger.Warn("resume marker disabled: could not resolve state directory", "error", err)
 		} else {
 			application = application.WithResumeMarkerPath(path)
 		}
-		// The daemon is the single writer, so the retention sweep runs here,
-		// reusing the recorder's store (Prune serializes with the writer on the
-		// one connection). The journal.prune tool is the manual equivalent.
-		if store != nil {
-			application = application.WithJournalSweeper(func(ctx context.Context) error {
-				res, err := store.Prune(ctx, time.Now())
-				if err != nil {
-					return err
-				}
-				if res.Total > 0 {
-					logger.Info("journal swept old events", "removed", res.Total, "by_stream", res.Removed)
-				}
-				return nil
-			}, cfg.Journal.EffectiveSweepEvery())
-		}
+		application = application.WithJournalRetentionSweep(store, cfg, logger)
 	}
 	if mode == app.ModeCLI && len(rest) == 0 {
 		return errors.New(application.UsageLine())
@@ -291,36 +283,16 @@ func helpRequest(args []string) ([]string, bool) {
 	return nil, false
 }
 
-// openJournal opens the event journal and returns the store, a recorder, and a
-// cleanup that drains and closes them. The store is returned so the gateway can
-// reuse it for the retention sweep (the daemon is the single writer). It
-// degrades to a nil store + no-op recorder (with a no-op cleanup) for setup
-// invocations — which run before a valid config exists — and whenever the store
-// cannot be opened, so journaling never blocks startup. The caller must invoke
-// the returned cleanup before exit so buffered events flush.
+// openJournal opens the event journal for this invocation. Setup tools run
+// before a valid config exists, so they get a nil store and a no-op recorder;
+// everything else takes the daemon's own opener, which degrades the same way
+// when the store cannot be opened. The caller must invoke the returned cleanup
+// before exit so buffered events flush.
 func openJournal(cfg config.Config, mode app.Mode, rest []string, logger *slog.Logger) (*journal.Store, journal.Recorder, func()) {
 	if isSetupInvocation(mode, rest) {
 		return nil, journal.NopRecorder{}, func() {}
 	}
-	path := cfg.Journal.EffectivePath(cfg.BaseDir, cfg.BaseName)
-	store, err := journal.Open(path, cfg.Journal.RetentionByStream(),
-		journal.WithBlobDir(cfg.Journal.EffectiveBlobDir(cfg.BaseDir, cfg.BaseName)))
-	if err != nil {
-		logger.Warn("journal disabled: could not open event store", "path", path, "error", err)
-		return nil, journal.NopRecorder{}, func() {}
-	}
-	recorder := journal.NewRecorder(store, cfg.Journal.EnabledStreams(), logger)
-	cleanup := func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := recorder.Close(ctx); err != nil {
-			logger.Warn("journal recorder did not drain cleanly", "error", err)
-		}
-		if err := store.Close(); err != nil {
-			logger.Warn("journal store close failed", "error", err)
-		}
-	}
-	return store, recorder, cleanup
+	return app.OpenJournal(cfg, logger)
 }
 
 // adoptLegacyBootstrap renames a legacy gateway.yaml to configPath when the
@@ -393,21 +365,6 @@ func selectMode(args []string) (app.Mode, []string) {
 	default:
 		return app.ModeCLI, args
 	}
-}
-
-// defaultResumeMarkerPath resolves the on-disk location for the
-// cross-restart resume marker. Follows the XDG state convention
-// (XDG_STATE_HOME overrides; falls back to ~/.local/state/murtaugh)
-// because the marker is runtime state, not config.
-func defaultResumeMarkerPath() (string, error) {
-	if v := strings.TrimSpace(os.Getenv("XDG_STATE_HOME")); v != "" {
-		return filepath.Join(v, "murtaugh", "restart.json"), nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, ".local", "state", "murtaugh", "restart.json"), nil
 }
 
 // newLogger builds the slog logger Murtaugh uses for daemon-style modes.

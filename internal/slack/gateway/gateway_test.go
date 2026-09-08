@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/miere/murtaugh/internal/agent"
-	"github.com/miere/murtaugh/internal/agentdelegate"
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/unfurl"
 	"github.com/slack-go/slack"
@@ -48,7 +47,7 @@ func TestAppNotifiesStartupOnceWhenSocketConnects(t *testing.T) {
 }
 
 func TestNewWithoutAdminUserDoesNotInstallTypedNilStartupNotifier(t *testing.T) {
-	app := New(config.Config{OAuth: config.OAuthConfig{AppToken: "xapp-test", BotToken: "xoxb-test"}}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, nil, nil, nil)
+	app := New(config.Config{OAuth: config.OAuthConfig{AppToken: "xapp-test", BotToken: "xoxb-test"}}, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, nil, nil, nil, nil)
 	if app.startupNotifier != nil {
 		t.Fatalf("expected no startup notifier without configuration.admin_user, got %#v", app.startupNotifier)
 	}
@@ -447,7 +446,7 @@ func TestLinkUnfurlHandlerSkipsNonJSONDelegate(t *testing.T) {
 	matcher, _ := unfurl.NewMatcher(map[string]config.UnfurlRuleConfig{
 		"issue": {Match: config.UnfurlMatchConfig{Domain: "github.com"}, Unfurl: config.UnfurlActionConfig{DelegateToAgent: &config.DelegateToAgentConfig{Agent: "default", Prompt: "x"}}},
 	})
-	del := &stubUnfurlDelegator{err: agentdelegate.ErrNonJSONOutput}
+	del := &stubUnfurlDelegator{err: agent.ErrNonJSONOutput}
 	handler := NewLinkUnfurlHandler(matcher, unfurl.NewRenderer(t.TempDir(), nil), nil, del, api, discardLogger())
 	if err := handler.Handle(context.Background(), LinkSharedRequest{
 		ChannelID: "C1",

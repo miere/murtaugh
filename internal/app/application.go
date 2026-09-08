@@ -20,7 +20,7 @@ import (
 	"time"
 
 	"github.com/miere/murtaugh/assets"
-	"github.com/miere/murtaugh/internal/agentdelegate"
+	"github.com/miere/murtaugh/internal/agentruntime"
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/config/store"
 	"github.com/miere/murtaugh/internal/frontends/cli"
@@ -132,6 +132,30 @@ type Application struct {
 	// jobRuns is the shared scheduled-run claim store, retained only so
 	// shutdown can close it. nil when no job is scheduled.
 	jobRuns config.JobRunStore
+	// agents is the agent machinery this binary was built with. The zero value
+	// is a process that cannot run an agent at all.
+	agents Agents
+}
+
+// Agents is the agent machinery an entry point is willing to link into its
+// binary. It is injected rather than imported because this package is shared by
+// every binary, and one of them — cmd/murtaugh-gateway — must be provably unable
+// to reach an agent backend (#170 Change E). A package-level import here would
+// put that backend in the gateway binary no matter which fields it left unset.
+//
+// The zero Agents is a process with no agent machinery: chat has no session
+// managers and every delegate-to-agent surface reports that delegation is
+// unavailable. internal/agentruntime/local supplies both fields for the binaries
+// that may run agents.
+type Agents struct {
+	// Runtime builds the gateway's in-process agent runtime for one
+	// configuration. It takes cfg rather than closing over it because a
+	// configuration reload builds a whole new Gateway from a new config.
+	Runtime func(config.Config, *tools.Registry, *slog.Logger) agentruntime.Builder
+	// Delegator builds the CLI/MCP one-shot delegate runner — the unbridged one,
+	// since outside the daemon no aggregator is listening. It must return a nil
+	// interface, never a typed nil, when no agents are configured.
+	Delegator func(config.Config, *tools.Registry) agentruntime.Delegator
 }
 
 // New constructs an Application for the given mode. cfg/configPath/logger
@@ -139,7 +163,7 @@ type Application struct {
 // frontends. args is the list of positional arguments handed to the CLI
 // frontend (Slack/MCP ignore it). version is the binary's compile-time
 // version string (e.g. "v0.4.1" or "dev") and is consumed by setup.update.
-func New(mode Mode, args []string, cfg config.Config, cfgStore config.Store, configPath, version string, logger *slog.Logger, recorder journal.Recorder) *Application {
+func New(mode Mode, args []string, cfg config.Config, cfgStore config.Store, configPath, version string, logger *slog.Logger, recorder journal.Recorder, agents Agents) *Application {
 	if recorder == nil {
 		recorder = journal.NopRecorder{}
 	}
@@ -163,8 +187,9 @@ func New(mode Mode, args []string, cfg config.Config, cfgStore config.Store, con
 		slacklib.NewLazyClient(cfg.OAuth.BotToken),
 		askcard.NewRenderer(baseDirFor(cfg, configPath), assets.FS),
 	)
-	reg := buildRegistry(cfg, cfgStore, configPath, version, recorder, broker, authFlow, askFlow)
+	reg := buildRegistry(cfg, cfgStore, configPath, version, recorder, broker, authFlow, askFlow, agents)
 	return &Application{
+		agents:            agents,
 		mode:              mode,
 		args:              args,
 		cfg:               cfg,
@@ -300,7 +325,7 @@ func (a *Application) WithJournalSweeper(sweep func(context.Context) error, ever
 
 // buildRegistry wires every tool Murtaugh ships with. New tools must be
 // registered here so they appear in both the CLI and MCP frontends.
-func buildRegistry(cfg config.Config, cfgStore config.Store, configPath, version string, recorder journal.Recorder, broker *interaction.Broker, authFlow *authcard.Flow, askFlow *askcard.Flow) *tools.Registry {
+func buildRegistry(cfg config.Config, cfgStore config.Store, configPath, version string, recorder journal.Recorder, broker *interaction.Broker, authFlow *authcard.Flow, askFlow *askcard.Flow, agents Agents) *tools.Registry {
 	reg := tools.NewRegistry()
 	reg.Register(ping.New())
 	reg.Register(versiontool.New(version))
@@ -315,7 +340,7 @@ func buildRegistry(cfg config.Config, cfgStore config.Store, configPath, version
 		j, ok := cfg.Jobs[name]
 		return j, ok
 	}
-	reg.Register(run.New(jobsLookup).WithDelegator(newJobDelegator(cfg, reg)).WithRecorder(recorder))
+	reg.Register(run.New(jobsLookup).WithDelegator(agents.localDelegator(cfg, reg)).WithRecorder(recorder))
 
 	// Journal read/maintenance tools open the event store on demand from the
 	// configured path; one opener (carrying per-stream retention for prune)
@@ -463,20 +488,24 @@ func effectiveTroubleshootProviders(cfg config.Config) []string {
 	return troubleshoot.KnownProviders()
 }
 
-// newJobDelegator builds the agent runner that backs agent-delegated jobs
-// (jobs with `agent`/`prompt` instead of `command`). It returns nil when no
-// agents are configured, leaving such jobs to fail with a clear error; config
-// validation already guarantees a job's agent is defined when one is set.
+// localDelegator builds the agent runner that backs agent-delegated jobs (jobs
+// with `agent`/`prompt` instead of `command`). It returns a nil interface when
+// this binary carries no agent machinery, or when no agents are configured,
+// leaving such jobs to fail with a clear error; config validation already
+// guarantees a job's agent is defined when one is set.
 //
 // This is the CLI/MCP runner: it has no MCP aggregator, because outside the
 // daemon there is none to connect to. Inside the daemon the gateway's own
 // bridged runner is used instead (see newScheduledRunner).
-func newJobDelegator(cfg config.Config, registry *tools.Registry) run.AgentDelegator {
-	if len(cfg.Agents) == 0 {
+func (a Agents) localDelegator(cfg config.Config, registry *tools.Registry) run.AgentDelegator {
+	if a.Delegator == nil {
 		return nil
 	}
-	return agentdelegate.NewRunner(cfg.Agents, cfg.Defaults, cfg.BaseDir, slog.Default()).
-		WithBuildContext(registry, cfg.MCPServers)
+	d := a.Delegator(cfg, registry)
+	if d == nil {
+		return nil
+	}
+	return d
 }
 
 // newScheduledRunner builds the executor the gateway scheduler uses to fire
@@ -490,14 +519,15 @@ func newJobDelegator(cfg config.Config, registry *tools.Registry) run.AgentDeleg
 // chat agent does, and a prompt that ends "post the result to #ops" can. nil
 // (no agents configured) falls back to the unbridged CLI runner, which fails
 // such a job with a clear error rather than silently doing nothing.
-func newScheduledRunner(cfg config.Config, recorder journal.Recorder, registry *tools.Registry, delegator *agentdelegate.Runner) gateway.ScheduledRunner {
+func (a *Application) newScheduledRunner(cfg config.Config, delegator agentruntime.Delegator) gateway.ScheduledRunner {
+	recorder, registry := a.recorder, a.registry
 	lookup := func(name string) (config.JobProfile, bool) {
 		j, ok := cfg.Jobs[name]
 		return j, ok
 	}
 	// Typed nil must not become a non-nil interface: jobs.run checks its
 	// delegator for nil to report "agent delegation is unavailable".
-	jobDelegator := newJobDelegator(cfg, registry)
+	jobDelegator := a.agents.localDelegator(cfg, registry)
 	if delegator != nil {
 		jobDelegator = delegator
 	}

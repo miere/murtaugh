@@ -11,7 +11,7 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/miere/murtaugh/internal/agentdelegate"
+	"github.com/miere/murtaugh/internal/agent"
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/slack-go/slack"
 )
@@ -218,7 +218,7 @@ func TestEngineDelegateReplyPostsJSON(t *testing.T) {
 
 func TestEngineDelegateReplyNonJSONSkipsPost(t *testing.T) {
 	poster := &recordingPoster{}
-	del := &fakeDelegator{jsonErr: agentdelegate.ErrNonJSONOutput}
+	del := &fakeDelegator{jsonErr: agent.ErrNonJSONOutput}
 	cfg := delegateReplyConfig("Summarise it")
 
 	engine := NewEngine(cfg, Options{Poster: poster, Delegator: del})

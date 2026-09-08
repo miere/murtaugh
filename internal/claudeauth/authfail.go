@@ -1,7 +1,15 @@
-package claudecode
+// Package claudeauth recognises, from its prose, a Claude Code failure that a
+// re-authentication would fix.
+//
+// It sits outside internal/agent/claudecode on purpose. Its one consumer is the
+// gateway's credential-repair path, which decides whether to ask the admin to
+// sign in again — a gateway policy, not a backend capability — and the gateway
+// must remain incapable of reaching an agent backend (#170 Change E). The
+// backend itself never asks the question: the marker list is matched against
+// text that has already left it.
+package claudeauth
 
 import (
-	"errors"
 	"strings"
 )
 
@@ -63,8 +71,3 @@ func mentionsAuthFailure(text string) bool {
 	}
 	return false
 }
-
-// ErrCredentialRejected wraps an underlying failure the gateway has classified
-// as a credential problem, so downstream code can branch on it with errors.Is
-// rather than re-running the string match.
-var ErrCredentialRejected = errors.New("claudecode: credential rejected")

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/miere/murtaugh/internal/agent"
+	"github.com/miere/murtaugh/internal/llm"
 )
 
 // approvalSummary renders a short human description of a tool call for the
@@ -126,8 +127,17 @@ func eventComplete(stopReason string) agent.Event {
 }
 
 // eventError builds the terminal failure agent.Event.
+//
+// The error is classified HERE, at the boundary where it leaves the package that
+// made the provider call, and the classification travels attached to it
+// (llm.CarryFailure — same text, same unwrap chain). Every reader downstream is
+// then free of litellm: the Slack alert card reads the vocabulary through
+// internal/providerfail, and so does the wire encoder when this turn is running
+// on a runtime node. Classifying at the reader instead would work in-process and
+// silently stop working across a link, where there is no
+// *providers.LiteLLMError left to classify.
 func eventError(err error) agent.Event {
-	return agent.Event{Type: agent.EventError, Error: err}
+	return agent.Event{Type: agent.EventError, Error: llm.CarryFailure(err)}
 }
 
 // toolResultString adapts an arbitrary tools.Tool result into the text payload

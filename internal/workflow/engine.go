@@ -11,7 +11,7 @@ import (
 	"sort"
 
 	"github.com/miere/murtaugh/assets"
-	"github.com/miere/murtaugh/internal/agentdelegate"
+	"github.com/miere/murtaugh/internal/agent"
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/journal"
 	"github.com/miere/murtaugh/internal/jsontemplate"
@@ -216,7 +216,7 @@ func (e *Engine) executeRule(ctx context.Context, rule Rule, responseURL string,
 				// A delegate-to-agent reply that produced non-JSON is not a hard
 				// failure: the runner already logged a warning with the output.
 				// Skip posting and move on rather than failing the whole rule.
-				if errors.Is(err, agentdelegate.ErrNonJSONOutput) {
+				if errors.Is(err, agent.ErrNonJSONOutput) {
 					e.record(ctx, "workflow.trigger", journal.LevelWarn, "reply-to-slack skipped: agent returned non-JSON", keys,
 						map[string]any{"trigger": "reply-to-slack", "json_valid": false})
 					continue

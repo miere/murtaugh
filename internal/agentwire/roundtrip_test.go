@@ -21,7 +21,7 @@ import (
 
 	"github.com/miere/murtaugh/internal/agent"
 	"github.com/miere/murtaugh/internal/agent/acp"
-	"github.com/miere/murtaugh/internal/agent/claudecode"
+	"github.com/miere/murtaugh/internal/claudeauth"
 	"github.com/miere/murtaugh/internal/llm"
 )
 
@@ -206,10 +206,15 @@ func TestRoundTripErrorIdentity(t *testing.T) {
 		},
 		{
 			// The non-obvious consumer: gateway/alert.go's failSpec runs
-			// llm.Classify to build the user-facing card. A text-only wire
-			// degrades every provider failure to the generic card.
-			name:     "provider failure classified by internal/llm",
-			err:      fmt.Errorf("native: provider stream: %w", providers.NewHTTPError("gemini", 503, geminiOverloadBody)),
+			// providerfail.Classify to build the user-facing card. A text-only
+			// wire degrades every provider failure to the generic card.
+			//
+			// The error is built the way the native backend hands one out —
+			// llm.CarryFailure at eventError — because that is where the
+			// litellm-shaped classification happens. The wire carries a
+			// classification; it does not derive one.
+			name:     "provider failure classified by the backend",
+			err:      llm.CarryFailure(fmt.Errorf("native: provider stream: %w", providers.NewHTTPError("gemini", 503, geminiOverloadBody))),
 			wantKind: ErrorProvider,
 			check: func(t *testing.T, decoded error) {
 				failure, ok := llm.Classify(decoded)
@@ -235,8 +240,8 @@ func TestRoundTripErrorIdentity(t *testing.T) {
 			err:      fmt.Errorf("claudecode: session failed: %w", errors.New("API Error: 401 Invalid API key · Please run /login")),
 			wantKind: ErrorUnknown,
 			check: func(t *testing.T, decoded error) {
-				if !claudecode.IsAuthFailure(decoded) {
-					t.Errorf("claudecode.IsAuthFailure(decoded) = false for %q; the admin would never be asked to re-authenticate", decoded)
+				if !claudeauth.IsAuthFailure(decoded) {
+					t.Errorf("claudeauth.IsAuthFailure(decoded) = false for %q; the admin would never be asked to re-authenticate", decoded)
 				}
 			},
 		},
