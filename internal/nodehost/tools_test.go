@@ -54,7 +54,7 @@ func TestANodesAgentCallsAMurtaughToolOnTheGateway(t *testing.T) {
 
 	events, err := rig.sessions["default"].Prompt(context.Background(),
 		agent.ConversationKey{ChannelID: "C1", ThreadTS: "123.4"},
-		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4"},
+		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4", UserID: nodeOwner},
 		agent.PromptRequest{Text: "are you there", Channel: "C1", Thread: "123.4", User: "U9"})
 	if err != nil {
 		t.Fatalf("prompt: %v", err)
@@ -131,7 +131,7 @@ func TestAnInFlightToolCallFailsWhenTheLinkDropsAndIsNotRepeatedOnTheNextConnect
 
 	events, err := rig.sessions["default"].Prompt(context.Background(),
 		agent.ConversationKey{ChannelID: "C1", ThreadTS: "123.4"},
-		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4"},
+		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4", UserID: nodeOwner},
 		agent.PromptRequest{Text: "do the thing", Channel: "C1", Thread: "123.4"})
 	if err != nil {
 		t.Fatalf("prompt: %v", err)
@@ -222,7 +222,7 @@ func TestTheGatewaysToolsAreVisibleAtBothMomentsABackendLatchesItsToolset(t *tes
 
 	events, err := rig.sessions["default"].Prompt(context.Background(),
 		agent.ConversationKey{ChannelID: "C1", ThreadTS: "123.4"},
-		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4"},
+		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4", UserID: nodeOwner},
 		agent.PromptRequest{Text: "hello", Channel: "C1", Thread: "123.4"})
 	if err != nil {
 		t.Fatalf("prompt: %v", err)
@@ -261,7 +261,7 @@ func TestAProxiedCallCarriesTheTurnsSlackLocation(t *testing.T) {
 
 	events, err := rig.sessions["default"].Prompt(context.Background(),
 		agent.ConversationKey{ChannelID: "C1", ThreadTS: "123.4"},
-		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4"},
+		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4", UserID: nodeOwner},
 		agent.PromptRequest{Text: "ask me something", Channel: "C1", Thread: "123.4", User: "U9"})
 	if err != nil {
 		t.Fatalf("prompt: %v", err)
@@ -305,7 +305,7 @@ func TestAToolCallResolvesItsTurnOnTheConnectionThatMadeIt(t *testing.T) {
 
 	events, err := rig.sessions["default"].Prompt(context.Background(),
 		agent.ConversationKey{ChannelID: "C1", ThreadTS: "123.4"},
-		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4"},
+		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4", UserID: nodeOwner},
 		agent.PromptRequest{Text: "ask me something", Channel: "C1", Thread: "123.4", User: "U9"})
 	if err != nil {
 		t.Fatalf("prompt: %v", err)
@@ -351,7 +351,7 @@ func TestTheGatewayAsksItsHumanBeforeRunningAGatedToolForANode(t *testing.T) {
 
 	events, err := rig.sessions["default"].Prompt(context.Background(),
 		agent.ConversationKey{ChannelID: "C1", ThreadTS: "123.4"},
-		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4"},
+		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4", UserID: nodeOwner},
 		agent.PromptRequest{Text: "do it", Channel: "C1", Thread: "123.4", User: "U9"})
 	if err != nil {
 		t.Fatalf("prompt: %v", err)

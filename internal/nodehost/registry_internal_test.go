@@ -148,6 +148,7 @@ func TestASessionBindingLeavesWithItsConnection(t *testing.T) {
 	host.mu.Unlock()
 	host.bindSession("session-a", node)
 	host.bindSession("session-b", node)
+	host.markTakeover("session-a", "node-old")
 
 	host.remove(node)
 
@@ -156,6 +157,13 @@ func TestASessionBindingLeavesWithItsConnection(t *testing.T) {
 	host.mu.Unlock()
 	if held != 0 {
 		t.Fatalf("the registry still holds %d session bindings for a connection that has gone", held)
+	}
+	// The takeover mark goes with it. Session ids are minted per node and
+	// nothing makes them unique across the fleet, so a mark left behind is one
+	// that could be handed to whatever next mints the same id — a takeover
+	// notice on a conversation that never moved.
+	if _, marked := host.takeTakeover("session-a"); marked {
+		t.Fatal("a takeover mark outlived the session it belonged to")
 	}
 	if _, err := host.sessionNode("session-a"); !errors.Is(err, agent.ErrSessionGone) {
 		t.Fatalf("a session on a departed connection resolved with %v, want ErrSessionGone", err)

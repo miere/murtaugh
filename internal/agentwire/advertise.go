@@ -1,5 +1,10 @@
 package agentwire
 
+import (
+	"path"
+	"strings"
+)
+
 // This file is the ADVERTISEMENT: what a node tells the gateway it can serve.
 //
 // It rides two ways, and both are needed. The connect-time snapshot travels on
@@ -71,6 +76,55 @@ type AssignmentClaim struct {
 	// it, and a claim whose profile the node does not serve is dropped before it
 	// is ever sent rather than filtered here.
 	Profile string `json:"profile,omitempty"`
+}
+
+// ClaimFor evaluates this node's OWN rule list against a channel and answers
+// with the first claim that matches.
+//
+// First match wins, walked in the order the node's admin wrote it — the same
+// positional precedence chat.channels has, because these ARE those rules
+// carried across. #170 is explicit that each node evaluates its own list and
+// answers yes or no, and that the gateway never merges lists across nodes, so
+// there is no cross-node specificity ordering to invent here and no tie-break
+// to get wrong. Which claim won is returned rather than a bare bool because it
+// names the profile the node would run, which is worth logging even while
+// nothing on the wire can address a profile.
+//
+// channelName may be empty when the gateway has not resolved it; only an exact
+// channel-id claim can match in that case.
+func (a Advertisement) ClaimFor(channelID, channelName string) (AssignmentClaim, bool) {
+	for _, claim := range a.Claims {
+		if claim.Matches(channelID, channelName) {
+			return claim, true
+		}
+	}
+	return AssignmentClaim{}, false
+}
+
+// Matches reports whether this claim covers a channel.
+//
+// The three shapes are chat.channels' three, deliberately: an exact Slack
+// channel ID, an exact channel NAME, or a `*` glob over the name. A claim would
+// otherwise mean something on the node that wrote it that it does not mean on
+// the gateway that reads it, and the failure of that would be silent — a
+// channel matching on one side and not the other looks exactly like a node
+// nobody claimed.
+func (c AssignmentClaim) Matches(channelID, channelName string) bool {
+	match := strings.TrimSpace(c.Match)
+	if match == "" {
+		return false
+	}
+	if channelID != "" && match == channelID {
+		return true
+	}
+	if channelName == "" {
+		return false
+	}
+	if !strings.ContainsRune(match, '*') {
+		return match == channelName
+	}
+	matched, err := path.Match(match, channelName)
+	return err == nil && matched
 }
 
 // Empty reports whether a node claimed nothing at all.

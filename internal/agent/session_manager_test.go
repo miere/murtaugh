@@ -201,3 +201,106 @@ func TestSessionManagerDiscardForcesFreshSession(t *testing.T) {
 		t.Fatalf("expected a fresh session after Discard, got %d sessions", client.sessions.Load())
 	}
 }
+
+// brokerClient stands in for the node broker: a session id it did not mint is
+// ErrSessionGone, which is what a runtime node disconnecting looks like from
+// the gateway's side.
+type brokerClient struct {
+	fakeClient
+	// live is the only session id this client will answer for. Every session it
+	// mints becomes the live one; the previous node's id therefore stops
+	// resolving the moment a new session is opened.
+	live          string
+	prompted      []string
+	conversations []ConversationKey
+}
+
+func (b *brokerClient) NewSession(ctx context.Context, meta SessionMetadata) (Session, error) {
+	if key, ok := ConversationFromContext(ctx); ok {
+		b.conversations = append(b.conversations, key)
+	}
+	session, err := b.fakeClient.NewSession(ctx, meta)
+	b.live = session.ID
+	return session, err
+}
+
+func (b *brokerClient) Prompt(ctx context.Context, sessionID string, req PromptRequest) (<-chan Event, error) {
+	b.prompted = append(b.prompted, sessionID)
+	if sessionID != b.live {
+		return nil, ErrSessionGone
+	}
+	return b.fakeClient.Prompt(ctx, sessionID, req)
+}
+
+// TestPromptOpensANewSessionWhenTheOldOneIsGone is the recovery half of #196's
+// re-election. Overwriting the stored pin is not enough on its own: this map
+// still binds the conversation to the dead node's session id, and handing that
+// id to the node that took over produces an error the user sees on every turn.
+func TestPromptOpensANewSessionWhenTheOldOneIsGone(t *testing.T) {
+	c := &brokerClient{}
+	m := NewSessionManager(c, time.Hour, 100)
+	key := ConversationKey{ChannelID: "C", ThreadTS: "1", DM: true}
+	ctx := context.Background()
+
+	if _, err := m.Prompt(ctx, key, SessionMetadata{ChannelID: "C"}, PromptRequest{Text: "one"}); err != nil {
+		t.Fatalf("first turn: %v", err)
+	}
+	stale := c.live
+	// The node holding it disconnects. Nothing tells the manager; it finds out
+	// by being refused.
+	c.live = "gone"
+
+	if _, err := m.Prompt(ctx, key, SessionMetadata{ChannelID: "C"}, PromptRequest{Text: "two"}); err != nil {
+		t.Fatalf("the turn after the node left was not recovered: %v", err)
+	}
+	if len(c.prompted) != 3 || c.prompted[1] != stale || c.prompted[2] == stale {
+		t.Fatalf("expected a refused prompt on %q followed by a fresh session; got %v", stale, c.prompted)
+	}
+	if id, ok := m.Lookup(key); !ok || id == stale {
+		t.Fatalf("the conversation is still bound to the dead node's session: %q %v", id, ok)
+	}
+}
+
+// TestPromptDoesNotRetryForever bounds the recovery at one attempt: a second
+// refusal is a genuine failure and is reported rather than looped on.
+func TestPromptDoesNotRetryForever(t *testing.T) {
+	c := &alwaysGoneClient{}
+	m := NewSessionManager(c, time.Hour, 100)
+	key := ConversationKey{ChannelID: "C", ThreadTS: "1"}
+
+	_, err := m.Prompt(context.Background(), key, SessionMetadata{}, PromptRequest{Text: "one"})
+	if err == nil {
+		t.Fatal("a session that can never be opened reported success")
+	}
+	// Two prompts, not a loop: the first session's and the replacement's.
+	if len(c.prompted) != 2 {
+		t.Fatalf("expected exactly two attempts, got %v", c.prompted)
+	}
+}
+
+// alwaysGoneClient refuses every prompt, however fresh the session.
+type alwaysGoneClient struct {
+	fakeClient
+	prompted []string
+}
+
+func (a *alwaysGoneClient) Prompt(context.Context, string, PromptRequest) (<-chan Event, error) {
+	a.prompted = append(a.prompted, "refused")
+	return nil, ErrSessionGone
+}
+
+// TestPromptCarriesTheConversationToTheClient covers the plumbing delegation
+// depends on: SessionMetadata has no DM flag, so the key is the only thing that
+// can tell a DM thread from a channel thread with the same ids.
+func TestPromptCarriesTheConversationToTheClient(t *testing.T) {
+	c := &brokerClient{}
+	m := NewSessionManager(c, time.Hour, 100)
+	key := ConversationKey{TeamID: "T", ChannelID: "C", ThreadTS: "1", DM: true}
+
+	if _, err := m.Prompt(context.Background(), key, SessionMetadata{ChannelID: "C"}, PromptRequest{Text: "one"}); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	if len(c.conversations) != 1 || c.conversations[0] != key {
+		t.Fatalf("the client was not told which conversation it was opening: %v", c.conversations)
+	}
+}

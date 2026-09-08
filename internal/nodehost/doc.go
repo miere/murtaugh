@@ -43,22 +43,42 @@
 // the other way, to one entry per node id, because delegation must never see one
 // machine twice and round-robin it against itself.
 //
-// What is NOT here is the CHOICE. A new conversation opens on the most recently
-// attached node, because picking between them properly needs a conversation
-// key, a fleet and a stored pin — item 10. Writing a choice here would have
-// meant writing one to be replaced before it was ever relied on.
+// # Delegation: which node takes a conversation
 //
-// What IS here is the BINDING, and it could not wait for the choice. The
-// session a conversation opens is bound to the connection that minted it, and
-// every later prompt, cancel and close for that session goes back to that
-// connection. Without it a second node attaching would silently take over every
-// live conversation on the first — session ids are minted per node, so the
-// newcomer is handed ids it never issued: a prompt fails in front of the user,
-// and a cancel is answered as success while the turn runs on unimpeded and the
-// gateway blocks draining a stream that will never close. A session whose
-// connection has gone is agent.ErrSessionGone, distinct from ErrNoNode because
-// it means THIS session cannot run while a new one could; re-opening it
-// elsewhere is item 10's re-election.
+// The choice is #170's algorithm and nothing else. Ask which nodes in the FLEET
+// claim this DM or channel; exactly one takes it; more than one round robins
+// among the matching; none round robins among the whole fleet. Each node
+// evaluates its own ordered rule list, first match wins, yes or no. The gateway
+// never merges rule lists, so there is no specificity ordering and no tie-break
+// to get wrong, and there is no default node — step four already catches every
+// unclaimed conversation.
+//
+// The FLEET is the initiating user's own connected nodes, or — only when they
+// have none — the connected nodes they hold a grant on. Never a mixture, which
+// is what makes user choice and node claims incapable of conflicting.
+//
+// The choice is then PINNED, and the pin is stored: a fourth side store beside
+// the leader lock, the run claim and the node credential, keyed by the
+// conversation. When the pinned node is gone the pin is OVERWRITTEN rather than
+// bypassed, or the conversation re-elects on every turn and lands somewhere new
+// each time. See delegate.go for the whole of it, and takeover.go for what the
+// model is told when its conversation arrives from a machine that is gone.
+//
+// An election happens once per SESSION, not once per turn, because the session
+// it opens is bound to the connection that minted it and every later prompt,
+// cancel and close for that session goes back there. That binding is also what
+// stops a node attaching mid-conversation from taking the conversation over:
+// session ids are minted per node, and a newcomer handed an id it never issued
+// fails the prompt in front of the user and answers the cancel as success. A
+// session whose connection has gone is agent.ErrSessionGone, which is what
+// starts the re-election.
+//
+// Delegation sits UNDER *agent.SessionManager, at agent.Client, because the
+// gateway type-asserts optional capability surfaces on the manager and three of
+// them fail silently when unsatisfied. That placement costs one thing and it is
+// paid on the context: NewSession is handed metadata with no DM flag and Prompt
+// is handed only a session id, so the conversation key travels as a context
+// value the manager sets.
 //
 // # What a node is not allowed to say
 //
@@ -157,7 +177,8 @@
 // # Nothing about a node is announced
 //
 // Attach, detach, revocation and every change to what a node claims go to the
-// journal, on the gateway stream, as kind `node`. #170 is explicit that
+// journal, on the gateway stream, as kind `node`; a conversation moving between
+// nodes goes there as kind `delegation`. #170 is explicit that
 // disconnects are journalled and not announced, because a laptop sleeping at
 // six o'clock disconnects every evening and a nightly message trains the admin
 // to ignore the one that matters.

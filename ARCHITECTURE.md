@@ -894,26 +894,14 @@ the *gateway holds* column, which states ownership rather than storage. An entry
 is a live socket plus a claim and both die with the process; only the elected
 leader accepts node connections, so a persisted registry read by a standby is
 guaranteed stale. The half that outlives a process is the conversation **pin**,
-which item 10 stores as a side store in the `NodeTokenStore` family.
+stored as a side store in the `NodeTokenStore` family — see delegation below.
 
 **Keyed per connection, enumerated per node.** Rotation means two credentials
 are valid at once, and `CloseCredential` closes by selector so revoking the old
 one does not drop the node — so a map keyed by node id would make the second
 connection evict the first. `Nodes()` collapses back to one entry per node id,
 because delegation must never see one machine twice and round-robin it against
-itself. Choosing between them is item 10: a new conversation still opens on the
-most recently attached node.
-
-**A session is bound to the connection that minted it.** The choice waits for
-item 10; the binding cannot. Session ids are minted per node, so once a second
-node can be connected, sending a conversation's next turn to "whichever node is
-newest" hands a machine an id it never issued — the prompt fails in front of the
-user, and a `Cancel` is answered as success while the turn runs on and the
-gateway blocks draining a stream that will never close. Every prompt, cancel and
-close therefore goes back to the session's own connection, and a session whose
-connection has gone is `agent.ErrSessionGone` — distinct from `ErrNoNode`
-because it means *this session* cannot run while a new one could. Re-opening it
-elsewhere, and telling the model it moved, is item 10.
+itself. Choosing between them is delegation, below.
 
 **`allow_anyone` deliberately does not cross**, and neither does
 `reply_on_thread`. The first waives the gateway's own access list for a
@@ -948,6 +936,91 @@ registry until a write fails at the transport's write timeout or TCP gives up.
 announced** — gateway stream, kind `node`. A laptop sleeping at six o'clock
 disconnects every evening, and a nightly message trains the admin to ignore the
 one that matters.
+
+### Delegation, pinning and takeover (`internal/nodehost/delegate.go`, `config.ConversationPinStore`)
+
+Which node takes a conversation. #170's algorithm, unaltered: ask which nodes in
+the **fleet** claim this DM or channel; exactly one takes it; more than one round
+robins among the matching; none round robins among the whole fleet. Each node
+evaluates its **own** ordered rule list, first match wins, yes or no
+(`agentwire.Advertisement.ClaimFor`). The gateway never merges rule lists, which
+is what makes "no specificity ordering and no tie-break" a property rather than
+an omission — there is nothing to order because nothing is compared. There is no
+default node and none is reachable: step 4 catches every unclaimed conversation.
+
+**The fleet comes first.** A conversation belongs to the initiating user's OWN
+connected nodes, or — only when they have none — to the connected nodes they
+hold a **grant** on. Never a mixture, and the early return in `fleetFor` is the
+whole enforcement: the granted set is not even built when the user has a node of
+their own. Grants are `access.node_grants`, keyed by node id, manual
+configuration written by the gateway admin (#170 permits that for now; a
+self-service surface is later work). The word is unrelated to
+`internal/slack/interaction`'s `Grants`, which are tool calls a user always
+allows.
+
+**Elect once, then pin, and the pin is stored.** Without it turn two lands on a
+node with no history and the model appears to lose its memory mid-conversation.
+The pin is a fourth side store beside `leader_locks`, `job_runs` and
+`node_tokens` — `conversation_pins`, keyed by the four fields of
+`agent.ConversationKey`, on all three backends. Like its neighbours it is **not**
+a config section: absent from `AllSections`/`AllSingletons`, never in `cfg show`,
+never carried by Snapshot/Restore. `cfg db migrate` therefore does not carry pins
+across, and unlike a lost credential a lost pin costs nothing — the conversation
+re-elects.
+
+It is the first **per-conversation** state Murtaugh persists. Sessions are a pure
+in-memory map evicted on an idle timeout, so a pin routinely outlives its session
+and a pin with no live session is the steady state, not an anomaly.
+
+**The pin is read before the fleet, so a pinned conversation is never
+re-fleeted.** The conversation key omits the user on purpose — the session is
+shared by the channel's participants — so in a shared channel the second speaker
+rides the first speaker's node instead of dragging the conversation onto their
+own. A fleet decides an ELECTION; a pin decides a TURN.
+
+**When the pinned node is gone the pin is OVERWRITTEN, not bypassed.** A pin left
+naming a dead machine re-elects every turn and every turn lands somewhere new —
+the memory-loss symptom the pin exists to prevent, in a worse form, and it
+survives the node coming back.
+
+Overwriting the row is not sufficient on its own. The session manager still holds
+a session id the dead node minted. `nodehost` already binds every session id to
+the connection that minted it — item 9, where the alternative was a second node
+taking over live conversations on the first — and answers a lost one with
+`agent.ErrSessionGone`, distinct from `ErrNoNode` because it means *this session*
+cannot run while a new one can. What delegation adds is the ANSWER:
+`SessionManager.Prompt` discards the binding and opens a fresh session, **once**,
+and that is what re-runs the election.
+
+**Round robin needs no persistence.** The cursor is an `atomic.Uint64` on the
+`Host` rather than in the runtime builder's closure, because a configuration
+reload re-runs that builder while the connections survive — a cursor rebuilt on
+every `cfg` edit restarts the rotation at the same node every time. Candidates
+are ordered by node id so two gateways given the same fleet make the same choice.
+
+**The takeover notice goes INSIDE the user message.** `<conversation-takeover>`
+is prepended to `PromptRequest.Text`, not sent as a message of its own, because
+`assertNoConsecutiveUserAfterTool` rejects a standalone user message after a
+tool-result and `native.Conversation` exposes no API for appending per-turn
+context as its own message. Text rather than a new field, because `claude_code`
+renders no context block at all and would drop a field silently; a distinct tag
+rather than `<context>`, because native and ACP already emit one by that name in
+the same message. It is consumed on first use — a model told on every message
+that it has just arrived and can see nothing behaves as though that were true.
+
+The takeover is automatic, and journalled as kind `delegation` on the gateway
+stream. #170 Change G also describes a card offering the next speaker a choice
+between their own fleet and the gateway admin's; #196 does not, and that card is
+left to the work that builds a cross-fleet grant flow — the notice the model
+delivers is what makes the move visible today.
+
+**Delegation runs under `*agent.SessionManager`, never in place of it.** The
+gateway type-asserts four optional capability surfaces on the manager and three
+of them fail silently when unsatisfied, so the choice of node lives at
+`agent.Client` — in `nodeClient.NewSession`, the one place reached exactly once
+per cold conversation. The conversation key reaches it on the context
+(`agent.WithConversation`, set by `SessionManager.Prompt`), because `NewSession`
+is handed metadata carrying no DM flag and `Prompt` is handed only a session id.
 
 ### The tool channel (`internal/toolset` partition, `internal/nodehost`, `internal/nodeserve`)
 

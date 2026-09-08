@@ -135,3 +135,64 @@ func TestCloneSharesNothing(t *testing.T) {
 		t.Fatal("cloning nothing produced something")
 	}
 }
+
+// TestAClaimMeansTheSameOnBothSidesOfTheLink covers the three shapes a claim's
+// match can take.
+//
+// They are chat.channels' three, and the reason the matcher lives on the type
+// rather than in the gateway is that a claim written on a node must select the
+// same channels on the gateway that reads it. A divergence would be silent: a
+// channel that matches on one side and not the other looks exactly like a
+// channel nobody claimed, which round robins and never errors.
+func TestAClaimMeansTheSameOnBothSidesOfTheLink(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		match       string
+		channelID   string
+		channelName string
+		want        bool
+	}{
+		{"an exact channel id", "C123", "C123", "nc-releases", true},
+		{"an exact channel name", "nc-releases", "C123", "nc-releases", true},
+		{"a leading glob", "nc-*", "C123", "nc-releases", true},
+		{"a trailing glob", "*-prod", "C123", "payments-prod", true},
+		{"a glob that does not match", "review-*", "C123", "nc-releases", false},
+		{"a name claim with no name resolved", "nc-*", "C123", "", false},
+		{"an id claim with no name resolved", "C123", "C123", "", true},
+		{"an empty match claims nothing", "", "C123", "nc-releases", false},
+		{"a malformed glob claims nothing rather than everything", "[", "C123", "nc-releases", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			claim := AssignmentClaim{Match: tc.match}
+			if got := claim.Matches(tc.channelID, tc.channelName); got != tc.want {
+				t.Fatalf("Matches(%q, %q) = %v, want %v", tc.channelID, tc.channelName, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestTheFirstMatchingClaimWins is the node's own rule list, evaluated in the
+// order its admin wrote it — the same positional precedence chat.channels has.
+func TestTheFirstMatchingClaimWins(t *testing.T) {
+	ad := Advertisement{Claims: []AssignmentClaim{
+		{Match: "nc-releases", Profile: "releases"},
+		{Match: "nc-*", Profile: "general"},
+	}}
+	claim, ok := ad.ClaimFor("C1", "nc-releases")
+	if !ok || claim.Profile != "releases" {
+		t.Fatalf("the narrower rule listed first did not win: %+v ok=%v", claim, ok)
+	}
+	claim, ok = ad.ClaimFor("C2", "nc-anything-else")
+	if !ok || claim.Profile != "general" {
+		t.Fatalf("the broader rule did not catch the rest: %+v ok=%v", claim, ok)
+	}
+	if _, ok := ad.ClaimFor("C3", "review-pr-1"); ok {
+		t.Fatal("a node claimed a channel none of its rules names")
+	}
+	// A node that claims nothing answers no, rather than answering for
+	// everything. That is what makes an unconfigured node round-robin fodder
+	// instead of a channel's owner.
+	if _, ok := (Advertisement{}).ClaimFor("C1", "nc-releases"); ok {
+		t.Fatal("an empty advertisement claimed a channel")
+	}
+}

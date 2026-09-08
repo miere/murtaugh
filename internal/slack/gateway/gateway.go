@@ -519,7 +519,7 @@ func New(cfg config.Config, logger *slog.Logger, recorder journal.Recorder, brok
 			if !known {
 				channelCache.refreshAsync(context.Background())
 			}
-			route := ChatRoute{Agent: def.Agent, ReplyOnThread: def.EffectiveReplyOnThread()}
+			route := ChatRoute{Agent: def.Agent, ReplyOnThread: def.EffectiveReplyOnThread(), ChannelName: channelName}
 			if cc, ok := matchChannel(req.ChannelID, channelName, cfg.Chat.Channels); ok {
 				if cc.Agent != "" {
 					route.Agent = cc.Agent
@@ -1991,7 +1991,16 @@ func (a *Gateway) dispatchTurn(parent context.Context, key agent.ConversationKey
 	// strategy from startChat is kept so the conversation key never diverges.
 	if a.chat != nil && a.chat.resolver != nil {
 		a.channelCache.resolveChannelName(parent, req.ChannelID)
-		route.Agent = a.chat.resolver(req).Agent
+		resolved := a.chat.resolver(req)
+		route.Agent = resolved.Agent
+		// The channel NAME is corrected here too, and it is the one other field
+		// safe to correct: the conversation key is built from ReplyOnThread and
+		// nothing else the resolver returns, so a name learned on this pass
+		// cannot make the key computed in startChat and the key computed in
+		// Handle disagree. It matters because a node's channel claims are
+		// mostly name globs, and a cold cache would otherwise delegate a
+		// brand-new channel as though nobody claimed it.
+		route.ChannelName = resolved.ChannelName
 		agentName = route.Agent
 	}
 

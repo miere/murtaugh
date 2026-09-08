@@ -167,6 +167,17 @@ type ChatRequest struct {
 type ChatRoute struct {
 	Agent         string
 	ReplyOnThread bool
+	// ChannelName is the channel's Slack name, as the resolver read it from the
+	// channel cache. Empty for a DM, and empty for a channel whose name the
+	// cache has not learned yet.
+	//
+	// It rides the route because the resolver is where the cache is reachable
+	// and Handle is where session metadata is built, and because delegation
+	// (#196) matches a runtime node's channel claims — which are an exact id, an
+	// exact name, or a glob over the name. Unlike Agent it does not participate
+	// in the conversation key, so correcting it in dispatchTurn cannot make the
+	// key diverge.
+	ChannelName string
 }
 
 func NewChatHandler(api StreamAPI, sessions map[string]ChatSessionManager, resolver func(ChatRequest) ChatRoute, interval time.Duration, minChars int, logger *slog.Logger) *ChatHandler {
@@ -496,7 +507,7 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest, route ChatRou
 		}
 	}
 	key := conversationKey(req, route.ReplyOnThread)
-	metadata := agent.SessionMetadata{TeamID: req.TeamID, ChannelID: req.ChannelID, ThreadTS: key.ThreadTS, UserID: req.UserID, Source: req.Source}
+	metadata := agent.SessionMetadata{TeamID: req.TeamID, ChannelID: req.ChannelID, ChannelName: route.ChannelName, ThreadTS: key.ThreadTS, UserID: req.UserID, Source: req.Source}
 	history, canvas := h.backfillHistory(ctx, req, sessions, key)
 	// A canvas comment turn: mark the surface, resolve the canvas id, and tell the
 	// agent (in-context) which document it is looking at so it can read/edit it

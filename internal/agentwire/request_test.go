@@ -94,7 +94,8 @@ func TestNewSessionRoundTrip(t *testing.T) {
 	}{
 		{"zero", agent.SessionMetadata{}},
 		{"a chat thread", agent.SessionMetadata{
-			TeamID: "T1", ChannelID: "C1", ThreadTS: "1700000000.000100", UserID: "U1", Source: "slack",
+			TeamID: "T1", ChannelID: "C1", ChannelName: "nc-releases",
+			ThreadTS: "1700000000.000100", UserID: "U1", Source: "slack",
 		}},
 		{"a canvas surface", agent.SessionMetadata{
 			TeamID: "T1", ChannelID: "C1", UserID: "U1", Source: "slack", Surface: "canvas", CanvasID: "F0123",

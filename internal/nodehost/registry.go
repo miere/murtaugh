@@ -126,6 +126,24 @@ func (n *attached) snapshot() Node {
 func (h *Host) Nodes() []Node {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	nodes := h.collapsedLocked()
+	out := make([]Node, 0, len(nodes))
+	for _, node := range nodes {
+		out = append(out, node.snapshot())
+	}
+	return out
+}
+
+// collapsedLocked is the registry as one entry per NODE, ordered by node id.
+// Callers hold the mutex.
+//
+// It is the one implementation of that collapse, and delegation uses it rather
+// than deriving its own: a second copy of "which connection represents this
+// machine, and in what order" would be a second rotation tie-break, and only
+// one of them would be on the turn path. Nodes copies values out of it for
+// callers outside the lock; delegation keeps the pointers, because it needs the
+// clients.
+func (h *Host) collapsedLocked() []*attached {
 	newest := make(map[string]*attached, len(h.nodes))
 	for _, node := range h.nodes {
 		if held, ok := newest[node.nodeID]; ok && !node.attachedAt.After(held.attachedAt) {
@@ -133,18 +151,19 @@ func (h *Host) Nodes() []Node {
 		}
 		newest[node.nodeID] = node
 	}
-	out := make([]Node, 0, len(newest))
+	out := make([]*attached, 0, len(newest))
 	for _, node := range newest {
-		out = append(out, node.snapshot())
+		out = append(out, node)
 	}
-	slices.SortFunc(out, func(a, b Node) int {
-		if a.NodeID != b.NodeID {
-			if a.NodeID < b.NodeID {
-				return -1
-			}
+	slices.SortFunc(out, func(a, b *attached) int {
+		switch {
+		case a.nodeID < b.nodeID:
+			return -1
+		case a.nodeID > b.nodeID:
 			return 1
+		default:
+			return 0
 		}
-		return 0
 	})
 	return out
 }
@@ -153,9 +172,9 @@ func (h *Host) Nodes() []Node {
 //
 // It answers for the same connection anyClient() resolves to, which is what
 // makes it a usable readiness check: a caller that sees a node here can send to
-// it. It is NOT the node any particular conversation runs on — that is the
-// session's binding, and with a registry the two are no longer the same
-// question.
+// it. It is NOT the node any particular conversation runs on — that is
+// delegation's answer and it is per conversation. With several attached this is
+// the most recent.
 func (h *Host) Attached() (nodeID string, ok bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
