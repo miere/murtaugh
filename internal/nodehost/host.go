@@ -15,6 +15,7 @@ import (
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/nodesocket"
 	"github.com/miere/murtaugh/internal/nodetoken"
+	"github.com/miere/murtaugh/internal/tools"
 )
 
 // ErrNoNode is what every call made while no node is attached returns. It is a
@@ -65,6 +66,11 @@ type Host struct {
 	current    *attached
 	approve    func(ctx context.Context, toolName, summary string) (bool, string)
 	background func(sessionID string, ev agent.Event)
+	// tools is the gateway's registry, from which a node is served the
+	// node-reachable slice. Live rather than captured, for the reason the
+	// approver is: a configuration reload rebuilds it under a surviving node
+	// connection.
+	tools *tools.Registry
 }
 
 // attached is one live node connection.
@@ -191,9 +197,12 @@ func (h *Host) serveLink(w http.ResponseWriter, r *http.Request) {
 		window = nodesocket.DefaultWindowBytes
 	}
 	client := remote.New(conn, remote.Options{
-		Logger:      h.log.With("node_id", record.NodeID),
-		Background:  h.deliverBackground,
-		Approve:     h.askApproval,
+		Logger:     h.log.With("node_id", record.NodeID),
+		Background: h.deliverBackground,
+		Approve:    h.askApproval,
+		// Murtaugh's own tools, served back down the connection the node
+		// dialled — never a second one. The gateway still never dials a node.
+		Tools:       &toolServer{host: h, log: h.log.With("node_id", record.NodeID)},
 		WindowBytes: window,
 		AckInterval: h.opts.AckInterval,
 	})

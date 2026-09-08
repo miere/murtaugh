@@ -38,6 +38,11 @@ const (
 	// abandonTimeout bounds the cancel sent when a caller's context is
 	// cancelled. It must be short: it runs on a teardown path.
 	abandonTimeout = 5 * time.Second
+	// toolAnswerTimeout bounds delivery of a tool call's answer back to the
+	// node. It is short because by the time it expires the node has already
+	// given up on this call — nodeserve fails an in-flight call the moment its
+	// link drops — so a longer wait only holds a goroutine.
+	toolAnswerTimeout = 30 * time.Second
 )
 
 // Options configures a Client.
@@ -62,6 +67,16 @@ type Options struct {
 	// drops them, which is what the gateway does today for an agent with no
 	// router bound.
 	Background func(sessionID string, ev agent.Event)
+	// Tools answers the node's tool.list and tool.call requests — Murtaugh's own
+	// tools, executed HERE with the gateway's credentials, subject to the
+	// partition the implementation applies.
+	//
+	// nil refuses both with a legible fault rather than answering an empty list.
+	// An empty list would be indistinguishable from "you may reach nothing",
+	// which is a real answer, and a node that took it would publish an agent
+	// with a silently empty toolset — the exact regression #194 exists to
+	// prevent.
+	Tools ToolHost
 	// EventBuffer is a turn's channel depth. Zero takes defaultEventBuffer.
 	EventBuffer int
 	// WindowBytes, AckThreshold, AckInterval and Epoch are passed through to
@@ -81,15 +96,20 @@ type Client struct {
 	// request: the path a background turn's completions arrive on.
 	background func(sessionID string, ev agent.Event)
 	approve    func(ctx context.Context, toolName, summary string) (bool, string)
+	tools      ToolHost
 	transfers  *transfers
 	buffer     int
 
 	nextID atomic.Int64
 	closes chan string
 
-	mu            sync.Mutex
-	closed        bool
+	mu     sync.Mutex
+	closed bool
+	// pending holds answers to requests THIS side minted; inbound holds the
+	// cancel funcs of requests the NODE minted. Two maps, because ids are per
+	// direction and both counters start at "1".
 	pending       map[string]chan agentwire.Message
+	inbound       map[string]context.CancelFunc
 	streams       map[string]*stream
 	answers       map[string]*agentwire.PendingDecision
 	interruptible *bool
@@ -117,10 +137,12 @@ func New(conn nodelink.Conn, opts Options) *Client {
 		decoder:    agentwire.NewDecoder(deliverer),
 		background: opts.Background,
 		approve:    opts.Approve,
+		tools:      opts.Tools,
 		transfers:  incoming,
 		buffer:     buffer,
 		closes:     make(chan string, closeQueueDepth),
 		pending:    make(map[string]chan agentwire.Message),
+		inbound:    make(map[string]context.CancelFunc),
 		streams:    make(map[string]*stream),
 		answers:    make(map[string]*agentwire.PendingDecision),
 	}
@@ -276,6 +298,24 @@ func (c *Client) SupportsCancel(context.Context) bool {
 	return *c.interruptible
 }
 
+// StreamLocation returns where in Slack the turn identified by streamID is
+// happening, if it is still open.
+//
+// It is exported for the tool channel: a node's tool call names its turn, and
+// the gateway has to put the location back on the context before invoking or
+// the approval gate short-circuits to allowed and `ask`/`present_plan` degrade
+// to non-interactive. The client already holds this per stream because
+// answerApproval needed the same thing.
+func (c *Client) StreamLocation(streamID string) (agent.TurnLocation, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	s := c.streams[streamID]
+	if s == nil {
+		return agent.TurnLocation{}, false
+	}
+	return s.location, true
+}
+
 // Done closes when the link under this client stops, for any reason. It is what
 // the owner of the connection waits on: a client whose link has died answers
 // every call with the link's error and never recovers, because a node that
@@ -300,6 +340,7 @@ func (c *Client) Close() error {
 
 	err := c.link.Close()
 	c.failAll(nil)
+	c.cancelInbound()
 	c.transfers.close()
 	return err
 }
@@ -322,10 +363,11 @@ func (c *Client) consume(payload []byte) error {
 	case agentwire.MessageEvent:
 		c.deliverEvent(msg)
 	case agentwire.MessageRequest:
-		// Nothing is defined in this direction yet. Answering keeps a node from
-		// waiting forever on a method this build does not serve; dispatching it
-		// off the read loop keeps that answer from queueing behind delivery.
-		go c.rejectRequest(msg)
+		// The tool channel, and an explicit refusal for anything else. It is
+		// dispatched off the read loop because a tool call can park on a human
+		// for ten minutes and a frame is acknowledged only once this handler
+		// returns — see serveRequest.
+		go c.serveRequest(msg)
 	case agentwire.MessageChunk:
 		// Written here, on the read loop, on purpose: the chunks arrive ahead of
 		// the event that references them, and this is what makes the deliverer a
@@ -585,6 +627,11 @@ func (c *Client) closeLoop() {
 func (c *Client) watchLink() {
 	<-c.link.Done()
 	c.failAll(c.link.Err())
+	// The tool calls this gateway was running FOR the node are cancelled here
+	// too. The node has already failed them for its model, so anything still
+	// executing is executing for nobody — and one of them may be parked on an
+	// approval card with a ten-minute timeout.
+	c.cancelInbound()
 	c.transfers.close()
 }
 

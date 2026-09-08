@@ -21,14 +21,23 @@ import (
 //
 // It contributes nothing that can run a model, which is the point: this is the
 // builder cmd/murtaugh-gateway may link, and CI checks that its dependency
-// closure stays clear of the backend packages.
+// closure stays clear of the backend packages. The REGISTRY it is handed is not
+// a backend and never was — it is the tool surface a node's agent reaches over
+// the tool channel (#194), and until item 8 this builder threw it away, which is
+// why a node's agent had no Murtaugh tools at all.
 func Runtime(host *Host) func(config.Config, *tools.Registry, *slog.Logger) agentruntime.Builder {
-	return func(cfg config.Config, _ *tools.Registry, logger *slog.Logger) agentruntime.Builder {
+	return func(cfg config.Config, registry *tools.Registry, logger *slog.Logger) agentruntime.Builder {
 		if logger == nil {
 			logger = slog.Default()
 		}
 		return func(hooks agentruntime.Hooks) agentruntime.Runtime {
 			host.SetApprover(approverFor(cfg, hooks))
+			// Bound here because this is where the gateway hands its registry
+			// over, and a reload runs this builder again while the node
+			// connection survives. It re-binds the same pointer: the registry is
+			// built once, in app.New. See SetTools for the staleness that
+			// actually follows from that, which is not this one.
+			host.SetTools(registry)
 			// Background events belong to the gateway that is currently serving,
 			// and a reload replaces it, so the sink is refreshed here rather
 			// than captured when the connection was made.

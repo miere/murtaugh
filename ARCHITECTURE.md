@@ -96,8 +96,9 @@ internal/nodehost/    The gateway's inbound edge: the accept endpoint, the one
                       nodetoken.Verify on a serving path, the attached node,
                       and the runtime builder that brokers to it.
 internal/nodeserve/   The node's half: answers the six requests over one link,
-                      streams a turn's events back, and gates native tool calls
-                      through the gateway's approver.
+                      streams a turn's events back, gates native tool calls
+                      through the gateway's approver, and proxies Murtaugh's own
+                      tools back to the gateway one call at a time.
 internal/config/      Config schema, validation, bootstrap-file loader, and the
                       config-store seam.
   store/              SQLite/Postgres store implementation + YAML→DB migration.
@@ -878,6 +879,88 @@ anyone would think to debug.
 One node is the whole world: the protocol carries no agent name, so a link IS an
 agent, every configured agent name resolves to the attached node, and a second
 node replaces the first. The registry that ends that is #170 item 9.
+
+### The tool channel (`internal/toolset` partition, `internal/nodehost`, `internal/nodeserve`)
+
+Murtaugh's own tools live on the gateway and hold the gateway's credentials. A
+node's agent reaches them over the connection the node already dialled — the
+gateway still never dials out — as `tool.list` and `tool.call`, the only
+direction a node initiates a call in.
+
+**It is a per-call proxy, not a tunnel of the MCP stream, and that is what makes
+it small.** #170 Concern 5 describes the hard version: move the MCP byte stream
+across and the gateway end becomes a server session whose entire state IS that
+stream, so a reconnected pipe is dead rather than degraded and the node has to
+own initialise replay and request-id rewriting. Keeping the MCP session local —
+between the agent's own subprocess and the node's aggregator socket — removes
+that problem rather than solving it. It also reaches the backend a tunnel would
+have missed: the **native** backend, the default one, never touches the
+aggregator at all, so a tunnel would have restored tools for `acp` and
+`claude_code` and left native silently tool-less.
+
+**All three backends reach the channel, and getting the other two there took a
+change to the aggregator.** The proxy alone is not enough: `acp` and
+`claude_code` reach the registry through `agentbuild`'s aggregator, which used to
+resolve the agent's built-ins when the agent was *constructed*. On a node that is
+before any gateway connection exists, so it snapshotted an empty registry and
+served nothing for the life of the process — the very regression this channel is
+for, in the two backends it was written for, while `native` looked fine because
+it resolves inside its own `Initialize`. The aggregator now resolves on its first
+session instead, which is after the handshake on a node and makes no difference
+in the gateway process, where the registry is built once in `app.New` before any
+agent.
+
+**The partition is a table in `internal/toolset` and is enforced in exactly one
+place, gateway-side.** `Reach` has three values and its zero value denies, so an
+unclassified family is refused rather than assumed harmless. A node reaches
+`ping`, `version`, `ask` and `present_plan`; `slack`, `jobs`, `cfg`, `setup`,
+`node`, `journal`, `troubleshoot` and `restart` are the gateway's alone; the
+workdir-rooted native groups and `auth.request` are meaningless remotely —
+`auth.request` because it writes the granted credential into the environment of
+the process that asked, which gateway-side is the wrong process. `nodehost`
+applies it on **both** verbs: `tool.list` never names a tool a node may not have,
+and `tool.call` re-checks before looking anything up, because a node admin owns
+their node's configuration and a node cannot be trusted to filter itself. The
+drift guard is in `internal/app`, the only package that can build the real
+registry.
+
+**Two things a proxied call must carry that an in-process one gets for free.**
+The turn's `agent.TurnLocation` is re-injected gateway-side from the stream id
+the call names — without it the approval gate short-circuits to *allowed* with no
+card and `ask`/`present_plan` go non-interactive, a silent ungating rather than a
+failure. And the descriptor carries the tool's `MCPName` override, so `ask`
+republishes as `AskUserQuestion` and a Claude Code agent still reaches for it.
+What does **not** cross is `agent.TurnEnv`: a gateway-executed tool runs with the
+gateway's environment.
+
+Only a **native** call names its stream today. An `acp`/`claude_code` call
+reaches the proxy through the node's local MCP aggregator, whose context is
+decorated once per session and cannot name a turn, so those two backends call
+with an empty stream: `ping` and `version` are unaffected, `ask` and
+`present_plan` fail gateway-side for want of a thread. Carrying a per-turn id
+onto the aggregator's per-call context is its own item; it is written down here
+rather than left to be discovered as "`ask` works on one backend".
+
+**The abort policy is forced by an absence, and it is enforced by cancellation
+rather than by wording.** Nothing in the tool surface says whether a call may be
+retried — `tools.Tool` is `Name`/`Description`/`InputSchema`/`Invoke` — so when a
+link dies, every in-flight call fails and none is retried. What makes that
+stick is that the node ends every turn before it fails that turn's calls, so an
+agent whose call was dropped is already cancelled; the note it would have read —
+the action may or may not have taken effect, do not retry — is the backstop for
+a caller whose context is not a turn's. The gateway cancels its side too, so a
+drop mid-approval cannot fire a side effect for an agent that has gone. That gap
+is closed **on this path only**: the in-process MCP frontend cannot be fixed the
+same way, because the MCP SDK wraps a connection's context in a type whose
+`Done()` returns nil forever, so no ancestor context reaches a tool handler. See
+`internal/nodehost`'s package doc.
+
+The tool set is fetched at the handshake, immediately before the node's agent is
+initialised, because both backend families latch: `native` on its first
+`Initialize`, `acp`/`claude_code` when their aggregator registers its first
+session. A gateway that cannot answer fails the handshake; the node's redial loop
+retries. The set is then frozen for the process — descriptions and schemas
+refresh on reconnect, membership does not.
 
 ### The two translations (`chat_request_translator.go`, `chat_event_translator.go`)
 
