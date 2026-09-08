@@ -18,6 +18,13 @@ type stream struct {
 	// sessionID is the session this turn belongs to, kept so a cancelled
 	// context can tell the node to abandon the turn.
 	sessionID string
+	// location is where in Slack this turn is happening, taken from the prompt
+	// on the way out and put back on the context of anything that has to ask
+	// the user something on the way in. The gateway's approver refuses to post
+	// a card without it — correctly, because a run with no thread has nobody
+	// watching — so a GateTool request arriving with a bare context would be
+	// auto-approved rather than asked.
+	location agent.TurnLocation
 
 	events chan agent.Event
 

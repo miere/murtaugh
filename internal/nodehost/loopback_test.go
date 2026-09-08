@@ -1,0 +1,927 @@
+package nodehost_test
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"os"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/miere/murtaugh/internal/agent"
+	"github.com/miere/murtaugh/internal/agentruntime"
+	"github.com/miere/murtaugh/internal/config"
+	"github.com/miere/murtaugh/internal/nodehost"
+	"github.com/miere/murtaugh/internal/nodeserve"
+	"github.com/miere/murtaugh/internal/nodesocket"
+	"github.com/miere/murtaugh/internal/nodetoken"
+)
+
+// This file is #193's verification, over a real WebSocket on loopback: a chat
+// turn, a cancellation mid-turn, an approval round trip, and — in
+// backpressure_test.go — the measurement.
+//
+// Everything below the test is production code. The gateway half is the real
+// Host, the real token verification, the real remote client under a real
+// agent.SessionManager built by the real runtime builder; the node half is the
+// real nodeserve.Server and the real tool gate. Only two things are fakes: the
+// agent (a scripted agent.Client, because a language model is not what is under
+// test) and the credential store (in memory, because the SQL one has its own
+// tests).
+
+// loopback is one gateway and one node, attached over 127.0.0.1.
+type loopback struct {
+	host     *nodehost.Host
+	store    *memTokens
+	addr     string
+	selector string
+	sessions map[string]*agent.SessionManager
+	agent    *scriptedAgent
+	gate     *nodeserve.ToolGate
+	// background is the NODE's sink — what a backend on the node calls when it
+	// emits outside a turn.
+	background *nodeserve.BackgroundSink
+	approved   chan approval
+	// notices is what the GATEWAY's background hook received. It is the far end
+	// of the same path.
+	notices chan notice
+	// nodeStopped closes when the node's Serve returns, however it ended.
+	nodeStopped chan struct{}
+}
+
+// approval records what the gateway's tool gate was asked, and answers it.
+type approval struct {
+	tool    string
+	summary string
+	answer  chan approvalAnswer
+}
+
+type approvalAnswer struct {
+	allowed bool
+	note    string
+}
+
+// notice is one event the gateway's background router was handed.
+type notice struct {
+	sessionID string
+	event     agent.Event
+}
+
+// rigOption tunes the rig for the handful of tests that need something other
+// than one healthy attached node.
+type rigOption func(*rigConfig)
+
+type rigConfig struct{ waitForAttach bool }
+
+// withoutWaitingForAttach is for the tests whose point is that the node does
+// NOT get published.
+func withoutWaitingForAttach() rigOption {
+	return func(c *rigConfig) { c.waitForAttach = false }
+}
+
+func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *loopback {
+	t.Helper()
+	cfg := rigConfig{waitForAttach: true}
+	for _, apply := range options {
+		apply(&cfg)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	store := &memTokens{records: map[string]config.NodeToken{}}
+	minted := mintInto(t, store, "node-1")
+
+	approved := make(chan approval, 4)
+	notices := make(chan notice, 8)
+	host, err := nodehost.New(nodehost.Options{Tokens: store, Logger: testLogger()})
+	if err != nil {
+		t.Fatalf("host: %v", err)
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	served := make(chan error, 1)
+	go func() { served <- host.Serve(ctx, listener) }()
+
+	// The real builder, so the test exercises the wiring a gateway would use —
+	// including the choice of which agent's approval gate a node reaches.
+	agentCfg := config.Config{
+		Agents: map[string]config.AgentProfile{"default": {}},
+		Chat:   config.ChatConfig{Enabled: true, Defaults: config.ChatDefaults{Agent: "default"}},
+	}
+	runtime := nodehost.Runtime(host)(agentCfg, nil, testLogger())(agentruntime.Hooks{
+		Chat: true,
+		Approvers: map[string]agentruntime.Approver{
+			"default": approverFunc(func(_ context.Context, tool, summary string) (bool, string) {
+				ask := approval{tool: tool, summary: summary, answer: make(chan approvalAnswer, 1)}
+				approved <- ask
+				answer := <-ask.answer
+				return answer.allowed, answer.note
+			}),
+		},
+		// The gateway's background router in miniature: what a claude_code
+		// stretch that finished after its turn would be rendered from.
+		BackgroundEvents: func(sessionID string, ev agent.Event) {
+			notices <- notice{sessionID: sessionID, event: ev}
+		},
+	})
+
+	gate := nodeserve.NewToolGate(testLogger())
+	background := nodeserve.NewBackgroundSink(testLogger())
+	script.gate = gate
+	conn, err := nodesocket.Dial(ctx, "ws://"+listener.Addr().String(), nodesocket.DialOptions{Token: minted.Token})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	// Closed rather than sent on, so a test can wait for the node's connection
+	// to end and the cleanup can wait for the same thing.
+	nodeStopped := make(chan struct{})
+	go func() {
+		defer close(nodeStopped)
+		_ = nodeserve.Serve(ctx, conn, script, nodeserve.Options{
+			Logger:      testLogger(),
+			Gate:        gate,
+			Background:  background,
+			WindowBytes: nodesocket.DefaultWindowBytes,
+		})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-nodeStopped
+		<-served
+	})
+
+	if cfg.waitForAttach {
+		waitFor(t, "the node to attach", func() bool {
+			_, ok := host.Attached()
+			return ok
+		})
+	}
+
+	return &loopback{
+		host:       host,
+		store:      store,
+		addr:       listener.Addr().String(),
+		selector:   minted.Selector,
+		sessions:   runtime.Sessions,
+		agent:      script,
+		gate:       gate,
+		background: background,
+		approved:   approved,
+		notices:    notices,
+
+		nodeStopped: nodeStopped,
+	}
+}
+
+// mintInto adds one usable credential to the store and returns it.
+func mintInto(t *testing.T, store *memTokens, nodeID string) nodetoken.Minted {
+	t.Helper()
+	minted, err := nodetoken.Mint()
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	if err := store.Put(context.Background(), config.NodeToken{
+		Selector:   minted.Selector,
+		SecretHash: string(minted.SecretHash),
+		NodeID:     nodeID,
+		UserID:     "U-owner",
+		CreatedAt:  time.Now(),
+	}); err != nil {
+		t.Fatalf("store credential: %v", err)
+	}
+	return minted
+}
+
+// 1. A chat turn, end to end against a connected runtime.
+func TestAChatTurnIsServedByAConnectedNode(t *testing.T) {
+	script := newScriptedAgent(func(turn *scriptedTurn) {
+		turn.emit(agent.Event{Type: agent.EventStatus, Text: "thinking"})
+		turn.emit(agent.Event{Type: agent.EventTask, Task: &agent.TaskEvent{
+			ID: "t1", Title: "read a file", Status: agent.TaskStatusComplete,
+		}})
+		turn.emit(agent.Event{Type: agent.EventText, Text: "half a sentence "})
+		turn.emit(agent.Event{Type: agent.EventText, Text: "and the rest.\n"})
+		turn.emit(agent.Event{Type: agent.EventComplete, StopReason: "end_turn"})
+	})
+	rig := dialLoopback(t, script)
+
+	manager := rig.sessions["default"]
+	if manager == nil {
+		t.Fatal("the runtime built no session manager for the default agent")
+	}
+	key := agent.ConversationKey{ChannelID: "C1", ThreadTS: "123.4"}
+	events, err := manager.Prompt(context.Background(), key,
+		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4", UserID: "U9"},
+		agent.PromptRequest{Text: "hello", Channel: "C1", Thread: "123.4", User: "U9"})
+	if err != nil {
+		t.Fatalf("prompt: %v", err)
+	}
+
+	var kinds []agent.EventType
+	var prose string
+	for ev := range events {
+		kinds = append(kinds, ev.Type)
+		if ev.Type == agent.EventText {
+			prose += ev.Text
+		}
+		if ev.Type == agent.EventError {
+			t.Fatalf("the turn failed: %v", ev.Error)
+		}
+		if ev.Type == agent.EventTask && (ev.Task == nil || ev.Task.Title != "read a file") {
+			t.Fatalf("the task lost its identity crossing the wire: %+v", ev.Task)
+		}
+	}
+	if prose != "half a sentence and the rest.\n" {
+		t.Fatalf("the reply came back as %q", prose)
+	}
+	if len(kinds) != 5 {
+		t.Fatalf("the turn produced %v, want five events in order", kinds)
+	}
+	if got := script.lastPrompt(); got.Text != "hello" || got.Thread != "123.4" {
+		t.Fatalf("the node was prompted with %+v", got)
+	}
+}
+
+// 2. A cancellation mid-turn. The gateway's idle path and its /stop command
+// both do `cancel(); for range events {}` and block until the channel closes;
+// across a link the context reaches nothing, so the cancel has to travel.
+func TestCancellationMidTurnReachesTheNodeAndClosesTheStream(t *testing.T) {
+	started := make(chan struct{})
+	script := newScriptedAgent(func(turn *scriptedTurn) {
+		turn.emit(agent.Event{Type: agent.EventText, Text: "working"})
+		close(started)
+		// Ends only when the node's backend is interrupted.
+		<-turn.cancelled
+		turn.emit(agent.Event{Type: agent.EventError, Error: context.Canceled})
+	})
+	rig := dialLoopback(t, script)
+
+	manager := rig.sessions["default"]
+	key := agent.ConversationKey{ChannelID: "C1", ThreadTS: "123.4"}
+	events, err := manager.Prompt(context.Background(), key,
+		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4"},
+		agent.PromptRequest{Text: "long job", Channel: "C1", Thread: "123.4"})
+	if err != nil {
+		t.Fatalf("prompt: %v", err)
+	}
+	if first := receiveEvent(t, events); first.Text != "working" {
+		t.Fatalf("first event was %+v", first)
+	}
+	<-started
+
+	sessionID, ok := manager.Lookup(key)
+	if !ok {
+		t.Fatal("the manager did not record the node's session")
+	}
+	cancelCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := manager.Cancel(cancelCtx, sessionID); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+
+	// The interrupt has to reach the node's backend, and the resulting error
+	// must still satisfy the identity check the renderer branches on — a
+	// cancellation that arrives as a generic failure becomes a failure card
+	// instead of an "interrupted" seal.
+	sawCancelled := false
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		for ev := range events {
+			if ev.Type == agent.EventError && errors.Is(ev.Error, context.Canceled) {
+				sawCancelled = true
+			}
+		}
+	}()
+	select {
+	case <-drained:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the turn's channel never closed after a cancel — the gateway would hang for its full idle timeout")
+	}
+	if !sawCancelled {
+		t.Fatal("the cancellation lost its identity crossing the wire")
+	}
+	if n := script.cancels(); n != 1 {
+		t.Fatalf("the node's backend was cancelled %d times, want 1", n)
+	}
+}
+
+// 3. An approval round trip: the node's native tool gate, the gateway's human,
+// and the note that comes back — which for a native tool call is not
+// diagnostics but the result string the model is handed.
+func TestApprovalRoundTripCarriesTheDecisionAndTheNote(t *testing.T) {
+	outcome := make(chan approvalAnswer, 1)
+	script := newScriptedAgent(func(turn *scriptedTurn) {
+		allowed, note := turn.gate.Approve(turn.ctx, "terminal", "rm -rf /tmp/x")
+		outcome <- approvalAnswer{allowed: allowed, note: note}
+		turn.emit(agent.Event{Type: agent.EventText, Text: "not run"})
+	})
+	rig := dialLoopback(t, script)
+
+	manager := rig.sessions["default"]
+	events, err := manager.Prompt(context.Background(),
+		agent.ConversationKey{ChannelID: "C1", ThreadTS: "123.4"},
+		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4"},
+		agent.PromptRequest{Text: "delete it", Channel: "C1", Thread: "123.4", User: "U9"})
+	if err != nil {
+		t.Fatalf("prompt: %v", err)
+	}
+
+	var ask approval
+	select {
+	case ask = <-rig.approved:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the gateway's approval gate was never asked")
+	}
+	if ask.tool != "terminal" || ask.summary != "rm -rf /tmp/x" {
+		t.Fatalf("the gate was asked about %+v", ask)
+	}
+	ask.answer <- approvalAnswer{allowed: false, note: "Denied by the user. The action was not run; do not retry it without their go-ahead."}
+
+	select {
+	case got := <-outcome:
+		if got.allowed {
+			t.Fatal("a denied tool call came back as allowed")
+		}
+		if got.note != "Denied by the user. The action was not run; do not retry it without their go-ahead." {
+			t.Fatalf("the note did not survive the round trip: %q", got.note)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the node's tool gate never got its answer")
+	}
+
+	// The approval is a request, not an event: rendering it would give a remote
+	// native agent a card the local one does not have.
+	for ev := range events {
+		if ev.Type == agent.EventPermission {
+			t.Fatal("a native tool approval reached the renderer as an event")
+		}
+	}
+}
+
+// A turn torn down with an approval outstanding must answer it. claude_code's
+// control request waits on its process exiting rather than on the turn's
+// context, so an unanswered approval parks a backend goroutine until the agent
+// is killed.
+func TestATornDownTurnAnswersItsOutstandingApproval(t *testing.T) {
+	outcome := make(chan approvalAnswer, 1)
+	asked := make(chan struct{})
+	script := newScriptedAgent(func(turn *scriptedTurn) {
+		go func() {
+			allowed, note := turn.gate.Approve(turn.ctx, "terminal", "rm -rf /tmp/x")
+			outcome <- approvalAnswer{allowed: allowed, note: note}
+		}()
+		<-asked
+		<-turn.cancelled
+	})
+	rig := dialLoopback(t, script)
+
+	manager := rig.sessions["default"]
+	key := agent.ConversationKey{ChannelID: "C1", ThreadTS: "123.4"}
+	events, err := manager.Prompt(context.Background(), key,
+		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4"},
+		agent.PromptRequest{Text: "delete it", Channel: "C1", Thread: "123.4"})
+	if err != nil {
+		t.Fatalf("prompt: %v", err)
+	}
+	select {
+	case <-rig.approved:
+		close(asked)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the gateway's approval gate was never asked")
+	}
+
+	sessionID, _ := manager.Lookup(key)
+	cancelCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = manager.Cancel(cancelCtx, sessionID)
+	for range events {
+	}
+
+	select {
+	case got := <-outcome:
+		if got.allowed {
+			t.Fatal("an abandoned approval was answered with consent")
+		}
+		if got.note == "" {
+			t.Fatal("an abandoned approval was answered with no note, so the model is told nothing")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("an approval outstanding when the turn ended was never answered")
+	}
+}
+
+// An attachment's bytes cross as a side transfer, and the chunks are sent
+// AHEAD of the event that references them. That ordering is the whole design:
+// the gateway materialises an attachment from inside the link's read loop, so a
+// deliverer that had to pull chunks arriving on that same loop would deadlock
+// it.
+func TestAnAttachmentCrossesAsASideTransfer(t *testing.T) {
+	body := bytes.Repeat([]byte("murtaugh "), 40000) // ~360 KiB: several chunks
+	script := newScriptedAgent(func(turn *scriptedTurn) {
+		turn.emit(agent.Event{Type: agent.EventAttachment, Attachment: &agent.AttachmentEvent{
+			Filename: "report.txt",
+			Title:    "the report",
+			Mimetype: "text/plain",
+			Data:     body,
+		}})
+	})
+	rig := dialLoopback(t, script)
+
+	events, err := rig.sessions["default"].Prompt(context.Background(),
+		agent.ConversationKey{ChannelID: "C1", ThreadTS: "123.4"},
+		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4"},
+		agent.PromptRequest{Text: "send me the report", Channel: "C1", Thread: "123.4"})
+	if err != nil {
+		t.Fatalf("prompt: %v", err)
+	}
+
+	var got *agent.AttachmentEvent
+	for ev := range events {
+		if ev.Type == agent.EventError {
+			t.Fatalf("the attachment failed to cross: %v", ev.Error)
+		}
+		if ev.Type == agent.EventAttachment {
+			got = ev.Attachment
+		}
+	}
+	if got == nil {
+		t.Fatal("no attachment reached the gateway")
+	}
+	if got.Filename != "report.txt" || got.Title != "the report" {
+		t.Fatalf("the attachment's metadata came through as %+v", got)
+	}
+	if got.Path == "" {
+		t.Fatal("the attachment arrived with no byte source; the uploader has nothing to send")
+	}
+	landed, err := os.ReadFile(got.Path)
+	if err != nil {
+		t.Fatalf("read the delivered file: %v", err)
+	}
+	if !bytes.Equal(landed, body) {
+		t.Fatalf("the delivered file is %d bytes, want %d", len(landed), len(body))
+	}
+}
+
+// A background event — one a session emits with no turn open — crosses the link
+// addressed by SESSION and reaches the gateway's background router.
+//
+// This is the feature split/06-liveness exists to render: without it a
+// claude_code stretch that goes quiet on a node produces no notice at all, and
+// because the gateway-side plumbing is complete the failure is silent on the
+// side anyone would debug.
+func TestABackgroundEventReachesTheGatewaysRouter(t *testing.T) {
+	rig := dialLoopback(t, newScriptedAgent(func(turn *scriptedTurn) {
+		turn.emit(agent.Event{Type: agent.EventComplete, StopReason: "end_turn"})
+	}))
+
+	manager := rig.sessions["default"]
+	key := agent.ConversationKey{ChannelID: "C1", ThreadTS: "123.4"}
+	events, err := manager.Prompt(context.Background(), key,
+		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4"},
+		agent.PromptRequest{Text: "start something long", Channel: "C1", Thread: "123.4"})
+	if err != nil {
+		t.Fatalf("prompt: %v", err)
+	}
+	for range events {
+	}
+	sessionID, ok := manager.Lookup(key)
+	if !ok {
+		t.Fatal("the manager did not record the node's session")
+	}
+
+	// The turn is over. This is what claude_code's emit does when a subagent
+	// finishes afterwards: no active turn, so it goes to the node's sink.
+	rig.background.Handle(sessionID, agent.Event{Type: agent.EventText, Text: "the subagent finished"})
+
+	select {
+	case got := <-rig.notices:
+		if got.sessionID != sessionID {
+			t.Fatalf("the notice was addressed to session %q, want %q", got.sessionID, sessionID)
+		}
+		if got.event.Type != agent.EventText || got.event.Text != "the subagent finished" {
+			t.Fatalf("the background event crossed as %+v", got.event)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a background event never reached the gateway; a stretch that goes quiet on a node would produce no notice")
+	}
+}
+
+// A background event addressed to a session must not be delivered as an
+// approval request. There is no stream for an answer to come back on, so
+// encoding one would register a correlation id nothing can resolve and park the
+// backend goroutine that raised it.
+func TestABackgroundApprovalIsAnsweredRatherThanSent(t *testing.T) {
+	rig := dialLoopback(t, newScriptedAgent(func(*scriptedTurn) {}))
+
+	decision := make(chan string, 1)
+	rig.background.Handle("node-session-1", agent.Event{
+		Type: agent.EventPermission,
+		Permission: &agent.PermissionPrompt{
+			Request:  agent.PermissionRequest{ToolKind: "terminal", ToolTitle: "rm -rf /"},
+			Decision: decision,
+		},
+	})
+
+	select {
+	case answer := <-decision:
+		if answer != "" {
+			t.Fatalf("a background approval was answered with %q; nobody was asked, so it must resolve as dismissed", answer)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a background approval was neither answered nor refused; the backend goroutine that raised it is parked")
+	}
+	select {
+	case got := <-rig.notices:
+		t.Fatalf("an approval request was rendered as a background event: %+v", got.event)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// A node that presents a credential the gateway does not know must be refused
+// before the upgrade, with an HTTP status a dialler can print.
+func TestAnUnknownCredentialIsRefusedBeforeTheUpgrade(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	host, err := nodehost.New(nodehost.Options{Tokens: &memTokens{records: map[string]config.NodeToken{}}, Logger: testLogger()})
+	if err != nil {
+		t.Fatalf("host: %v", err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() { _ = host.Serve(ctx, listener) }()
+
+	minted, err := nodetoken.Mint()
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	_, err = nodesocket.Dial(ctx, "ws://"+listener.Addr().String(), nodesocket.DialOptions{Token: minted.Token})
+	if err == nil {
+		t.Fatal("an unknown credential was accepted")
+	}
+	if got := err.Error(); !contains(got, "401") {
+		t.Fatalf("the refusal did not reach the node as a status it can print: %v", err)
+	}
+	if _, attached := host.Attached(); attached {
+		t.Fatal("a rejected node was attached anyway")
+	}
+}
+
+// Revoking a credential closes the connection it authenticated, which is what
+// #170 says revocation means. It closes by selector, never by node: during a
+// rotation a node holds two live credentials.
+func TestRevokingACredentialClosesItsConnection(t *testing.T) {
+	rig := dialLoopback(t, newScriptedAgent(func(*scriptedTurn) {}))
+	if _, ok := rig.host.Attached(); !ok {
+		t.Fatal("the node did not attach")
+	}
+	// The selector is the one the rig minted; the host holds it.
+	if err := rig.host.CloseCredential(context.Background(), rig.selector); err != nil {
+		t.Fatalf("close credential: %v", err)
+	}
+	waitFor(t, "the node to be dropped", func() bool {
+		_, ok := rig.host.Attached()
+		return !ok
+	})
+}
+
+// The other half of that rule, and the half the overlap window exists for.
+// During a rotation a node holds two live credentials: it has already moved to
+// the new one and the old one is revoked behind it. Closing "every connection
+// of node X" would drop the node in the middle of the seamless operation, so
+// the match is on SELECTOR alone.
+func TestRevokingADifferentCredentialLeavesTheConnectionUp(t *testing.T) {
+	rig := dialLoopback(t, newScriptedAgent(func(turn *scriptedTurn) {
+		turn.emit(agent.Event{Type: agent.EventText, Text: "still here"})
+	}))
+
+	// The credential being retired: same node, different selector — which is
+	// exactly the state a rotation's overlap window is.
+	retired := mintInto(t, rig.store, "node-1")
+	if retired.Selector == rig.selector {
+		t.Fatal("the two credentials share a selector; the rig cannot pose a rotation")
+	}
+	if _, _, err := rig.store.Revoke(context.Background(), retired.Selector, time.Now()); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+
+	if err := rig.host.CloseCredential(context.Background(), retired.Selector); err != nil {
+		t.Fatalf("close credential: %v", err)
+	}
+
+	if _, ok := rig.host.Attached(); !ok {
+		t.Fatal("revoking the credential the node had already rotated OFF dropped the node")
+	}
+	// Attached is a flag; a turn is the proof the link still carries anything.
+	events, err := rig.sessions["default"].Prompt(context.Background(),
+		agent.ConversationKey{ChannelID: "C1", ThreadTS: "123.4"},
+		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4"},
+		agent.PromptRequest{Text: "are you there", Channel: "C1", Thread: "123.4"})
+	if err != nil {
+		t.Fatalf("the node stopped serving after an unrelated credential was revoked: %v", err)
+	}
+	if first := receiveEvent(t, events); first.Text != "still here" {
+		t.Fatalf("the surviving connection answered with %+v", first)
+	}
+	for range events {
+	}
+}
+
+// The node's agent is initialized at the HANDSHAKE, not lazily on the first
+// turn. agent.SessionManager latches "initialized" on first success and never
+// repeats it, so a node that attaches after the gateway's first turn would
+// otherwise never be initialized at all — and the symptom is one conversation
+// class working and another not, long after whatever change caused it.
+func TestTheNodesAgentIsInitializedAtTheHandshake(t *testing.T) {
+	rig := dialLoopback(t, newScriptedAgent(func(*scriptedTurn) {}))
+
+	// Nothing has been prompted. The count can only come from the handshake.
+	waitFor(t, "the node's agent to be initialized", func() bool {
+		return rig.agent.initializes() == 1
+	})
+}
+
+// And a node whose agent will not come up is not published. Publishing it would
+// give every conversation an agent that fails on its first turn, with the
+// failure surfacing to a user rather than to the operator who attached it.
+func TestANodeWhoseAgentWillNotInitializeIsNotPublished(t *testing.T) {
+	script := newScriptedAgent(func(*scriptedTurn) {})
+	script.initErr = errors.New("the backend is not installed on this machine")
+
+	rig := dialLoopback(t, script, withoutWaitingForAttach())
+
+	// Give the handshake every chance to publish it.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if nodeID, ok := rig.host.Attached(); ok {
+			t.Fatalf("a node whose agent could not initialize was published as %q", nodeID)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if n := script.initializes(); n == 0 {
+		t.Fatal("the handshake never tried to initialize the node's agent")
+	}
+}
+
+// A second node REPLACES the first. There is one slot, and refusing the
+// newcomer instead would lock a node whose laptop slept out behind a half-dead
+// connection the gateway has not noticed yet — until the gateway is restarted.
+// That is the exact scenario cmd/murtaugh-runtime's jittered redial loop exists
+// to handle.
+func TestASecondNodeReplacesTheFirst(t *testing.T) {
+	rig := dialLoopback(t, newScriptedAgent(func(*scriptedTurn) {}))
+	if nodeID, _ := rig.host.Attached(); nodeID != "node-1" {
+		t.Fatalf("the first node attached as %q", nodeID)
+	}
+
+	attachAnother(t, rig, "node-2")
+
+	waitFor(t, "the second node to take the slot", func() bool {
+		nodeID, ok := rig.host.Attached()
+		return ok && nodeID == "node-2"
+	})
+	// The incumbent is not merely shadowed: its connection is closed, so a
+	// half-dead one does not linger holding a goroutine and a socket, and the
+	// node itself learns to redial.
+	select {
+	case <-rig.nodeStopped:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the replaced node's connection was never closed; it would sit there believing it was still serving")
+	}
+}
+
+// attachAnother dials a second node into the same gateway.
+func attachAnother(t *testing.T, rig *loopback, nodeID string) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	minted := mintInto(t, rig.store, nodeID)
+	conn, err := nodesocket.Dial(ctx, "ws://"+rig.addr, nodesocket.DialOptions{Token: minted.Token})
+	if err != nil {
+		t.Fatalf("dial the second node: %v", err)
+	}
+	served := make(chan error, 1)
+	go func() {
+		served <- nodeserve.Serve(ctx, conn, newScriptedAgent(func(*scriptedTurn) {}), nodeserve.Options{
+			Logger:      testLogger(),
+			WindowBytes: nodesocket.DefaultWindowBytes,
+		})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-served
+	})
+}
+
+// ---- fakes -----------------------------------------------------------------
+
+// scriptedAgent is an agent.Client whose turns are a Go function. It is the one
+// thing in these tests that is not production code, because what is under test
+// is the hop and not the model.
+type scriptedAgent struct {
+	script func(*scriptedTurn)
+	gate   *nodeserve.ToolGate
+	// initErr makes the agent refuse to come up, which is a real state — a
+	// backend binary that is not installed on the node's machine.
+	initErr error
+
+	mu        sync.Mutex
+	sessions  map[string]*scriptedTurn
+	last      agent.PromptRequest
+	cancelled int
+	initCalls int
+}
+
+type scriptedTurn struct {
+	ctx       context.Context
+	gate      *nodeserve.ToolGate
+	events    chan agent.Event
+	cancelled chan struct{}
+	once      sync.Once
+}
+
+func newScriptedAgent(script func(*scriptedTurn)) *scriptedAgent {
+	return &scriptedAgent{script: script, sessions: make(map[string]*scriptedTurn)}
+}
+
+func (a *scriptedAgent) Initialize(context.Context) error {
+	a.mu.Lock()
+	a.initCalls++
+	err := a.initErr
+	a.mu.Unlock()
+	return err
+}
+
+func (a *scriptedAgent) NewSession(_ context.Context, _ agent.SessionMetadata) (agent.Session, error) {
+	return agent.Session{ID: "node-session-1"}, nil
+}
+
+func (a *scriptedAgent) Prompt(ctx context.Context, sessionID string, req agent.PromptRequest) (<-chan agent.Event, error) {
+	turn := &scriptedTurn{
+		ctx:       ctx,
+		gate:      a.gate,
+		events:    make(chan agent.Event, 8),
+		cancelled: make(chan struct{}),
+	}
+	a.mu.Lock()
+	a.last = req
+	a.sessions[sessionID] = turn
+	a.mu.Unlock()
+
+	go func() {
+		defer close(turn.events)
+		a.script(turn)
+	}()
+	return turn.events, nil
+}
+
+func (a *scriptedAgent) Cancel(_ context.Context, sessionID string) error {
+	a.mu.Lock()
+	turn := a.sessions[sessionID]
+	a.cancelled++
+	a.mu.Unlock()
+	if turn == nil {
+		// Idempotent, the way acp.Client.Cancel is for an unknown session.
+		return nil
+	}
+	turn.once.Do(func() { close(turn.cancelled) })
+	return nil
+}
+
+func (a *scriptedAgent) Close() error { return nil }
+
+func (a *scriptedAgent) lastPrompt() agent.PromptRequest {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.last
+}
+
+func (a *scriptedAgent) cancels() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.cancelled
+}
+
+func (a *scriptedAgent) initializes() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.initCalls
+}
+
+func (t *scriptedTurn) emit(ev agent.Event) {
+	select {
+	case t.events <- ev:
+	case <-t.ctx.Done():
+	}
+}
+
+type approverFunc func(context.Context, string, string) (bool, string)
+
+func (f approverFunc) Approve(ctx context.Context, toolName, summary string) (bool, string) {
+	return f(ctx, toolName, summary)
+}
+
+// memTokens is the credential store in memory. The SQL implementations have
+// their own tests; what these need is a store that answers.
+type memTokens struct {
+	mu      sync.Mutex
+	records map[string]config.NodeToken
+}
+
+func (m *memTokens) Put(_ context.Context, token config.NodeToken) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.records[token.Selector]; exists {
+		return fmt.Errorf("selector %s already exists", token.Selector)
+	}
+	m.records[token.Selector] = token
+	return nil
+}
+
+func (m *memTokens) BySelector(_ context.Context, selector string) (config.NodeToken, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	record, ok := m.records[selector]
+	return record, ok, nil
+}
+
+func (m *memTokens) List(_ context.Context, nodeID string) ([]config.NodeToken, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]config.NodeToken, 0, len(m.records))
+	for _, record := range m.records {
+		if nodeID == "" || record.NodeID == nodeID {
+			out = append(out, record)
+		}
+	}
+	return out, nil
+}
+
+func (m *memTokens) Revoke(_ context.Context, selector string, at time.Time) (config.NodeToken, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	record, ok := m.records[selector]
+	if !ok {
+		return config.NodeToken{}, false, nil
+	}
+	if record.RevokedAt.IsZero() {
+		record.RevokedAt = at
+	}
+	m.records[selector] = record
+	return record, true, nil
+}
+
+func (m *memTokens) Close() error { return nil }
+
+// ---- helpers ---------------------------------------------------------------
+
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
+}
+
+func waitFor(t *testing.T, what string, ok func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if ok() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
+func receiveEvent(t *testing.T, events <-chan agent.Event) agent.Event {
+	t.Helper()
+	select {
+	case ev, ok := <-events:
+		if !ok {
+			t.Fatal("the turn's channel closed with no events")
+		}
+		return ev
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for an event")
+		return agent.Event{}
+	}
+}
+
+func contains(haystack, needle string) bool {
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		if haystack[i:i+len(needle)] == needle {
+			return true
+		}
+	}
+	return false
+}

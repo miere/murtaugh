@@ -1,18 +1,23 @@
-// Command murtaugh-runtime is the runtime node daemon: the process that will
-// hold a connection open to a gateway and run agents on this machine.
+// Command murtaugh-runtime is the runtime node daemon: the process that holds a
+// connection open to a gateway and runs agents on this machine.
 //
-// It does not do that yet, and it does not pretend to. The link a node speaks
-// over — the transport, the handshake, the session and tool channels — is #170
-// Changes C and D; until they exist there is nothing to dial and nothing to
-// answer. What this binary is today is the entry point those changes attach to,
-// plus the one thing it can honestly report now: whether this machine's
-// configuration describes a node that could serve, and what it would serve.
+// It dials; the gateway never dials it. That is #170's attack-surface argument
+// and it is why a node works from a laptop behind NAT with no tunnel and no
+// inbound firewall rule: revoking a node is closing a socket, not chasing an
+// address.
 //
 // Unlike cmd/murtaugh-gateway, this binary MAY reach the agent packages — it is
-// the half of the split whose whole job is running a model. It happens not to
-// import them yet, because there is nothing here to prompt them: agent backends
-// this binary cannot yet be asked to run would be built, reported on, and never
-// used.
+// the half of the split whose whole job is running a model.
+//
+// # What it does not have yet
+//
+// A node's agent has its backend's own tools and NONE of Murtaugh's. The tool
+// channel — an agent on a node reaching the gateway's tool surface — is #170
+// Change D, item 8, and it is the next thing built. Until it exists the
+// registry handed to the runtime here is empty on purpose rather than
+// half-wired: a node that silently offered a subset of the tools a local agent
+// has would be the "refactor that is really a regression" the spec warns about,
+// discovered by a user rather than by a maintainer.
 package main
 
 import (
@@ -21,24 +26,42 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
+	"math/rand"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"sort"
 	"syscall"
+	"time"
 
+	"github.com/miere/murtaugh/internal/agent"
+	"github.com/miere/murtaugh/internal/agentruntime"
+	"github.com/miere/murtaugh/internal/agentruntime/local"
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/config/migrate"
 	configstore "github.com/miere/murtaugh/internal/config/store"
+	"github.com/miere/murtaugh/internal/nodeserve"
+	"github.com/miere/murtaugh/internal/nodesocket"
 	"github.com/miere/murtaugh/internal/nodetoken"
+	"github.com/miere/murtaugh/internal/tools"
 )
 
 var version = "dev"
 
-// errNoLinkYet is what this binary exits with. It is an error rather than a
-// clean exit so a supervisor that is pointed at it too early reports a failure
-// instead of flapping a process that silently does nothing.
-var errNoLinkYet = errors.New("a runtime node cannot attach to a gateway yet: the node link is not implemented (see #170, Changes C and D)")
+// errNoGateway is what this binary exits with when it is given nothing to dial.
+// It is an error rather than a clean exit so a supervisor pointed at a node
+// that was never told where its gateway is reports a failure instead of
+// flapping a process that silently does nothing.
+var errNoGateway = errors.New("no gateway address: pass -gateway wss://host:port (a node dials in; the gateway never dials out)")
+
+const (
+	// reconnectFloor and reconnectCeiling bound the redial backoff. Jittered,
+	// because every node discovers a dead gateway at the same moment and an
+	// unjittered fleet redials in lockstep.
+	reconnectFloor   = 1 * time.Second
+	reconnectCeiling = 30 * time.Second
+)
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -50,6 +73,10 @@ func main() {
 func run(args []string) error {
 	fs := flag.NewFlagSet("murtaugh-runtime", flag.ContinueOnError)
 	configPath := fs.String("config", "", "path to config.yaml (default ~/.config/murtaugh/config.yaml)")
+	gatewayURL := fs.String("gateway", "", "gateway address to attach to, ws:// or wss:// (required)")
+	agentName := fs.String("agent", "", "which configured agent this node serves (default: the chat default, or the only one)")
+	tokenPath := fs.String("token-file", "", "path to this node's credential (default: node-token beside the config)")
+	insecure := fs.Bool("insecure-skip-verify", false, "do not verify the gateway's TLS certificate")
 	showVersion := fs.Bool("version", false, "print the version and exit")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -90,13 +117,191 @@ func run(args []string) error {
 	defer func() { _ = cfgStore.Close() }()
 
 	reportAgents(os.Stdout, cfg)
-	return errNoLinkYet
+	if *gatewayURL == "" {
+		return errNoGateway
+	}
+
+	credential := *tokenPath
+	if credential == "" {
+		credential = nodetoken.PathFor(cfg.BaseDir)
+	}
+	token, err := nodetoken.ReadFile(credential)
+	if err != nil {
+		return err
+	}
+
+	logger := newLogger(cfg.Access.Debug)
+	served, name, err := serveAgent(cfg, logger, *agentName)
+	if err != nil {
+		return err
+	}
+	logger.Info("runtime node serving one agent", "agent", name, "gateway", *gatewayURL)
+
+	return attach(ctx, logger, attachment{
+		gateway:    *gatewayURL,
+		token:      token,
+		insecure:   *insecure,
+		client:     served.client,
+		gate:       served.gate,
+		background: served.background,
+	})
+}
+
+// servedAgent is the one agent this node offers, the gate its tool calls go
+// through, and the sink its background events leave by.
+type servedAgent struct {
+	client     agent.Client
+	gate       *nodeserve.ToolGate
+	background *nodeserve.BackgroundSink
+}
+
+// serveAgent builds the node's in-process runtime and picks the agent it will
+// serve.
+//
+// One agent, because the protocol carries no agent name: a link IS an agent.
+// That is #193's deliberate simplification — the registry that lets a node
+// advertise what it can serve is item 9 — and it is named here rather than
+// discovered later from a confusing failure.
+func serveAgent(cfg config.Config, logger *slog.Logger, requested string) (servedAgent, string, error) {
+	name, err := chooseAgent(cfg, requested)
+	if err != nil {
+		return servedAgent{}, "", err
+	}
+
+	// Both collaborators are built before the agent because the backends want
+	// them at construction, and bound to a connection when one arrives.
+	gate := nodeserve.NewToolGate(logger)
+	background := nodeserve.NewBackgroundSink(logger)
+
+	runtime := local.Builder(cfg, tools.NewRegistry(), logger)(nodeHooks(cfg, gate, background))
+	client, ok := runtime.Clients[name]
+	if !ok {
+		return servedAgent{}, "", fmt.Errorf("agent %q did not build; see the errors above", name)
+	}
+	return servedAgent{client: client, gate: gate, background: background}, name, nil
+}
+
+// nodeHooks is everything a node contributes to its own in-process runtime.
+//
+// These are the collaborators only a Slack-facing process can supply, which on
+// a node means: reached over the link instead of in memory. Both must be
+// present or the corresponding feature fails SILENTLY, one hop before the
+// protocol could carry it — an unset Approver runs side-effecting tools
+// unprompted, and an unset BackgroundEvents makes claude_code drop a background
+// stretch's events at the backend, so the gateway's "went quiet" notice never
+// appears with nothing logged on the side anyone would debug.
+func nodeHooks(cfg config.Config, gate *nodeserve.ToolGate, background *nodeserve.BackgroundSink) agentruntime.Hooks {
+	// Every agent gets the gate: which one this node serves is decided
+	// elsewhere, and an agent built with no gate would run side-effecting tools
+	// unprompted if that choice changed.
+	approvers := make(map[string]agentruntime.Approver, len(cfg.Agents))
+	for agentName := range cfg.Agents {
+		approvers[agentName] = gate
+	}
+	return agentruntime.Hooks{
+		Chat:             true,
+		Approvers:        approvers,
+		BackgroundEvents: background.Handle,
+	}
+}
+
+func chooseAgent(cfg config.Config, requested string) (string, error) {
+	if requested != "" {
+		if _, ok := cfg.Agents[requested]; !ok {
+			return "", fmt.Errorf("no agent named %q is configured on this node", requested)
+		}
+		return requested, nil
+	}
+	if fallback := cfg.Chat.Defaults.Agent; fallback != "" {
+		if _, ok := cfg.Agents[fallback]; ok {
+			return fallback, nil
+		}
+	}
+	if len(cfg.Agents) == 1 {
+		for name := range cfg.Agents {
+			return name, nil
+		}
+	}
+	if len(cfg.Agents) == 0 {
+		return "", errors.New("no agents are configured on this node")
+	}
+	return "", errors.New("this node has several agents and no default: pass -agent to say which one it serves")
+}
+
+type attachment struct {
+	gateway    string
+	token      string
+	insecure   bool
+	client     agent.Client
+	gate       *nodeserve.ToolGate
+	background *nodeserve.BackgroundSink
+}
+
+// attach dials the gateway and serves it, redialling until the process is
+// stopped.
+//
+// A dropped connection is not fatal and is not announced: a laptop that sleeps
+// at six o'clock disconnects every evening, and a node that gave up on the
+// first refusal would need a human to restart it every morning.
+func attach(ctx context.Context, logger *slog.Logger, a attachment) error {
+	backoff := reconnectFloor
+	for {
+		conn, err := nodesocket.Dial(ctx, a.gateway, nodesocket.DialOptions{
+			Token:              a.token,
+			InsecureSkipVerify: a.insecure,
+		})
+		if err == nil {
+			backoff = reconnectFloor
+			logger.Info("attached to gateway", "gateway", a.gateway)
+			err = nodeserve.Serve(ctx, conn, a.client, nodeserve.Options{
+				Logger:      logger,
+				Gate:        a.gate,
+				Background:  a.background,
+				WindowBytes: nodesocket.DefaultWindowBytes,
+				AckInterval: 30 * time.Second,
+			})
+			if err != nil {
+				logger.Warn("gateway connection ended", "error", err)
+			} else {
+				logger.Info("gateway connection closed")
+			}
+		} else {
+			logger.Warn("could not attach to gateway", "error", err, "retry_in", backoff)
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(jitter(backoff)):
+		}
+		backoff *= 2
+		if backoff > reconnectCeiling {
+			backoff = reconnectCeiling
+		}
+	}
+}
+
+// jitter spreads a fleet's reconnections over the window rather than firing
+// them together.
+func jitter(d time.Duration) time.Duration {
+	if d <= 0 {
+		return 0
+	}
+	return d/2 + time.Duration(rand.Int63n(int64(d/2)+1)) //nolint:gosec // scheduling jitter, not a secret
+}
+
+func newLogger(debug bool) *slog.Logger {
+	level := slog.LevelInfo
+	if debug {
+		level = slog.LevelDebug
+	}
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 }
 
 // reportAgents prints what this node would serve, and where the credential it
-// would present lives. It is the only useful answer available before the link
-// exists, and it is the answer an operator wants first: "is this machine
-// configured to be a node at all?".
+// presents lives. It is printed before anything is dialled, because "is this
+// machine configured to be a node at all?" is the first question an operator
+// asks and the one a connection failure does not answer.
 func reportAgents(out io.Writer, cfg config.Config) {
 	fmt.Fprintf(out, "murtaugh-runtime %s\n", version)
 	fmt.Fprintf(out, "config: %s\n", cfg.BaseDir)

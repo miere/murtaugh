@@ -89,6 +89,12 @@ type Runtime struct {
 	// agent name. An agent that failed to build is absent, and the startup
 	// routing summary reports the gap.
 	Sessions map[string]*agent.SessionManager
+	// Clients is the raw agent.Client under each session manager, keyed the same
+	// way. A gateway never touches it — it holds conversations and therefore
+	// wants the manager. A runtime node does: it serves a gateway that runs its
+	// OWN session manager over the link, and putting a second one on the node
+	// would mint a second set of session ids for the same conversation.
+	Clients map[string]agent.Client
 	// ToolProblems records, per agent, the tool groups dropped at build time
 	// because the agent had no resolvable workspace. The agent still answers;
 	// the startup summary reports each dropped feature.

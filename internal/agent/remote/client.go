@@ -43,9 +43,20 @@ const (
 // Options configures a Client.
 type Options struct {
 	Logger *slog.Logger
-	// Deliverer materialises a side-transferred attachment. nil makes an
-	// arriving attachment an error on its turn rather than a dropped file.
+	// Deliverer materialises a side-transferred attachment. nil takes this
+	// package's own collector, which buffers the chunks that arrive ahead of
+	// the event into a file; supply one only to override that.
 	Deliverer agentwire.AttachmentDeliverer
+	// Approve answers a GateTool permission request — the native loop's inline
+	// approval, which in process is a direct call to the gateway's approver and
+	// has no event of its own. It returns the pair that call returns: whether to
+	// run the tool, and the note handed BACK TO THE MODEL as the call's result
+	// when not.
+	//
+	// nil denies every such request with a note saying nobody could be asked.
+	// Defaulting to allow would mean an agent whose gateway forgot to wire this
+	// runs every side-effecting tool unprompted.
+	Approve func(ctx context.Context, toolName, summary string) (allowed bool, note string)
 	// Background receives events that belong to no request: a background turn
 	// completing against a session the gateway is not prompting. nil logs and
 	// drops them, which is what the gateway does today for an agent with no
@@ -69,6 +80,8 @@ type Client struct {
 	// background receives events addressed to a session rather than to a
 	// request: the path a background turn's completions arrive on.
 	background func(sessionID string, ev agent.Event)
+	approve    func(ctx context.Context, toolName, summary string) (bool, string)
+	transfers  *transfers
 	buffer     int
 
 	nextID atomic.Int64
@@ -94,10 +107,17 @@ func New(conn nodelink.Conn, opts Options) *Client {
 	if buffer <= 0 {
 		buffer = defaultEventBuffer
 	}
+	incoming := newTransfers(log)
+	deliverer := opts.Deliverer
+	if deliverer == nil {
+		deliverer = incoming
+	}
 	c := &Client{
 		log:        log,
-		decoder:    agentwire.NewDecoder(opts.Deliverer),
+		decoder:    agentwire.NewDecoder(deliverer),
 		background: opts.Background,
+		approve:    opts.Approve,
+		transfers:  incoming,
 		buffer:     buffer,
 		closes:     make(chan string, closeQueueDepth),
 		pending:    make(map[string]chan agentwire.Message),
@@ -163,6 +183,7 @@ func (c *Client) NewSession(ctx context.Context, meta agent.SessionMetadata) (ag
 func (c *Client) Prompt(ctx context.Context, sessionID string, request agent.PromptRequest) (<-chan agent.Event, error) {
 	id := c.mintID()
 	s := newStream(sessionID, c.buffer)
+	s.location = agent.TurnLocation{ChannelID: request.Channel, ThreadTS: request.Thread, UserID: request.User}
 
 	c.mu.Lock()
 	if c.closed {
@@ -201,11 +222,19 @@ func (c *Client) watchTurn(ctx context.Context, id string, s *stream) {
 
 // Cancel interrupts the session's in-flight turn.
 //
-// It honours ctx's deadline and returns: the gateway's idle path calls it under
-// five seconds while holding a wedged turn open. An unknown session is the
-// node's business, and answers success there for the same reason
-// acp.Client.Cancel returns nil — there is nothing to interrupt and nothing to
-// report.
+// It honours ctx's deadline for its own wait, but it does NOT guarantee to
+// return within it. Link.Send takes an uncancellable mutex before it consults
+// the context, so a sender already wedged inside a transport write holds this
+// one behind it; the bound is that wedge's write deadline
+// (nodesocket.DefaultWriteTimeout, after which the link is torn down and every
+// call fails at once) plus ctx's own. The gateway's idle path calls this under
+// five seconds while holding a wedged turn open and gets its answer in that
+// long in the ordinary case — but the worst case is one write timeout, not five
+// seconds, and item 3 owns the mutex ordering that would make it exact.
+//
+// An unknown session is the node's business, and answers success there for the
+// same reason acp.Client.Cancel returns nil — there is nothing to interrupt and
+// nothing to report.
 func (c *Client) Cancel(ctx context.Context, sessionID string) error {
 	return c.call(ctx, agentwire.MethodCancel, agentwire.SessionRef{SessionID: sessionID}, nil)
 }
@@ -247,6 +276,12 @@ func (c *Client) SupportsCancel(context.Context) bool {
 	return *c.interruptible
 }
 
+// Done closes when the link under this client stops, for any reason. It is what
+// the owner of the connection waits on: a client whose link has died answers
+// every call with the link's error and never recovers, because a node that
+// disappeared has to dial back in.
+func (c *Client) Done() <-chan struct{} { return c.link.Done() }
+
 // Close says goodbye, tears the link down and finishes every open turn.
 func (c *Client) Close() error {
 	c.mu.Lock()
@@ -265,6 +300,7 @@ func (c *Client) Close() error {
 
 	err := c.link.Close()
 	c.failAll(nil)
+	c.transfers.close()
 	return err
 }
 
@@ -291,7 +327,10 @@ func (c *Client) consume(payload []byte) error {
 		// off the read loop keeps that answer from queueing behind delivery.
 		go c.rejectRequest(msg)
 	case agentwire.MessageChunk:
-		c.log.Warn("remote: attachment transfer chunk arrived with no transfer in progress", "transfer_id", msg.ID)
+		// Written here, on the read loop, on purpose: the chunks arrive ahead of
+		// the event that references them, and this is what makes the deliverer a
+		// lookup instead of a pull that would deadlock the loop it runs on.
+		c.transfers.accept(msg)
 	case agentwire.MessagePermission:
 		c.log.Warn("remote: permission answer arrived from the node, which does not answer them", "id", msg.ID)
 	default:
@@ -329,10 +368,16 @@ func (c *Client) deliverEvent(msg agentwire.Message) {
 	// End may ride along with a final event, so the payload is delivered before
 	// the channel closes rather than instead of it.
 	if len(msg.Body) > 0 {
-		ev, err := c.decode(msg)
-		if err != nil {
+		ev, handled, err := c.decode(msg, s)
+		switch {
+		case err != nil:
 			s.send(agent.Event{Type: agent.EventError, Error: err})
-		} else {
+		case handled:
+			// A native tool approval: it is a request the gateway answers, not
+			// an event the renderer draws. In process the same call never
+			// reaches the event stream either, so putting it there would give a
+			// remote native agent a card the local one does not have.
+		default:
 			s.send(ev)
 		}
 	}
@@ -350,7 +395,7 @@ func (c *Client) deliverBackground(msg agentwire.Message) {
 		c.log.Warn("remote: background event with no router bound", "session_id", msg.SessionID)
 		return
 	}
-	ev, err := c.decode(msg)
+	ev, _, err := c.decode(msg, nil)
 	if err != nil {
 		ev = agent.Event{Type: agent.EventError, Error: err}
 	}
@@ -359,22 +404,69 @@ func (c *Client) deliverBackground(msg agentwire.Message) {
 
 // decode turns an event frame into the agent event the renderer consumes, and
 // starts the watcher that carries a permission answer back.
-func (c *Client) decode(msg agentwire.Message) (agent.Event, error) {
+//
+// The second result says the frame was a request rather than an event and has
+// been taken care of: a GateTool approval is answered by the gateway's tool
+// gate directly, off this goroutine, and never reaches the turn's stream.
+func (c *Client) decode(msg agentwire.Message, s *stream) (agent.Event, bool, error) {
 	var wire agentwire.Event
 	if err := msg.Into(&wire); err != nil {
-		return agent.Event{}, err
+		return agent.Event{}, false, err
 	}
 	ev, pending, err := c.decoder.Decode(context.Background(), wire)
 	if err != nil {
-		return agent.Event{}, err
+		return agent.Event{}, false, err
 	}
-	if pending != nil {
-		c.mu.Lock()
-		c.answers[pending.ID] = pending
-		c.mu.Unlock()
-		go c.answerPermission(pending)
+	if pending == nil {
+		return ev, false, nil
 	}
-	return ev, nil
+	if pending.Gate == agentwire.GateTool {
+		go c.answerApproval(pending, ev, s)
+		return agent.Event{}, true, nil
+	}
+	c.mu.Lock()
+	c.answers[pending.ID] = pending
+	c.mu.Unlock()
+	go c.answerPermission(pending)
+	return ev, false, nil
+}
+
+// answerApproval runs the gateway's inline tool gate for a native agent on a
+// node and sends back the pair it returns.
+//
+// It runs off the read loop because the gate blocks on a human for up to ten
+// minutes, and the read loop is the only thing that can deliver the cancel that
+// would end that wait.
+func (c *Client) answerApproval(pending *agentwire.PendingDecision, ev agent.Event, s *stream) {
+	toolName, summary := "", ""
+	if ev.Permission != nil {
+		toolName, summary = ev.Permission.Request.ToolKind, ev.Permission.Request.ToolTitle
+	}
+	allowed, note := false, "Skipped: this gateway has no approval gate for the agent, so nobody could be asked. The action was not run."
+	if c.approve != nil {
+		ctx := context.Background()
+		if s != nil {
+			// Without the turn's location the gate short-circuits to "allowed"
+			// — its documented headless behaviour — which over a link would
+			// silently ungate every tool call on the node.
+			ctx = agent.WithTurnLocation(ctx, s.location)
+		}
+		allowed, note = c.approve(ctx, toolName, summary)
+	}
+	decision := agent.PermissionDeny
+	if allowed {
+		decision = agent.PermissionAllow
+	}
+	msg, err := agentwire.PermissionAnswer(agentwire.PermissionResponse{ID: pending.ID, OptionID: decision, Note: note})
+	if err != nil {
+		c.log.Warn("remote: encode tool approval", "error", err, "id", pending.ID)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), abandonTimeout)
+	defer cancel()
+	if err := c.send(ctx, msg); err != nil {
+		c.log.Warn("remote: deliver tool approval", "error", err, "id", pending.ID)
+	}
 }
 
 // answerPermission waits for the human's decision and sends it back under the
@@ -493,6 +585,7 @@ func (c *Client) closeLoop() {
 func (c *Client) watchLink() {
 	<-c.link.Done()
 	c.failAll(c.link.Err())
+	c.transfers.close()
 }
 
 // abandon tells the node to stop a turn whose consumer has gone.
