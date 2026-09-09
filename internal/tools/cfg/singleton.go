@@ -203,5 +203,61 @@ func SingletonTools(p Provider) []tools.Tool {
 		&singletonShowTool{p: p, key: config.SingletonTroubleshoot, label: "troubleshoot"},
 		&electionSetTool{p: p},
 		&singletonShowTool{p: p, key: config.SingletonElection, label: "election"},
+		&nodeSetTool{p: p},
+		&singletonShowTool{p: p, key: config.SingletonNode, label: "node"},
 	}
+}
+
+// nodeSetTool updates the node singleton: where a runtime node dials.
+//
+// It is a set tool rather than a bootstrap-file field because the address is
+// ordinary configuration that an operator edits when a gateway moves, and the
+// bootstrap file is deliberately credentials-and-store only. It is also the one
+// block whose CONTENTS are about the gateway and whose OWNER is the node — see
+// internal/config/node.go.
+type nodeSetTool struct{ p Provider }
+
+func (t *nodeSetTool) Name() string { return "cfg.node.set" }
+func (t *nodeSetTool) Description() string {
+	return "Update this runtime node's config (the gateway seed addresses it dials)."
+}
+func (t *nodeSetTool) InputSchema() *jsonschema.Schema {
+	return &jsonschema.Schema{
+		Type: "object",
+		Properties: map[string]*jsonschema.Schema{
+			"gateway": {
+				Type:  "array",
+				Items: &jsonschema.Schema{Type: "string"},
+				Description: "gateway seed address, ws:// or wss:// (repeatable; replaces the list). " +
+					"Addresses a gateway names in a redirect are added to these and never replace them.",
+			},
+		},
+	}
+}
+func (t *nodeSetTool) Invoke(ctx context.Context, args map[string]any) (any, error) {
+	s, err := t.p()
+	if err != nil {
+		return nil, err
+	}
+	var cfg config.NodeConfig
+	if body, ok, err := s.GetSingleton(ctx, config.SingletonNode); err != nil {
+		return nil, err
+	} else if ok && len(body) > 0 {
+		if err := json.Unmarshal(body, &cfg); err != nil {
+			return nil, err
+		}
+	}
+	if v, ok := arrayArg(args, "gateway"); ok {
+		cfg.Gateway = v
+	}
+	// Checked here as well as by the store's own validation, because the store's
+	// runs under whichever role opened it and this tool is reachable from a
+	// combined install where nothing else would look at the block.
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	if err := putSingletonValidated(ctx, s, config.SingletonNode, cfg); err != nil {
+		return nil, err
+	}
+	return okResult{Message: "saved node config; restart the node to apply"}, nil
 }

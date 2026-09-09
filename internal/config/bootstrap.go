@@ -49,6 +49,47 @@ func Bootstrap(configPath string) error {
 	return err
 }
 
+// BootstrapNode seeds a RUNTIME NODE's configuration root.
+//
+// It is BootstrapWithReport with one asset swapped and it exists for what that
+// asset does NOT contain: node-config.yaml has no `oauth:` block. Seeding a node
+// from the gateway's skeleton would put a file advertising `${SLACK_APP_TOKEN}`
+// and `${SLACK_BOT_TOKEN}` on every laptop in the fleet — an invitation to fill
+// them in, on the one machine #170 is explicit must never hold them.
+//
+// The .env template is swapped for the same reason and not for a different one:
+// env.example carries `SLACK_APP_TOKEN` and `SLACK_BOT_TOKEN` under a heading
+// saying they are required, so seeding it would remove the invitation from one
+// file and re-create it in the file beside it. node-env.example names the
+// provider variables a node genuinely uses and no Slack variable at all.
+//
+// Everything else a node uses is seeded identically: AGENTS.md, the system
+// prompt, the templates tree and the skills directory its agents read.
+func BootstrapNode(configPath string) error {
+	_, err := bootstrapWithReport(configPath, false, RoleNode)
+	return err
+}
+
+// bootstrapAsset names the embedded bootstrap file a role is seeded from.
+func bootstrapAsset(role Role) string {
+	if role == RoleNode {
+		return "node-config.yaml"
+	}
+	return "config.yaml"
+}
+
+// envAsset names the embedded .env template a role is seeded from.
+//
+// A node gets its own because the gateway's advertises ${SLACK_APP_TOKEN} and
+// ${SLACK_BOT_TOKEN} under "required to run the gateway" — which on a laptop is
+// both wrong and an instruction.
+func envAsset(role Role) string {
+	if role == RoleNode {
+		return "node-env.example"
+	}
+	return "env.example"
+}
+
 // BootstrapWithReport is the report-returning variant of Bootstrap. On
 // success it returns a report describing what was created, refreshed, and
 // preserved.
@@ -69,6 +110,12 @@ func Bootstrap(configPath string) error {
 //     agent finds whatever lands there (bespoke skills + any exports).
 //   - AGENTS.md and BOOTSTRAP.md, when those docs are embedded in assets/.
 func BootstrapWithReport(configPath string, force bool) (BootstrapReport, error) {
+	return bootstrapWithReport(configPath, force, RoleCombined)
+}
+
+// bootstrapWithReport is the implementation both roles share. Only the seed
+// bootstrap file differs; see bootstrapAsset.
+func bootstrapWithReport(configPath string, force bool, role Role) (BootstrapReport, error) {
 	report := BootstrapReport{}
 	baseDir := filepath.Dir(configPath)
 	if err := os.MkdirAll(baseDir, bootstrapDirPerm); err != nil {
@@ -82,11 +129,11 @@ func BootstrapWithReport(configPath string, force bool) (BootstrapReport, error)
 	// database now and is managed via `murtaugh cfg …`. On an UPGRADE the real
 	// siblings still exist on disk and are auto-migrated into the store.
 	plan := []struct{ src, dst string }{
-		{"config.yaml", configPath},
-		// Seed a template .env (from the non-dotfile asset env.example) so a
-		// fresh install has the credentials file to fill in. preserveExisting
-		// means a real .env is never clobbered.
-		{"env.example", filepath.Join(baseDir, EnvFileName)},
+		{bootstrapAsset(role), configPath},
+		// Seed a template .env (from the non-dotfile asset) so a fresh install
+		// has the credentials file to fill in. preserveExisting means a real
+		// .env is never clobbered. Which template, see envAsset.
+		{envAsset(role), filepath.Join(baseDir, EnvFileName)},
 	}
 	for _, name := range optionalBootstrapDocs {
 		plan = append(plan, struct{ src, dst string }{name, filepath.Join(baseDir, name)})

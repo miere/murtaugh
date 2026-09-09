@@ -47,7 +47,7 @@ func (h *loopHarness) run() {
 	done := make(chan error, 1)
 	go func() {
 		done <- attach(ctx, quietLogger(), attachment{
-			gateway: seed,
+			gateways: []string{seed},
 			dial: func(_ context.Context, address string) (*nodesocket.Conn, error) {
 				h.mu.Lock()
 				h.dialled = append(h.dialled, address)

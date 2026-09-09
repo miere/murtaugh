@@ -81,6 +81,31 @@ type Options struct {
 	// Empty means "work it out" — see Host.Address, which explains why the
 	// worked-out answer is ws:// and when that is not good enough.
 	Advertise string
+	// References is every agent profile NAME the gateway's own configuration
+	// mentions. It is a function rather than a value because a configuration
+	// reload rebuilds the gateway while the connections survive.
+	//
+	// It is what #198 moved to connect time: a gateway holds no profile bodies,
+	// so it cannot resolve one of these names until a node says what it serves.
+	// nil skips the check. See onboard.go.
+	References func() []config.AgentReference
+	// OnUnconfiguredNode is called when a node attaches claiming nothing.
+	//
+	// A node with no profiles has never been configured, which #170 Change I
+	// makes a trigger for the EXISTING Slack onboarding rather than an error —
+	// run against the node's OWNER, who is on the credential. The node has no
+	// Slack of its own, which is why this is driven from the gateway. nil means
+	// the arrival is journalled and nothing else.
+	OnUnconfiguredNode func(ctx context.Context, node Node)
+	// OnNodeSettled is called when a node stops being one with nothing
+	// configured: it advertised something, or it disconnected.
+	//
+	// It is the other end of OnUnconfiguredNode and exists because the offer it
+	// makes is an ENTITLEMENT held on the Slack side, not a message. An offer
+	// that is never withdrawn outlives its node for the life of the process, and
+	// the gateway routes its owner's next click at a node id that is configured
+	// or gone. nil means an offer is only ever ended by being used.
+	OnNodeSettled func(node Node)
 }
 
 // Host owns the accept endpoint and the registry of connected nodes.
@@ -359,6 +384,10 @@ func (h *Host) attach(node *attached) {
 	h.log.Info("runtime node attached", "node_id", node.nodeID, "user_id", node.userID, "selector", node.selector,
 		"profiles", len(ad.Profiles), "claims", len(ad.Claims), "connected", count)
 	h.record(journal.LevelInfo, "attached", "A runtime node attached", node, ad)
+	// After the entry is published, never before: the fleet-scoped check below
+	// reads the registry, and a node reviewing its own arrival before it is in
+	// there would be told its own profiles are not served.
+	h.reviewClaim(node, ad)
 }
 
 func (h *Host) detach(node *attached) {
@@ -367,6 +396,10 @@ func (h *Host) detach(node *attached) {
 	h.log.Info("runtime node detached", "node_id", node.nodeID, "selector", node.selector)
 	// Journalled, never announced. See Options.Journal.
 	h.record(journal.LevelInfo, "detached", "A runtime node disconnected", node, agentwire.Advertisement{})
+	// A node that is gone cannot be configured by a form, so its owner's
+	// invitation ends with the connection. It comes back on the next attach if
+	// the node is still unconfigured, which is seconds away.
+	h.settle(node)
 }
 
 // advertise records a node's claim, at the handshake and on every later change.
@@ -387,6 +420,11 @@ func (h *Host) advertise(node *attached, ad agentwire.Advertisement) {
 	h.log.Info("a runtime node changed what it claims", "node_id", node.nodeID,
 		"profiles", len(ad.Profiles), "claims", len(ad.Claims))
 	h.record(journal.LevelInfo, "advertised", "A runtime node changed what it claims", node, ad)
+	// A claim change can settle either of the two questions differently: a node
+	// that finished onboarding stops being unconfigured, and one whose owner
+	// renamed a profile can strand a gateway reference that resolved a minute
+	// ago. Both are worth knowing at the moment they become true.
+	h.reviewClaim(node, ad)
 }
 
 // record puts one node lifecycle event on the gateway stream.

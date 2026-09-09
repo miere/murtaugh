@@ -27,11 +27,12 @@ import (
 // The two ends already have tests. These are about the join.
 
 // recordingEndpoint is a stand-in for cmd/murtaugh-gateway's listener that
-// records the three calls instead of binding a port.
+// records the calls instead of binding a port.
 type recordingEndpoint struct {
-	address  config.LeaderAddress
-	followed []LeaderView
-	detached []string
+	address   config.LeaderAddress
+	followed  []LeaderView
+	detached  []string
+	onboarded []NodeOnboarding
 }
 
 func (e *recordingEndpoint) endpoint() NodeEndpoint {
@@ -39,6 +40,7 @@ func (e *recordingEndpoint) endpoint() NodeEndpoint {
 		Address: func() config.LeaderAddress { return e.address },
 		Follow:  func(v LeaderView) { e.followed = append(e.followed, v) },
 		Detach:  func(reason string) { e.detached = append(e.detached, reason) },
+		Onboard: func(o NodeOnboarding) { e.onboarded = append(e.onboarded, o) },
 	}
 }
 
@@ -153,6 +155,42 @@ func TestTheElectionPublishesWhereNodesReachThisGateway(t *testing.T) {
 	if got := opts.Address(); !got.Equal(endpoint.address) {
 		t.Errorf("after the address moved the election still publishes %v, want %v", got, endpoint.address)
 	}
+}
+
+// TestTheNodeRegistryIsHandedBothEndsOfTheOnboardingTrigger is the same rule as
+// the three above, applied to the fourth wiring in this composition root.
+//
+// The registry knows a node attached with nothing configured and knows when it
+// stopped being one; the Slack side owns the form and the entitlement behind it.
+// Neither can see the other, so all three answers cross here — and an offer with
+// no withdrawal is one an administrator cannot get out from behind, because the
+// gateway checks the node branch before the admin branch.
+func TestTheNodeRegistryIsHandedBothEndsOfTheOnboardingTrigger(t *testing.T) {
+	endpoint := &recordingEndpoint{}
+	a, holder := wiringTestApp(endpoint)
+
+	a.wireNodeOnboarding(holder)
+
+	if len(endpoint.onboarded) != 1 {
+		t.Fatalf("the node registry was handed the gateway's answers %d times, want exactly 1", len(endpoint.onboarded))
+	}
+	o := endpoint.onboarded[0]
+	if o.References == nil {
+		t.Error("References is nil: the gateway's agent names never reach the connect-time check")
+	}
+	if o.Unconfigured == nil {
+		t.Error("Unconfigured is nil: a node that attaches with nothing configured is never onboarded")
+	}
+	if o.Settled == nil {
+		t.Error("Settled is nil: an invitation outlives its node for the life of the process, " +
+			"and an admin who once plugged one in cannot reach their own gateway's form again")
+	}
+	// Both closures must survive a configuration reload, which replaces the
+	// gateway. Reaching it through the holder is what makes that true; a captured
+	// pointer would be a torn-down predecessor.
+	holder.swap(a.buildGateway(config.Config{}))
+	o.Unconfigured(context.Background(), "node-7", "U0OWNER01")
+	o.Settled("node-7", "U0OWNER01")
 }
 
 // TestAGatewayWithNoNodeListenerStillElects is the shipping default: every

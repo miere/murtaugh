@@ -63,7 +63,10 @@ func (a *Application) runGateway(ctx context.Context) error {
 	// gateway learns about leadership last. A reload repeats this for the
 	// replacement (see reloadConfig).
 	holder.get().WithLeaderElection(runner)
-	a.attachAgentSetup(ctx, holder.get(), holder, runner)
+	a.attachAgentSetup(ctx, holder.get(), a.cfg, holder, runner)
+	// The node endpoint learns how to ask the gateway its two questions. Once,
+	// not per reload: the closures go through the holder.
+	a.wireNodeOnboarding(holder)
 
 	// Close agent backends on the way out, whichever gateway is current by
 	// then. A reload has already closed the one it replaced.
@@ -133,7 +136,7 @@ func (a *Application) reloadConfig(daemonCtx, opCtx context.Context, holder *gat
 	replacement := a.buildGateway(cfg)
 	replacement.WithLeaderElection(runner)
 	a.attachRunClaims(replacement)
-	a.attachAgentSetup(daemonCtx, replacement, holder, runner)
+	a.attachAgentSetup(daemonCtx, replacement, cfg, holder, runner)
 	holder.swap(replacement)
 	a.cfg = cfg
 

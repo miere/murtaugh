@@ -54,6 +54,26 @@ type Options struct {
 	// indistinguishable to the gateway from a node that has never been
 	// configured.
 	Advertise *Advertiser
+	// Configure applies the agent profiles a Slack onboarding form produced for
+	// this node's owner, into this node's OWN store.
+	//
+	// nil refuses the method, which is the right answer for any node that did
+	// not opt in: #170 says node admins own their node, and this is the one
+	// place a gateway can write to one. The node's own applier is where the
+	// "only while unconfigured" guarantee is enforced — see
+	// agentwire.NodeConfiguration.
+	Configure func(ctx context.Context, cfg agentwire.NodeConfiguration) (agentwire.NodeConfigured, error)
+	// Restart stops the node so its supervisor brings it back up serving what it
+	// was just given. Called only after a Configure whose answer said it would,
+	// and only after that answer is on the wire — it cancels the context this
+	// connection is served on, so firing it a moment early would leave the
+	// operator watching a form that appeared to fail.
+	//
+	// It exists because both agent backend families latch their toolset at
+	// construction: a process that came up with no agent cannot grow one. nil is
+	// a node that applies configuration and keeps running without it, which is
+	// only useful to a test.
+	Restart func()
 	// WindowBytes, AckThreshold, AckInterval and Epoch go to the link. Zero
 	// takes the link's defaults — which is wrong over a real socket; see
 	// nodesocket.DefaultWindowBytes.
@@ -72,6 +92,10 @@ type Server struct {
 	ready  chan struct{}
 	proxy  *ToolProxy
 	claim  *Advertiser
+	// configure applies a configuration the gateway hands this node. nil
+	// refuses the method; see Options.Configure.
+	configure func(ctx context.Context, cfg agentwire.NodeConfiguration) (agentwire.NodeConfigured, error)
+	restart   func()
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -137,6 +161,10 @@ func Serve(ctx context.Context, conn nodelink.Conn, client agent.Client, opts Op
 		// Same reason: serveInitialize reads the claim to put on the handshake
 		// answer, and that runs off the read loop before the binds below.
 		claim: opts.Advertise,
+		// And the same again: the gateway may send node.configure at any point
+		// after the handshake, which is served off that loop.
+		configure: opts.Configure,
+		restart:   opts.Restart,
 	}
 	s.ctx, s.cancel = context.WithCancel(ctx)
 	defer s.cancel()
@@ -317,6 +345,8 @@ func (s *Server) serve(msg agentwire.Message) {
 		s.serveCancel(msg)
 	case agentwire.MethodCloseSession:
 		s.serveCloseSession(msg)
+	case agentwire.MethodConfigure:
+		s.serveConfigure(msg)
 	case agentwire.MethodClose:
 		s.reply(msg.ID, agentwire.Empty{})
 		s.cancel()
@@ -446,6 +476,43 @@ func (s *Server) serveCloseSession(msg agentwire.Message) {
 	// response to a request nobody made.
 	if closer, ok := s.client.(interface{ CloseSession(string) }); ok {
 		closer.CloseSession(ref.SessionID)
+	}
+}
+
+// serveConfigure applies the configuration a Slack onboarding form produced for
+// this node's owner.
+//
+// It is answered rather than fire-and-forget because a human is waiting for the
+// outcome in Slack: "saved two profiles, restarting" and "this node is already
+// configured" are two different things for the gateway to say, and a node that
+// silently ignored the frame would leave the operator watching a form that
+// appeared to work.
+//
+// The node decides. A build that wired no applier refuses, and an applier that
+// refuses because the node already holds profiles refuses — see
+// agentwire.NodeConfiguration for why that guarantee is enforced here and not on
+// the gateway.
+func (s *Server) serveConfigure(msg agentwire.Message) {
+	if s.configure == nil {
+		s.fault(msg.ID, errors.New("nodeserve: this node does not accept configuration from its gateway"))
+		return
+	}
+	var cfg agentwire.NodeConfiguration
+	if err := msg.Into(&cfg); err != nil {
+		s.fault(msg.ID, fmt.Errorf("nodeserve: read the configuration: %w", err))
+		return
+	}
+	result, err := s.configure(s.ctx, cfg)
+	if err != nil {
+		s.fault(msg.ID, err)
+		return
+	}
+	s.log.Info("this node was configured by its gateway", "profiles", result.Applied, "restarting", result.Restarting)
+	s.reply(msg.ID, result)
+	// After the reply, never before: the restart cancels the context this
+	// connection is being served on.
+	if result.Restarting && s.restart != nil {
+		s.restart()
 	}
 }
 

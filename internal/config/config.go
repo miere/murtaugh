@@ -18,6 +18,19 @@ import (
 )
 
 const defaultRelativePath = ".config/murtaugh/config.yaml"
+
+// defaultNodeRelativePath is the runtime node's own configuration root.
+//
+// It is a SUBDIRECTORY rather than a second file beside config.yaml, and that
+// is the load-bearing part. Two roles in one directory share a .env, a store, a
+// node-token — and, worst, a schema migration: internal/config/migrate backs up
+// and restores every top-level regular FILE in its directory, so a failed
+// migration in one role would restore over the other role's credentials.
+// Directories are skipped by both the backup and the restore, so a node rooted
+// below the gateway's directory is untouched by the gateway's migrations and
+// gets its own config.db, .env and node-token for free (Config.BaseName already
+// stems the sibling database names).
+const defaultNodeRelativePath = ".config/murtaugh/node/config.yaml"
 const defaultAgentsRelativePath = ".config/murtaugh/agents.yaml"
 const defaultJobsRelativePath = ".config/murtaugh/jobs.yaml"
 const defaultJournalRelativePath = ".config/murtaugh/journal.yaml"
@@ -28,8 +41,14 @@ type Config struct {
 	// config.yaml, "slack-nurturecloud" for slack-nurturecloud.yaml). It stems
 	// the sibling database filenames so that several configs can share one
 	// directory without colliding on a single config.db/journal.db pair.
-	BaseName string      `yaml:"-" json:"-"`
-	OAuth    OAuthConfig `yaml:"oauth" json:"oauth"`
+	BaseName string `yaml:"-" json:"-"`
+	// Role is which half of #170's split this configuration belongs to. It is
+	// set by the binary that loaded it — never read from the file or the store,
+	// because a node that could declare itself a gateway by editing its own
+	// config would be asserting a role the gateway then trusts. The zero value
+	// is RoleCombined, which is today's behaviour and the shipping default.
+	Role  Role        `yaml:"-" json:"-"`
+	OAuth OAuthConfig `yaml:"oauth" json:"oauth"`
 	// Database is the config-store backend selection, parsed from the bootstrap
 	// config.yaml. It is the only non-credential block that stays on disk; every
 	// other section below is sourced from the store it points at.
@@ -43,6 +62,7 @@ type Config struct {
 	Journal       JournalConfig                 `yaml:"-" json:"-"`
 	Troubleshoot  TroubleshootConfig            `yaml:"-" json:"-"`
 	Election      ElectionConfig                `yaml:"-" json:"-"`
+	Node          NodeConfig                    `yaml:"-" json:"-"`
 	WorkflowRules map[string]WorkflowRuleConfig `yaml:"-" json:"-"`
 	UnfurlRules   map[string]UnfurlRuleConfig   `yaml:"-" json:"-"`
 }
@@ -622,6 +642,28 @@ type SandboxConfig struct {
 	Env []string `yaml:"env" json:"env,omitempty"`
 }
 
+// RootedAt returns the profile with its work_dir filled in when it carries
+// none, and unchanged when it does.
+//
+// It lives here rather than at the one call site because that call site is a
+// runtime node applying a profile its gateway just built (#170 Change I), and
+// the workdir guard — internal/archtest/workdiranalyzer, run in CI — forbids
+// downstream packages from READING the raw field. That rule is right: a
+// downstream read is somebody consuming an unresolved workdir instead of a
+// ResolvedAgent. This is not that. It is config AUTHORING, one step before the
+// row is written, and it belongs beside the field it defaults.
+//
+// The profile that needs it is the owner's `tweaker`, which is rooted wherever
+// the configuration lives so it can edit it. The gateway that built it cannot
+// know that path — it is a directory on somebody else's machine — so it leaves
+// the field empty and the node fills it in.
+func (p AgentProfile) RootedAt(dir string) AgentProfile {
+	if strings.TrimSpace(p.WorkDir) == "" {
+		p.WorkDir = dir
+	}
+	return p
+}
+
 // AgentProfile defines one agent. Shared knobs live at the top; the backend is
 // selected by which sub-block is present — exactly one of Native or ACP. There
 // is no separate `kind`: a profile carrying a `native:` block is a native
@@ -944,6 +986,20 @@ func DefaultPath() (string, error) {
 	return filepath.Join(home, defaultRelativePath), nil
 }
 
+// DefaultNodePath is where a runtime node keeps its configuration when it was
+// not told otherwise: ~/.config/murtaugh/node/config.yaml.
+//
+// The gateway's default is unchanged — #170's split is about giving the node its
+// own root, not about moving an installed gateway — so an existing install stays
+// exactly where it is and a node lands beside it without touching it.
+func DefaultNodePath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve user home: %w", err)
+	}
+	return filepath.Join(home, defaultNodeRelativePath), nil
+}
+
 func DefaultAgentsPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -1124,11 +1180,18 @@ func Parse(data []byte) (Config, error) {
 
 func (c Config) Validate() error {
 	var errs []error
-	if strings.TrimSpace(c.OAuth.AppToken) == "" {
-		errs = append(errs, errors.New("oauth.app_token is required"))
+	// A node has no Slack connection, so requiring the workspace's tokens of it
+	// would mean handing them to every laptop that runs an agent. See role.go.
+	if c.Role.HoldsSlackCredentials() {
+		if strings.TrimSpace(c.OAuth.AppToken) == "" {
+			errs = append(errs, errors.New("oauth.app_token is required"))
+		}
+		if strings.TrimSpace(c.OAuth.BotToken) == "" {
+			errs = append(errs, errors.New("oauth.bot_token is required"))
+		}
 	}
-	if strings.TrimSpace(c.OAuth.BotToken) == "" {
-		errs = append(errs, errors.New("oauth.bot_token is required"))
+	if err := c.Node.Validate(); err != nil {
+		errs = append(errs, err)
 	}
 	if err := c.Journal.Validate(); err != nil {
 		errs = append(errs, err)
@@ -1186,25 +1249,45 @@ func (c Config) Validate() error {
 		}
 	}
 
+	// resolvesNames is the behavioural change #198 introduces, applied at every
+	// name→body site below. A gateway does not hold profile bodies, so it cannot
+	// tell a typo from a name only somebody's laptop can serve; the check moves
+	// to connect time (internal/nodehost) and runs against the profiles the
+	// attaching user's fleet advertises. Everything that is NOT a name→body
+	// check — a blank name, a duplicate match, a malformed glob — still runs for
+	// every role, because none of those needs a body to answer.
+	resolvesNames := c.Role.HoldsAgentProfiles()
+	known := agentSet{profiles: c.Agents, resolves: resolvesNames}
 	if c.Chat.Enabled {
-		if len(c.Agents) == 0 {
+		if len(c.Agents) == 0 && resolvesNames {
 			errs = append(errs, errors.New("chat is enabled but no agents are defined in agents.yaml"))
 		}
 		if strings.TrimSpace(c.Chat.Defaults.Agent) == "" {
 			errs = append(errs, errors.New("chat.defaults.agent is required when chat is enabled"))
-		} else if _, ok := c.Agents[c.Chat.Defaults.Agent]; !ok {
+		} else if _, ok := c.Agents[c.Chat.Defaults.Agent]; !ok && resolvesNames {
 			errs = append(errs, fmt.Errorf("chat.defaults.agent %q not found in agents.yaml", c.Chat.Defaults.Agent))
 		}
 		for user, agent := range c.Chat.Defaults.DMAgents {
 			if strings.TrimSpace(user) == "" {
 				errs = append(errs, errors.New("chat.defaults.dm_agents has a blank user key"))
 			}
-			if _, ok := c.Agents[agent]; !ok {
+			// Blankness before the lookup, and unconditionally. A blank value is
+			// not a name→body question — no body is needed to see it — so it must
+			// be raised for every role. Left to the lookup below it is deferred on
+			// a gateway, and AgentReferences deliberately skips blanks, so it
+			// would fall through both halves and be reported nowhere.
+			if strings.TrimSpace(agent) == "" {
+				errs = append(errs, fmt.Errorf("chat.defaults.dm_agents[%s] is blank; remove the entry or name an agent", user))
+			} else if _, ok := c.Agents[agent]; !ok && resolvesNames {
 				errs = append(errs, fmt.Errorf("chat.defaults.dm_agents[%s] %q not found in agents", user, agent))
 			}
 		}
+		// Set-but-blank rather than unset: `dm_agent: "  "` is somebody halfway
+		// through an edit, and it is the same fall-through as dm_agents above.
 		if c.Chat.Defaults.DMAgent != "" {
-			if _, ok := c.Agents[c.Chat.Defaults.DMAgent]; !ok {
+			if strings.TrimSpace(c.Chat.Defaults.DMAgent) == "" {
+				errs = append(errs, errors.New("chat.defaults.dm_agent is blank; remove it or name an agent"))
+			} else if _, ok := c.Agents[c.Chat.Defaults.DMAgent]; !ok && resolvesNames {
 				errs = append(errs, fmt.Errorf("chat.defaults.dm_agent %q not found in agents.yaml", c.Chat.Defaults.DMAgent))
 			}
 		}
@@ -1225,8 +1308,12 @@ func (c Config) Validate() error {
 			seenMatch[channel] = i
 			// A channel rule may set only reply_on_thread (empty agent → falls
 			// back to chat.defaults.agent), so validate the agent only when set.
+			// Set-but-blank is neither, and is raised for every role: see
+			// chat.defaults.dm_agents above.
 			if cc.Agent != "" {
-				if _, ok := c.Agents[cc.Agent]; !ok {
+				if strings.TrimSpace(cc.Agent) == "" {
+					errs = append(errs, fmt.Errorf("chat.channels[%s].agent is blank; remove it to fall back to chat.defaults.agent", channel))
+				} else if _, ok := c.Agents[cc.Agent]; !ok && resolvesNames {
 					errs = append(errs, fmt.Errorf("chat.channels[%s].agent references unknown agent %q", channel, cc.Agent))
 				}
 			}
@@ -1268,7 +1355,7 @@ func (c Config) Validate() error {
 			if !hasPrompt {
 				errs = append(errs, fmt.Errorf("jobs[%s].prompt is required when agent is set", name))
 			}
-			if hasAgent {
+			if hasAgent && resolvesNames {
 				if _, ok := c.Agents[job.Agent]; !ok {
 					errs = append(errs, fmt.Errorf("jobs[%s].agent references unknown agent %q", name, job.Agent))
 				}
@@ -1304,13 +1391,13 @@ func (c Config) Validate() error {
 			errs = append(errs, fmt.Errorf("workflow-rules[%s].trigger must contain at least one action", name))
 		}
 		for i, trigger := range rule.Triggers {
-			if err := validateTrigger(trigger, c.Agents); err != nil {
+			if err := validateTrigger(trigger, known); err != nil {
 				errs = append(errs, fmt.Errorf("workflow-rules[%s].trigger[%d]: %w", name, i, err))
 			}
 		}
 	}
 	for name, rule := range c.UnfurlRules {
-		if err := validateUnfurlRule(rule, c.Agents); err != nil {
+		if err := validateUnfurlRule(rule, known); err != nil {
 			errs = append(errs, fmt.Errorf("unfurl-rules[%s]: %w", name, err))
 		}
 	}
@@ -1626,7 +1713,7 @@ func durationOrDefault(value string, fallback time.Duration) time.Duration {
 	return duration
 }
 
-func validateTrigger(trigger TriggerConfig, agents map[string]AgentProfile) error {
+func validateTrigger(trigger TriggerConfig, agents agentSet) error {
 	switch trigger.Type {
 	case "reply-to-slack":
 		if trigger.ReplyToSlack == nil {
@@ -1665,12 +1752,35 @@ func validateRun(run RunTriggerConfig) error {
 	return nil
 }
 
+// agentSet answers the one question every name→body check asks — "is this the
+// name of a profile I hold?" — and can answer a third way that a bare map
+// cannot: "I do not hold profiles, so I cannot say".
+//
+// That third answer is what #198's move of validation to connect time needs. A
+// nil map would answer "unknown agent" to every name on a gateway, and a map
+// pre-filled with every name would defeat the check on a node.
+type agentSet struct {
+	profiles map[string]AgentProfile
+	// resolves is false for a role that holds no profile bodies (RoleGateway),
+	// which makes unknown always answer false and defers the check.
+	resolves bool
+}
+
+// unknown reports a name that this configuration can prove is not an agent.
+func (s agentSet) unknown(name string) bool {
+	if !s.resolves {
+		return false
+	}
+	_, ok := s.profiles[name]
+	return !ok
+}
+
 // validateDelegate checks a delegate-to-agent block: it always needs a prompt,
 // and a named agent must be defined in agents.yaml. When agentOptional is true
 // (the top-level delegate-to-agent trigger, which starts a chat turn) an empty
 // agent is allowed and means "use the channel router"; the headless surfaces
 // (reply-to-slack, unfurl) still require an explicit agent.
-func validateDelegate(d *DelegateToAgentConfig, agents map[string]AgentProfile, agentOptional bool) error {
+func validateDelegate(d *DelegateToAgentConfig, agents agentSet, agentOptional bool) error {
 	if d == nil {
 		return errors.New("delegate-to-agent config is required")
 	}
@@ -1678,7 +1788,7 @@ func validateDelegate(d *DelegateToAgentConfig, agents map[string]AgentProfile, 
 		if !agentOptional {
 			return errors.New("delegate-to-agent requires an agent")
 		}
-	} else if _, ok := agents[d.Agent]; !ok {
+	} else if agents.unknown(d.Agent) {
 		return fmt.Errorf("delegate-to-agent references unknown agent %q", d.Agent)
 	}
 	if strings.TrimSpace(d.Prompt) == "" {
@@ -1805,7 +1915,7 @@ func countTrue(vals ...bool) int {
 	return n
 }
 
-func validateUnfurlRule(rule UnfurlRuleConfig, agents map[string]AgentProfile) error {
+func validateUnfurlRule(rule UnfurlRuleConfig, agents agentSet) error {
 	var errs []error
 	match := rule.Match
 	if strings.TrimSpace(match.Domain) == "" &&

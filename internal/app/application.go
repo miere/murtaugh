@@ -17,10 +17,12 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/miere/murtaugh/assets"
 	"github.com/miere/murtaugh/internal/agentruntime"
+	"github.com/miere/murtaugh/internal/agentwire"
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/config/store"
 	"github.com/miere/murtaugh/internal/frontends/cli"
@@ -127,6 +129,13 @@ type Application struct {
 	approvedCfg    config.Snapshot
 	approvedCfgSet bool
 	approvedCfgMu  sync.Mutex
+	// agentRefs is every agent profile NAME the running configuration mentions,
+	// republished on every reload.
+	//
+	// Atomic rather than mutex-guarded because it is read from a node's own
+	// connection goroutine at the moment that node attaches, which can be any
+	// moment at all — including the middle of a reload. See node_setup.go.
+	agentRefs atomic.Pointer[[]config.AgentReference]
 	// jobRuns is the shared scheduled-run claim store, retained only so
 	// shutdown can close it. nil when no job is scheduled.
 	jobRuns config.JobRunStore
@@ -345,6 +354,36 @@ type NodeEndpoint struct {
 	// nothing will ever route a conversation over again, and it would keep
 	// holding it. Dropping it is what makes it redial into the redirect.
 	Detach func(reason string)
+	// Onboard is handed the two gateway-side answers the node registry needs
+	// and cannot work out: what this gateway's configuration NAMES, and who to
+	// offer the setup form to when a node attaches with nothing configured.
+	//
+	// It is called once, with closures that reach the CURRENT gateway through
+	// the holder, so a configuration reload does not have to re-register
+	// anything. See #170 Change I and internal/nodehost/onboard.go.
+	Onboard func(NodeOnboarding)
+	// Configure hands one node the profiles a completed setup form produced.
+	// It is the return path of Onboard's trigger.
+	Configure func(ctx context.Context, nodeID string, cfg agentwire.NodeConfiguration) (agentwire.NodeConfigured, error)
+}
+
+// NodeOnboarding is what the gateway supplies to the node registry.
+type NodeOnboarding struct {
+	// References is every agent profile name this gateway's configuration
+	// mentions, re-read on each call so a reload is picked up.
+	//
+	// This is #198's behavioural change in one field: those names used to be
+	// resolved against profile bodies at write time, and a gateway no longer
+	// holds bodies to resolve them against.
+	References func() []config.AgentReference
+	// Unconfigured is called when a node attaches claiming nothing.
+	Unconfigured func(ctx context.Context, nodeID, userID string)
+	// Settled is called when a node stops being one with nothing configured —
+	// it advertised something, or it disconnected — so the invitation its owner
+	// is holding can be withdrawn. Without it an administrator who once plugged
+	// in an unconfigured node is routed to that node for the life of the
+	// process. See internal/slack/gateway.WithdrawNodeSetup.
+	Settled func(nodeID, userID string)
 }
 
 // WithNodeEndpoint attaches the inbound node listener to the election. Returns
@@ -398,7 +437,7 @@ func buildRegistry(cfg config.Config, cfgStore config.Store, configPath, version
 		return cfgStore, nil
 	}
 	reg.Register(define.New(storeProvider))
-	for _, t := range cfgtools.All(cfgStore, configPath) {
+	for _, t := range cfgtools.All(cfgStore, configPath, cfg.Role) {
 		reg.Register(t)
 	}
 

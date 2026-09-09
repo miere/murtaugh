@@ -11,9 +11,20 @@
 // Dialling in means this process owns finding the gateway, which after a
 // failover is a different machine. A gateway that is not the elected one
 // redirects rather than dropping the connection, and the addresses it names are
-// ADDED to the configured seed — never substituted for it, or a node asleep
+// ADDED to the configured seeds — never substituted for them, or a node asleep
 // through a topology change wakes holding only addresses that no longer exist.
-// gateways.go owns that list and the rule.
+// gateways.go owns that list and the rule. The seeds come from this node's own
+// configuration (`node.gateway`) or from -gateway, which overrides it.
+//
+// # A node that has never been configured
+//
+// It still attaches, advertising nothing. That empty claim is #170 Change I's
+// onboarding trigger: the gateway learns who OWNS the node from the credential
+// it presented, offers that person the existing Slack setup form, and sends the
+// answers back down this connection for configure.go to apply. A node that
+// refused to start without a profile — which is what this did before item 12 —
+// made the trigger unreachable, because the one node that needed onboarding was
+// the one node that could never connect to ask for it.
 //
 // It also owns the distinction #197 exists for: a failed dial is reported as
 // "wrong gateway", "gateway down" or "credential rejected", because those are
@@ -56,12 +67,14 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/miere/murtaugh/internal/agent"
 	"github.com/miere/murtaugh/internal/agentruntime"
 	"github.com/miere/murtaugh/internal/agentruntime/local"
+	"github.com/miere/murtaugh/internal/agentwire"
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/config/migrate"
 	configstore "github.com/miere/murtaugh/internal/config/store"
@@ -78,7 +91,7 @@ var version = "dev"
 // It is an error rather than a clean exit so a supervisor pointed at a node
 // that was never told where its gateway is reports a failure instead of
 // flapping a process that silently does nothing.
-var errNoGateway = errors.New("no gateway address: pass -gateway wss://host:port (a node dials in; the gateway never dials out)")
+var errNoGateway = errors.New("no gateway address: set one with `murtaugh cfg node set --gateway wss://host:port` or pass -gateway (a node dials in; the gateway never dials out)")
 
 const (
 	// reconnectFloor and reconnectCeiling bound the redial backoff. Jittered,
@@ -109,8 +122,8 @@ func run(args []string) error {
 	}
 
 	fs := flag.NewFlagSet("murtaugh-runtime", flag.ContinueOnError)
-	configPath := fs.String("config", "", "path to config.yaml (default ~/.config/murtaugh/config.yaml)")
-	gatewayURL := fs.String("gateway", "", "gateway address to attach to, ws:// or wss:// (required); addresses learned from a redirect are added to this one and never replace it")
+	configPath := fs.String("config", "", "path to this node's config.yaml (default ~/.config/murtaugh/node/config.yaml)")
+	gatewayURL := fs.String("gateway", "", "gateway address to attach to, ws:// or wss://; overrides node.gateway in the configuration. Addresses learned from a redirect are added to the seeds and never replace them")
 	agentName := fs.String("agent", "", "which configured agent this node serves (default: the chat default, or the only one)")
 	tokenPath := fs.String("token-file", "", "path to this node's credential (default: node-token beside the config)")
 	insecure := fs.Bool("insecure-skip-verify", false, "do not verify the gateway's TLS certificate")
@@ -126,9 +139,13 @@ func run(args []string) error {
 		return fmt.Errorf("unexpected argument %q: this binary takes no subcommands", fs.Arg(0))
 	}
 
+	// A node's own configuration ROOT, not the gateway's. Two roles in one
+	// directory share a .env, a store and a node-token — and share
+	// internal/config/migrate's backup/restore, which reverts every top-level
+	// file in the directory it runs in. See config.DefaultNodePath.
 	path := *configPath
 	if path == "" {
-		defaultPath, err := config.DefaultPath()
+		defaultPath, err := config.DefaultNodePath()
 		if err != nil {
 			return err
 		}
@@ -140,21 +157,33 @@ func run(args []string) error {
 	} else if len(applied) > 0 {
 		fmt.Fprintf(os.Stderr, "murtaugh-runtime: migrated config to schema v%d\n", applied[len(applied)-1])
 	}
-	if err := config.Bootstrap(path); err != nil {
+	// The node's skeleton, which unlike the gateway's carries no `oauth:` block:
+	// a node has no Slack connection and must never hold the workspace's tokens.
+	if err := config.BootstrapNode(path); err != nil {
 		return err
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	cfg, cfgStore, err := configstore.Bootstrap(ctx, path, false)
+	// RoleNode, which is what lets this load at all: a node's configuration is
+	// validated without the Slack credentials it must not hold. See
+	// internal/config/role.go.
+	cfg, cfgStore, err := configstore.BootstrapRole(ctx, path, config.RoleNode, false)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = cfgStore.Close() }()
 
-	reportAgents(os.Stdout, cfg)
-	if *gatewayURL == "" {
+	// The seed addresses: the flag, or the node's own configuration. The flag
+	// wins so an operator can point a node somewhere once without editing it.
+	seeds := cfg.Node.Seeds()
+	if flagged := strings.TrimSpace(*gatewayURL); flagged != "" {
+		seeds = []string{flagged}
+	}
+
+	reportAgents(os.Stdout, cfg, seeds)
+	if len(seeds) == 0 {
 		return errNoGateway
 	}
 
@@ -168,17 +197,36 @@ func run(args []string) error {
 	}
 
 	logger := newLogger(cfg.Access.Debug)
+	// The process context, which the configuration applier below can end. A node
+	// that has just been given its first agent profiles restarts into them —
+	// both backend families latch their toolset at construction, so a process
+	// built with nothing cannot grow an agent. See configure.go.
+	runCtx, restart := context.WithCancel(ctx)
+	defer restart()
+
 	served, name, err := serveAgent(cfg, logger, *agentName)
 	if err != nil {
 		return err
 	}
-	logger.Info("runtime node serving one agent", "agent", name, "gateway", *gatewayURL)
 
 	// What this node claims, set BEFORE the first dial so the handshake answer
 	// carries it. A node that advertised after attaching would be attached and
 	// mute for a window, and the gateway builds its registry entry inside that
 	// window.
-	serving := []string{name}
+	//
+	// A node with nothing configured advertises NOTHING, and that empty claim is
+	// the signal: #170 Change I makes it the trigger for onboarding the node's
+	// owner through Slack, which the gateway drives because this process has no
+	// Slack of its own. It is why such a node attaches at all rather than
+	// refusing to start — an unpublished node has no owner the gateway can ask.
+	var serving []string
+	if name != "" {
+		serving = []string{name}
+		logger.Info("runtime node serving one agent", "agent", name, "gateways", strings.Join(seeds, " "))
+	} else {
+		logger.Warn("this node has no agent profile configured; attaching so its owner can be offered the setup form in Slack",
+			"config", cfg.BaseDir, "gateways", strings.Join(seeds, " "))
+	}
 	served.claim.Publish(ctx, nodeclaim.Advertise(cfg, serving))
 
 	// And the only reason a node ever changes its claim afterwards. Nothing
@@ -220,8 +268,9 @@ func run(args []string) error {
 		}()
 	}
 
-	return attach(ctx, logger, attachment{
-		gateway:    *gatewayURL,
+	configure := &configurer{store: cfgStore, baseDir: cfg.BaseDir, logger: logger, restarts: true}
+	return attach(runCtx, logger, attachment{
+		gateways:   seeds,
 		token:      token,
 		insecure:   *insecure,
 		client:     served.client,
@@ -229,6 +278,10 @@ func run(args []string) error {
 		background: served.background,
 		tools:      served.tools,
 		claim:      served.claim,
+		configure:  configure.apply,
+		// Fired by nodeserve AFTER the answer is on the wire, never by the
+		// applier: it cancels the context this very connection is served on.
+		restart: restart,
 	})
 }
 
@@ -261,6 +314,19 @@ func serveAgent(cfg config.Config, logger *slog.Logger, requested string) (serve
 	name, err := chooseAgent(cfg, requested)
 	if err != nil {
 		return servedAgent{}, "", err
+	}
+	if name == "" {
+		// Nothing configured. The node attaches anyway, with an empty
+		// advertisement, because that empty claim is what triggers onboarding
+		// its owner through Slack — see the call site, and #170 Change I. None
+		// of the collaborators below are built: there is no agent for them to
+		// serve, and the gate, the proxy and the aggregator all exist to feed
+		// one. The claim advertiser is the exception, because the empty claim is
+		// the entire point.
+		return servedAgent{
+			client: nodeserve.UnconfiguredClient{},
+			claim:  nodeserve.NewAdvertiser(logger),
+		}, "", nil
 	}
 
 	// All three collaborators are built before the agent because the backends
@@ -333,13 +399,21 @@ func chooseAgent(cfg config.Config, requested string) (string, error) {
 		}
 	}
 	if len(cfg.Agents) == 0 {
-		return "", errors.New("no agents are configured on this node")
+		// The empty name, not an error. A node that has never been configured
+		// must be able to attach, because the gateway learns who OWNS it from
+		// the credential the connection presents and learns it has nothing from
+		// the empty advertisement — and #170 Change I makes those two facts
+		// together the trigger for onboarding the owner through Slack. Refusing
+		// to start, which is what this did before, made that trigger unreachable
+		// by construction: the one node that needs onboarding was the one node
+		// that could never connect to ask for it.
+		return "", nil
 	}
 	return "", errors.New("this node has several agents and no default: pass -agent to say which one it serves")
 }
 
 type attachment struct {
-	gateway    string
+	gateways   []string
 	token      string
 	insecure   bool
 	client     agent.Client
@@ -347,6 +421,8 @@ type attachment struct {
 	background *nodeserve.BackgroundSink
 	tools      *nodeserve.ToolProxy
 	claim      *nodeserve.Advertiser
+	configure  func(context.Context, agentwire.NodeConfiguration) (agentwire.NodeConfigured, error)
+	restart    func()
 
 	// dial and wait are the loop's two seams, nil in every binary and set only
 	// by the loop's own test.
@@ -393,7 +469,7 @@ func (a attachment) waiter() func(time.Duration) <-chan time.Time {
 // not — is gatewayList.refusal's. Both live in gateways.go, because the loop
 // below is the part that must stay obvious.
 func attach(ctx context.Context, logger *slog.Logger, a attachment) error {
-	gateways := newGatewayList(a.gateway)
+	gateways := newGatewayList(a.gateways...)
 	dial, wait := a.dialer(), a.waiter()
 	backoff := reconnectFloor
 	for {
@@ -432,6 +508,8 @@ func attach(ctx context.Context, logger *slog.Logger, a attachment) error {
 			Background:  a.background,
 			Tools:       a.tools,
 			Advertise:   a.claim,
+			Configure:   a.configure,
+			Restart:     a.restart,
 			WindowBytes: nodesocket.DefaultWindowBytes,
 			AckInterval: 30 * time.Second,
 		}); err != nil {
@@ -498,12 +576,17 @@ func newLogger(debug bool) *slog.Logger {
 // presents lives. It is printed before anything is dialled, because "is this
 // machine configured to be a node at all?" is the first question an operator
 // asks and the one a connection failure does not answer.
-func reportAgents(out io.Writer, cfg config.Config) {
+func reportAgents(out io.Writer, cfg config.Config, seeds []string) {
 	fmt.Fprintf(out, "murtaugh-runtime %s\n", version)
 	fmt.Fprintf(out, "config: %s\n", cfg.BaseDir)
 	fmt.Fprintf(out, "node credential: %s\n", nodetoken.PathFor(cfg.BaseDir))
+	if len(seeds) == 0 {
+		fmt.Fprintln(out, "gateways: none configured")
+	} else {
+		fmt.Fprintf(out, "gateways: %s\n", strings.Join(seeds, " "))
+	}
 	if len(cfg.Agents) == 0 {
-		fmt.Fprintln(out, "agents: none configured")
+		fmt.Fprintln(out, "agents: none configured — attaching so this node's owner can be offered the setup form in Slack")
 		return
 	}
 	names := make([]string, 0, len(cfg.Agents))
