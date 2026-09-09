@@ -379,7 +379,9 @@ Configuration is split between a slim on-disk **bootstrap file** and a
 **config store** (a database). Only the credentials and the store connection
 live on disk; everything else lives in the store.
 
-**On disk** — `~/.config/murtaugh/config.yaml`, two blocks only:
+**On disk** — `~/.config/murtaugh/config.yaml` for a gateway (a runtime node
+gets its own root, `~/.config/murtaugh/node/config.yaml`, with no `oauth:` block
+at all — see the configuration-split section below), two blocks only:
 
 - `oauth:` — Slack tokens (`app_token`/`bot_token`/`user_token`), each a
   `${VAR}` reference resolved from the sibling `.env`.
@@ -428,6 +430,11 @@ singletons.
   that replaced the old `config.Load`: parse the bootstrap file, migrate a
   legacy YAML tree on first upgrade (below), open the store, and — unless
   `setup` is true — load + validate the whole config from it.
+  `store.BootstrapRole(ctx, configPath, role, setup)` is the same for one half
+  of #170's split: the role decides whether Slack credentials are required and
+  whether an agent NAME can be resolved against a BODY here at all. See "The
+  configuration split and the onboarding trigger" below — that deferral is the
+  one behavioural change of #198, and it moves the check to connect time.
 - `config.AssembleFromRows(base, items, singletons)` is the **validated core**:
   it merges the bootstrap `Config` with the store rows into a full `Config` and
   runs `Config.Validate()`. `Store.Load` calls it; so does every `cfg` mutation.
@@ -452,6 +459,23 @@ assembled config via `AssembleFromRows`, and on failure restores the prior row
 (`upsertItemValidated`/`putSingletonValidated` in `internal/tools/cfg/deps.go`),
 so a bad edit can never leave the store in an unloadable state. `cfg db migrate`
 copies the store into the other backend and rewrites the `database:` block.
+
+Every one of those validations runs **under this process's role**
+(`validationBaseFor`), `cfg db migrate` included: on a broker gateway both
+regimes would otherwise run, so `chat.defaults.agent` would be accepted at write
+time and refused by the migration, and a gateway that cannot migrate cannot be
+moved onto the shared store its election needs. The migration validates the
+SOURCE, before it opens the target — a refusal after `Restore` leaves a fully
+populated store that `config.yaml` does not point at, and running the command
+again makes a second one.
+
+`murtaugh cfg node set|show` is the exception to "the binary decides the role":
+its subject is a NODE's configuration root, which by design has no `oauth:`
+block, so `cmd/murtaugh/main.go` bootstraps those two commands at `RoleNode`
+(`roleFor`). Without it the only documented way to set `node.gateway` died on
+`oauth.app_token is required` — a credential a node must never hold and an
+operator therefore cannot supply. `cfg node split` is deliberately not one of
+them: it runs from the gateway's root and writes the node's.
 
 **Configuration is hot-reloaded, under admin approval.** The runtime no longer
 loads config once and keeps it: leader election made that untenable, since a
@@ -1217,6 +1241,149 @@ Cloud Run gateway must run with `max_instances = 1` (and `min_instances = 1` for
 a warm standby). Election already guarantees one gateway serves Slack, so nothing
 is lost.
 
+### The configuration split and the onboarding trigger (`internal/config/role.go`, `internal/nodehost/onboard.go`)
+
+**The gateway and the runtime node hold different configuration, in different
+places, under different rules.** #170 Change I.
+
+**Separate roots, not two files in one directory.** The gateway keeps
+`~/.config/murtaugh/config.yaml`; a node defaults to
+`~/.config/murtaugh/node/config.yaml` — its own directory, so it gets its own
+`config.db`, `.env` and `node-token` for free (`Config.BaseName` already stems
+the sibling database names). The directory matters rather than the filename:
+`internal/config/migrate` backs up and restores every top-level regular FILE in
+the directory it runs in, so two roles sharing one directory means a failed
+migration in either can restore over the other's credentials. Directories are
+skipped by both halves of that, which is what makes the node's root safe under
+the gateway's.
+
+A node's bootstrap file is seeded from `assets/node-config.yaml`, which has **no
+`oauth:` block**: a node has no Slack connection and must never hold the
+workspace's tokens. `config.BootstrapNode` is the only difference from the
+gateway's seeding.
+
+**A node's configuration is independent of the gateway it attaches to,
+including its backend.** A laptop node on SQLite attaching to a
+Firestore-backed gateway is ordinary and supported — it is what lets a team run
+nodes without every developer holding cloud credentials.
+
+**Roles decide which rules apply** (`config.Role`, zero value `RoleCombined`):
+
+| Role | Slack tokens | agent name → body |
+|---|---|---|
+| `RoleCombined` (`murtaugh slack gateway`, the shipping default) | required | resolved locally |
+| `RoleGateway` (`murtaugh-gateway`) | required | **deferred to connect time** |
+| `RoleNode` (`murtaugh-runtime`) | not required | resolved locally |
+
+The role is set by the binary that loaded the configuration and is never read
+from the file or the store — a node that could declare itself a gateway by
+editing its own config would be asserting a role the gateway then trusts.
+
+**The behavioural change, stated where an operator will meet it.** The default
+agent name is validated at WRITE time today: `cfg chat set --default-agent typo`
+is refused, and so is a daemon start. A broker gateway holds no profile bodies,
+so it cannot make that check — and the node that does hold the body may be
+asleep. The check therefore moves to **connect time**: when a node attaches,
+`internal/nodehost/onboard.go` resolves the names the gateway's configuration
+uses (`config.AgentReferences`) against the profiles that user's FLEET
+advertises, and journals what nothing serves (`stream=gateway kind=node
+state=unservable`). **"Is my configuration valid" now depends partly on who is
+online.**
+
+Two properties are constraints rather than preferences. It is **advisory** — a
+gateway restarting before any node has dialled has an empty registry, and a
+check that could fail would refuse its own working configuration on every boot.
+And it is **fleet-scoped**, not a flat union over every connected node:
+delegation picks from the initiating user's own nodes or ones they hold a grant
+on and never a mixture, so a profile only Bob's laptop serves cannot answer for
+Alice.
+
+`config.AgentReferences` and the name→body checks in `Config.Validate` are the
+same seven sites seen from two sides. A site added to one and not the other is a
+typo nothing ever reports, and the two directions need two different guards.
+`agentrefs_test.go` compares the list against a hard-coded seven, so removing a
+site from it fails. `agentrefs_guard_test.go` runs `Validate` under both roles
+over a configuration naming a different agent at each of the seven, and — because
+a site that does not exist yet cannot be run — counts the role-gated checks in
+the package's own SOURCE against a pinned number, so adding an eighth check to
+`Validate` and not to the list fails too.
+
+**Blankness is not one of them.** A blank name needs no profile body to detect,
+so it is raised for every role and `AgentReferences` skips it deliberately rather
+than naming the same problem twice. Three sites — `chat.defaults.dm_agents`,
+`chat.defaults.dm_agent` and `chat.channels[].agent` — used to catch a blank only
+as a side effect of the body lookup failing, which meant #198 deferred it with
+the rest and it fell through both halves.
+
+**Splitting an existing install.** `murtaugh cfg node split` (→
+`store.SplitForNode`) copies the node's half — agent profiles, MCP servers,
+jobs, `chat` and `defaults` — into a second store, validates each half under its
+OWN role, and **deletes nothing**. `chat` and `defaults` are copied rather than
+assigned because both halves read them: `internal/nodeclaim` derives a node's
+whole advertisement from `chat.channels` plus `chat.defaults.agent`, and
+`defaults` carries the gateway's stream cadence and the node's ACP settings
+alike. Node token hashes and conversation pins cannot travel at all — they live
+in side stores `Snapshot` deliberately excludes.
+
+Deleting the gateway's agent rows is precisely what would switch the in-process
+path off, and that path is still the shipping default, so the split is safe to
+run against a live gateway and safe to run twice.
+
+**Zero profiles is an onboarding TRIGGER, not an error.** A node that has never
+been configured attaches advertising nothing (`nodeserve.UnconfiguredClient`,
+`chooseAgent` returning an empty name). Refusing to start — what a node did
+before this item — made the trigger unreachable by construction: the one node
+that needed onboarding was the one node that could never connect to ask for it.
+
+The gateway sees the empty advertisement, learns the OWNER from the credential
+the connection presented, and runs the **existing** Slack setup form against
+them. It is a new trigger on one flow, not a second flow. Three packages hold a
+third each and `internal/app/node_setup.go` is where they meet:
+
+- `internal/nodehost` knows a node arrived with nothing and who owns it, and has
+  no Slack.
+- `internal/slack/gateway` owns the form and knows nothing about nodes. Its
+  admin-only gate is *replaced* rather than relaxed: a user may open the form
+  when they have an unconfigured node waiting (`node_setup.go`,
+  `setupSubjectFor`).
+- The profiles belong in the NODE's store, so they cross as
+  `agentwire.MethodConfigure` — the one method that carries configuration.
+
+**The offer is an entitlement, not a message, so it has to END.** Three things
+end it and the registry knows two of them, which is why `OnNodeSettled` exists
+alongside `OnUnconfiguredNode`: the form was submitted, the node advertised
+something (it was configured, possibly by hand in a terminal), or the node
+disconnected. `setupSubjectFor` checks the node branch **before** the admin
+branch, so an offer that never ended would route an administrator who once
+plugged in an unconfigured node at that node id for the life of the process,
+with no other route into their own gateway's form.
+
+**And the CARD is once per owner, not once per node.** `pendingNodes` keeps
+which node a submission configures (it moves, to the newest) separately from
+whether that owner has already been sent a card (it does not). Keying the card
+on the node id instead is a DM storm: two unconfigured nodes on a seconds-scale
+reconnect backoff alternate, and every attach then finds a different id stored
+and posts again — the "trains the admin to ignore it" failure #170 states for
+disconnects, landing in the fresh-install case.
+
+**The node decides.** `MethodConfigure` does not make a gateway able to write a
+node's configuration: the node applies it only while it holds no agent profile of
+its own (`cmd/murtaugh-runtime/configure.go`). A gateway can bootstrap an empty
+node exactly once and can never reconfigure a running one, which is what keeps
+#170's "node admins own their node" true. The node then **restarts** — both agent
+backend families latch their toolset at construction, so a process that came up
+with no agent cannot grow one — and nodeserve fires that restart only after the
+answer is on the wire, because it cancels the context the connection is served
+on.
+
+The `tweaker` profile's `work_dir` is the one field the gateway leaves empty: it
+is rooted wherever the configuration lives, that directory is on the node's
+machine, and only the node can fill it in. Nothing on the wire says so — a field
+carrying the empty answer would be dropped by `omitempty` and be
+indistinguishable from a producer that never set it, so the substitution is the
+node's, stated in `agentwire.NodeConfiguration` and pinned by
+`cmd/murtaugh-runtime`'s own test.
+
 ### The two translations (`chat_request_translator.go`, `chat_event_translator.go`)
 
 A turn crosses two named boundaries, one per direction. They exist because the
@@ -1486,10 +1653,18 @@ filtered queries. Two lanes, never conflated.
 ## Assets and embedding (`internal/../assets`)
 
 `assets/assets.go` embeds reference files via
-`//go:embed config.yaml env.example system-prompt.md AGENTS.md cli-help.md templates skills troubleshoot`.
+`//go:embed config.yaml node-config.yaml env.example node-env.example system-prompt.md AGENTS.md cli-help.md templates skills troubleshoot`.
 The embedded `config.yaml` is the slim bootstrap default (`oauth:` +
 `database:`); the former YAML siblings are no longer embedded or seeded, since
 that configuration now lives in the config store.
+
+A runtime node is seeded from its own pair, and for one reason applied twice.
+`node-config.yaml` has no `oauth:` block, and `node-env.example` names no
+`SLACK_*` variable — `env.example` carries `SLACK_APP_TOKEN` and
+`SLACK_BOT_TOKEN` under a heading saying they are required to run the gateway,
+so seeding it would remove the invitation from one file and re-create it in the
+file beside it, on the one machine #170 is explicit must never hold them
+(`config.bootstrapAsset` / `config.envAsset`).
 Block Kit templates live under `templates/` (`unfurl/`, `auth/`, `ask/`) — see "Block Kit
 rendering" above for why a card is a template rather than Go builders. The
 Test-communication button is built in Go (`internal/slack/pingcard` supplies its

@@ -11,12 +11,17 @@ import (
 // The addresses this node will try, and the rule that keeps it able to come
 // home.
 //
-// #170: learned gateways AUGMENT the configured seed and NEVER replace it. The
-// failure that rule exists to prevent is specific and unrecoverable without it —
-// a node that was asleep through a topology change wakes holding only addresses
-// that no longer exist, having overwritten the one address somebody typed on
-// purpose. So the seed is first, permanent, and returned to on every cycle,
-// and everything learned is appended behind it.
+// #170: learned gateways AUGMENT the configured seeds and NEVER replace them.
+// The failure that rule exists to prevent is specific and unrecoverable without
+// it — a node that was asleep through a topology change wakes holding only
+// addresses that no longer exist, having overwritten the address somebody typed
+// on purpose. So the seeds are first, permanent, and returned to on every cycle,
+// and everything learned is appended behind them.
+//
+// The seeds come from the node's own configuration (config.NodeConfig.Gateway)
+// or from -gateway, which overrides it. Configuration rather than a flag alone
+// because an installed daemon's address survives a reinstall and is the one
+// thing an operator edits when a gateway moves; see internal/config/node.go.
 //
 // Nothing learned is written down, either. Learned addresses die with the
 // process, which is the same rule stated for time instead of for order: a
@@ -38,9 +43,14 @@ const (
 )
 
 // gatewayList is the ordered set of addresses this node will dial, with the
-// seed pinned at the front.
+// seeds pinned at the front.
 type gatewayList struct {
-	seed    string
+	// seeds is what an operator configured, in their order. Several because a
+	// gateway is often known by more than one name — a hostname and an address,
+	// #170's "hostname AND IP where available" seen from the node's side — and
+	// making the operator pick one means picking the one that will be wrong
+	// first. None of them is ever evicted.
+	seeds   []string
 	learned []string
 	// at is the address currently selected, held BY VALUE rather than as an
 	// index: learning may evict, and an index would then quietly name a
@@ -50,15 +60,31 @@ type gatewayList struct {
 	hops int
 }
 
-func newGatewayList(seed string) *gatewayList {
-	return &gatewayList{seed: seed, at: seed}
+func newGatewayList(seeds ...string) *gatewayList {
+	kept := make([]string, 0, len(seeds))
+	for _, seed := range seeds {
+		if trimmed := strings.TrimSpace(seed); trimmed != "" {
+			kept = append(kept, trimmed)
+		}
+	}
+	return &gatewayList{seeds: kept, at: first(kept)}
 }
 
-// addresses is the seed followed by everything learned, in the order they will
+// first is the address a cycle starts from, and the one a lost cursor falls
+// back to. Empty for a list with no seeds, which is a node that was never told
+// where to dial — refused at startup, so it is unreachable here.
+func first(seeds []string) string {
+	if len(seeds) == 0 {
+		return ""
+	}
+	return seeds[0]
+}
+
+// addresses is the seeds followed by everything learned, in the order they will
 // be tried.
 func (g *gatewayList) addresses() []string {
-	all := make([]string, 0, len(g.learned)+1)
-	all = append(all, g.seed)
+	all := make([]string, 0, len(g.learned)+len(g.seeds))
+	all = append(all, g.seeds...)
 	return append(all, g.learned...)
 }
 
@@ -69,16 +95,16 @@ func (g *gatewayList) current() string {
 			return address
 		}
 	}
-	// The selected address was evicted. The seed cannot be, which is the point
+	// The selected address was evicted. A seed cannot be, which is the point
 	// of it.
-	g.at = g.seed
-	return g.seed
+	g.at = first(g.seeds)
+	return g.at
 }
 
 // advance moves to the next address, wrapping back to the seed.
 //
 // This is the whole of stale-seed recovery: whatever a node has been told, it
-// comes back round to the address it was configured with, every cycle.
+// comes back round to the addresses it was configured with, every cycle.
 func (g *gatewayList) advance() {
 	all := g.addresses()
 	for i, address := range all {
@@ -87,7 +113,7 @@ func (g *gatewayList) advance() {
 			return
 		}
 	}
-	g.at = g.seed
+	g.at = first(g.seeds)
 }
 
 // attached records that a connection was established, which is what ends a
@@ -133,8 +159,10 @@ func (g *gatewayList) learn(addresses []string, logger *slog.Logger) {
 }
 
 func (g *gatewayList) known(address string) bool {
-	if address == g.seed {
-		return true
+	for _, seed := range g.seeds {
+		if seed == address {
+			return true
+		}
 	}
 	for _, learned := range g.learned {
 		if learned == address {

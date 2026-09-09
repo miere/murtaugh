@@ -38,22 +38,39 @@ var legacySiblings = []string{
 // NOT loaded/validated (setup tools run before a valid config exists); the
 // returned Config carries only the bootstrap fields.
 func Bootstrap(ctx context.Context, configPath string, setup bool) (config.Config, config.Store, error) {
+	return BootstrapRole(ctx, configPath, config.RoleCombined, setup)
+}
+
+// BootstrapRole is Bootstrap for one half of #170's split.
+//
+// The role decides which rules apply to what the store holds: a node is not
+// asked for Slack credentials it must never carry, and a gateway is not asked to
+// resolve an agent NAME against a profile BODY it no longer holds. See
+// internal/config/role.go — that deferral is the behavioural change #198 makes,
+// and it moves those checks to connect time.
+//
+// The legacy YAML→store migration is skipped for a node: a node's root is new
+// (there is no pre-database node install to upgrade), and running it would make
+// a node adopt whatever agents.yaml happened to be sitting beside it.
+func BootstrapRole(ctx context.Context, configPath string, role config.Role, setup bool) (config.Config, config.Store, error) {
 	boot, err := config.LoadBootstrap(configPath)
 	if err != nil {
 		return config.Config{}, nil, err
 	}
+	boot.Role = role
 
 	// A bootstrap file predating this feature has no `database:` block: migrate
 	// its YAML siblings into a fresh SQLite store, then re-read the (rewritten)
 	// bootstrap so it now points at that store. Setup invocations skip this —
 	// they are actively constructing config and may be partial/token-less.
-	if boot.Database.IsZero() && !setup {
+	if boot.Database.IsZero() && !setup && role != config.RoleNode {
 		if err := migrateFilesToStore(ctx, configPath); err != nil {
 			return config.Config{}, nil, fmt.Errorf("migrate config to database: %w", err)
 		}
 		if boot, err = config.LoadBootstrap(configPath); err != nil {
 			return config.Config{}, nil, err
 		}
+		boot.Role = role
 	}
 
 	s, err := Open(ctx, boot.Database, filepath.Dir(configPath), config.BaseNameOf(configPath))

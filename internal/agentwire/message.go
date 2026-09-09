@@ -75,6 +75,16 @@ const (
 	// rides InitializeResult, because a node-initiated frame at handshake time
 	// can beat the gateway's own registry entry into existence.
 	MethodAdvertise Method = "node.advertise"
+	// MethodConfigure hands a node that has never been configured the agent
+	// profiles a Slack onboarding form just produced for its owner. Its body is
+	// a NodeConfiguration and its answer is a NodeConfigured.
+	//
+	// It is the only method that carries configuration, and the only one a node
+	// may refuse on policy: a node applies it solely while it holds no agent
+	// profile of its own, so it can bootstrap an empty node and can never
+	// reconfigure a running one. See configure.go for why that guarantee lives
+	// on the node rather than in this constant.
+	MethodConfigure Method = "node.configure"
 )
 
 // Message is one payload: what the envelope wraps.

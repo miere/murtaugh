@@ -313,6 +313,12 @@ type Gateway struct {
 	writeAgentProfiles AgentProfileWriter
 	configDir          string
 	probeClient        onboarding.Doer
+	// writeNodeProfiles applies the SAME form to a runtime node instead of to
+	// this gateway, and pendingNodes is who is entitled to submit it. Together
+	// they are #170 Change I's onboarding trigger: a node that attaches with
+	// nothing configured gets its owner offered the form. See node_setup.go.
+	writeNodeProfiles NodeProfileWriter
+	pendingNodes      pendingNodes
 	// claimAdmin persists the first-user-wins administrator adoption. nil keeps
 	// the claim in memory for this process only (CLI/MCP and tests).
 	claimAdmin AdminClaimer

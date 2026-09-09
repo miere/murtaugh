@@ -122,7 +122,7 @@ func run(rawArgs []string) error {
 	// database, archiving the siblings). Setup tools open the store but skip the
 	// Load/validate — they run before a valid config exists and only need the
 	// store handle to write into.
-	cfg, cfgStore, err := configstore.Bootstrap(ctx, configPath, setupInvocation)
+	cfg, cfgStore, err := configstore.BootstrapRole(ctx, configPath, roleFor(mode, rest), setupInvocation)
 	if err != nil {
 		return err
 	}
@@ -189,9 +189,28 @@ func runMCPBridge() error {
 // extractConfigFlag pulls the global --config flag out of args, supporting
 // both `--config=VALUE` and `--config VALUE` (and the single-dash variants).
 // Unknown flags are passed through to the selected frontend untouched.
+//
+// It scans the WHOLE command line, before and after the subcommand, because
+// `murtaugh --config X ping` and `murtaugh ping --config X` are both documented.
+// The cost of that reach is that no tool may ever take a flag called `config`:
+// its value would be eaten here and the tool would see nothing. That is not
+// hypothetical — `cfg node split --config <dest>` shipped that way and ran the
+// entire command against the destination — so a SECOND `--config` is now an
+// error rather than last-one-wins. Retargeting the whole invocation is never
+// what somebody who typed it twice meant, and the alternative to saying so is
+// the silent version of it.
 func extractConfigFlag(args []string, fallback string) (string, []string, error) {
 	out := make([]string, 0, len(args))
 	configPath := fallback
+	seen := false
+	set := func(value string) error {
+		if seen {
+			return fmt.Errorf("--config given twice (%q then %q): it is a GLOBAL flag naming the configuration this command runs against, and applies to the whole command line. "+
+				"A destination path belongs to the subcommand's own flag, e.g. `cfg node split --dest`", configPath, value)
+		}
+		seen, configPath = true, value
+		return nil
+	}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		name, value, hasValue := parseConfigToken(a)
@@ -200,13 +219,17 @@ func extractConfigFlag(args []string, fallback string) (string, []string, error)
 			continue
 		}
 		if hasValue {
-			configPath = value
+			if err := set(value); err != nil {
+				return "", nil, err
+			}
 			continue
 		}
 		if i+1 >= len(args) {
 			return "", nil, errors.New("--config requires a value")
 		}
-		configPath = args[i+1]
+		if err := set(args[i+1]); err != nil {
+			return "", nil, err
+		}
 		i++
 	}
 	return configPath, out, nil
@@ -324,6 +347,40 @@ func isSetupInvocation(mode app.Mode, rest []string) bool {
 		return false
 	}
 	return rest[0] == "setup"
+}
+
+// roleFor decides which half of #170's split THIS invocation addresses.
+//
+// The role is set by the binary and never read from the file — a configuration
+// that could declare itself a gateway would be asserting a role the gateway
+// then trusts — so it is decided from the command line, and exactly two
+// commands decide it.
+//
+// `cfg node set` and `cfg node show` are the documented way to point an
+// installed node at its gateway: named in assets/cli-help.md, instructed inside
+// assets/node-config.yaml, and offered as the remedy by murtaugh-runtime's own
+// "no gateway address" error. Their subject IS the node's own root, which by
+// design has no `oauth:` block — so run at RoleCombined they die on
+// "oauth.app_token is required", asking an operator for a credential a node must
+// never hold and which they therefore cannot supply.
+//
+// `cfg node split` is deliberately NOT one of them. It runs from the GATEWAY's
+// root and writes the node's, which is why it already worked.
+//
+// RoleNode is only ever more permissive than RoleCombined here: it drops the
+// Slack-credential requirement and keeps every name→body check, since a node
+// holds the bodies. So pointing either of these two at a combined root still
+// does exactly what it did.
+func roleFor(mode app.Mode, rest []string) config.Role {
+	if mode != app.ModeCLI || len(rest) < 3 || rest[0] != "cfg" || rest[1] != "node" {
+		return config.RoleCombined
+	}
+	switch rest[2] {
+	case "set", "show":
+		return config.RoleNode
+	default:
+		return config.RoleCombined
+	}
 }
 
 // selectMode resolves the top-level subcommand. `slack gateway` starts the

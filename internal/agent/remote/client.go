@@ -280,6 +280,26 @@ func (c *Client) Cancel(ctx context.Context, sessionID string) error {
 	return c.call(ctx, agentwire.MethodCancel, agentwire.SessionRef{SessionID: sessionID}, nil)
 }
 
+// Configure hands a node the agent profiles a Slack onboarding form produced
+// for its owner, and reports what the node did with them.
+//
+// It is deliberately NOT on agent.Client. The interface is what a gateway uses
+// to run a turn, and every implementation of it — native, acp, claude_code, and
+// this one — would have to grow a method that only means anything across a
+// network. This is a remote-only capability, reached by the one caller that
+// knows it is talking to a node.
+//
+// The node may refuse, and a refusal is the ordinary case rather than an error
+// in the transport: a node applies configuration only while it holds none of its
+// own. See agentwire.NodeConfiguration.
+func (c *Client) Configure(ctx context.Context, cfg agentwire.NodeConfiguration) (agentwire.NodeConfigured, error) {
+	var out agentwire.NodeConfigured
+	if err := c.call(ctx, agentwire.MethodConfigure, cfg, &out); err != nil {
+		return agentwire.NodeConfigured{}, err
+	}
+	return out, nil
+}
+
 // CloseSession releases one conversation's node-side resources.
 //
 // It returns immediately, always. The session manager calls it while holding
