@@ -58,6 +58,13 @@ Persistent ACP chat session logs.
 |------|-------|-------------------|
 | `session.turn` | info / warn / error | One completed chat turn. keys: `session_id` + channel/thread/user. payload: `agent`, `source`, `outcome` (`completed`/`interrupted`/`timed_out`/`errored`), `stop_reason` (the agent's reported reason, e.g. `end_turn`/`max_tokens`/`refusal`), `duration_ms`, `chunks`, `bytes`. Level follows the outcome (timeout → warn, error → error). **The full prompt/response text is not in the row** — it lives in the transcript file at `blob_ref` (NDJSON under the journal `blob_dir`). |
 
+| `session.evicted` | info / warn | One cached session dropped by the manager. keys: `session_id` + channel/thread. payload: `agent`, `reason` (`idle`/`busy_timeout`/`capacity`), `age_ms` (time in the state that condemned it), `dm`, `live` (sessions still held), `mid_run`. Only `busy_timeout` is a warning — it is the one that interrupted a turn in flight; `idle` and `capacity` are expected housekeeping and are never surfaced in Slack. |
+
+`session.evicted` is the answer to "why did the agent forget my thread?": an
+evicted conversation opens a fresh session on its next message, with no history
+beyond what thread backfill can rebuild. A `reason: busy_timeout` row means the
+opposite problem — a session sat in one turn for `busy_timeout` and was reaped.
+
 When a turn shows `bytes: 0` (an **empty reply**), check `stop_reason`: a value other than `end_turn` (e.g. `max_tokens`, `refusal`) means the agent ended without producing text — Murtaugh surfaces this to the user as a note rather than silence. A `stop_reason` of `end_turn` with `bytes: 0` means the agent ran only tools and sent no message. Enable `configuration.debug: true` to also log every raw `session/update` kind, which reveals if the agent streamed text under an envelope Murtaugh didn't recognise.
 
 The in-turn interaction flows — a `terminal` approval gate, the `ask`/`present_plan` prompts, a held job's first-run confirmation — emit **no journal events** of their own, and a denied/timed-out approval does **not** add a turn outcome: it's a skip-with-note, so the turn still ends `completed`. There is no `outcome` value or event kind to look for here; to see whether the agent was waiting on a human, look in the Slack thread, not the journal.

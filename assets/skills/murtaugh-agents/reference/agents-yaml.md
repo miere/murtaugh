@@ -52,10 +52,11 @@ defaults for one agent; to retune the rest, `cfg export` the config, edit the
 
 | Field | Default if omitted | Controls |
 |---|---|---|
-| `session.idle_timeout` | `30m` | How long an idle session is kept before teardown. |
+| `session.idle_timeout` | `30m` | How long a **quiet** session is kept before teardown. A session with a turn in flight is not idle at any age, so this never interrupts work; the clock restarts when the turn ends. |
+| `session.busy_timeout` | `18h` | Ceiling on a session that is **actively running a turn** — the runaway guard. Agents are expected to run long tasks overnight, so this only reaps a genuinely wedged session. |
 | `session.request_timeout` | `10m` | Idle timeout per chat turn: max time with **no agent activity** before the turn is treated as stalled. Resets on every chunk/task update, so a long but progressing response is never cut off. |
 | `session.long_running_tool_timeout` | `1h` | Total-duration cap on a single tool call (ACP agents). While a tool runs a heartbeat keeps the turn alive so `request_timeout` never trips; this bounds a genuinely wedged tool. Past it the turn fails naming the tool and the session is dropped. |
-| `session.max_concurrent` | `100` | Concurrent session cap per agent. |
+| `session.max_concurrent` | `100` | Concurrent session cap per agent. At the cap an **idle** session is evicted to make room; if every slot is running a turn the new conversation is refused with a "busy" warning rather than taking a slot from live work. |
 | `rendering.progress_display` | `simplified` | How tool/step progress renders while a turn streams: `simplified` (one small context-line message — "Reading file…" — that updates in place and resolves to "✓ Done thinking" when the turn ends) or `tasks` (the full multi-card plan woven into the reply). Override per agent with `--progress-display`. |
 | `rendering.stream_min_chunk_chars` | `24` | Minimum characters before a chunk is flushed (avoids choppy edits). |
 | `rendering.stream_append_interval` | `250ms` | How often buffered chunks are flushed to Slack. |

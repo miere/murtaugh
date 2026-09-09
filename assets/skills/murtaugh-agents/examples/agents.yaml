@@ -6,7 +6,8 @@
 # Runtime defaults applied to every agent, grouped by the concern each serves.
 defaults:
   session:
-    idle_timeout: 30m
+    idle_timeout: 30m           # quiet sessions only; a running turn is never idle
+    busy_timeout: 18h           # runaway guard for a session stuck in one turn
     request_timeout: 10m        # idle-bounded: reset by every agent event
     long_running_tool_timeout: 1h  # total cap on a single tool call (ACP)
     max_concurrent: 100

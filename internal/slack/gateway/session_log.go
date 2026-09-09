@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/miere/murtaugh/internal/agent"
 	"github.com/miere/murtaugh/internal/journal"
 )
 
@@ -124,5 +125,46 @@ func (s *sessionLogger) record(ctx context.Context, t sessionTurn) {
 		},
 		BlobRef: ref,
 		Payload: payload,
+	})
+}
+
+// recordEviction writes one dropped session to the acp_session stream.
+//
+// An idle sweep is expected and is never shown to the user, which is precisely
+// why it belongs here: without a row, the only trace a conversation was dropped
+// is the absence of one, and "why did the agent forget my thread?" becomes
+// unanswerable after the fact. A busy-timeout eviction is the one that
+// interrupted work, so it is the one recorded as a warning.
+//
+// Called from the session manager's observer, which runs under its lock: the
+// recorder's Record is a non-blocking enqueue, so this must stay allocation-
+// light and must never grow a blocking call.
+func (s *sessionLogger) recordEviction(ctx context.Context, agentName string, e agent.Eviction) {
+	if s == nil {
+		return
+	}
+	level := journal.LevelInfo
+	if e.Reason == agent.EvictionBusyTimeout {
+		level = journal.LevelWarn
+	}
+	s.recorder.Record(ctx, journal.Event{
+		Stream:  journal.StreamACPSession,
+		Kind:    "session.evicted",
+		Level:   level,
+		Summary: fmt.Sprintf("evicted %s session (%s) after %s", agentName, e.Reason, e.Age.Round(time.Second)),
+		Keys: journal.Keys{
+			TeamID:    e.Key.TeamID,
+			ChannelID: e.Key.ChannelID,
+			ThreadTS:  e.Key.ThreadTS,
+			SessionID: e.SessionID,
+		},
+		Payload: map[string]any{
+			"agent":   agentName,
+			"reason":  string(e.Reason),
+			"age_ms":  e.Age.Milliseconds(),
+			"dm":      e.Key.DM,
+			"live":    e.Live,
+			"mid_run": e.Reason == agent.EvictionBusyTimeout,
+		},
 	})
 }
