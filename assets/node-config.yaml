@@ -1,0 +1,43 @@
+# Murtaugh RUNTIME NODE bootstrap file. This is the ONLY configuration a node
+# keeps on disk; it holds just the database connection. Everything else — agent
+# profiles, MCP servers, this node's assignment rules, the gateway seed address
+# — lives in the database beside it and is managed with `murtaugh cfg …`.
+#
+# There is deliberately no `oauth:` block. A node has no Slack connection: it
+# reaches Slack only through the gateway it dials, and the workspace's app and
+# bot tokens stay on the gateway. If you find yourself wanting to put them here,
+# what you actually want is `murtaugh-gateway`.
+#
+# A node's configuration is independent of the gateway it attaches to. This
+# backend does not have to match the gateway's: a laptop node on sqlite
+# attaching to a firestore-backed gateway is ordinary and supported, and is what
+# lets a team run nodes without every developer holding cloud credentials.
+database:
+  backend: sqlite            # sqlite | firestore | postgres
+  # sqlite:
+  #   # Path to this node's config database. Defaults to `<this file's name>.db`
+  #   # beside this file (config.yaml → config.db); set an absolute path to move
+  #   # it elsewhere.
+  #   path: /custom/path/config.db
+  #
+  # firestore:
+  #   project_id: my-gcp-project      # omit to let ADC decide
+  #   database_id: "(default)"        # omit for the project's default database
+  #   collection: murtaugh-node       # root collection; set to share a database
+  #   credentials_file: ~/sa-key.json # only where ADC cannot serve
+  #
+  # postgres:
+  #   dsn: ${MURTAUGH_NODE_DB_DSN}
+
+# Where this node dials, and its credential:
+#
+#   murtaugh cfg node set --gateway wss://gateway.example.com:8443
+#
+# The credential is a FILE — `node-token` beside this one — not a setting, so
+# the sandboxed model this node runs cannot read it out of the store. Mint one
+# on the gateway with `murtaugh node token issue`, then install it here with
+# `murtaugh node token install`.
+#
+# Addresses a gateway names in a redirect are ADDED to the list above and never
+# replace it: a node asleep through a topology change must wake holding an
+# address that still exists.

@@ -109,6 +109,22 @@ type rigConfig struct {
 	// not pin, which is a supported state: every conversation is re-elected on
 	// its next cold session.
 	pins config.ConversationPinStore
+	// references is what the GATEWAY's configuration names, and unconfigured is
+	// what it does about a node that claims nothing. Both nil is a Host that
+	// journals what it sees and disturbs nobody, which is what a gateway with no
+	// Slack side is.
+	references   func() []config.AgentReference
+	unconfigured func(context.Context, nodehost.Node)
+	// settled is the other end of unconfigured: the node advertised something,
+	// or it went away, so its owner's invitation is over.
+	settled func(nodehost.Node)
+	// configure is what the NODE does with a configuration its gateway hands it.
+	// nil refuses the method, which is every node that did not opt in.
+	configure func(context.Context, agentwire.NodeConfiguration) (agentwire.NodeConfigured, error)
+	// restart is what the NODE does after applying a configuration whose answer
+	// said it would restart. nil is a node that applies and keeps running, which
+	// is only useful to a test.
+	restart func()
 }
 
 // withoutWaitingForAttach is for the tests whose point is that the node does
@@ -140,6 +156,29 @@ func pinning(pins config.ConversationPinStore) rigOption {
 	return func(c *rigConfig) { c.pins = pins }
 }
 
+// onboarding gives the gateway the two answers only its Slack side has: what its
+// configuration names, and who to offer the setup form to.
+func onboarding(references func() []config.AgentReference, unconfigured func(context.Context, nodehost.Node)) rigOption {
+	return func(c *rigConfig) { c.references, c.unconfigured = references, unconfigured }
+}
+
+// settling records the other end of the trigger: a node that stopped being one
+// with nothing configured.
+func settling(settled func(nodehost.Node)) rigOption {
+	return func(c *rigConfig) { c.settled = settled }
+}
+
+// configurable lets the node accept a configuration from its gateway.
+func configurable(apply func(context.Context, agentwire.NodeConfiguration) (agentwire.NodeConfigured, error)) rigOption {
+	return func(c *rigConfig) { c.configure = apply }
+}
+
+// restarting gives the node the supervisor hook nodeserve fires after a
+// configuration whose answer said it would restart.
+func restarting(restart func()) rigOption {
+	return func(c *rigConfig) { c.restart = restart }
+}
+
 func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *loopback {
 	t.Helper()
 	cfg := rigConfig{waitForAttach: true}
@@ -162,6 +201,9 @@ func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *lo
 	// is told which election to defer to — see failover_test.go, where that
 	// default is the thing under test.
 	host.FollowLeader(elected{})
+	if cfg.references != nil || cfg.unconfigured != nil || cfg.settled != nil {
+		host.WithOnboarding(cfg.references, cfg.unconfigured, cfg.settled)
+	}
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -222,6 +264,8 @@ func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *lo
 			Background:  background,
 			Tools:       proxy,
 			Advertise:   claim,
+			Configure:   cfg.configure,
+			Restart:     cfg.restart,
 			WindowBytes: nodesocket.DefaultWindowBytes,
 		})
 	}()

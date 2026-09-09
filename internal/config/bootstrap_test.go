@@ -320,3 +320,50 @@ func TestBootstrapIsIdempotent(t *testing.T) {
 		t.Fatalf("second Bootstrap returned error: %v", err)
 	}
 }
+
+// TestANodeRootIsSeededWithNoSlackVariables is #198's own argument applied to
+// the file beside the one it was made about.
+//
+// BootstrapNode exists because node-config.yaml has no `oauth:` block — seeding
+// a node from the gateway's skeleton would put a file advertising
+// ${SLACK_APP_TOKEN} and ${SLACK_BOT_TOKEN} on every laptop in the fleet. The
+// shared plan then seeded env.example verbatim, which carries both of them
+// under a heading saying they are required to run the gateway: the invitation
+// removed from one file and re-created in the file beside it.
+func TestANodeRootIsSeededWithNoSlackVariables(t *testing.T) {
+	dir := t.TempDir()
+	if err := BootstrapNode(filepath.Join(dir, "config.yaml")); err != nil {
+		t.Fatalf("seed a node root: %v", err)
+	}
+	for _, name := range []string{"config.yaml", EnvFileName} {
+		body := readSeeded(t, filepath.Join(dir, name))
+		for _, forbidden := range []string{"SLACK_APP_TOKEN", "SLACK_BOT_TOKEN"} {
+			if strings.Contains(body, forbidden) {
+				t.Errorf("a node's %s names %s; the tokens stay on the gateway", name, forbidden)
+			}
+		}
+	}
+	// And the bootstrap file still has no oauth BLOCK, which is what
+	// BootstrapNode was written for in the first place.
+	if cfg, err := LoadBootstrap(filepath.Join(dir, "config.yaml")); err != nil {
+		t.Fatalf("load the seeded node bootstrap: %v", err)
+	} else if cfg.OAuth != (OAuthConfig{}) {
+		t.Errorf("a node's bootstrap file carries an oauth block: %+v", cfg.OAuth)
+	}
+	// And what a node DOES need is still there, or the swap traded one problem
+	// for a laptop with no provider credentials file at all.
+	if env := readSeeded(t, filepath.Join(dir, EnvFileName)); !strings.Contains(env, "ANTHROPIC_API_KEY") {
+		t.Errorf("a node's %s carries no provider variables:\n%s", EnvFileName, env)
+	}
+}
+
+// readSeeded returns a bootstrapped file's contents, failing the test if it is
+// not there at all.
+func readSeeded(t *testing.T, path string) string {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", filepath.Base(path), err)
+	}
+	return string(body)
+}

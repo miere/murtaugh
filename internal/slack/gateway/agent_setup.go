@@ -88,8 +88,11 @@ func isAgentSetupSubmit(interaction slack.InteractionCallback) bool {
 // It runs inline rather than on a goroutine because Slack expires a trigger_id
 // within seconds, and a modal opened with an expired one fails silently.
 func (a *Gateway) handleAgentSetupOpen(ctx context.Context, interaction slack.InteractionCallback) {
-	if !a.access().IsAdminUser(interaction.User.ID) {
-		a.logger.Warn("ignoring an agent setup click from a non-admin", "user", interaction.User.ID)
+	// The administrator configures this gateway; a user with an unconfigured
+	// node waiting configures that node. Everybody else is refused. See
+	// node_setup.go for why the second case is not a relaxation of the first.
+	if _, ok := a.setupSubjectFor(interaction.User.ID); !ok {
+		a.logger.Warn("ignoring an agent setup click from a user with nothing to configure", "user", interaction.User.ID)
 		return
 	}
 	if a.webClient == nil {
@@ -112,8 +115,8 @@ func (a *Gateway) handleAgentSetupOpen(ctx context.Context, interaction slack.In
 // that triggered it, so acking blank first — which is what the common path does
 // — would close the form instead of advancing it.
 func (a *Gateway) handleAgentSetupSubmit(event socketmode.Event, interaction slack.InteractionCallback) {
-	if !a.access().IsAdminUser(interaction.User.ID) {
-		a.logger.Warn("ignoring an agent setup submission from a non-admin", "user", interaction.User.ID)
+	if _, ok := a.setupSubjectFor(interaction.User.ID); !ok {
+		a.logger.Warn("ignoring an agent setup submission from a user with nothing to configure", "user", interaction.User.ID)
 		a.ack(event)
 		return
 	}
@@ -211,8 +214,14 @@ func (a *Gateway) updateSetupView(ctx context.Context, viewID string, build func
 // a DM: the operator is looking at the form, and a message elsewhere about a
 // box in front of them is a worse answer than marking the box.
 func (a *Gateway) applySetup(event socketmode.Event, interaction slack.InteractionCallback, draft onboarding.Draft) {
-	admin := strings.TrimSpace(a.access().AdminUser)
-	profiles, err := onboarding.Build(draft, a.configDir, admin)
+	// Who this form configures, and therefore where the profiles go, who the
+	// tweaker is bound to and where it is rooted. See node_setup.go.
+	subject, ok := a.setupSubjectFor(interaction.User.ID)
+	if !ok {
+		a.ackViewErrors(event, map[string]string{blockTools: "You are not configuring anything right now."})
+		return
+	}
+	profiles, err := onboarding.Build(draft, subject.configDir, subject.user)
 	if err != nil {
 		// Marked against the tool picker, not the work directory: Slack drops a
 		// field error naming a block the OPEN view does not contain, and by this
@@ -220,7 +229,7 @@ func (a *Gateway) applySetup(event socketmode.Event, interaction slack.Interacti
 		a.ackViewErrors(event, map[string]string{blockTools: err.Error()})
 		return
 	}
-	if a.writeAgentProfiles == nil {
+	if !subject.isNode() && a.writeAgentProfiles == nil {
 		// Marked against the tool picker, not the work directory: Slack drops a
 		// field error naming a block the OPEN view does not contain, and by this
 		// point the operator is looking at the options step.
@@ -237,9 +246,9 @@ func (a *Gateway) applySetup(event socketmode.Event, interaction slack.Interacti
 		ctx, cancel := context.WithTimeout(context.Background(), setupApplyTimeout)
 		defer cancel()
 
-		if err := a.writeAgentProfiles(ctx, profiles); err != nil {
-			a.logger.Error("could not apply the agent setup", "error", err)
-			a.reportSetupOutcome(ctx, alertcard.Spec{
+		if err := a.applyProfiles(ctx, subject, profiles); err != nil {
+			a.logger.Error("could not apply the agent setup", "error", err, "node_id", subject.nodeID)
+			a.reportSetupOutcome(ctx, subject, alertcard.Spec{
 				Level:     alertcard.LevelError,
 				Title:     "Could not save the agent profiles",
 				Subtitle:  "Nothing was changed; the form can be reopened from the prompt above.",
@@ -248,13 +257,36 @@ func (a *Gateway) applySetup(event socketmode.Event, interaction slack.Interacti
 			})
 			return
 		}
-		a.logger.Info("agent profiles created", "default", profiles.Name, "tweaker", onboarding.TweakerName)
-		a.reportSetupOutcome(ctx, alertcard.Spec{
+		// Consumed on success only. A form that failed to apply should still be
+		// reopenable from the card that is still sitting in the DM.
+		if subject.isNode() {
+			a.pendingNodes.clear(subject.user)
+		}
+		a.logger.Info("agent profiles created", "default", profiles.Name, "tweaker", onboarding.TweakerName,
+			"node_id", subject.nodeID)
+		a.reportSetupOutcome(ctx, subject, alertcard.Spec{
 			Level:    alertcard.LevelNotice,
 			Title:    fmt.Sprintf("Created %s and %s", profiles.Name, onboarding.TweakerName),
-			Subtitle: "say hello when the reload finishes",
+			Subtitle: setupSettledSubtitle(subject),
 		})
 	}()
+}
+
+// applyProfiles routes a completed form to whichever half it configures.
+func (a *Gateway) applyProfiles(ctx context.Context, subject setupSubject, profiles onboarding.Profiles) error {
+	if subject.isNode() {
+		return a.writeNodeProfiles(ctx, subject.nodeID, profiles)
+	}
+	return a.writeAgentProfiles(ctx, profiles)
+}
+
+// setupSettledSubtitle says what happens next, which differs by half: this
+// gateway reloads in place, while a node restarts and redials.
+func setupSettledSubtitle(subject setupSubject) string {
+	if subject.isNode() {
+		return "your node is restarting; say hello once it reconnects"
+	}
+	return "say hello when the reload finishes"
 }
 
 // reportSetupOutcome DMs the operator the result of applying the form.
@@ -263,8 +295,12 @@ func (a *Gateway) applySetup(event socketmode.Event, interaction slack.Interacti
 // prompt that produced it, and a second full-width block there repeats what the
 // reload notices already say. A failure keeps the card, because that one needs
 // a body.
-func (a *Gateway) reportSetupOutcome(ctx context.Context, spec alertcard.Spec) {
-	dest, err := a.resolveSuggestionDestination(ctx, "")
+func (a *Gateway) reportSetupOutcome(ctx context.Context, subject setupSubject, spec alertcard.Spec) {
+	// Reported to whoever filled the form in, which for a node is its owner
+	// rather than the gateway administrator. Telling the admin that somebody
+	// else's laptop is now configured is both noise to them and silence to the
+	// person waiting for the answer.
+	dest, err := a.resolveSetupDestination(ctx, subject)
 	if err != nil || dest == "" {
 		a.logger.Warn("could not report the agent setup outcome", "error", err)
 		return

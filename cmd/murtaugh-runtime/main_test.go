@@ -32,7 +32,7 @@ func TestReportNamesEachAgentAndItsResolvedKind(t *testing.T) {
 	}
 
 	var out strings.Builder
-	reportAgents(&out, cfg)
+	reportAgents(&out, cfg, []string{"wss://gateway.example:8443"})
 	got := out.String()
 
 	for _, want := range []string{
@@ -55,7 +55,7 @@ func TestReportNamesEachAgentAndItsResolvedKind(t *testing.T) {
 // reads like a successful enrolment.
 func TestReportSaysSoWhenNoAgentIsConfigured(t *testing.T) {
 	var out strings.Builder
-	reportAgents(&out, config.Config{BaseDir: "/tmp/murtaugh-runtime-test"})
+	reportAgents(&out, config.Config{BaseDir: "/tmp/murtaugh-runtime-test"}, nil)
 
 	if got := out.String(); !strings.Contains(got, "agents: none configured") {
 		t.Errorf("report does not say the machine has no agents; got:\n%s", got)

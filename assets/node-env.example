@@ -1,0 +1,34 @@
+# Murtaugh RUNTIME NODE credentials — keep this file secret.
+#
+# This is ~/.config/murtaugh/node/.env. Every secret lives here; the config
+# file beside it references these variables as ${VAR} and never holds the
+# values, so the `murtaugh troubleshoot` bundle (which collects the .yaml
+# files) cannot leak them. A value exported in the real environment overrides
+# the one here.
+#
+# Format: KEY=value, one per line. No quotes needed; no spaces around '='.
+#
+# There are deliberately no SLACK_* variables here. A node has no Slack
+# connection: it reaches Slack only through the gateway it dials, and the
+# workspace's app and bot tokens stay on the gateway. Naming them in this file
+# would be an invitation to fill them in, on the one machine #170 is explicit
+# must never hold them.
+#
+# This node's own credential is not here either. It is a FILE — `node-token`
+# beside this one — so the sandboxed model this node runs cannot read it out of
+# the environment. Mint one on the gateway with `murtaugh node token issue`.
+
+# --- LLM providers (only the ones your native agents use) ---
+# The variable NAME is what an agent profile's `api_key_env:` points at.
+GEMINI_API_KEY=
+ANTHROPIC_API_KEY=
+OPENAI_API_KEY=
+# OpenAI/Anthropic-compatible third parties reuse the families above with a
+# base_url override (set per-agent with `murtaugh cfg agent …`). Give each its
+# own key var:
+# ZAI_API_KEY=
+# DEEPSEEK_API_KEY=
+# KIMI_API_KEY=
+
+# --- External MCP servers (optional; referenced from mcp_servers[*].env) ---
+# VAULTRE_TOKEN=

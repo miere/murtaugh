@@ -454,6 +454,9 @@ murtaugh cfg validate            # validate the store's config without changing 
 murtaugh cfg export [--file <path>]   # dump the store (stdout, or a file)
 murtaugh cfg import --file <path>     # load a previously exported store
 murtaugh cfg db migrate --to <postgres|sqlite> [--dsn-env <VAR>|--sqlite-path <path>]
+murtaugh cfg node split [--dest <path>] [--gateway wss://host:port]
+murtaugh cfg node set --gateway wss://host:port   # on a node: where it dials
+murtaugh cfg node show
 ```
 
 `cfg db migrate` copies the current store into the target backend and rewrites
@@ -461,6 +464,40 @@ the `database:` block of `config.yaml` to point at it. For Postgres, pass
 `--dsn-env` naming the `.env` variable that holds the DSN (e.g.
 `--dsn-env MURTAUGH_DB_DSN`); the DSN itself is never written to YAML. For
 SQLite, `--sqlite-path` overrides the default `config.db` location.
+
+`cfg node split` gives the runtime-node half of a combined installation its own
+configuration root (default `~/.config/murtaugh/node/config.yaml`, a directory
+of its own so the two roles never share a `.env`, a store or a schema
+migration). Agent profiles, MCP servers, jobs, `chat` and `defaults` are
+**copied** there; access, election, grants, workflow and unfurl rules stay here,
+and node token hashes and conversation pins never travel. Nothing here is
+deleted or changed, so it is safe to run against a live gateway and safe to run
+twice — the gateway keeps answering in-process until you start
+`murtaugh-gateway` instead, which is a choice of binary rather than a
+consequence of this command.
+
+A node's backend does not have to match the gateway's: a laptop node on SQLite
+attaching to a Firestore-backed gateway is ordinary and supported.
+
+The destination flag is `--dest` and not `--config`. `--config` is the GLOBAL
+flag naming the configuration this command runs against — the gateway's — and it
+is stripped from the whole command line before any tool sees it, so a second one
+would silently retarget the whole invocation instead of naming the destination:
+
+```
+murtaugh --config ~/.config/murtaugh/config.yaml \
+  cfg node split --dest ~/.config/murtaugh/node/config.yaml
+```
+
+**One behaviour changes when profile bodies live on nodes.** The default agent
+NAME is checked against a profile BODY at write time today — `cfg chat set
+--default-agent typo` is refused. A gateway running as the broker half holds no
+bodies, so it cannot make that check, and it moves to **connect time**: when a
+node attaches, the gateway resolves the names its configuration uses against the
+profiles that user's fleet advertises and journals the ones nothing serves
+(`stream=gateway kind=node state=unservable`). "Is my configuration valid" now
+depends partly on who is online. It is a warning and never fatal — a gateway
+that refused to start with an empty node registry could never start at all.
 
 ```
 murtaugh cfg agent create --name default --type native --provider gemini \

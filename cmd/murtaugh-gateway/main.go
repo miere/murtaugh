@@ -19,6 +19,17 @@
 // possible to acquire one by editing a config file that `murtaugh slack
 // gateway` — the shipping default, which binds nothing — also reads.
 //
+// # Its configuration is the gateway's half, and only that
+//
+// It loads with config.RoleGateway: Slack tokens, access, election, rules and
+// pins, with the agent profile bodies belonging to whichever node serves them.
+// The visible consequence is that the default agent NAME is no longer checked
+// against a BODY when it is written — this process holds no bodies — so the
+// check happens when a node attaches, against what that user's fleet advertises.
+// "Is my configuration valid" therefore depends partly on who is online, and the
+// answer arrives in the journal on the gateway stream rather than at startup. A
+// gateway that refused to boot on an empty registry could never boot at all.
+//
 // The listener binds at process start; whether it ACCEPTS is decided by the
 // election, wired into the Host inside the daemon's run. A standby holds the
 // port and turns nodes away with the leader's address, which is why the two are
@@ -97,7 +108,12 @@ func run(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	cfg, cfgStore, err := configstore.Bootstrap(ctx, path, false)
+	// RoleGateway: this half holds the Slack credentials and no agent profile
+	// bodies, so a name like chat.defaults.agent can no longer be resolved
+	// against one here. That check moves to CONNECT time, against the profiles
+	// the attaching user's fleet advertises — see internal/config/role.go, and
+	// the "is my configuration valid now depends on who is online" note there.
+	cfg, cfgStore, err := configstore.BootstrapRole(ctx, path, config.RoleGateway, false)
 	if err != nil {
 		return err
 	}
@@ -151,6 +167,18 @@ func run(args []string) error {
 			Address: host.Address,
 			Follow:  func(v app.LeaderView) { host.FollowLeader(v) },
 			Detach:  host.DetachAll,
+			// #170 Change I's onboarding trigger, and the connect-time check
+			// that replaced a write-time one. Both are answers only the Slack
+			// side has and only the node registry needs, so the binary holding
+			// both ends hands them over — the same shape as Follow above.
+			Onboard: func(o app.NodeOnboarding) {
+				host.WithOnboarding(o.References, func(ctx context.Context, node nodehost.Node) {
+					o.Unconfigured(ctx, node.NodeID, node.UserID)
+				}, func(node nodehost.Node) {
+					o.Settled(node.NodeID, node.UserID)
+				})
+			},
+			Configure: host.Configure,
 		}
 		go func() {
 			if err := host.Listen(ctx, addr); err != nil {
