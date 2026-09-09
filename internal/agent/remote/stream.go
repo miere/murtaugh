@@ -24,6 +24,13 @@ type stream struct {
 	// a card without it — correctly, because a run with no thread has nobody
 	// watching — so a GateTool request arriving with a bare context would be
 	// auto-approved rather than asked.
+	// A headless turn — a job, an unfurl, a workflow trigger — happens nowhere,
+	// and its location is simply the zero value. There is no second flag saying
+	// so, because agent.TurnLocationFromContext already defines presence as
+	// `ok && loc.ChannelID != ""`: a zero-valued location reads as ABSENT to
+	// every consumer, which is the answer they are all written for. A parallel
+	// `located bool` would be a second, quieter definition of the same word, and
+	// the two would eventually disagree.
 	location agent.TurnLocation
 
 	events chan agent.Event

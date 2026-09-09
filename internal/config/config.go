@@ -200,7 +200,34 @@ type AccessConfig struct {
 	// internal/slack/interaction's Grants, which are the tool calls one user
 	// chose to always allow.
 	NodeGrants map[string][]string `yaml:"node_grants" json:"node_grants,omitempty"`
+	// MainNode is the node id that serves HEADLESS work: scheduled jobs, workflow
+	// triggers and link unfurling. Empty means there is none, and every headless
+	// surface then refuses loudly rather than borrowing whichever node happens to
+	// be attached.
+	//
+	// It is here, beside NodeGrants, for that entry's whole reason and one more.
+	// Being main is the right to serve every user's unfurls and every job on the
+	// gateway, which is the largest grant the gateway makes — so it cannot be
+	// asserted by a file on somebody's laptop. #170's item 4 settled that a node
+	// must never assert its own identity; a `main: true` on the node's own
+	// configuration, or on its advertisement, would be exactly that, and the
+	// gateway would trust it. The gateway admin writes this one.
+	//
+	// It is a NODE ID and not a token selector because a node has more than one
+	// live credential during a rotation (see internal/nodehost's registry): a
+	// flag hung off the credential would have to be copied by hand on every
+	// rotation, and the failure of forgetting is that headless work stops at some
+	// unrelated later moment.
+	//
+	// One node, not a list. Round robin over several would put two unfurls of the
+	// same link on two machines with different checkouts and different answers,
+	// and #170 puts these on "the main node", singular. A fleet that needs more
+	// wants a second gateway.
+	MainNode string `yaml:"main_node" json:"main_node,omitempty"`
 }
+
+// MainNodeID is the designated main node, trimmed. Empty means none.
+func (a AccessConfig) MainNodeID() string { return strings.TrimSpace(a.MainNode) }
 
 // GrantsOn reports whether userID holds a grant on the node.
 //

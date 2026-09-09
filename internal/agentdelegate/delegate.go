@@ -18,7 +18,6 @@ package agentdelegate
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -29,6 +28,7 @@ import (
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/mcpbridge"
 	"github.com/miere/murtaugh/internal/nodetoken"
+	"github.com/miere/murtaugh/internal/oneshot"
 	"github.com/miere/murtaugh/internal/tools"
 )
 
@@ -161,13 +161,7 @@ func (r *Runner) RunForJSON(ctx context.Context, agentName, prompt string) ([]by
 	if err != nil {
 		return nil, err
 	}
-	trimmed := strings.TrimSpace(out)
-	if !json.Valid([]byte(trimmed)) {
-		r.logger.Warn("delegate-to-agent expected a JSON response but the agent produced something else; skipping render",
-			"agent", agentName, "output", trimmed)
-		return nil, agent.ErrNonJSONOutput
-	}
-	return []byte(trimmed), nil
+	return oneshot.ExpectJSON(out, agentName, r.logger)
 }
 
 // RunAndForget runs a delegation and discards the agent's text output — the
@@ -207,67 +201,14 @@ func (r *Runner) Run(ctx context.Context, agentName, prompt string) (string, err
 	if err := client.Initialize(ctx); err != nil {
 		return "", fmt.Errorf("delegate-to-agent: initialize agent %q: %w", agentName, err)
 	}
-	// Ephemeral: a delegation is one-shot and belongs to no conversation. Without
-	// it the empty conversation triple derives one fixed session id for every
-	// delegation ever made, and a claude_code backend --resumes the previous
-	// run's transcript — so the second run of a daily job wakes up already
-	// believing it did the work.
-	session, err := client.NewSession(ctx, agent.SessionMetadata{Source: "delegate", Ephemeral: true})
-	if err != nil {
-		return "", fmt.Errorf("delegate-to-agent: create session for agent %q: %w", agentName, err)
-	}
-
-	// Drive the prompt under a child context we can cancel ourselves so the
-	// idle watchdog can unblock the in-flight request without disturbing ctx.
-	promptCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	events, err := client.Prompt(promptCtx, session.ID, agent.PromptRequest{Text: prompt})
-	if err != nil {
-		return "", fmt.Errorf("delegate-to-agent: prompt agent %q: %w", agentName, err)
-	}
-
-	var buf strings.Builder
-	idle := time.NewTimer(r.idleTimeout)
-	defer idle.Stop()
-	for {
-		select {
-		case <-idle.C:
-			// The agent went silent for the whole idle window. Unblock the
-			// in-flight request and drain so the client tears down cleanly.
-			cancel()
-			for range events {
-			}
-			return buf.String(), fmt.Errorf("delegate-to-agent: agent %q went idle for %s", agentName, r.idleTimeout)
-		case event, ok := <-events:
-			if !ok {
-				// Channel closed without an explicit completion event: treat the
-				// accumulated output as the result.
-				return buf.String(), nil
-			}
-			resetIdleTimer(idle, r.idleTimeout)
-			switch event.Type {
-			case agent.EventText:
-				// Only the agent's reply text is captured. EventStatus is
-				// progress/meta (e.g. compaction) and must not pollute the
-				// captured output, which a caller may parse as JSON.
-				buf.WriteString(event.Text)
-			case agent.EventError:
-				return buf.String(), fmt.Errorf("delegate-to-agent: agent %q failed: %w", agentName, event.Error)
-			case agent.EventComplete:
-				return buf.String(), nil
-			}
-		}
-	}
-}
-
-// resetIdleTimer restarts t for another idle window, draining an already-fired
-// timer first so the next select does not observe a stale tick.
-func resetIdleTimer(t *time.Timer, d time.Duration) {
-	if !t.Stop() {
-		select {
-		case <-t.C:
-		default:
-		}
-	}
-	t.Reset(d)
+	// The drive loop itself is internal/oneshot, shared with the gateway-side
+	// headless delegator so a job behaves the same whether it ran in process or
+	// on the main node. What stays here is everything that BUILDS: the profile
+	// lookup, the client, and its teardown — which is exactly the part
+	// cmd/murtaugh-gateway may not link.
+	return oneshot.Drive(ctx, client, oneshot.Request{
+		Agent:       agentName,
+		Prompt:      prompt,
+		IdleTimeout: r.idleTimeout,
+	})
 }

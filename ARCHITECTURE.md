@@ -1074,6 +1074,89 @@ per cold conversation. The conversation key reaches it on the context
 (`agent.WithConversation`, set by `SessionManager.Prompt`), because `NewSession`
 is handed metadata carrying no DM flag and `Prompt` is handed only a session id.
 
+### Headless dispatch: the main node (`internal/nodehost/headless.go`, `internal/oneshot`)
+
+Chat has an initiator whose node can be chosen. **A cron at 03:00 does not, and
+neither does an unfurl.** `agentruntime.Delegator` has five consumers — scheduled
+jobs, the workflow engine's reply-to-slack arm, link unfurling, the `jobs.run`
+tool, and the CLI's own runner — and only the workflow one has a user worth
+using. Three have none at all, and the unfurl's is the wrong kind: the sharer is
+whichever workspace member pasted a link, usually somebody who owns no node and
+holds no grant. Fleeting on them is not a policy, it is an outage with a user id
+attached.
+
+So `Host.delegate` is untouched, `fleetFor` still returns nothing for an empty
+user id, and headless work has its own selection path that picks **one** node.
+
+**The main node is designated by the GATEWAY**, in `access.main_node`, keyed by
+node id, beside `node_grants` and for the same reason plus one. Being main is the
+right to serve every user's unfurls and every scheduled job — the largest grant
+this gateway makes — so it is the one claim a node is least entitled to make
+about itself, and item 4 already settled that a node must never assert its own
+identity. Nothing on `agentwire.Advertisement` changes. It is keyed on the node
+ID rather than on a token record because a node has two live credentials during a
+rotation, and a flag on the credential would have to be copied by hand each time.
+
+**Nothing is borrowed and nothing fails quietly.** There is no fallback to
+whichever node happens to be attached. `ErrNoMainNode` (none designated — go and
+configure the gateway) and `ErrMainNodeOffline` (designated, asleep — go and wake
+the machine) are separate because they send the reader to different people, and
+both are journalled at ERROR on the gateway stream, kind `headless`. #199 exists
+because landing this split without an answer fails **silently**.
+
+**The drive loop is `internal/oneshot`, and it is its own package for a build
+reason.** The same loop is wanted in process (`internal/agentdelegate`) and on
+the gateway, and `agentdelegate` can never be linked into `cmd/murtaugh-gateway`:
+it imports `internal/agentbuild` in order to construct clients. Reachability is a
+property of the package, so extracting the loop inside `agentdelegate` would have
+changed nothing. `oneshot` takes a client and never makes one, imports only
+`internal/agent`, and does neither `Initialize` nor `Close` — those are lifecycle,
+and the two callers have opposite ones.
+
+**A headless session says so explicitly, on the wire.** `SessionMetadata.Headless`
+travels beside `Ephemeral`. In process the same fact is expressed by omission —
+a delegated client is built with no approver, so nothing can ask — but a node
+builds every agent with its gate long before it knows which turns have a thread.
+It cannot be inferred on the far side either: "no `TurnLocation` on the context"
+is the in-process test and is false over the link, where the location is set from
+the prompt's channel on every turn. `nodeserve` serves a headless turn with **no
+stream on its context**, which routes the existing branches: `ToolGate.Approve`
+runs ungated, and the gateway sees a tool call naming no turn so `ask`,
+`present_plan` and the approver take their documented no-thread paths. Without
+it a 03:00 job raises a card nobody can answer and blocks until its timeout
+burns. The gateway half of the same rule: `remote.Client` records a stream's
+location only when the prompt names a channel, so a headless turn's location is
+the zero value. There is no second flag saying "this one happens nowhere":
+`agent.TurnLocationFromContext` already answers presence as
+`ok && loc.ChannelID != ""`, so a zero location reads as ABSENT to every
+consumer, and the in-process native client stamps its location unconditionally
+for the same reason. `Client.StreamLocation` therefore answers "is this stream
+KNOWN", which is a different question — `nodehost.locate` warns about a tool
+call naming a turn this gateway has never heard of, and a job, an unfurl or a
+workflow trigger is not one.
+
+**Jobs stay gateway-scheduled and become broker-EXECUTED.** Moving the scheduler
+node-side is explicitly deferred by #199 — shipping a split scheduler and a split
+runtime together is the item most likely to sink the iteration. `cfg node split`
+copies job rows onto the node and deletes none, but a node runs no scheduler, so
+those rows are inert.
+
+**A failed scheduled run now tells the admin.** It used to write one line to
+`slack.err.log`, and the only detector that alerts — `reportMissedJobs`, on
+leader promotion — cannot see it: the occurrence claim is taken BEFORE the run
+and never released, so a job that claimed its slot and then failed reads as one
+that succeeded. The alert fires on the **edge** into failure and re-arms on a
+success, because a per-minute job that starts failing would otherwise DM the
+admin fourteen hundred times a day. It reports rather than replays and does not
+release the claim, staying with the policy already written down for missed
+occurrences: whether a late run is wanted depends on the job, and the claim IS
+the mutual exclusion between two gateways.
+
+**The CLI keeps its local agent, unchanged.** `murtaugh jobs run <x>` still
+builds an agent in process with no gateway and no node. #170 is explicit: when
+the broker is broken there must be a way to run an agent that does not go
+through it.
+
 ### The tool channel (`internal/toolset` partition, `internal/nodehost`, `internal/nodeserve`)
 
 Murtaugh's own tools live on the gateway and hold the gateway's credentials. A
@@ -1107,7 +1190,8 @@ agent.
 **The partition is a table in `internal/toolset` and is enforced in exactly one
 place, gateway-side.** `Reach` has three values and its zero value denies, so an
 unclassified family is refused rather than assumed harmless. A node reaches
-`ping`, `version`, `ask` and `present_plan`; `slack`, `jobs`, `cfg`, `setup`,
+`ping`, `version`, `ask`, `present_plan` and — the one per-TOOL exception —
+`slack.send_msg`; `slack` otherwise, plus `jobs`, `cfg`, `setup`,
 `node`, `journal`, `troubleshoot` and `restart` are the gateway's alone; the
 workdir-rooted native groups and `auth.request` are meaningless remotely —
 `auth.request` because it writes the granted credential into the environment of
@@ -1117,6 +1201,23 @@ and `tool.call` re-checks before looking anything up, because a node admin owns
 their node's configuration and a node cannot be trusted to filter itself. The
 drift guard is in `internal/app`, the only package that can build the real
 registry.
+
+**`slack.send_msg` is the exception, and `toolset.Tools` is where exceptions
+live.** A headless job's whole output mechanism is the agent posting for itself
+— `RunAndForget` discards the text deliberately — so a broker-executed job whose
+prompt ends "post the result to #ops" would otherwise do its work and tell
+nobody. The family's stated reason for refusing is two things, and only one is
+about the credential: the bot token is not an argument and does not cross, since
+the call executes gateway-side like every other `ReachNode` tool, exactly the
+trade `ask` and `present_plan` already make. The other half does go: `attachment`
+and `blocks` take unrooted GATEWAY filesystem paths the tool reads and uploads,
+so they are **denied by name and stripped from the schema the node is offered** —
+stripped as well as refused, because a model handed an argument it may not use
+will use it, be refused, and try again until the job's timeout is gone. The rest
+of the family stays gateway-only: reading a workspace's history, editing somebody
+else's message and creating channels are all wider than reporting a result. This
+IS a widening of what a node's agent can ask the gateway to do, taken knowingly
+under #199.
 
 **Two things a proxied call must carry that an in-process one gets for free.**
 The turn's `agent.TurnLocation` is re-injected gateway-side from the stream id

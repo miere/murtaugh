@@ -110,6 +110,17 @@ type Server struct {
 	turns map[string]*turn
 	asks  map[string]*ask
 	calls map[string]chan agentwire.Message
+	// headless is the set of session ids opened with no human behind them — a
+	// scheduled job, a workflow trigger, an unfurl. A turn on one of these is
+	// served WITHOUT a stream on its context, which is what makes the approval
+	// gate and every gateway-side interactive tool take their documented
+	// no-human branch instead of raising a frame nobody can answer. See
+	// servePrompt.
+	//
+	// It is keyed by session rather than carried on the prompt because the fact
+	// belongs to the session: the gateway opens one, prompts it once, and closes
+	// it, and a second prompt on the same session is the same delegation.
+	headless map[string]bool
 }
 
 // turn is one in-flight prompt.
@@ -146,13 +157,14 @@ func Serve(ctx context.Context, conn nodelink.Conn, client agent.Client, opts Op
 		log = slog.Default()
 	}
 	s := &Server{
-		client: client,
-		log:    log,
-		enc:    agentwire.NewEncoder(),
-		ready:  make(chan struct{}),
-		turns:  make(map[string]*turn),
-		asks:   make(map[string]*ask),
-		calls:  make(map[string]chan agentwire.Message),
+		client:   client,
+		log:      log,
+		enc:      agentwire.NewEncoder(),
+		ready:    make(chan struct{}),
+		turns:    make(map[string]*turn),
+		asks:     make(map[string]*ask),
+		calls:    make(map[string]chan agentwire.Message),
+		headless: make(map[string]bool),
 		// Set at construction, not alongside the binds below: the read loop
 		// starts inside nodelink.New and serveInitialize reads this field off
 		// that loop, so assigning it afterwards is a data race with the first
@@ -410,10 +422,16 @@ func (s *Server) serveNewSession(msg agentwire.Message) {
 		s.fault(msg.ID, err)
 		return
 	}
-	session, err := s.client.NewSession(s.ctx, meta.Decode())
+	decoded := meta.Decode()
+	session, err := s.client.NewSession(s.ctx, decoded)
 	if err != nil {
 		s.fault(msg.ID, err)
 		return
+	}
+	if decoded.Headless {
+		s.mu.Lock()
+		s.headless[session.ID] = true
+		s.mu.Unlock()
 	}
 	s.replyResult(msg.ID, agentwire.NewSessionResult{SessionID: session.ID})
 }
@@ -430,7 +448,20 @@ func (s *Server) servePrompt(msg agentwire.Message) {
 	// deep inside a tool invocation, knows which turn's stream to raise its
 	// request on. It is the only correlation available: an Approver is built
 	// per agent, not per turn.
-	turnCtx = withStream(turnCtx, msg.ID)
+	//
+	// A HEADLESS turn deliberately gets none, and this omission is the whole
+	// mechanism. In process a delegated agent is built with no approver at all,
+	// so a job never asks; a node cannot do that, because it builds one gate per
+	// agent long before it knows which turns will have a thread. Withholding the
+	// stream reaches the same place through the branch that already exists:
+	// ToolGate.Approve sees no stream and runs ungated, and the gateway's own
+	// side sees a tool call naming no turn, resolves no TurnLocation, and lets
+	// `ask`, `present_plan` and the approver take their documented no-thread
+	// paths. A job that raised a card instead would block on an answer nobody
+	// can give until its timeout burned — the wedged-03:00-job failure.
+	if !s.isHeadless(body.SessionID) {
+		turnCtx = withStream(turnCtx, msg.ID)
+	}
 
 	s.mu.Lock()
 	s.turns[msg.ID] = &turn{sessionID: body.SessionID, cancel: cancel}
@@ -447,6 +478,17 @@ func (s *Server) servePrompt(msg agentwire.Message) {
 	// a rejection as an empty reply.
 	s.reply(msg.ID, agentwire.Empty{})
 	go s.pump(turnCtx, msg.ID, events)
+}
+
+// isHeadless reports whether this session was opened with nobody behind it.
+//
+// An unknown session id reads as NOT headless, which is the conservative answer
+// in the direction that matters: an unknown session is one this server did not
+// open, and treating it as headless would silently ungate a chat turn.
+func (s *Server) isHeadless(sessionID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.headless[sessionID]
 }
 
 func (s *Server) serveCancel(msg agentwire.Message) {
@@ -474,6 +516,9 @@ func (s *Server) serveCloseSession(msg agentwire.Message) {
 	// Deliberately unanswered: the gateway fires this from a queue with no
 	// pending answer registered, and a reply would be logged there as a
 	// response to a request nobody made.
+	s.mu.Lock()
+	delete(s.headless, ref.SessionID)
+	s.mu.Unlock()
 	if closer, ok := s.client.(interface{ CloseSession(string) }); ok {
 		closer.CloseSession(ref.SessionID)
 	}

@@ -47,13 +47,22 @@ func Runtime(host *Host) func(config.Config, *tools.Registry, *slog.Logger) agen
 			// than captured when the connection was made.
 			host.setBackground(hooks.BackgroundEvents)
 
-			rt := agentruntime.Runtime{}
+			rt := agentruntime.Runtime{
+				// Headless dispatch (#199): jobs, workflow triggers and unfurls
+				// on the MAIN node. It is set here, ABOVE the chat check below,
+				// and that placement is load-bearing — agentruntime.Hooks says
+				// these surfaces run whether or not chat is enabled, and a
+				// gateway with chat off is precisely the deployment that exists
+				// to run scheduled jobs.
+				Delegator: &headlessDelegator{
+					host:        host,
+					idleTimeout: cfg.Defaults.EffectiveRequestTimeout(),
+					log:         logger.With("runtime", "node", "delegate", "headless"),
+				},
+			}
 			if !hooks.Chat {
-				// No chat surface means nothing would ever prompt these. There
-				// is deliberately no Delegator either: a job or an unfurl
-				// running on a node is #170's item 13, and a nil delegator is
-				// already reported as "agent delegation is unavailable" rather
-				// than silently doing nothing.
+				// No chat surface means nothing would ever prompt the session
+				// managers, so none is built.
 				return rt
 			}
 			rt.Sessions = make(map[string]*agent.SessionManager)

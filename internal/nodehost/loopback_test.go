@@ -51,6 +51,10 @@ type loopback struct {
 	token    string
 	sessions map[string]*agent.SessionManager
 	agent    *scriptedAgent
+	// registry is the GATEWAY's tool registry, or nil when this rig has no tool
+	// channel. Kept so a delegator built off this rig serves the same tools the
+	// chat path does.
+	registry *tools.Registry
 	gate     *nodeserve.ToolGate
 	// background is the NODE's sink — what a backend on the node calls when it
 	// emits outside a turn.
@@ -125,6 +129,11 @@ type rigConfig struct {
 	// said it would restart. nil is a node that applies and keeps running, which
 	// is only useful to a test.
 	restart func()
+	// logs, when set, is where the GATEWAY's own logger writes. Some of what
+	// this Host does is only observable there — a WARN about a turn it does not
+	// recognise has no other output — and a warning nothing asserts is a warning
+	// that can start firing on every job without anybody noticing.
+	logs io.Writer
 }
 
 // withoutWaitingForAttach is for the tests whose point is that the node does
@@ -179,6 +188,30 @@ func restarting(restart func()) rigOption {
 	return func(c *rigConfig) { c.restart = restart }
 }
 
+// logging captures what the GATEWAY logs, at WARN and above.
+func logging(w io.Writer) rigOption {
+	return func(c *rigConfig) { c.logs = w }
+}
+
+// gatewayLog is a concurrency-safe sink for the gateway's log lines: the Host
+// writes from whichever goroutine served the frame.
+type gatewayLog struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (l *gatewayLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.Write(p)
+}
+
+func (l *gatewayLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.String()
+}
+
 func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *loopback {
 	t.Helper()
 	cfg := rigConfig{waitForAttach: true}
@@ -193,7 +226,11 @@ func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *lo
 
 	approved := make(chan approval, 4)
 	notices := make(chan notice, 8)
-	host, err := nodehost.New(nodehost.Options{Tokens: store, Logger: testLogger(), Journal: cfg.journal, Pins: cfg.pins})
+	gatewayLogger := testLogger()
+	if cfg.logs != nil {
+		gatewayLogger = slog.New(slog.NewTextHandler(cfg.logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	}
+	host, err := nodehost.New(nodehost.Options{Tokens: store, Logger: gatewayLogger, Journal: cfg.journal, Pins: cfg.pins})
 	if err != nil {
 		t.Fatalf("host: %v", err)
 	}
@@ -218,7 +255,7 @@ func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *lo
 		Agents: map[string]config.AgentProfile{"default": {}},
 		Chat:   config.ChatConfig{Enabled: true, Defaults: config.ChatDefaults{Agent: "default"}},
 	}
-	runtime := nodehost.Runtime(host)(agentCfg, cfg.registry, testLogger())(agentruntime.Hooks{
+	runtime := nodehost.Runtime(host)(agentCfg, cfg.registry, gatewayLogger)(agentruntime.Hooks{
 		Chat: true,
 		Approvers: map[string]agentruntime.Approver{
 			"default": approverFunc(func(_ context.Context, tool, summary string) (bool, string) {
@@ -290,6 +327,7 @@ func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *lo
 		token:      minted.Token,
 		sessions:   runtime.Sessions,
 		agent:      script,
+		registry:   cfg.registry,
 		gate:       gate,
 		background: background,
 		approved:   approved,
@@ -1322,6 +1360,10 @@ type scriptedAgent struct {
 	prompted  int
 	cancelled int
 	initCalls int
+	// opened counts NewSession, closedIDs records which of them were closed.
+	// Both exist for the session-leak guard in headless_test.go.
+	opened    int
+	closedIDs map[string]bool
 	// The two moments a real backend latches its toolset, recorded as the names
 	// visible in the node's registry at each. native resolves inside Initialize;
 	// an acp/claude_code agent's aggregator resolves when its first session is
@@ -1366,11 +1408,37 @@ func (a *scriptedAgent) Initialize(context.Context) error {
 	return err
 }
 
+// NewSession mints a DISTINCT id per session, the way every real backend does —
+// an ephemeral headless turn derives a fresh UUID by construction — so
+// opened/closed can be counted rather than assumed.
 func (a *scriptedAgent) NewSession(_ context.Context, _ agent.SessionMetadata) (agent.Session, error) {
 	a.mu.Lock()
 	a.atNewSession = registryNames(a.tools)
+	a.opened++
+	id := fmt.Sprintf("node-session-%d", a.opened)
 	a.mu.Unlock()
-	return agent.Session{ID: "node-session-1"}, nil
+	return agent.Session{ID: id}, nil
+}
+
+// CloseSession is what a node's real backends implement — acp and claude_code
+// each own a per-session OS process, and it is the only place their teardown
+// runs. Counting it here is how a session leak over the link becomes visible in
+// a test instead of in a node's memory an hour later.
+func (a *scriptedAgent) CloseSession(id string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closedIDs == nil {
+		a.closedIDs = map[string]bool{}
+	}
+	a.closedIDs[id] = true
+}
+
+// sessionCounts reports how many sessions this agent opened and how many of them
+// were closed.
+func (a *scriptedAgent) sessionCounts() (opened, closed int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.opened, len(a.closedIDs)
 }
 
 // registryNames is what a backend resolving its toolset out of the node's
