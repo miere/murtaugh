@@ -18,6 +18,14 @@
 // it. Binding a port is a new attack surface on the machine, and it must not be
 // possible to acquire one by editing a config file that `murtaugh slack
 // gateway` — the shipping default, which binds nothing — also reads.
+//
+// The listener binds at process start; whether it ACCEPTS is decided by the
+// election, wired into the Host inside the daemon's run. A standby holds the
+// port and turns nodes away with the leader's address, which is why the two are
+// separate: a listener that came and went with leadership would have to
+// re-acquire its port at exactly the moment a failover is already going badly.
+// -node-advertise is what a deployment behind a reverse proxy tells nodes to
+// come to, since this process cannot discover its own public name.
 package main
 
 import (
@@ -52,6 +60,7 @@ func run(args []string) error {
 	fs := flag.NewFlagSet("murtaugh-gateway", flag.ContinueOnError)
 	configPath := fs.String("config", "", "path to config.yaml (default ~/.config/murtaugh/config.yaml)")
 	nodeListen := fs.String("node-listen", "", "address to accept runtime node connections on, e.g. 127.0.0.1:8787 (empty: accept none)")
+	nodeAdvertise := fs.String("node-advertise", "", "address(es) nodes should use to reach this gateway, space- or comma-separated and used verbatim, e.g. \"wss://gateway.example.com wss://192.0.2.10:8443\" (empty: work it out from the listener, which yields ws:// and is only dialable on loopback)")
 	showVersion := fs.Bool("version", false, "print the version and exit")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -104,6 +113,7 @@ func run(args []string) error {
 	// and that is the property CI enforces. Everything else is wired exactly as
 	// the combined binary wires it for ModeGateway.
 	agents := app.Agents{}
+	var nodeEndpoint app.NodeEndpoint
 	if addr := strings.TrimSpace(*nodeListen); addr != "" {
 		tokens, err := configstore.OpenNodeTokens(ctx, cfg.Database, cfg.BaseDir, cfg.BaseName)
 		if err != nil {
@@ -123,11 +133,25 @@ func run(args []string) error {
 			return fmt.Errorf("open the conversation pin store: %w", err)
 		}
 		defer func() { _ = pins.Close() }()
-		host, err := nodehost.New(nodehost.Options{Tokens: tokens, Logger: logger, Journal: recorder, Pins: pins})
+		host, err := nodehost.New(nodehost.Options{
+			Tokens: tokens, Logger: logger, Journal: recorder, Pins: pins,
+			Advertise: strings.TrimSpace(*nodeAdvertise),
+		})
 		if err != nil {
 			return err
 		}
 		agents.Runtime = nodehost.Runtime(host)
+		// Bound at process start, accepting only while elected. #170 says only
+		// the elected gateway accepts nodes, and a listener that came and went
+		// with leadership would have to re-acquire its port at exactly the
+		// moment a failover is already going badly. So the port is held and the
+		// accept is gated — by the election, wired below, without which this
+		// endpoint refuses everything.
+		nodeEndpoint = app.NodeEndpoint{
+			Address: host.Address,
+			Follow:  func(v app.LeaderView) { host.FollowLeader(v) },
+			Detach:  host.DetachAll,
+		}
 		go func() {
 			if err := host.Listen(ctx, addr); err != nil {
 				// The gateway keeps serving Slack: a broken listener means no
@@ -144,6 +168,7 @@ func run(args []string) error {
 		// user-triggered restart looks identical to a SIGTERM from the outside
 		// (launchd, systemd): the process exits 0 and the supervisor respawns it.
 		WithRestartCoordinator(app.NewRestartCoordinator(stop, logger, 0, 0)).
+		WithNodeEndpoint(nodeEndpoint).
 		WithJournalRetentionSweep(store, cfg, logger)
 	if marker, err := app.DefaultResumeMarkerPath(); err != nil {
 		logger.Warn("resume marker disabled: could not resolve state directory", "error", err)

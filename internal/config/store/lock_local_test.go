@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/miere/murtaugh/internal/config"
@@ -216,7 +217,7 @@ func TestLocalLockerRenewIsIdentity(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("Renew: ok=%v err=%v", ok, err)
 	}
-	if renewed != lease {
+	if !reflect.DeepEqual(renewed, lease) {
 		t.Errorf("Renew changed the lease: got %+v, want %+v", renewed, lease)
 	}
 }
@@ -264,5 +265,58 @@ func TestOpenLockerRejectsIncompleteIdentity(t *testing.T) {
 				t.Fatal("OpenLocker accepted an incomplete identity")
 			}
 		})
+	}
+}
+
+// TestLocalLockerHolderReadsTheLeaderWithoutTakingTheLock is the local
+// backend's half of the redirect.
+//
+// Its scope is one machine, so the address a standby must hand a node is
+// loopback on a DIFFERENT port — which is exactly the thing a standby cannot
+// guess and must be told. The read must also not disturb the lock it is reading:
+// a standby asking where the leader is, every time it turns a node away, must not
+// be able to interrupt the leader.
+func TestLocalLockerHolderReadsTheLeaderWithoutTakingTheLock(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	leader := openTestLocker(t, dir, testIdentity())
+	standby := openTestLocker(t, dir, testIdentity())
+
+	// Nobody holds it yet: there is no leader, whatever any leftover file says.
+	if _, ok, err := standby.Holder(ctx); err != nil || ok {
+		t.Fatalf("Holder before any acquisition: ok=%v err=%v; want no leader", ok, err)
+	}
+
+	lease, ok, err := leader.Acquire(ctx)
+	if err != nil || !ok {
+		t.Fatalf("Acquire: ok=%v err=%v", ok, err)
+	}
+	addr := config.LeaderAddress{"ws://127.0.0.1:8788"}
+	if err := leader.Publish(ctx, lease, addr); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	held, ok, err := standby.Holder(ctx)
+	if err != nil || !ok {
+		t.Fatalf("Holder: ok=%v err=%v", ok, err)
+	}
+	if !held.Address.Equal(addr) {
+		t.Errorf("Holder read %v, want %v", held.Address, addr)
+	}
+	if held.Epoch != lease.Epoch {
+		t.Errorf("Holder read epoch %d, want %d", held.Epoch, lease.Epoch)
+	}
+	// The read left the lock alone.
+	if ok, err := leader.Verify(ctx, lease); err != nil || !ok {
+		t.Fatalf("the leader lost its lock to a read: ok=%v err=%v", ok, err)
+	}
+
+	// A released lock names no leader, even though the file still describes
+	// one — the body outlives the release so the epoch survives a handover.
+	if err := leader.Release(ctx, lease); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	if _, ok, err := standby.Holder(ctx); err != nil || ok {
+		t.Fatalf("Holder over a released lock: ok=%v err=%v; want no leader", ok, err)
 	}
 }

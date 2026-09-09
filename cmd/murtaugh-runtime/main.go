@@ -6,6 +6,20 @@
 // inbound firewall rule: revoking a node is closing a socket, not chasing an
 // address.
 //
+// # Which gateway, and why it did not attach
+//
+// Dialling in means this process owns finding the gateway, which after a
+// failover is a different machine. A gateway that is not the elected one
+// redirects rather than dropping the connection, and the addresses it names are
+// ADDED to the configured seed — never substituted for it, or a node asleep
+// through a topology change wakes holding only addresses that no longer exist.
+// gateways.go owns that list and the rule.
+//
+// It also owns the distinction #197 exists for: a failed dial is reported as
+// "wrong gateway", "gateway down" or "credential rejected", because those are
+// three different problems with three different owners and a single "could not
+// attach" line names none of them.
+//
 // Unlike cmd/murtaugh-gateway, this binary MAY reach the agent packages — it is
 // the half of the split whose whole job is running a model.
 //
@@ -96,7 +110,7 @@ func run(args []string) error {
 
 	fs := flag.NewFlagSet("murtaugh-runtime", flag.ContinueOnError)
 	configPath := fs.String("config", "", "path to config.yaml (default ~/.config/murtaugh/config.yaml)")
-	gatewayURL := fs.String("gateway", "", "gateway address to attach to, ws:// or wss:// (required)")
+	gatewayURL := fs.String("gateway", "", "gateway address to attach to, ws:// or wss:// (required); addresses learned from a redirect are added to this one and never replace it")
 	agentName := fs.String("agent", "", "which configured agent this node serves (default: the chat default, or the only one)")
 	tokenPath := fs.String("token-file", "", "path to this node's credential (default: node-token beside the config)")
 	insecure := fs.Bool("insecure-skip-verify", false, "do not verify the gateway's TLS certificate")
@@ -333,6 +347,39 @@ type attachment struct {
 	background *nodeserve.BackgroundSink
 	tools      *nodeserve.ToolProxy
 	claim      *nodeserve.Advertiser
+
+	// dial and wait are the loop's two seams, nil in every binary and set only
+	// by the loop's own test.
+	//
+	// They exist because two of the behaviours #197 headlines are properties of
+	// the LOOP rather than of gatewayList: that a hop costs no backoff, and
+	// that paying a backoff returns the hop budget. Both are invisible to a
+	// test that drives gatewayList directly — it reaches past the caller — and
+	// unreachable through the real ones, which need a gateway on a socket and a
+	// wall clock willing to spend thirty seconds.
+	dial func(ctx context.Context, address string) (*nodesocket.Conn, error)
+	wait func(d time.Duration) <-chan time.Time
+}
+
+// dialer is the real dial, closing over the credential this node presents.
+func (a attachment) dialer() func(context.Context, string) (*nodesocket.Conn, error) {
+	if a.dial != nil {
+		return a.dial
+	}
+	return func(ctx context.Context, address string) (*nodesocket.Conn, error) {
+		return nodesocket.Dial(ctx, address, nodesocket.DialOptions{
+			Token:              a.token,
+			InsecureSkipVerify: a.insecure,
+		})
+	}
+}
+
+// waiter is the real backoff wait.
+func (a attachment) waiter() func(time.Duration) <-chan time.Time {
+	if a.wait != nil {
+		return a.wait
+	}
+	return time.After
 }
 
 // attach dials the gateway and serves it, redialling until the process is
@@ -341,44 +388,74 @@ type attachment struct {
 // A dropped connection is not fatal and is not announced: a laptop that sleeps
 // at six o'clock disconnects every evening, and a node that gave up on the
 // first refusal would need a human to restart it every morning.
+//
+// Which address it dials is gatewayList's business, and why it waited — or did
+// not — is gatewayList.refusal's. Both live in gateways.go, because the loop
+// below is the part that must stay obvious.
 func attach(ctx context.Context, logger *slog.Logger, a attachment) error {
+	gateways := newGatewayList(a.gateway)
+	dial, wait := a.dialer(), a.waiter()
 	backoff := reconnectFloor
 	for {
-		conn, err := nodesocket.Dial(ctx, a.gateway, nodesocket.DialOptions{
-			Token:              a.token,
-			InsecureSkipVerify: a.insecure,
-		})
-		if err == nil {
-			backoff = reconnectFloor
-			logger.Info("attached to gateway", "gateway", a.gateway)
-			err = nodeserve.Serve(ctx, conn, a.client, nodeserve.Options{
-				Logger:      logger,
-				Gate:        a.gate,
-				Background:  a.background,
-				Tools:       a.tools,
-				Advertise:   a.claim,
-				WindowBytes: nodesocket.DefaultWindowBytes,
-				AckInterval: 30 * time.Second,
-			})
-			if err != nil {
-				logger.Warn("gateway connection ended", "error", err)
-			} else {
-				logger.Info("gateway connection closed")
+		address := gateways.current()
+		conn, err := dial(ctx, address)
+		if err != nil {
+			if gateways.refusal(address, err, logger) {
+				// A redirect, and somewhere to go. Hop now: the fleet answered
+				// and named the leader, so waiting out a backoff earned by
+				// unrelated failures would idle a healthy node for nothing.
+				select {
+				case <-ctx.Done():
+					return nil
+				default:
+				}
+				continue
 			}
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-wait(jitter(backoff)):
+			}
+			// The wait is what the hop budget was protecting against spending;
+			// having paid it, the node may follow redirects again.
+			gateways.waited()
+			backoff = nextBackoff(backoff)
+			continue
+		}
+
+		backoff = reconnectFloor
+		gateways.attached()
+		logger.Info("attached to gateway", "gateway", address)
+		if err := nodeserve.Serve(ctx, conn, a.client, nodeserve.Options{
+			Logger:      logger,
+			Gate:        a.gate,
+			Background:  a.background,
+			Tools:       a.tools,
+			Advertise:   a.claim,
+			WindowBytes: nodesocket.DefaultWindowBytes,
+			AckInterval: 30 * time.Second,
+		}); err != nil {
+			logger.Warn("gateway connection ended", "error", err, "gateway", address)
 		} else {
-			logger.Warn("could not attach to gateway", "error", err, "retry_in", backoff)
+			logger.Info("gateway connection closed", "gateway", address)
 		}
 
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-time.After(jitter(backoff)):
+		case <-wait(jitter(backoff)):
 		}
-		backoff *= 2
-		if backoff > reconnectCeiling {
-			backoff = reconnectCeiling
-		}
+		backoff = nextBackoff(backoff)
 	}
+}
+
+// nextBackoff doubles the wait, up to the ceiling.
+func nextBackoff(backoff time.Duration) time.Duration {
+	backoff *= 2
+	if backoff > reconnectCeiling {
+		return reconnectCeiling
+	}
+	return backoff
 }
 
 // runMCPBridge runs the `murtaugh-runtime mcp-bridge` subcommand: a transparent

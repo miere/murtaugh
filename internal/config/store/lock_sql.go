@@ -148,8 +148,8 @@ func (l *sqlLocker) Acquire(ctx context.Context) (config.Lease, bool, error) {
 	seconds := int64(l.ttl / time.Second)
 
 	insert := fmt.Sprintf(
-		`INSERT INTO leader_locks (lock_key, owner, fence, epoch, acquired_at, lease_seconds, released, team_id, app_id)
-		 VALUES (%s, %s, %s, 1, %s, %s, 0, %s, %s)
+		`INSERT INTO leader_locks (lock_key, owner, fence, epoch, acquired_at, lease_seconds, released, team_id, app_id, address)
+		 VALUES (%s, %s, %s, 1, %s, %s, 0, %s, %s, '')
 		 ON CONFLICT (lock_key) DO NOTHING`,
 		l.ph(1), l.ph(2), l.ph(3), l.d.Now(), l.ph(4), l.ph(5), l.ph(6))
 	res, err := l.db.ExecContext(ctx, insert, key, owner, fence, seconds, l.identity.TeamID, l.identity.AppID)
@@ -164,10 +164,15 @@ func (l *sqlLocker) Acquire(ctx context.Context) (config.Lease, bool, error) {
 	// server's own reckoning. The epoch advances in SQL so takeovers stay
 	// totally ordered without a read-then-write that another node could
 	// interleave with.
+	//
+	// The address is cleared in the same statement, and that is not tidiness: it
+	// belongs to the node that just lost the lock, and leaving it would have
+	// every standby redirect nodes to a gateway that has stood down until this
+	// node gets round to publishing its own.
 	takeover := fmt.Sprintf(
 		`UPDATE leader_locks
 		    SET owner = %s, fence = %s, epoch = epoch + 1, acquired_at = %s,
-		        lease_seconds = %s, released = 0
+		        lease_seconds = %s, released = 0, address = ''
 		  WHERE lock_key = %s AND (released = 1 OR %s)`,
 		l.ph(1), l.ph(2), l.d.Now(), l.ph(3), l.ph(4), l.expired())
 	res, err = l.db.ExecContext(ctx, takeover, owner, fence, seconds, key)
@@ -205,18 +210,64 @@ func (l *sqlLocker) finishAcquire(ctx context.Context, fence string) (config.Lea
 // readLease reads the row iff it is still held under fence.
 func (l *sqlLocker) readLease(ctx context.Context, fence string) (config.Lease, bool, error) {
 	query := fmt.Sprintf(
-		`SELECT owner, epoch, acquired_at, lease_seconds
+		`SELECT owner, epoch, acquired_at, lease_seconds, address
 		   FROM leader_locks
 		  WHERE lock_key = %s AND fence = %s AND released = 0 AND NOT (%s)`,
 		l.ph(1), l.ph(2), l.expired())
+	return l.scanLease(l.db.QueryRowContext(ctx, query, l.identity.Key(), fence))
+}
 
+// Holder reads the live claim whoever holds it, without contending.
+//
+// The WHERE clause is the point. `released = 0 AND NOT expired` is what keeps a
+// standby from redirecting a node to the gateway that just stood down: the row
+// survives a release so the epoch survives a handover, so "there is a row" and
+// "there is a leader" are different questions.
+func (l *sqlLocker) Holder(ctx context.Context) (config.Lease, bool, error) {
+	query := fmt.Sprintf(
+		`SELECT owner, epoch, acquired_at, lease_seconds, address
+		   FROM leader_locks
+		  WHERE lock_key = %s AND released = 0 AND NOT (%s)`,
+		l.ph(1), l.expired())
+	lease, ok, err := l.scanLease(l.db.QueryRowContext(ctx, query, l.identity.Key()))
+	if err != nil {
+		return config.Lease{}, false, fmt.Errorf("read the leader lock: %w", err)
+	}
+	return lease, ok, nil
+}
+
+// Publish records this node's node-endpoint address on the row it holds.
+//
+// Conditioned on the fence, like every other write here: a node that has been
+// taken over must not stamp its address onto its successor's lock, which would
+// send every node in the fleet to a gateway that no longer leads.
+func (l *sqlLocker) Publish(ctx context.Context, lease config.Lease, addr config.LeaderAddress) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if !lease.Held() || lease.Key != l.identity.Key() || l.fence == "" {
+		return nil
+	}
+	stmt := fmt.Sprintf(
+		`UPDATE leader_locks SET address = %s
+		  WHERE lock_key = %s AND fence = %s AND released = 0`,
+		l.ph(1), l.ph(2), l.ph(3))
+	if _, err := l.db.ExecContext(ctx, stmt, addr.Encode(), l.identity.Key(), l.fence); err != nil {
+		return fmt.Errorf("publish the leader address: %w", err)
+	}
+	return nil
+}
+
+// scanLease decodes one lock row into a lease.
+func (l *sqlLocker) scanLease(row *sql.Row) (config.Lease, bool, error) {
 	var (
 		owner   string
 		epoch   int64
 		raw     any
 		seconds int64
+		address string
 	)
-	err := l.db.QueryRowContext(ctx, query, l.identity.Key(), fence).Scan(&owner, &epoch, &raw, &seconds)
+	err := row.Scan(&owner, &epoch, &raw, &seconds, &address)
 	if errors.Is(err, sql.ErrNoRows) {
 		return config.Lease{}, false, nil
 	}
@@ -236,6 +287,7 @@ func (l *sqlLocker) readLease(ctx context.Context, fence string) (config.Lease, 
 		// anything in. The caller uses it to schedule renewals, not to decide
 		// whether it still leads — that goes through Verify.
 		ExpiresAt: acquired.Add(time.Duration(seconds) * time.Second),
+		Address:   config.ParseLeaderAddress(address),
 	}, true, nil
 }
 

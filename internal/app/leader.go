@@ -51,7 +51,54 @@ func (a *Application) wireLeaderElection(ctx context.Context, holder *gatewayHol
 		return nil, fmt.Errorf("leader election: open lock: %w", err)
 	}
 
-	runner, err := election.New(election.Options{
+	runner, err := a.followElection(locker, holder)
+	if err != nil {
+		_ = locker.Close()
+		return nil, fmt.Errorf("leader election: %w", err)
+	}
+
+	a.logger.Info("leader election active",
+		"backend", locker.Backend(),
+		"identity", identity.String(),
+		"lease", a.cfg.Election.EffectiveLease(),
+		"renew", a.cfg.Election.EffectiveRenew(),
+		"stands_down_after", a.cfg.Election.EffectiveDemoteAfter())
+
+	a.leaderLocker = locker
+	return runner, nil
+}
+
+// followElection builds the runner over an already-open lock and hands it to
+// the inbound node listener.
+//
+// It is separate from wireLeaderElection because everything above it needs a
+// Slack workspace and a configuration store, and none of the three points where
+// the listener meets the election does — so this is the seam the wiring test
+// drives. The three are each a single line here and each of them was, until
+// #197's review, deletable with the whole suite still green.
+func (a *Application) followElection(locker config.Locker, holder *gatewayHolder) (*election.Runner, error) {
+	runner, err := election.New(a.electionOptions(locker, holder))
+	if err != nil {
+		return nil, err
+	}
+
+	// The listener has been bound since process start; this is what decides
+	// whether it ACCEPTS. Until it is called the endpoint refuses everything,
+	// which is why it is wired here — the last thing before the election runs —
+	// rather than at the listener's own construction, where no election exists
+	// to consult.
+	if a.nodeEndpoint.Follow != nil {
+		a.nodeEndpoint.Follow(runner)
+	}
+	return runner, nil
+}
+
+// electionOptions is where the gateway, the inbound node listener and the
+// election meet. Two of the three node-endpoint wirings live in it — the
+// address a standby redirects to, and the drop on demotion — and the third is
+// in followElection, which calls it.
+func (a *Application) electionOptions(locker config.Locker, holder *gatewayHolder) election.Options {
+	return election.Options{
 		Locker:   locker,
 		Election: a.cfg.Election,
 		Logger:   a.logger.With("component", "election"),
@@ -60,6 +107,12 @@ func (a *Application) wireLeaderElection(ctx context.Context, holder *gatewayHol
 		// otherwise leaves its trace only in whichever node's launchd log
 		// happens to still exist.
 		Recorder: a.recorder,
+		// Where this gateway accepts runtime nodes, written into the lock record
+		// on promotion so a standby — already contending for the same lock —
+		// can redirect a node to the leader instead of dropping it. nil for a
+		// binary that opened no node listener, which is every gateway shipping
+		// today, and reads as "the leader accepts no nodes".
+		Address: a.nodeEndpoint.Address,
 		Callbacks: election.Callbacks{
 			// Both reach the CURRENT gateway through the holder rather than a
 			// captured pointer: a configuration reload replaces it, and the
@@ -86,23 +139,18 @@ func (a *Application) wireLeaderElection(ctx context.Context, holder *gatewayHol
 			},
 			OnDemote: func(ctx context.Context, reason string) {
 				holder.get().StopServing(ctx, reason)
+				// After the Slack side has drained, and only then: a node
+				// dropped first would redial into the new leader while this one
+				// was still finishing a turn on its behalf. Nodes are dropped
+				// rather than left attached because a node cannot tell that the
+				// gateway it holds a socket to has stopped leading — it would
+				// sit there, connected and unreachable, until somebody noticed.
+				if a.nodeEndpoint.Detach != nil {
+					a.nodeEndpoint.Detach(reason)
+				}
 			},
 		},
-	})
-	if err != nil {
-		_ = locker.Close()
-		return nil, fmt.Errorf("leader election: %w", err)
 	}
-
-	a.logger.Info("leader election active",
-		"backend", locker.Backend(),
-		"identity", identity.String(),
-		"lease", a.cfg.Election.EffectiveLease(),
-		"renew", a.cfg.Election.EffectiveRenew(),
-		"stands_down_after", a.cfg.Election.EffectiveDemoteAfter())
-
-	a.leaderLocker = locker
-	return runner, nil
 }
 
 // promotionReason turns a lease into the sentence the takeover notice carries.

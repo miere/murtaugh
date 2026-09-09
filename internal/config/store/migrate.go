@@ -128,6 +128,20 @@ func migrations(d Dialect) [][]string {
 			)`,
 			`CREATE INDEX IF NOT EXISTS conversation_pins_by_node ON conversation_pins (node_id)`,
 		},
+		// v6 — where the leader accepts runtime nodes. A standby is already
+		// contending for this row, so putting the address on it is what lets it
+		// redirect a node instead of dropping it: the alternative is a bare
+		// socket close, which looks identical to a dead gateway, a rejected
+		// credential and broken wifi.
+		//
+		// It defaults to empty and empty means something precise — this leader
+		// accepts no nodes — so a row written before this column existed, and a
+		// leader started without a node listener, read the same and correct way.
+		// The column is written on every acquisition (cleared) and by Publish
+		// (set), never left over from a previous holder.
+		{
+			`ALTER TABLE leader_locks ADD COLUMN address TEXT NOT NULL DEFAULT ''`,
+		},
 	}
 }
 
