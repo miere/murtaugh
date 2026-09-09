@@ -1,7 +1,12 @@
-// Package launchd implements the `setup.launchd` tool: write the
-// dev.murtaugh LaunchAgent plist, optionally invoking launchctl to
-// (re)bootstrap it. Mirrors the plist install.sh emitted, including the
-// PATH environment block and the `slack gateway` ProgramArguments.
+// Package launchd implements the `setup.launchd` tool: write a Murtaugh
+// LaunchAgent plist, optionally invoking launchctl to (re)bootstrap it.
+//
+// There are two of them, because #170 puts the gateway and a runtime node in
+// separate processes: `dev.murtaugh` running `slack gateway`, which is what this
+// tool has always written and what every install already has registered, and
+// `dev.murtaugh.runtime` running the node. They carry distinct labels, distinct
+// log files and separate configuration roots, so a crash-looping node does not
+// take Slack down with it and either can be restarted without the other.
 //
 // The tool is registered on every platform but only operational on darwin;
 // other GOOS values return a clean "unsupported on $GOOS" error so callers
@@ -52,7 +57,7 @@ func (t *Tool) Name() string { return "setup.launchd" }
 
 // Description returns the human-facing summary used by MCP clients.
 func (t *Tool) Description() string {
-	return "Write the dev.murtaugh LaunchAgent plist (macOS) and optionally load it."
+	return "Write a Murtaugh LaunchAgent plist (macOS) — the gateway's or a runtime node's — and optionally load it."
 }
 
 // InputSchema returns the JSON Schema for the tool's arguments.
@@ -60,7 +65,8 @@ func (t *Tool) InputSchema() *jsonschema.Schema {
 	return &jsonschema.Schema{
 		Type: "object",
 		Properties: map[string]*jsonschema.Schema{
-			"binary_path": {Type: "string", Description: "Absolute path to the murtaugh binary."},
+			"binary_path": {Type: "string", Description: "Absolute path to the binary this agent runs."},
+			"role":        {Type: "string", Enum: []any{string(RoleGateway), string(RoleRuntime)}, Description: "Which daemon: gateway (dev.murtaugh, the default) or runtime (dev.murtaugh.runtime)."},
 			"load":        {Type: "boolean", Description: "When true, run launchctl bootout+bootstrap after writing."},
 		},
 		Required: []string{"binary_path"},
@@ -69,6 +75,10 @@ func (t *Tool) InputSchema() *jsonschema.Schema {
 
 // Result is the structured payload returned by Invoke.
 type Result struct {
+	// Label is which launchd job this is, and it is in the result because it is
+	// what the operator has to type to start it. With two agents "kickstart
+	// dev.murtaugh" is no longer the only answer.
+	Label      string `json:"label"`
 	Path       string `json:"path"`
 	BackupPath string `json:"backup_path,omitempty"`
 	Created    bool   `json:"created"`
@@ -100,6 +110,15 @@ func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 	if strings.TrimSpace(binary) == "" {
 		return nil, errors.New("binary_path is required")
 	}
+	roleArg, _ := args["role"].(string)
+	role, err := roleFrom(roleArg)
+	if err != nil {
+		return nil, err
+	}
+	spec, err := specFor(role)
+	if err != nil {
+		return nil, err
+	}
 	load, _ := args["load"].(bool)
 
 	home, err := t.deps.Home()
@@ -107,7 +126,7 @@ func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 		return nil, fmt.Errorf("resolve home: %w", err)
 	}
 
-	plistPath := filepath.Join(home, "Library", "LaunchAgents", "dev.murtaugh.plist")
+	plistPath := filepath.Join(home, "Library", "LaunchAgents", spec.Label+".plist")
 	logsDir := filepath.Join(home, "Library", "Logs", "murtaugh")
 	for _, dir := range []string{filepath.Dir(plistPath), logsDir} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -115,7 +134,7 @@ func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 		}
 	}
 
-	body, err := renderPlist(binary, home, logsDir)
+	body, err := renderPlist(role, binary, home, logsDir)
 	if err != nil {
 		return nil, err
 	}
@@ -143,12 +162,12 @@ func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 		// state=not running) and produces no output, so Slack is
 		// unreachable. kickstart forces the first run; -k also restarts a
 		// stale instance, keeping re-runs of the installer idempotent.
-		if err := t.deps.Launchctl(ctx, "launchctl", "kickstart", "-k", gui+"/dev.murtaugh"); err != nil {
+		if err := t.deps.Launchctl(ctx, "launchctl", "kickstart", "-k", gui+"/"+spec.Label); err != nil {
 			return nil, fmt.Errorf("launchctl kickstart failed: %w", err)
 		}
 		loaded = true
 	}
-	return Result{Path: plistPath, BackupPath: backupPath, Created: !wasThere, Loaded: loaded}, nil
+	return Result{Label: spec.Label, Path: plistPath, BackupPath: backupPath, Created: !wasThere, Loaded: loaded}, nil
 }
 
 func pathExists(path string) bool {

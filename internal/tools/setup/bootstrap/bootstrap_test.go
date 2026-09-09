@@ -111,3 +111,59 @@ func containsPath(haystack []string, want string) bool {
 	}
 	return false
 }
+
+// A runtime node's root is defined by what it does NOT contain: no `oauth:`
+// block, and an .env template naming no SLACK_* variable. Seeding it from the
+// gateway skeleton would put a file advertising ${SLACK_APP_TOKEN} on every
+// laptop in the fleet — an invitation to fill in credentials #170 says that
+// machine must never hold.
+func TestRoleRuntimeSeedsARootWithNoSlackCredentials(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	tl := New(func() string { return path })
+
+	if _, err := tl.Invoke(context.Background(), map[string]any{"role": "runtime"}); err != nil {
+		t.Fatalf("invoke: %v", err)
+	}
+	body := readFile(t, path)
+	if strings.Contains(body, "${SLACK_APP_TOKEN}") {
+		t.Fatalf("a node's config.yaml references the workspace's Slack token:\n%s", body)
+	}
+	if env := readFile(t, filepath.Join(dir, ".env")); strings.Contains(env, "SLACK_APP_TOKEN=") {
+		t.Fatalf("a node's .env has a slot for the workspace's Slack token:\n%s", env)
+	}
+
+	// And the default is unchanged, which is what every existing caller gets.
+	gwDir := t.TempDir()
+	gwPath := filepath.Join(gwDir, "config.yaml")
+	if _, err := New(func() string { return gwPath }).Invoke(context.Background(), map[string]any{}); err != nil {
+		t.Fatalf("invoke: %v", err)
+	}
+	if !strings.Contains(readFile(t, gwPath), "${SLACK_APP_TOKEN}") {
+		t.Fatal("the default role no longer seeds the gateway skeleton")
+	}
+}
+
+// An unknown role is refused rather than defaulted. The two roots differ by a
+// credential block, and quietly seeding the wrong one over a typo puts Slack
+// tokens where they must never be.
+func TestAnUnknownRoleIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	tl := New(func() string { return filepath.Join(dir, "config.yaml") })
+	_, err := tl.Invoke(context.Background(), map[string]any{"role": "node"})
+	if err == nil {
+		t.Fatal("an unknown role was accepted")
+	}
+	if !strings.Contains(err.Error(), "node") {
+		t.Fatalf("the refusal did not name the value: %v", err)
+	}
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(body)
+}

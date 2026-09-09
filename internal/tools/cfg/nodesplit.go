@@ -121,8 +121,8 @@ func (t *nodeSplitTool) Invoke(ctx context.Context, args map[string]any) (any, e
 	}
 
 	return okResult{Message: fmt.Sprintf(
-		"copied %d rows into %s (%s); kept on the gateway: %s. Nothing here changed — install a node credential with `murtaugh node token install` and start murtaugh-runtime.",
-		report.Total(), target, describe(report.Copied), describe(report.Kept))}, nil
+		"copied %d rows into %s (%s); kept on the gateway: %s. Nothing here changed — mint this node a credential on the gateway with `murtaugh node token mint --node <name> --user <slack-user-id>`, put the printed secret at %s/node-token (mode 0600), and start murtaugh-runtime.",
+		report.Total(), target, describe(report.Copied), describe(report.Kept), filepath.Dir(target))}, nil
 }
 
 // nodeSeed reads and validates the optional --gateway seed address, returning

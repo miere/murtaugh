@@ -49,6 +49,15 @@ func Bootstrap(configPath string) error {
 	return err
 }
 
+// BootstrapRole is Bootstrap for whichever half of #170's split the caller
+// addresses. RoleNode seeds the node skeleton; everything else seeds the
+// gateway's, so the zero Role — RoleCombined, which is every existing caller —
+// behaves exactly as Bootstrap always did.
+func BootstrapRole(configPath string, role Role) error {
+	_, err := bootstrapWithReport(configPath, false, role)
+	return err
+}
+
 // BootstrapNode seeds a RUNTIME NODE's configuration root.
 //
 // It is BootstrapWithReport with one asset swapped and it exists for what that
@@ -66,8 +75,15 @@ func Bootstrap(configPath string) error {
 // Everything else a node uses is seeded identically: AGENTS.md, the system
 // prompt, the templates tree and the skills directory its agents read.
 func BootstrapNode(configPath string) error {
-	_, err := bootstrapWithReport(configPath, false, RoleNode)
+	_, err := BootstrapNodeWithReport(configPath, false)
 	return err
+}
+
+// BootstrapNodeWithReport is the report-returning variant, for the surfaces that
+// tell an operator what they got: `setup bootstrap --role node`, which is how
+// the installer seeds a runtime node's root.
+func BootstrapNodeWithReport(configPath string, force bool) (BootstrapReport, error) {
+	return bootstrapWithReport(configPath, force, RoleNode)
 }
 
 // bootstrapAsset names the embedded bootstrap file a role is seeded from.

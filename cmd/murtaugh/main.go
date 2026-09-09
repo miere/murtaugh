@@ -109,7 +109,13 @@ func run(rawArgs []string) error {
 		return fmt.Errorf("adopt legacy config file: %w", err)
 	}
 
-	if err := config.Bootstrap(configPath); err != nil {
+	// Seeded for the role this invocation addresses, not always for a gateway.
+	// This call runs BEFORE anything reads an argument, so pointing --config at
+	// a node's root used to create a config.yaml advertising ${SLACK_APP_TOKEN}
+	// there — the exact file item 12 removed from a node — and the later
+	// `--role node` seeding would then preserve it, because bootstrap never
+	// overwrites a config.yaml that already exists.
+	if err := config.BootstrapRole(configPath, roleFor(mode, rest)); err != nil {
 		return err
 	}
 
@@ -371,7 +377,24 @@ func isSetupInvocation(mode app.Mode, rest []string) bool {
 // holds the bodies. So pointing either of these two at a combined root still
 // does exactly what it did.
 func roleFor(mode app.Mode, rest []string) config.Role {
-	if mode != app.ModeCLI || len(rest) < 3 || rest[0] != "cfg" || rest[1] != "node" {
+	if mode != app.ModeCLI || len(rest) < 2 {
+		return config.RoleCombined
+	}
+	// Any `setup … --role runtime` addresses the RUNTIME NODE's root — the
+	// installer's `--role runtime|both` path, which runs `setup bootstrap` and
+	// `setup launchd` against it. It is the third exception and it is the same
+	// exception: the subject is the node's own directory, so seeding it from the
+	// gateway skeleton is the failure, not a validation difference.
+	//
+	// It is one rule over every setup tool rather than a list of them, because
+	// the rule that would actually be broken is the one that forgets a tool: a
+	// setup command run without it seeds a config.yaml advertising
+	// ${SLACK_APP_TOKEN} into the node's root, before the tool it names has
+	// done anything at all.
+	if rest[0] == "setup" && namesRuntimeRole(rest[1:]) {
+		return config.RoleNode
+	}
+	if len(rest) < 3 || rest[0] != "cfg" || rest[1] != "node" {
 		return config.RoleCombined
 	}
 	switch rest[2] {
@@ -380,6 +403,25 @@ func roleFor(mode app.Mode, rest []string) config.Role {
 	default:
 		return config.RoleCombined
 	}
+}
+
+// namesRuntimeRole reports whether the tool arguments carry `--role runtime`,
+// in either of the two spellings the CLI's argument parser accepts.
+//
+// `runtime` and not `node`: it is the word the installer's --role takes, the
+// word setup.launchd takes, and the name of the binary it starts. config.RoleNode
+// is the internal spelling and does not have to be the operator's.
+func namesRuntimeRole(args []string) bool {
+	for i, arg := range args {
+		switch {
+		case arg == "--role" || arg == "-role":
+			return i+1 < len(args) && strings.EqualFold(strings.TrimSpace(args[i+1]), "runtime")
+		case strings.HasPrefix(arg, "--role="), strings.HasPrefix(arg, "-role="):
+			_, value, _ := strings.Cut(arg, "=")
+			return strings.EqualFold(strings.TrimSpace(value), "runtime")
+		}
+	}
+	return false
 }
 
 // selectMode resolves the top-level subcommand. `slack gateway` starts the

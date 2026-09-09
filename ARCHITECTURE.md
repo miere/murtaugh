@@ -1055,6 +1055,68 @@ per cold conversation. The conversation key reaches it on the context
 (`agent.WithConversation`, set by `SessionManager.Prompt`), because `NewSession`
 is handed metadata carrying no DM flag and `Prompt` is handed only a session id.
 
+### Installing a role (`install/macos/install.sh`, `internal/tools/setup/{bootstrap,launchd}`)
+
+`--role gateway|runtime|both`, plus `MURTAUGH_ROLE`. `gateway` is the default and
+is byte-for-byte what the installer has always done, because a published
+`curl … | bash` line that passes nothing must keep getting what it got yesterday.
+
+**Two LaunchAgents, sharing nothing that identifies a job to launchd.**
+`dev.murtaugh` runs `murtaugh slack gateway` and logs to `slack.{out,err}.log`;
+`dev.murtaugh.runtime` runs `murtaugh-runtime` and logs to
+`runtime.{out,err}.log`. Distinct labels, distinct plists, distinct log files,
+separate configuration roots — so a crash-looping node does not take Slack down
+and either restarts alone. The gateway's plist is untouched: its label, its
+arguments and its log filenames are named in AGENTS.md, docs/operations.md,
+cli-help.md, the murtaugh-setup skill and every existing install's launchd
+registry, and changing any of them is a migration rather than an improvement.
+
+**KeepAlive on the node is load-bearing.** Item 12's zero-profile onboarding has
+a node write its new configuration, answer the gateway and then EXIT, relying on
+the supervisor to bring it back into it. Without KeepAlive a freshly onboarded
+node just dies.
+
+**The node's root is seeded with `setup bootstrap --role runtime`**, never with a
+plain one. The node skeleton is defined by what it LACKS — no `oauth:` block, an
+`.env` naming no `SLACK_*` variable — and seeding it from the gateway's would put
+a file advertising `${SLACK_APP_TOKEN}` on every laptop in the fleet.
+
+**`--role runtime` propagates through the composition root, not just through the
+tool.** Every `murtaugh` invocation seeds the configuration root it is pointed at
+BEFORE the tool runs, so a bare `setup launchd` on a node-only machine created a
+gateway `config.yaml` beside the node's — a step that writes a plist, silently
+creating the one file item 12 removed. `roleFor` therefore maps ANY
+`setup … --role runtime` to `RoleNode`, as one rule over every setup tool rather
+than a list of them: the rule that gets broken is the one that forgets a tool.
+
+**A node needs exactly two things to attach, and both are printed.** The seed
+address is written into the node's own store with `cfg node set --gateway` — one
+of the few commands that loads at `RoleNode`, which is what makes it runnable
+during an install at all, since everything else validates a gateway config and
+dies on "oauth.app_token is required" while `.env` still holds placeholders.
+`--role both` fills it in with the loopback pair; `--role runtime` takes
+`--gateway` and, given none, prints the command rather than inventing an address.
+
+**The token is never minted by the installer.** `node token mint` needs a Slack
+user id, and nobody is the admin until the first DM claims it. It also refuses to
+overwrite: the file is written with `O_EXCL`, before the record is stored, so a
+mint-on-every-run installer would abort the second install under `set -euo
+pipefail` and leave an orphan credential registered on the gateway. So the
+installer reports — the path, the mode, and the exact command — and an existing
+token is left alone.
+
+**Three release assets, not one.** `murtaugh`, `murtaugh-gateway` and
+`murtaugh-runtime`, all signed with the same identifier so one Full Disk Access
+grant covers the product. A plist naming a binary no release publishes
+crash-loops with ENOENT and the only evidence is a log file nobody is watching
+yet. The extra assets are fetched only for the roles that run them, so an install
+of an older `--version` on the default role is unaffected.
+
+**The installer still asks nothing and still leaves every daemon stopped.**
+`--role` is parsed, never prompted for; an unknown value dies like any other
+unknown argument; and `restart_launch_agent_if_needed` takes the label so it
+restarts only an agent that was already registered, and only the right one.
+
 ### Headless dispatch: the main node (`internal/nodehost/headless.go`, `internal/oneshot`)
 
 Chat has an initiator whose node can be chosen. **A cron at 03:00 does not, and

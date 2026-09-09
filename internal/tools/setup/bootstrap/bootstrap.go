@@ -52,6 +52,11 @@ func (t *Tool) InputSchema() *jsonschema.Schema {
 				Type:        "boolean",
 				Description: "Refresh the bundled default system prompt to the shipped version (user config, secrets, and AGENTS.md are always preserved).",
 			},
+			"role": {
+				Type:        "string",
+				Enum:        []any{"gateway", "runtime"},
+				Description: "Which root to seed: gateway (the default) or runtime. A runtime node's root gets a config.yaml with no oauth block and an .env template naming no Slack variable.",
+			},
 		},
 	}
 }
@@ -90,7 +95,13 @@ func (t *Tool) Invoke(_ context.Context, args map[string]any) (any, error) {
 	}
 	force, _ := args["force"].(bool)
 
-	report, err := config.BootstrapWithReport(path, force)
+	// The node asset is not a variation on the gateway's, it is the ABSENCE of
+	// something: node-config.yaml has no `oauth:` block and node-env.example
+	// names no SLACK_* variable. Seeding a node root from the gateway skeleton
+	// would put a file advertising ${SLACK_APP_TOKEN} on every laptop in the
+	// fleet — an invitation to fill it in, on the one machine #170 is explicit
+	// must never hold those tokens.
+	report, err := bootstrapFor(role(args), path, force)
 	if err != nil {
 		return nil, err
 	}
@@ -100,4 +111,23 @@ func (t *Tool) Invoke(_ context.Context, args map[string]any) (any, error) {
 		Updated:   report.Updated,
 		Preserved: report.Preserved,
 	}, nil
+}
+
+// role reads the role argument. An unknown value is not defaulted away: the two
+// roots differ by a credential block, and silently seeding the wrong one is not
+// a thing to recover from by guessing.
+func role(args map[string]any) string {
+	v, _ := args["role"].(string)
+	return strings.ToLower(strings.TrimSpace(v))
+}
+
+func bootstrapFor(role, path string, force bool) (config.BootstrapReport, error) {
+	switch role {
+	case "", "gateway":
+		return config.BootstrapWithReport(path, force)
+	case "runtime":
+		return config.BootstrapNodeWithReport(path, force)
+	default:
+		return config.BootstrapReport{}, fmt.Errorf("unknown role %q: expected \"gateway\" or \"runtime\"", role)
+	}
 }

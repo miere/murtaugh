@@ -35,8 +35,12 @@ database:
 #
 # The credential is a FILE — `node-token` beside this one — not a setting, so
 # the sandboxed model this node runs cannot read it out of the store. Mint one
-# on the gateway with `murtaugh node token issue`, then install it here with
-# `murtaugh node token install`.
+# on the gateway:
+#
+#   murtaugh node token mint --node <name> --user <slack-user-id>
+#
+# then write the printed mrtg_node_… secret to `node-token` beside this file,
+# with mode 0600 — a looser mode is refused when the node reads it.
 #
 # Addresses a gateway names in a redirect are ADDED to the list above and never
 # replace it: a node asleep through a topology change must wake holding an

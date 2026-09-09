@@ -55,19 +55,29 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Build binary
+      # Three binaries, not one. #170 splits the daemon into a Slack-facing
+      # gateway and a runtime node in its own process, and the installer's
+      # --role runtime|both writes a LaunchAgent pointing at murtaugh-runtime.
+      # A plist naming a binary no release publishes crash-loops with ENOENT,
+      # and the only evidence is a log file nobody is watching yet. `murtaugh`
+      # keeps its exact asset name: install.sh looks for it verbatim and every
+      # published curl|bash line depends on it.
+      - name: Build binaries
         shell: bash
         run: |
           set -euo pipefail
 
           mkdir -p dist
-          asset_name="${BINARY_NAME}-${TAG_NAME}-${{ matrix.goos }}-${{ matrix.goarch }}"
+          for cmd in murtaugh murtaugh-gateway murtaugh-runtime; do
+            asset_name="${cmd}-${TAG_NAME}-${{ matrix.goos }}-${{ matrix.goarch }}"
+            GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 \
+              go build -trimpath -ldflags="-s -w -X main.version=${TAG_NAME}" -o "dist/${asset_name}" "./cmd/${cmd}"
+            chmod +x "dist/${asset_name}"
+          done
 
-          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 \
-            go build -trimpath -ldflags="-s -w -X main.version=${TAG_NAME}" -o "dist/${asset_name}" ./cmd/murtaugh
-
-          chmod +x "dist/${asset_name}"
-          echo "ASSET_PATH=dist/${asset_name}" >> "$GITHUB_ENV"
+          # The CLI keeps its own variable: the TCC steps below are about the
+          # binary users grant Full Disk Access to, and that is this one.
+          echo "ASSET_PATH=dist/${BINARY_NAME}-${TAG_NAME}-${{ matrix.goos }}-${{ matrix.goarch }}" >> "$GITHUB_ENV"
 
       # macOS pins a TCC grant to the code's designated requirement. Go's linker
       # emits an ad-hoc signature, and an ad-hoc DR degenerates to
@@ -129,12 +139,18 @@ jobs:
             || { echo "::error::no codesigning identity in build.keychain"; exit 1; }
           echo "SIGN_ID=$SIGN_ID" >> "$GITHUB_ENV"
 
-      - name: Sign binary
+      # Every asset is signed with the SAME identifier. The identifier is what a
+      # stored TCC grant pins, and all three are one product from one install;
+      # giving the node its own would mean a separate Full Disk Access grant for
+      # a process the user thinks of as the same program.
+      - name: Sign binaries
         if: matrix.goos == 'darwin'
         shell: bash
         run: |
           set -euo pipefail
-          codesign --force --sign "$SIGN_ID" --identifier "$SIGN_IDENTIFIER" "$ASSET_PATH"
+          for path in dist/*; do
+            codesign --force --sign "$SIGN_ID" --identifier "$SIGN_IDENTIFIER" "$path"
+          done
           codesign -dvvv "$ASSET_PATH" 2>&1 | grep -Ei 'identifier|flags|cdhash=' || true
           codesign -d -r- "$ASSET_PATH" 2>&1 || true
 
@@ -149,17 +165,19 @@ jobs:
           set -euo pipefail
           expected="identifier \"$SIGN_IDENTIFIER\" and certificate leaf = H\"$SIGN_LEAF_SHA1\""
           echo "requiring: $expected"
-          codesign --verify -R "=$expected" "$ASSET_PATH" || {
-            echo "::error::binary does not satisfy the pinned requirement - releasing it would break every existing Full Disk Access grant"
-            exit 1
-          }
+          for path in dist/*; do
+            codesign --verify -R "=$expected" "$path" || {
+              echo "::error::${path} does not satisfy the pinned requirement - releasing it would break every existing Full Disk Access grant"
+              exit 1
+            }
+          done
           echo "OK - existing TCC grants survive this release."
 
-      - name: Upload release asset
+      - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TAG_NAME }}
-          files: ${{ env.ASSET_PATH }}
+          files: dist/*
           overwrite_files: true
 
   installer:

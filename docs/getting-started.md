@@ -28,9 +28,25 @@ Useful flags:
 | `--force` | Reinstall even if the latest version is already present. |
 | `--skip-config` | Update the binary only; leave config files untouched. |
 | `--reconfigure` | Rewrite all config files from scratch. |
+| `--role gateway\|runtime\|both` | Which daemons this machine runs. Default `gateway`. |
+| `--gateway wss://host:port` | Seed address a runtime node dials. |
 
 The installer is **safe to re-run**: it exits cleanly when already up to date,
 preserves your config by default, and restarts a running daemon after updating.
+
+**`--role`** is for the runtime-node split. `gateway` is the default and is what
+this installer has always done. `runtime` installs an always-on node daemon and
+nothing Slack-facing — its own configuration root at `~/.config/murtaugh/node`,
+its own LaunchAgent `dev.murtaugh.runtime`, and its own log files. `both` puts
+the pair on one machine.
+
+A node needs exactly two things to attach, and the installer prints both: a
+**gateway seed address** (recorded for you when you pass `--gateway`, or for
+`--role both`) and a **node token**, which the installer deliberately does not
+mint — minting needs a Slack user id, and nobody is the gateway's admin until the
+first DM claims it. Run `murtaugh node token mint --node <name> --user <id>` on
+the gateway and put the printed secret at `~/.config/murtaugh/node/node-token`,
+mode `0600`. A reinstall never touches a token that is already there.
 
 During install you choose how chat is backed:
 

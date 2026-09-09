@@ -508,6 +508,14 @@ everything else (agents, jobs, rules, …) is created there via `cfg …` and th
 `setup` tools, not as YAML siblings. Runs on every Murtaugh start, not just the
 first.
 
+`--role runtime` seeds a RUNTIME NODE's root instead. That skeleton is defined by
+what it lacks: no `oauth:` block, and an `.env` naming no `SLACK_*` variable — a
+node has no Slack connection and must never hold the workspace's tokens.
+
+```
+murtaugh --config ~/.config/murtaugh/node/config.yaml setup bootstrap --role runtime
+```
+
 | Flag      | Required | Type    | Notes                                                              |
 |-----------|----------|---------|-------------------------------------------------------------------|
 | `--force` | no       | boolean | Refresh the bundled default `system-prompt.md` to the shipped version. |
@@ -627,18 +635,39 @@ murtaugh setup mcp-register --client goose --binary-path /usr/local/bin/murtaugh
 
 ## murtaugh setup launchd
 
-Write the `dev.murtaugh` LaunchAgent plist (macOS only) and optionally load it
-via launchctl. On non-macOS hosts it returns a clean "unsupported on <os>"
-error. An existing plist is backed up first.
+Write a Murtaugh LaunchAgent plist (macOS only) and optionally load it via
+launchctl. On non-macOS hosts it returns a clean "unsupported on <os>" error. An
+existing plist is backed up first.
+
+There are two agents, because the gateway and a runtime node are separate
+processes. They share nothing that identifies a job to launchd, so either can be
+restarted without the other and a crash-looping node does not take Slack down:
+
+| Role      | Label                  | Runs                     | Logs                                   |
+|-----------|------------------------|--------------------------|----------------------------------------|
+| `gateway` | `dev.murtaugh`         | `murtaugh slack gateway` | `~/Library/Logs/murtaugh/slack.*.log`  |
+| `runtime` | `dev.murtaugh.runtime` | `murtaugh-runtime`       | `~/Library/Logs/murtaugh/runtime.*.log`|
 
 | Flag            | Required | Type    | Notes                                                              |
 |-----------------|----------|---------|--------------------------------------------------------------------|
-| `--binary-path` | yes      | string  | Absolute path to the `murtaugh` binary.                            |
+| `--binary-path` | yes      | string  | Absolute path to the binary this agent runs.                       |
+| `--role`        | no       | enum    | `gateway` (default) or `runtime`.                                  |
 | `--load`        | no       | boolean | `true` runs `launchctl bootout`+`bootstrap`+`kickstart` after writing. Remember booleans need a value: `--load true`. |
+
+Both carry `KeepAlive`. On the node that is load-bearing rather than
+belt-and-braces: a node configured by the gateway for the first time writes its
+new configuration, answers, and exits, relying on the supervisor to bring it back.
 
 ```
 murtaugh setup launchd --binary-path /usr/local/bin/murtaugh --load true
+murtaugh --config ~/.config/murtaugh/node/config.yaml \
+  setup launchd --role runtime --binary-path /usr/local/bin/murtaugh-runtime
 ```
+
+Pass `--config` alongside `--role runtime`. Every `murtaugh` invocation seeds the
+configuration root it is pointed at before the tool runs, so a bare call on a
+node-only machine would create a gateway `config.yaml` advertising
+`${SLACK_APP_TOKEN}` in `~/.config/murtaugh` — the file a node must never have.
 
 ## murtaugh setup update
 

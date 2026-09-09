@@ -30,6 +30,23 @@ restarts on crash. Under launchd it logs to:
 **Start any debugging in those logs** — startup, agent warmup, event handling,
 job runs, and errors all land there.
 
+`install.sh --role runtime` (or `--role both`) writes a **second** LaunchAgent,
+`dev.murtaugh.runtime`, running `murtaugh-runtime` out of its own configuration
+root at `~/.config/murtaugh/node` and logging to `runtime.out.log` /
+`runtime.err.log`. The two share no label, no plist, no log file and no
+configuration directory, so a crash-looping node does not take Slack down with
+it and either can be restarted alone:
+
+```
+launchctl kickstart -k gui/$(id -u)/dev.murtaugh
+launchctl kickstart -k gui/$(id -u)/dev.murtaugh.runtime
+```
+
+A runtime node is an always-on daemon on purpose: scheduled jobs must fire when
+their owner is not chatting. **A job whose node is asleep does not run and is not
+replayed** — the same policy that already applies to an occurrence missed across
+a restart.
+
 On other platforms, run `murtaugh slack gateway` under your own supervisor
 (systemd, a process manager, etc.).
 

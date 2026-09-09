@@ -14,14 +14,22 @@ Slack. Taking it down cuts your only channel to the user, so you cannot report
 what you broke, and the user's first symptom is silence.
 
 **Before** running `murtaugh slack gateway`, `install/macos/install.sh`,
-`murtaugh setup launchd`, any `launchctl` verb against `dev.murtaugh`, or
-`go test ./...` (the installer tests drive the real installer), check for a live
-gateway:
+`murtaugh setup launchd`, any `launchctl` verb against `dev.murtaugh` or
+`dev.murtaugh.runtime`, or `go test ./...` (the installer tests drive the real
+installer), check for a live gateway:
 
 ```sh
 launchctl print "gui/$(id -u)/dev.murtaugh" >/dev/null 2>&1 && echo "LIVE AGENT"
 pgrep -fl 'murtaugh slack gateway'
 ```
+
+There are two labels now: `install.sh --role runtime|both` also writes
+`dev.murtaugh.runtime`. And `setup.launchd` resolves the home directory from the
+RUNNING PROCESS's environment, so a Go test that drives it IN PROCESS writes into
+your real `~/Library/LaunchAgents` — pointing `--config` at a `t.TempDir()` does
+not move it. Exercise it behind the recorder fakes in
+`internal/tools/setup/launchd`, or through `install.sh`, whose
+`launchd_domain_is_ours` guard is the last line of defence and not a licence.
 
 If either reports something, treat the gateway as live and **stop**. Do not
 start a second one: two gateways on the same bot token both receive every Slack

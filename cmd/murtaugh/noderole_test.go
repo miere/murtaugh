@@ -1,7 +1,9 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/miere/murtaugh/internal/app"
@@ -65,9 +67,59 @@ func TestRoleForNamesOnlyTheTwoCommandsThatAddressANodeRoot(t *testing.T) {
 		"mcp":              {app.ModeMCP, []string{"cfg", "node", "set"}, config.RoleCombined},
 		"nothing at all":   {app.ModeCLI, nil, config.RoleCombined},
 		"a tool named cfg": {app.ModeCLI, []string{"cfg"}, config.RoleCombined},
+
+		// #200's installer runs these two against the node's own root. The rule
+		// is one over every setup tool rather than a list of them, because the
+		// rule that actually gets broken is the one that forgets a tool: a setup
+		// command run without it seeds a config.yaml advertising
+		// ${SLACK_APP_TOKEN} into the node's root before the tool it names has
+		// done anything.
+		"setup bootstrap --role runtime": {app.ModeCLI, []string{"setup", "bootstrap", "--role", "runtime"}, config.RoleNode},
+		"setup launchd --role runtime":   {app.ModeCLI, []string{"setup", "launchd", "--role", "runtime", "--binary-path", "/x"}, config.RoleNode},
+		"setup launchd --role=runtime":   {app.ModeCLI, []string{"setup", "launchd", "--role=runtime"}, config.RoleNode},
+		"setup bootstrap --role gateway": {app.ModeCLI, []string{"setup", "bootstrap", "--role", "gateway"}, config.RoleCombined},
+		"setup bootstrap":                {app.ModeCLI, []string{"setup", "bootstrap"}, config.RoleCombined},
+		"setup launchd":                  {app.ModeCLI, []string{"setup", "launchd", "--binary-path", "/x"}, config.RoleCombined},
+		"a --role elsewhere":             {app.ModeCLI, []string{"cfg", "agent", "create", "--role", "runtime"}, config.RoleCombined},
 	} {
 		if got := roleFor(tc.mode, tc.rest); got != tc.want {
 			t.Errorf("%s: roleFor = %q, want %q", name, got, tc.want)
 		}
 	}
+}
+
+// The composition root seeds the configuration root it is pointed at BEFORE any
+// tool runs, so the failure this guards is the one that happens before the
+// operator's command does anything: `setup … --role runtime` against a node's
+// directory creating a gateway config.yaml there.
+//
+// It is driven through run() rather than through config.BootstrapRole, because
+// the bug was in the wiring and the function was always correct.
+func TestASetupCommandForARuntimeNodeSeedsNoSlackCredentials(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	// setup bootstrap is the seeding command, so the pre-seed and the tool must
+	// agree — a disagreement is invisible, because bootstrap PRESERVES a
+	// config.yaml that is already there.
+	if err := run([]string{"--config", path, "setup", "bootstrap", "--role", "runtime"}); err != nil {
+		t.Fatalf("setup bootstrap --role runtime: %v", err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read the seeded config: %v", err)
+	}
+	if strings.Contains(string(body), "${SLACK_APP_TOKEN}") {
+		t.Fatalf("a node's root was seeded from the gateway skeleton:\n%s", body)
+	}
+
+	// setup.launchd is the other command the installer runs against this root,
+	// and it is the one that used to go wrong — it writes only into
+	// ~/Library/LaunchAgents and looks like it touches no configuration at all.
+	// It is asserted on the roleFor table above and DELIBERATELY not executed
+	// here: the tool resolves the home directory from the RUNNING PROCESS's
+	// environment, so driving it in process writes a LaunchAgent into the
+	// developer's real ~/Library — pointing --config at a t.TempDir() does not
+	// move it. That is the same hazard install_test.go's launchd_domain_is_ours
+	// guard exists for, and a unit test is not the place to lean on it.
 }
