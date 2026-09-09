@@ -512,3 +512,53 @@ func TestDroppedEventFailsTheTurnWithTheGap(t *testing.T) {
 		t.Fatalf("the turn delivered %v; nothing after the gap may be rendered", seen)
 	}
 }
+
+// A headless turn is KNOWN and has no thread, and those are two different facts.
+//
+// The tool channel asks this client where a turn is happening. It used to answer
+// with a second boolean — `located` — set only when the prompt named a channel,
+// on the stated grounds that "every consumer asks 'is there a human' by key
+// PRESENCE, so a present-but-empty location sends each of them to post into
+// channel ”". agent.TurnLocationFromContext returns `ok && loc.ChannelID != ""`,
+// so that was never true: a zero-valued location already reads as absent, and
+// the in-process native client stamps one unconditionally on every headless turn
+// for exactly that reason.
+//
+// What the extra flag DID do is make a job indistinguishable from a tool call
+// naming a turn this gateway has never heard of — which is a real anomaly, is
+// logged as one by nodehost.locate, and would have been logged for every job,
+// every workflow trigger and every unfurl.
+func TestAHeadlessTurnIsAKnownStreamWithNoLocation(t *testing.T) {
+	client, node, _ := dial(t, nodeConfig{sessionID: "session-42"}, Options{})
+
+	// No channel: this is a job, an unfurl or a workflow trigger.
+	if _, err := client.Prompt(context.Background(), "session-42", agent.PromptRequest{Text: "the 03:00 job"}); err != nil {
+		t.Fatalf("prompt: %v", err)
+	}
+	stream := receive(t, "the accepted stream", node.streams)
+
+	location, known := client.StreamLocation(stream)
+	if !known {
+		t.Fatal("a headless turn read as a stream this gateway does not know; nodehost.locate logs that as an anomaly, so every job would report one")
+	}
+	if _, ok := agent.TurnLocationFromContext(agent.WithTurnLocation(context.Background(), location)); ok {
+		t.Fatalf("a headless turn's location %+v reads as PRESENT on the context; `ask`, `present_plan` and the approval gate would each try to use it", location)
+	}
+
+	// And a turn that DOES name a channel still arrives intact.
+	if _, err := client.Prompt(context.Background(), "session-42", agent.PromptRequest{
+		Text: "hello", Channel: "C1", Thread: "111.222", User: "U1",
+	}); err != nil {
+		t.Fatalf("prompt: %v", err)
+	}
+	chatStream := receive(t, "the accepted stream", node.streams)
+	location, known = client.StreamLocation(chatStream)
+	if !known || location.ChannelID != "C1" || location.ThreadTS != "111.222" || location.UserID != "U1" {
+		t.Fatalf("a chat turn's location came back as %+v (known=%v)", location, known)
+	}
+
+	// A stream nobody minted is the case the warning is for.
+	if _, known := client.StreamLocation("stream-nobody-minted"); known {
+		t.Fatal("an unknown stream read as known, so a tool call naming a turn this gateway never had would pass silently")
+	}
+}

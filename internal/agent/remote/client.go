@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -224,7 +225,17 @@ func (c *Client) NewSession(ctx context.Context, meta agent.SessionMetadata) (ag
 func (c *Client) Prompt(ctx context.Context, sessionID string, request agent.PromptRequest) (<-chan agent.Event, error) {
 	id := c.mintID()
 	s := newStream(sessionID, c.buffer)
-	s.location = agent.TurnLocation{ChannelID: request.Channel, ThreadTS: request.Thread, UserID: request.User}
+	// Only when there is somewhere to point at, which leaves a headless turn — a
+	// job, an unfurl, a workflow trigger — holding the ZERO location. That is
+	// the honest answer and it is the one every consumer is written for:
+	// agent.TurnLocationFromContext returns `ok && loc.ChannelID != ""`, so a
+	// zero location reads as absent to interaction.GateApprover, `ask` and
+	// `present_plan` alike, and each takes its no-thread branch. It is also what
+	// the in-process native client does — it stamps the location unconditionally
+	// — so both paths present a headless turn identically.
+	if strings.TrimSpace(request.Channel) != "" {
+		s.location = agent.TurnLocation{ChannelID: request.Channel, ThreadTS: request.Thread, UserID: request.User}
+	}
 
 	c.mu.Lock()
 	if c.closed {
@@ -345,6 +356,14 @@ func (c *Client) SupportsCancel(context.Context) bool {
 // the approval gate short-circuits to allowed and `ask`/`present_plan` degrade
 // to non-interactive. The client already holds this per stream because
 // answerApproval needed the same thing.
+//
+// ok means the STREAM IS KNOWN, and not "this turn has a thread". Those are two
+// different questions and conflating them made a headless turn — which has no
+// thread and is not supposed to — indistinguishable from a tool call naming a
+// turn this gateway has never heard of, which is a real anomaly and is logged as
+// one. The location of a known headless turn is the zero value, and
+// agent.TurnLocationFromContext reads that as absent, so the caller can stamp it
+// unconditionally and every consumer still takes its no-thread branch.
 func (c *Client) StreamLocation(streamID string) (agent.TurnLocation, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -529,7 +548,11 @@ func (c *Client) answerApproval(pending *agentwire.PendingDecision, ev agent.Eve
 		if s != nil {
 			// Without the turn's location the gate short-circuits to "allowed"
 			// — its documented headless behaviour — which over a link would
-			// silently ungate every tool call on the node.
+			// silently ungate every tool call on the node. A headless turn's
+			// location is the zero value and reads as absent, so it takes
+			// exactly that branch; it should also never get this far, because a
+			// headless session is served with no stream on its context and its
+			// gate never raises a frame.
 			ctx = agent.WithTurnLocation(ctx, s.location)
 		}
 		allowed, note = c.approve(ctx, toolName, summary)

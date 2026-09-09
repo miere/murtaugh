@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
 
@@ -99,7 +100,7 @@ type accessSetTool struct{ p Provider }
 
 func (t *accessSetTool) Name() string { return "cfg.access.set" }
 func (t *accessSetTool) Description() string {
-	return "Update the access config (admin user, allowed users, debug)."
+	return "Update the access config (admin user, allowed users, debug, main node)."
 }
 func (t *accessSetTool) InputSchema() *jsonschema.Schema {
 	return &jsonschema.Schema{
@@ -108,6 +109,7 @@ func (t *accessSetTool) InputSchema() *jsonschema.Schema {
 			"admin_user":    {Type: "string", Description: "admin Slack user ID or handle"},
 			"allowed_users": {Type: "array", Items: &jsonschema.Schema{Type: "string"}, Description: "allowed Slack user (repeatable; replaces the list)"},
 			"debug":         {Type: "boolean", Description: "enable access debug logging"},
+			"main_node":     {Type: "string", Description: "node id that serves headless work (jobs, workflow triggers, unfurls); empty string clears it"},
 		},
 	}
 }
@@ -132,6 +134,16 @@ func (t *accessSetTool) Invoke(ctx context.Context, args map[string]any) (any, e
 	}
 	if v, ok := boolArg(args, "debug"); ok {
 		cfg.Debug = v
+	}
+	// Designating the main node is the gateway admin writing down which machine
+	// serves work that has no user to fleet on. It is here, on the gateway's own
+	// access block, and not on the node's configuration, because a node that
+	// could declare itself main would be granting itself the right to serve
+	// every user's unfurls and every scheduled job — the thing #170's item 4
+	// settled a node may never do. An empty value clears the designation, which
+	// is the only way to un-designate and has to be reachable.
+	if v, ok := stringArg(args, "main_node"); ok {
+		cfg.MainNode = strings.TrimSpace(v)
 	}
 	if err := putSingletonValidated(ctx, s, config.SingletonAccess, cfg); err != nil {
 		return nil, err

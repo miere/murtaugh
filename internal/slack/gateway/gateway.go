@@ -174,6 +174,12 @@ type Gateway struct {
 	// writes the durable half so a restart does not re-ask.
 	confirmedJobs   map[string]bool
 	confirmedJobsMu sync.Mutex
+	// failingJobs records which jobs the last run of failed, so the admin is
+	// alerted on the EDGE into failure rather than on every occurrence. Guarded
+	// by confirmedJobsMu, because it is the same per-job bookkeeping and a
+	// second mutex over the same map key set is how the two drift. See
+	// notifyJobFailure.
+	failingJobs map[string]bool
 	// persistJobConfirmation stamps an approved job `confirmed: true` in the
 	// config store, so the approval outlives this process. Wired by the
 	// composition root (WithJobConfirmer) as a closure over the store. nil

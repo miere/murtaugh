@@ -104,6 +104,11 @@ func TestNewSessionRoundTrip(t *testing.T) {
 		// delegation derives the same session id and a claude_code backend
 		// resumes the previous delegation's transcript.
 		{"an ephemeral delegation", agent.SessionMetadata{Source: "delegate", Ephemeral: true}},
+		// And the other field whose loss is a named bug, in the same shape: a
+		// node that does not learn a turn is headless builds it a real approval
+		// gate, raises a card for a 03:00 job, and blocks on an answer the
+		// gateway has no thread to give — the job burns its whole timeout.
+		{"a headless delegation", agent.SessionMetadata{Source: "delegate", Ephemeral: true, Headless: true}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
