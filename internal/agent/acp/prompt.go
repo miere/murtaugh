@@ -12,10 +12,15 @@ import (
 
 // promptBlocks renders a agent.PromptRequest into ACP `session/prompt` content
 // blocks. ACP exposes no system role, so leading delimited blocks are the
-// closest stand-in for a system note. Order:
-//  0. a <persona> block (only when a shared persona is configured) carrying
-//     Murtaugh's voice, so an ACP agent reads as the same character as native
-//     even when it runs in an external project with its own AGENTS.md.
+// closest stand-in for a system note.
+//
+// Murtaugh deliberately injects NO persona here. An ACP adapter is bespoke — it
+// arrives with its own harness, its own prompt, and its own idea of who it is —
+// so its voice is the admin's to configure through that adapter, not something
+// Murtaugh smuggles in as a user block on every turn. SOUL.md governs the two
+// backends Murtaugh actually owns: native and claude_code.
+//
+// Order:
 //  1. a <context> block carrying the volatile per-turn facts (current time,
 //     working directory) — the ACP analogue of native's RenderTurnContext, so
 //     an ACP agent knows what day it is and where it is rooted, just like the
@@ -29,10 +34,7 @@ import (
 //     backfilling an existing thread).
 //  4. the user's text.
 func (c *acpSession) promptBlocks(request agent.PromptRequest) []map[string]string {
-	blocks := make([]map[string]string, 0, 5)
-	if persona := strings.TrimSpace(c.opts.Persona); persona != "" {
-		blocks = append(blocks, map[string]string{"type": "text", "text": "<persona>\n" + persona + "\n</persona>"})
-	}
+	blocks := make([]map[string]string, 0, 4)
 	if ctxText := c.renderTurnContext(); ctxText != "" {
 		blocks = append(blocks, map[string]string{"type": "text", "text": ctxText})
 	}

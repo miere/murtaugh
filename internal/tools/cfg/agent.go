@@ -26,6 +26,7 @@ func agentSchema(nameRequired bool) *jsonschema.Schema {
 		"mcp_servers":            {Type: "array", Items: &jsonschema.Schema{Type: "string"}, Description: "extra MCP server to attach (repeatable)"},
 		"export_skills_to_fs":    {Type: "array", Items: &jsonschema.Schema{Type: "string"}, Description: "bundled skill to export to the workdir (repeatable; 'all' for every one)"},
 		"progress_display":       {Type: "string", Description: "simplified | tasks"},
+		"soul_file":              {Type: "string", Description: "persona file override (native/claude_code); default searches <workdir>/SOUL.md then <workspace>/SOUL.md"},
 		"approval_terminal":      {Type: "string", Description: "native terminal gate: allowlist | prompt | off"},
 		"approval_requests":      {Type: "string", Description: "acp permission answering: ask | auto-allow | auto-deny"},
 		"approval_allow":         {Type: "array", Items: &jsonschema.Schema{Type: "string"}, Description: "extra allowlisted terminal command (repeatable)"},
@@ -160,6 +161,9 @@ func buildAgentProfile(existing *config.AgentProfile, args map[string]any) (conf
 	}
 	if v, ok := stringArg(args, "progress_display"); ok {
 		p.ProgressDisplay = v
+	}
+	if v, ok := stringArg(args, "soul_file"); ok {
+		p.SoulFile = v
 	}
 	if v, ok := stringArg(args, "approval_terminal"); ok {
 		p.Approval.Terminal = v

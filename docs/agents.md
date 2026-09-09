@@ -63,6 +63,43 @@ DeepSeek, and Kimi ride the `anthropic`/`openai`-compatible families via a
 `--base-url` override. A workspace `AGENTS.md` in the agent's `--workdir` is
 auto-loaded into the system prompt as project guidelines.
 
+## The persona (SOUL.md)
+
+An agent's voice lives in `SOUL.md`, and it is the same file for a `native` and a
+`claude_code` agent — that is what keeps the two reading as the same character.
+Murtaugh resolves it in this order:
+
+1. `--soul-file` on the agent profile — the only knob that separates two
+   profiles sharing one workdir.
+2. `<workdir>/SOUL.md` — the per-workdir override, so an agent's voice can follow
+   the context it works in. This is what the onboarding flow writes.
+3. `<workspace>/SOUL.md` — the node default, seeded by bootstrap.
+
+The file carries YAML frontmatter because it doubles as a Claude Code **output
+style**: bootstrap links it to `.claude/output-styles/murtaugh.md`, so an admin
+working in that directory from the interactive `claude` CLI can select the
+agent's voice from their style list. The frontmatter is stripped before the prose
+is injected, and its `name:` key is a binding key — Claude Code's `outputStyle`
+setting matches on it, so renaming it breaks style selection. The name an agent
+answers to belongs in the prose, not the frontmatter.
+
+How it reaches the model differs by backend, because their system prompts do:
+
+| Backend | Persona delivery |
+|---|---|
+| `native` | A `<persona>` block appended after the base system prompt, inside the cacheable static prefix. |
+| `claude_code` | Merged with the Slack formatting rules into a single `--append-system-prompt`. The CLI owns the rest of its system prompt; `system-prompt.md` is deliberately not passed. |
+| `acp` | None. An ACP adapter is bespoke and brings its own harness, so its voice is the admin's to configure there. |
+
+A freshly seeded `SOUL.md` is frontmatter only, which resolves to no persona at
+all — the pre-onboarding state that makes the seeded `AGENTS.md`'s "I don't have
+a name or personality yet" true rather than immediately contradicted.
+
+> The single `--append-system-prompt` is not a style choice: the `claude` CLI
+> does **not** accumulate repeated occurrences of that flag. The last one wins
+> and every earlier one is silently dropped, so passing persona and formatting
+> rules separately would ship an agent with one and not the other.
+
 Change a field later with `cfg agent update`:
 
 ```sh

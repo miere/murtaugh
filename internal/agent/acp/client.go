@@ -33,9 +33,6 @@ type ProcessOptions struct {
 	// the agent can reach Murtaugh's own tools. nil leaves mcpServers empty. One
 	// aggregator is shared across all of an agent's sessions; the manager closes it.
 	Aggregator agent.Aggregator
-	// Persona is Murtaugh's shared persona (SOUL.md). ACP exposes no system role,
-	// so when set it is injected as a leading <persona> block on every prompt.
-	Persona string
 	// ToolHeartbeatInterval is how often a still-running tool emits a keep-alive
 	// status event so the gateway's idle watchdog does not treat a long,
 	// output-silent tool call as a stall. Zero takes defaultACPToolHeartbeatInterval.

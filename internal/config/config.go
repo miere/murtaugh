@@ -596,6 +596,13 @@ type AgentProfile struct {
 	// agent (e.g. "files", "terminal", "skills", "slack", "jobs"). Empty means
 	// no tools beyond the always-on set the toolset resolver decides.
 	Tools []string `yaml:"tools" json:"tools,omitempty"`
+	// SoulFile pins where this agent's persona is read from, overriding the
+	// standard search (<workdir>/SOUL.md, then <workspace>/SOUL.md). A relative
+	// path resolves against the workspace/config dir. It is the only knob that
+	// separates the voices of two profiles sharing one workdir — which the
+	// onboarding flow, writing to <workdir>/SOUL.md, otherwise collapses into
+	// one. Ignored by kind:acp, whose persona belongs to its adapter.
+	SoulFile string `yaml:"soul_file" json:"soul_file,omitempty"`
 	// ExportSkillsToFS lists bundled (murtaugh-*) skills to write into this
 	// agent's workdir so an external, filesystem-discovering agent (e.g. a
 	// Claude-based ACP backend) can load them. Empty (the default) keeps the

@@ -35,29 +35,64 @@ import (
 // same name (internal/tools/ask, via MCPName), so hiding the built-in is what
 // makes the model reach for the one that works — with the payload it already
 // knows. Without this flag the built-in shadows it.
-// `--append-system-prompt` carries Murtaugh's Slack formatting rules. Unlike
-// the native and ACP backends, a claude_code session never sees
-// assets/system-prompt.md — the CLI owns its own system prompt — so without
-// this flag the only formatting guidance it gets is whatever CLAUDE.md happens
-// to sit in its workdir tree, competing with the CLI's own "output
-// GitHub-flavored markdown for a terminal" instruction. Which one won decided
-// the dialect per turn, which is exactly how the same agent produced correct
-// bold in one reply and raw `**` in the next.
-var defaultArgs = []string{
-	"-p",
-	"--input-format", "stream-json",
-	"--output-format", "stream-json",
-	"--verbose",
-	"--permission-prompt-tool", "stdio",
-	"--disallowedTools", "AskUserQuestion",
-	"--append-system-prompt", strings.TrimSpace(assets.SlackFormat()),
+// `--append-system-prompt` carries everything Murtaugh contributes to the
+// session's system prompt: the agent's persona and the Slack formatting rules.
+// A claude_code session deliberately never sees assets/system-prompt.md — the
+// CLI owns its own system prompt, and respecting that battle-tested harness is
+// most of the reason to run this backend at all. But voice and transport are
+// Murtaugh's, not the CLI's: without this flag the only formatting guidance the
+// model gets is whatever CLAUDE.md happens to sit in its workdir tree, competing
+// with the CLI's own "output GitHub-flavored markdown for a terminal"
+// instruction. Which one won decided the dialect per turn, which is exactly how
+// the same agent produced correct bold in one reply and raw `**` in the next.
+func defaultArgs(persona string) []string {
+	args := []string{
+		"-p",
+		"--input-format", "stream-json",
+		"--output-format", "stream-json",
+		"--verbose",
+		"--permission-prompt-tool", "stdio",
+		"--disallowedTools", "AskUserQuestion",
+	}
+	if appended := appendSystemPrompt(persona); appended != "" {
+		args = append(args, "--append-system-prompt", appended)
+	}
+	return args
 }
 
-// Options configures a Client. Command is required. Args defaults to defaultArgs
-// (the stream-json launch) when nil; tests inject a fake process via Command/Args.
+// appendSystemPrompt merges the persona and the Slack formatting rules into ONE
+// value, because the CLI does NOT accumulate repeated --append-system-prompt
+// flags: the last occurrence silently wins and every earlier one is dropped
+// (verified empirically against 2.1.x — two flags in, only the second's rule was
+// obeyed). Passing them as two flags would therefore ship an agent with a voice
+// and no formatting rules, or the reverse, with nothing to catch it.
+//
+// Order mirrors native's assembly — persona, then transport — so the two
+// backends present the model with the same text in the same sequence.
+func appendSystemPrompt(persona string) string {
+	var parts []string
+	if p := strings.TrimSpace(persona); p != "" {
+		parts = append(parts, "<persona>\n"+p+"\n</persona>")
+	}
+	if rules := strings.TrimSpace(assets.SlackFormat()); rules != "" {
+		parts = append(parts, rules)
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+// Options configures a Client. Command is required. Args defaults to
+// defaultArgs(Persona) (the stream-json launch) when nil; tests inject a fake
+// process via Command/Args. Setting Args replaces the defaults wholesale, which
+// also drops the persona and formatting rules — an operator override is taken at
+// its word.
 type Options struct {
 	Command string
 	Args    []string
+	// Persona is the agent's resolved SOUL.md prose (frontmatter already
+	// stripped by persona.Resolve). Empty ships no <persona> block at all —
+	// the pre-onboarding state, where the seeded SOUL.md is frontmatter only.
+	// Ignored when Args is set.
+	Persona string
 	// Model, when set, is appended as `--model <Model>` to the launch args.
 	Model   string
 	Env     []string
@@ -121,7 +156,7 @@ func New(opts Options) *Client {
 		opts.Logger = slog.Default()
 	}
 	if opts.Args == nil {
-		opts.Args = defaultArgs
+		opts.Args = defaultArgs(opts.Persona)
 	}
 	if opts.Model != "" {
 		opts.Args = append(append([]string{}, opts.Args...), "--model", opts.Model)

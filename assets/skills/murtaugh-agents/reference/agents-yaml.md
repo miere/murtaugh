@@ -100,6 +100,7 @@ see the `murtaugh-setup` skill's `setup_env`).
 | `--approval-terminal` / `--approval-allow` / `--approval-requests` | no | Human-approval gate for side-effecting tool calls (see below). Defaults to gating on (`allowlist`). |
 | `--approval-keep-resolved` | no | Keep settled approval cards in the thread instead of clearing them a few seconds after the decision. Defaults to clearing. |
 | `--progress-display` | no | Override `defaults.rendering.progress_display` for this agent (`simplified` / `tasks`). |
+| `--soul-file` | no | Pin where this agent's persona is read from, overriding the default search (`<workdir>/SOUL.md`, then `<workspace>/SOUL.md`). A relative path resolves against the config dir. The only way to give two profiles that share one workdir different voices. Ignored by `acp`, whose persona belongs to its adapter. |
 | `--icon` | no | The agent's face: an `http(s)` image URL. Omitted picks one at random from the built-in palette and stores it, so every agent has a distinct, stable icon; an agent created before this feature is backfilled on the next start. |
 
 A workspace `AGENTS.md` (in the agent's `workdir`) is auto-loaded into the system

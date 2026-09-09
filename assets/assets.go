@@ -19,7 +19,7 @@ import (
 // that configuration lives in the database now and is authored via `murtaugh
 // cfg …`, so there is nothing to seed.
 //
-//go:embed config.yaml env.example system-prompt.md slack-format.md AGENTS.md cli-help.md templates skills troubleshoot
+//go:embed config.yaml env.example system-prompt.md slack-format.md AGENTS.md SOUL.md GUIDELINES.md cli-help.md templates skills troubleshoot
 var FS embed.FS
 
 // slackFormatFile holds the Slack formatting dialect rules.
