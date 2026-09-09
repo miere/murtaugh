@@ -4,6 +4,7 @@ import (
 	"context"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -405,7 +406,7 @@ func receiveApproval(t *testing.T, rig *loopback) approval {
 func TestTheGatewayRefusesAToolANodeMayNotReach(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(ping.New())
-	registry.Register(&namedTool{name: "slack.send-msg"})
+	registry.Register(&namedTool{name: "slack.fetch-msgs"})
 	registry.Register(&namedTool{name: "node.token.mint"})
 	registry.Register(&namedTool{name: "cfg.agent.create"})
 
@@ -414,7 +415,7 @@ func TestTheGatewayRefusesAToolANodeMayNotReach(t *testing.T) {
 
 	// The node is never even told the names.
 	published := rig.proxy.Registry()
-	for _, forbidden := range []string{"slack.send-msg", "node.token.mint", "cfg.agent.create"} {
+	for _, forbidden := range []string{"slack.fetch-msgs", "node.token.mint", "cfg.agent.create"} {
 		if _, ok := published.Get(forbidden); ok {
 			t.Fatalf("%s was published to the node; its credentials are the gateway's", forbidden)
 		}
@@ -429,7 +430,7 @@ func TestTheGatewayRefusesAToolANodeMayNotReach(t *testing.T) {
 	if _, ok := host.Attached(); !ok {
 		t.Fatal("the node is not attached")
 	}
-	err := callByName(t, rig, "slack.send-msg")
+	err := callByName(t, rig, "slack.fetch-msgs")
 	if err == nil {
 		t.Fatal("the gateway ran a gateway-only tool because a node asked for it by name")
 	}
@@ -565,4 +566,152 @@ func receiveAny(t *testing.T, ch chan any) any {
 		t.Fatal("timed out waiting for a tool result")
 		return nil
 	}
+}
+
+// The one per-TOOL exception in the partition (#199). A broker-executed job's
+// entire output mechanism is the agent posting for itself — RunAndForget
+// discards the text on purpose — so `slack.send-msg` has to cross or every job
+// prompt ending "post the result to #ops" silently stops working.
+//
+// What must NOT cross with it is every argument that reaches past the message:
+// `attachment` and `blocks` name paths on the GATEWAY's filesystem, and `as`
+// selects WHICH CREDENTIAL posts — `as: "admin"` picks the human admin's own
+// xoxp- token, so a node's agent that could pass it could post as the person who
+// runs the gateway, from what may be somebody else's laptop.
+func TestSendMsgCrossesButItsGatewayCredentialsAndFilePathsDoNot(t *testing.T) {
+	posted := &recordingSendMsg{}
+	registry := tools.NewRegistry()
+	registry.Register(posted)
+	registry.Register(&namedTool{name: "slack.fetch-msgs"})
+
+	rig := dialLoopback(t, newScriptedAgent(func(*scriptedTurn) {}), withTools(registry))
+
+	// It is offered, and the rest of the family is not.
+	published := rig.proxy.Registry()
+	tool, ok := published.Get("slack.send-msg")
+	if !ok {
+		t.Fatal("slack.send-msg did not cross, so a job on a node cannot report its own result")
+	}
+	if _, ok := published.Get("slack.fetch-msgs"); ok {
+		t.Fatal("the whole slack family crossed; the exception is one tool, not the namespace")
+	}
+
+	// The denied arguments are not even in the schema the node was offered. A
+	// model handed an argument it may not use will use it, be refused, and try
+	// again — a job arguing with the gateway for its whole timeout.
+	schema := tool.InputSchema()
+	if schema == nil || len(schema.Properties) == 0 {
+		t.Fatal("the offered schema carried no properties at all")
+	}
+	for _, denied := range []string{"attachment", "blocks", "as"} {
+		if _, present := schema.Properties[denied]; present {
+			t.Fatalf("%q was offered to the node; it reaches a gateway credential or a path on the gateway's filesystem", denied)
+		}
+	}
+	if _, present := schema.Properties["text"]; !present {
+		t.Fatal("text was pruned too, so this test would pass with an empty schema")
+	}
+
+	// The gateway's own copy is untouched: pruning must not edit the tool the
+	// gateway itself uses, where the arguments are legitimate. recordingSendMsg
+	// CACHES its schema and hands out the same pointer every call — see the type
+	// — which is the case withoutArgs is written for and the only case in which
+	// this assertion can fail.
+	for _, kept := range []string{"attachment", "blocks", "as"} {
+		if _, present := posted.InputSchema().Properties[kept]; !present {
+			t.Fatalf("pruning the node's copy removed %q from the gateway's own tool", kept)
+		}
+	}
+	if !slices.Contains(posted.InputSchema().Required, "channel") {
+		t.Fatal("pruning the node's copy edited the gateway's own required list")
+	}
+
+	// An ordinary post works, and it runs on the GATEWAY — which is what keeps
+	// the bot token off the node.
+	if _, err := rig.proxy.Call(context.Background(), "slack.send-msg", map[string]any{"channel": "C1", "text": "the backup finished"}); err != nil {
+		t.Fatalf("a node could not post its job's result: %v", err)
+	}
+	if n := posted.calls(); n != 1 {
+		t.Fatalf("the post executed %d times on the gateway", n)
+	}
+
+	// And asking for the denied argument by name anyway is REFUSED rather than
+	// dropped: silently ignoring it would post a message whose text says "see
+	// attached".
+	_, err := rig.proxy.Call(context.Background(), "slack.send-msg",
+		map[string]any{"channel": "C1", "text": "see attached", "attachment": "/etc/passwd"})
+	if err == nil {
+		t.Fatal("the gateway read a file off its own disk because a node asked it to")
+	}
+	if !strings.Contains(err.Error(), "attachment") {
+		t.Fatalf("the refusal did not name the argument: %v", err)
+	}
+	if n := posted.calls(); n != 1 {
+		t.Fatal("the denied call ran anyway")
+	}
+
+	// And the same for the credential selector. This one is worse than reading a
+	// file: it would have executed, successfully, as the human admin.
+	_, err = rig.proxy.Call(context.Background(), "slack.send-msg",
+		map[string]any{"channel": "C1", "text": "approved, ship it", "as": "admin"})
+	if err == nil {
+		t.Fatal("a node's agent posted to Slack as the human admin")
+	}
+	if !strings.Contains(err.Error(), "as") {
+		t.Fatalf("the refusal did not name the argument: %v", err)
+	}
+	if n := posted.calls(); n != 1 {
+		t.Fatal("the impersonating call ran anyway")
+	}
+}
+
+// recordingSendMsg stands in for the real slack.send-msg: the same name, the
+// same two file-path arguments, the same `as` credential selector, and a count
+// of how often it executed here — on the gateway, which is the half of the
+// arrangement that keeps the bot token where it is.
+//
+// Its schema is built ONCE and the same pointer is returned on every call. That
+// is deliberate and it is what makes the "gateway's own copy is untouched"
+// assertion above able to fail: a tools.Tool is free to cache its schema, and
+// while every tool in the tree today happens to build a fresh literal per call,
+// a guard that only holds for the tools that do is a guard that holds by
+// accident. Pruning in place would strip attachment/blocks/as from the object
+// the GATEWAY itself uses.
+type recordingSendMsg struct {
+	mu     sync.Mutex
+	n      int
+	once   sync.Once
+	schema *jsonschema.Schema
+}
+
+func (t *recordingSendMsg) Name() string        { return "slack.send-msg" }
+func (t *recordingSendMsg) Description() string { return "Post a message to Slack." }
+func (t *recordingSendMsg) InputSchema() *jsonschema.Schema {
+	t.once.Do(func() {
+		t.schema = &jsonschema.Schema{
+			Type: "object",
+			Properties: map[string]*jsonschema.Schema{
+				"channel":    {Type: "string"},
+				"text":       {Type: "string"},
+				"attachment": {Type: "string"},
+				"blocks":     {Type: "string"},
+				"as":         {Type: "string", Enum: []any{"bot", "admin"}},
+			},
+			Required: []string{"channel"},
+		}
+	})
+	return t.schema
+}
+
+func (t *recordingSendMsg) Invoke(context.Context, map[string]any) (any, error) {
+	t.mu.Lock()
+	t.n++
+	t.mu.Unlock()
+	return "posted", nil
+}
+
+func (t *recordingSendMsg) calls() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.n
 }

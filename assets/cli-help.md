@@ -398,9 +398,20 @@ murtaugh cfg chat show
 ### Access (`cfg access`) — singleton
 
 ```
-murtaugh cfg access set  [--admin-user --allowed-users <u> (repeat) --debug]
+murtaugh cfg access set  [--admin-user --allowed-users <u> (repeat) --debug
+                          --main-node <node-id>]
 murtaugh cfg access show
 ```
+
+`--main-node` designates the node that serves HEADLESS work: scheduled jobs,
+workflow triggers and link unfurling. None of those has a user whose fleet could
+be chosen from, so they go to this one node rather than through delegation. Pass
+an empty string to clear it. With none designated — or with the designated node
+not attached — those surfaces refuse and say which of the two it was, in the log
+and in the journal (`journal.query --stream gateway`, kind `headless`); nothing
+is borrowed from whichever node happens to be connected. It lives on the GATEWAY
+because a node that could declare itself main would be granting itself the right
+to serve every user's unfurls and every job.
 
 ### Workflow & unfurl rules (`cfg workflow-rule`, `cfg unfurl-rule`)
 

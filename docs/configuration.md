@@ -306,6 +306,33 @@ handles — nothing rewrites a handle here the way it does in `allowed_users`, s
 handle silently matches nobody. And there is no ownership check, because the only
 writer is the gateway admin.
 
+#### The main node
+
+`access.main_node` names the node id that serves **headless** work — scheduled
+jobs, workflow triggers and link unfurling:
+
+```yaml
+access:
+  main_node: laptop-mira
+```
+
+None of those has a user to choose a node for. A cron at 03:00 has nobody, and an
+unfurl's user is whoever pasted the link — usually somebody who owns no node and
+holds no grant. So they do not go through delegation at all: they go to the one
+node the gateway admin designated.
+
+It is written **here**, on the gateway, and never on the node's own
+configuration. Being main is the right to serve every user's unfurls and every
+scheduled job, which is the largest grant this gateway makes, and a node that
+could declare itself main would be granting it to itself.
+
+Set it with `murtaugh cfg access set --main-node <node-id>`; pass an empty string
+to clear it. With none set — or with the designated node not attached — every
+headless surface **refuses and says so**, in the log and in the journal (gateway
+stream, kind `headless`). Nothing is borrowed from whichever node happens to be
+connected. A job whose node is asleep does not run and is not replayed, which is
+the same policy that already applies to a missed occurrence.
+
 Grants apply only to the runtime-node split (`murtaugh-gateway -node-listen`).
 They have nothing to do with the tool-approval "always allow" grants a user
 accumulates in a conversation.

@@ -38,6 +38,12 @@ type SessionMetadata struct {
 	// id, and a claude_code backend resumes the previous delegation's
 	// transcript — the bug fixed in e2c3cca, re-introduced by a dropped bool.
 	Ephemeral bool `json:"ephemeral,omitempty"`
+	// Headless must survive the hop for the same class of reason as Ephemeral,
+	// and the damage is worse. It is the node's only way to know that no human
+	// is behind this turn: a node that loses it raises a real approval frame for
+	// a 03:00 job, the gateway has no thread to answer it in, and the job blocks
+	// until its own timeout burns. See agent.SessionMetadata.Headless.
+	Headless bool `json:"headless,omitempty"`
 }
 
 // EncodeSessionMetadata renders the metadata for the wire.
@@ -52,6 +58,7 @@ func EncodeSessionMetadata(m agent.SessionMetadata) SessionMetadata {
 		Surface:     m.Surface,
 		CanvasID:    m.CanvasID,
 		Ephemeral:   m.Ephemeral,
+		Headless:    m.Headless,
 	}
 }
 
@@ -67,6 +74,7 @@ func (m SessionMetadata) Decode() agent.SessionMetadata {
 		Surface:     m.Surface,
 		CanvasID:    m.CanvasID,
 		Ephemeral:   m.Ephemeral,
+		Headless:    m.Headless,
 	}
 }
 

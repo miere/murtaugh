@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
+
+	"github.com/google/jsonschema-go/jsonschema"
 
 	"github.com/miere/murtaugh/internal/agent"
 	"github.com/miere/murtaugh/internal/agent/remote"
@@ -54,7 +57,7 @@ func (s *toolServer) List(context.Context) ([]agentwire.ToolDescriptor, error) {
 		if !toolset.NodeMayReach(t.Name()) {
 			continue
 		}
-		descriptor, err := describe(t)
+		descriptor, err := describe(t, toolset.DeniedArgs(t.Name()))
 		if err != nil {
 			// One tool that cannot be described is dropped; the agent keeps the
 			// rest of its toolset. Same contract as toolset.Problem: a
@@ -99,6 +102,20 @@ func (s *toolServer) Call(ctx context.Context, call agentwire.ToolCall) (agentwi
 	tool, ok := registry.Get(name)
 	if !ok {
 		return agentwire.ToolResult{}, fmt.Errorf("the gateway has no tool named %q", name)
+	}
+	// A per-tool exception's denied arguments. They are already absent from the
+	// schema this node was offered, so a call carrying one is either a node
+	// asking for something it was not offered — which the gateway refuses rather
+	// than filters, for the reason in the type doc — or a model inventing an
+	// argument. Refusing beats dropping: silently ignoring `attachment` would
+	// post a message whose text says "see attached", and silently ignoring `as`
+	// would answer a request to post as the admin by posting as the bot.
+	for _, arg := range toolset.DeniedArgs(name) {
+		if _, present := call.Args[arg]; !present {
+			continue
+		}
+		s.log.Warn("nodehost: a node passed an argument the partition denies", "tool", name, "argument", arg)
+		return agentwire.ToolResult{}, fmt.Errorf("the gateway does not accept the %q argument to %q from a runtime node: it reaches something that belongs to the GATEWAY — a path on its filesystem, or a credential of its own — and the gateway is not the machine your agent is running on", arg, name)
 	}
 
 	ctx = s.host.locate(ctx, s.node, call.Stream)
@@ -148,12 +165,12 @@ func (s *toolServer) gate(ctx context.Context, tool tools.Tool, args map[string]
 type mcpNamer interface{ MCPName() string }
 
 // describe renders one tool for the wire.
-func describe(t tools.Tool) (agentwire.ToolDescriptor, error) {
+func describe(t tools.Tool, denied []string) (agentwire.ToolDescriptor, error) {
 	descriptor := agentwire.ToolDescriptor{Name: t.Name(), Description: t.Description()}
 	if namer, ok := t.(mcpNamer); ok {
 		descriptor.PublishedName = strings.TrimSpace(namer.MCPName())
 	}
-	if schema := t.InputSchema(); schema != nil {
+	if schema := withoutArgs(t.InputSchema(), denied); schema != nil {
 		encoded, err := json.Marshal(schema)
 		if err != nil {
 			return agentwire.ToolDescriptor{}, fmt.Errorf("encode input schema: %w", err)
@@ -161,6 +178,51 @@ func describe(t tools.Tool) (agentwire.ToolDescriptor, error) {
 		descriptor.InputSchema = encoded
 	}
 	return descriptor, nil
+}
+
+// withoutArgs removes a per-tool exception's denied arguments from the schema a
+// node is offered.
+//
+// Removing them from the SCHEMA as well as refusing them at call time is not
+// belt and braces. A model handed an argument it may not use will use it, be
+// refused, and — because a refusal is a tool result rather than a fault — try
+// again with the same argument; the visible symptom is a job that spends its
+// whole timeout arguing with the gateway. Refusal at Call is the enforcement
+// (a node cannot be trusted to filter itself), and this is the part that keeps
+// the surface honest.
+//
+// The schema is copied rather than edited. A tools.Tool is free to return the
+// same pointer on every call, and pruning in place would remove the argument
+// from the gateway's OWN copy of the tool — where it is legitimate.
+//
+// That last sentence used to be unfalsifiable: every tool in the tree builds a
+// fresh schema literal per call, so the fake did too, and an in-place prune was
+// invisible to the test asserting against it. nodehost's recordingSendMsg now
+// caches its schema and hands out one pointer, which is the case this paragraph
+// is about and the only one in which the assertion can fail.
+func withoutArgs(schema *jsonschema.Schema, denied []string) *jsonschema.Schema {
+	if schema == nil || len(denied) == 0 || len(schema.Properties) == 0 {
+		return schema
+	}
+	pruned := *schema
+	pruned.Properties = make(map[string]*jsonschema.Schema, len(schema.Properties))
+	for name, property := range schema.Properties {
+		if slices.Contains(denied, name) {
+			continue
+		}
+		pruned.Properties[name] = property
+	}
+	if len(schema.Required) > 0 {
+		required := make([]string, 0, len(schema.Required))
+		for _, name := range schema.Required {
+			if slices.Contains(denied, name) {
+				continue
+			}
+			required = append(required, name)
+		}
+		pruned.Required = required
+	}
+	return &pruned
 }
 
 // render turns a tool's result into the string the node hands back to its
@@ -200,6 +262,11 @@ func (h *Host) locate(ctx context.Context, node *attached, stream string) contex
 	if stream == "" || node == nil || node.client == nil {
 		return ctx
 	}
+	// ok is "the stream is known", not "the turn has a thread". A headless turn
+	// is known and has no thread: its location is the zero value, which
+	// agent.TurnLocationFromContext reads as absent, so stamping it is correct
+	// and warning about it would report every job, every unfurl and every
+	// workflow trigger as an anomaly.
 	location, ok := node.client.StreamLocation(stream)
 	if !ok {
 		h.log.Warn("a node's tool call named a turn this gateway does not know; it will run without a thread to ask in", "stream", stream)

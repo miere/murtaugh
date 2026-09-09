@@ -76,6 +76,24 @@ type SessionMetadata struct {
 	// id, and a claude_code backend `--resume`s the previous delegation's
 	// transcript — see DeriveSessionID.
 	Ephemeral bool `json:"ephemeral,omitempty"`
+	// Headless says there is no human anywhere behind this session: a cron at
+	// 03:00, a workflow trigger, an unfurl. It is an EXPLICIT signal and not an
+	// inference, and that is the whole point of the field.
+	//
+	// In process the same fact is expressed by omission — agentdelegate builds a
+	// delegated client with no Approver and no BackgroundSink, so nothing can ask
+	// and nothing can render. Over a node link that omission is unavailable: the
+	// node builds every agent with its approval gate, because the node cannot
+	// know at construction which turns will have a thread. So the fact has to
+	// travel with the session.
+	//
+	// It cannot be derived on the other side either. "No TurnLocation on the
+	// context" is the in-process test and it is false over the link, where the
+	// location is set from the prompt's channel on every turn. "Ephemeral" is
+	// close but means something else — nothing to resume — and a later surface
+	// that wants a fresh session for a human would set it and silently lose the
+	// gate.
+	Headless bool `json:"headless,omitempty"`
 }
 
 // Aggregator hands an ACP session the MCP server it should connect to in order
