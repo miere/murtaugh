@@ -1,42 +1,43 @@
 package native
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func TestPrependPersona(t *testing.T) {
-	got := PrependPersona("You are Murtaugh.", "Follow the rules.")
-	if !strings.HasPrefix(got, "<persona>\nYou are Murtaugh.\n</persona>") {
-		t.Fatalf("persona block not prepended: %q", got)
+// The persona is appended AFTER the base prompt, not before it: the base is
+// operational scaffolding and the persona is voice, so the voice gets recency
+// rather than being argued down by the tool discipline that follows.
+func TestAppendPersona(t *testing.T) {
+	got := AppendPersona("Follow the rules.", "You are Murtaugh.")
+	if !strings.HasSuffix(got, "<persona>\nYou are Murtaugh.\n</persona>") {
+		t.Fatalf("persona block not appended: %q", got)
 	}
-	if !strings.Contains(got, "Follow the rules.") {
-		t.Fatalf("base prompt lost: %q", got)
+	if !strings.HasPrefix(got, "Follow the rules.") {
+		t.Fatalf("base prompt must lead: %q", got)
 	}
-	// Empty persona leaves the base untouched.
-	if got := PrependPersona("", "base"); got != "base" {
+	// An empty persona — the seeded, frontmatter-only SOUL.md of an agent that
+	// has not onboarded yet — leaves the base untouched.
+	if got := AppendPersona("base", ""); got != "base" {
 		t.Fatalf("empty persona changed base: %q", got)
 	}
 	// Empty base with a persona yields just the block.
-	if got := PrependPersona("Hi", ""); got != "<persona>\nHi\n</persona>" {
+	if got := AppendPersona("", "Hi"); got != "<persona>\nHi\n</persona>" {
 		t.Fatalf("unexpected persona-only output: %q", got)
 	}
 }
 
-func TestReadSoul(t *testing.T) {
-	dir := t.TempDir()
-	if got := ReadSoul(dir); got != "" {
-		t.Fatalf("expected empty when no SOUL.md, got %q", got)
+// Assembly order is base → persona → Slack rules, and the transport rules stay
+// last so they survive an operator who replaces the whole system prompt.
+func TestPersonaSitsBetweenBaseAndSlackRules(t *testing.T) {
+	got := AppendSlackFormat(AppendPersona("BASE-MARKER", "SOUL-MARKER"))
+	base := strings.Index(got, "BASE-MARKER")
+	soul := strings.Index(got, "SOUL-MARKER")
+	rules := strings.Index(got, "Formatting for Slack")
+	if base < 0 || soul < 0 || rules < 0 {
+		t.Fatalf("a section went missing: base=%d soul=%d rules=%d\n%s", base, soul, rules, got)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "SOUL.md"), []byte("You are Murtaugh."), 0o644); err != nil {
-		t.Fatalf("write SOUL.md: %v", err)
-	}
-	if got := ReadSoul(dir); got != "You are Murtaugh." {
-		t.Fatalf("ReadSoul = %q, want the file contents", got)
-	}
-	if got := ReadSoul(""); got != "" {
-		t.Fatalf("empty dir should yield empty, got %q", got)
+	if !(base < soul && soul < rules) {
+		t.Fatalf("wrong order (want base < persona < rules): base=%d soul=%d rules=%d", base, soul, rules)
 	}
 }

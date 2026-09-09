@@ -541,6 +541,7 @@ the unified `cfg` surface.)
 | `--tools`              | no       | string (repeat) | Native: tool allowlist (`files`, `terminal`, `skills`, namespaces).|
 | `--mcp-servers`        | no       | string (repeat) | Native: `mcp_servers` entries to attach.                          |
 | `--system-prompt-file` | no       | string          | Native: path (relative to config dir) to the system prompt.       |
+| `--soul-file`          | no       | string          | Persona override; default searches workdir then workspace SOUL.md.|
 | `--context-limit`      | no       | integer         | Native: token budget for compaction. 0 = per-family default.      |
 | `--compaction`         | no       | enum            | Native: `truncate` (default) or `summarize`.                      |
 | `--cache-retention`    | no       | enum            | Native: prompt-cache TTL — `5m` (default), `1h`, or `off`.        |

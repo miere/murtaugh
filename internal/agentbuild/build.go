@@ -16,6 +16,7 @@ import (
 	"github.com/miere/murtaugh/internal/agent/acp"
 	"github.com/miere/murtaugh/internal/agent/claudecode"
 	"github.com/miere/murtaugh/internal/agent/native"
+	"github.com/miere/murtaugh/internal/agent/persona"
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/frontends/mcp"
 	"github.com/miere/murtaugh/internal/mcpbridge"
@@ -24,8 +25,9 @@ import (
 
 // Deps carries the shared context needed to build either backend. Registry and
 // MCPServers are only consulted for native agents; WorkspaceDir is the
-// workspace/config root for persona (SOUL.md), the system-prompt file, and the
-// bespoke-skills dir. The agent workdir is NOT here — it is resolved once into
+// workspace/config root for the DEFAULT persona (SOUL.md), the system-prompt
+// file, and the bespoke-skills dir — a workdir-local SOUL.md outranks it (see
+// persona.Resolve). The agent workdir is NOT here — it is resolved once into
 // the ResolvedAgent passed to Client, so it cannot be re-derived from a raw
 // fallback at this seam.
 type Deps struct {
@@ -111,9 +113,9 @@ func Client(resolved ResolvedAgent, deps Deps) (agent.Client, error) {
 			Logger:           logger,
 			PermissionPolicy: profile.ResolvedACPPermission(),
 			Aggregator:       aggregator,
-			// Share Murtaugh's persona with the ACP agent (it has no system role of
-			// our making); read from the config/workspace dir where SOUL.md lives.
-			Persona:     native.ReadSoul(deps.WorkspaceDir),
+			// No persona: an ACP adapter is bespoke and brings its own harness and
+			// prompt, so its voice is the admin's to configure there. SOUL.md
+			// governs native and claude_code only.
 			ToolCeiling: deps.LongRunningToolTimeout,
 			Sandbox:     box,
 		}), nil
@@ -140,9 +142,14 @@ func Client(resolved ResolvedAgent, deps Deps) (agent.Client, error) {
 			aggregator = aggr
 		}
 		return claudecode.New(claudecode.Options{
-			Command:          profile.ClaudeCode.Command,
-			Args:             profile.ClaudeCode.Args,
-			Model:            profile.ClaudeCode.Model,
+			Command: profile.ClaudeCode.Command,
+			Args:    profile.ClaudeCode.Args,
+			Model:   profile.ClaudeCode.Model,
+			// The same SOUL.md a native agent gets, resolved by the same rules and
+			// stripped of its output-style frontmatter — the whole point of the
+			// parity work. It reaches the model as --append-system-prompt because
+			// the CLI owns everything else about its system prompt.
+			Persona:          persona.Resolve(profile.SoulFile, resolved.Dir(), deps.WorkspaceDir),
 			Env:              profile.EnvOverrides(),
 			WorkDir:          resolved.Dir(),
 			Logger:           logger,

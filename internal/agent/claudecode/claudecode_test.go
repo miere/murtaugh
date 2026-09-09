@@ -512,16 +512,17 @@ func TestStrayResultDoesNotCloseOurTurn(t *testing.T) {
 // built-in is what lets the model find it. Drop this flag and the built-in
 // shadows the replacement again.
 func TestDefaultArgsSuppressTheBuiltInAskUserQuestion(t *testing.T) {
+	args := defaultArgs("")
 	var found bool
-	for i, arg := range defaultArgs {
+	for i, arg := range args {
 		if arg != "--disallowedTools" {
 			continue
 		}
-		if i+1 >= len(defaultArgs) {
+		if i+1 >= len(args) {
 			t.Fatal("--disallowedTools has no value")
 		}
-		if defaultArgs[i+1] != "AskUserQuestion" {
-			t.Fatalf("--disallowedTools %q, want AskUserQuestion", defaultArgs[i+1])
+		if args[i+1] != "AskUserQuestion" {
+			t.Fatalf("--disallowedTools %q, want AskUserQuestion", args[i+1])
 		}
 		found = true
 	}
@@ -530,27 +531,62 @@ func TestDefaultArgsSuppressTheBuiltInAskUserQuestion(t *testing.T) {
 	}
 }
 
+// appendedSystemPrompt returns the single --append-system-prompt value in args,
+// failing the test when the flag is absent or repeated. Repetition is the
+// failure mode this whole assembly exists to prevent: the CLI keeps only the
+// LAST occurrence, so a second flag would silently discard the first.
+func appendedSystemPrompt(t *testing.T, args []string) string {
+	t.Helper()
+	var values []string
+	for i, arg := range args {
+		if arg != "--append-system-prompt" {
+			continue
+		}
+		if i+1 >= len(args) {
+			t.Fatal("--append-system-prompt has no value")
+		}
+		values = append(values, args[i+1])
+	}
+	if len(values) == 0 {
+		t.Fatal("no --append-system-prompt in args")
+	}
+	if len(values) > 1 {
+		t.Fatalf("--append-system-prompt passed %d times; the CLI keeps only the last, so everything else is silently dropped", len(values))
+	}
+	return values[0]
+}
+
 // A claude_code session never reads assets/system-prompt.md, so this flag is
 // the only channel Murtaugh has for the Slack dialect rules. Without it the
 // model falls back to the CLI's own "GitHub-flavored markdown for a terminal"
 // instruction and mrkdwn surfaces show raw metacharacters.
 func TestDefaultArgsAppendTheSlackFormattingRules(t *testing.T) {
-	var value string
-	for i, arg := range defaultArgs {
-		if arg != "--append-system-prompt" {
-			continue
-		}
-		if i+1 >= len(defaultArgs) {
-			t.Fatal("--append-system-prompt has no value")
-		}
-		value = defaultArgs[i+1]
-	}
-	if value == "" {
-		t.Fatal("defaultArgs no longer appends the Slack formatting rules")
-	}
+	value := appendedSystemPrompt(t, defaultArgs(""))
 	for _, want := range []string{"standard Markdown", "mrkdwn"} {
 		if !strings.Contains(value, want) {
 			t.Fatalf("appended prompt does not mention %q:\n%s", want, value)
 		}
+	}
+	if strings.Contains(value, "<persona>") {
+		t.Fatalf("an empty persona must not produce a persona block:\n%s", value)
+	}
+}
+
+// The persona and the formatting rules share ONE flag, because the CLI does not
+// accumulate repeated --append-system-prompt values. Two flags would ship a
+// voice with no formatting rules (or the reverse) with nothing to catch it.
+func TestDefaultArgsMergePersonaAndFormattingIntoOneFlag(t *testing.T) {
+	value := appendedSystemPrompt(t, defaultArgs("I am Murtaugh."))
+	persona := strings.Index(value, "<persona>\nI am Murtaugh.\n</persona>")
+	rules := strings.Index(value, "Formatting for Slack")
+	if persona < 0 {
+		t.Fatalf("persona block missing:\n%s", value)
+	}
+	if rules < 0 {
+		t.Fatalf("Slack formatting rules missing:\n%s", value)
+	}
+	// Same order native assembles: persona, then transport.
+	if persona > rules {
+		t.Fatalf("persona must precede the formatting rules:\n%s", value)
 	}
 }

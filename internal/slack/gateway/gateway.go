@@ -511,6 +511,14 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 				} else if len(exported) > 0 {
 					logger.Info("exported bundled skills to workdir", "agent", name, "skills", exported, "dir", filepath.Join(agentWorkDir, ".agents", "skills"))
 				}
+				// Seed the workdir's persona/guidelines docs and the Claude Code
+				// aliases, so an agent working outside the config root still finds
+				// the files its onboarding flow is told to edit. Non-destructive and
+				// non-fatal: a failure only costs the scaffolding, and the persona
+				// falls back to the workspace default.
+				if _, err := config.ScaffoldWorkspaceDocs(agentWorkDir); err != nil {
+					logger.Warn("workspace doc scaffolding failed", "agent", name, "dir", agentWorkDir, "error", err)
+				}
 			}
 			client, err := agentbuild.Client(resolved, agentbuild.Deps{
 				Registry:               registry,

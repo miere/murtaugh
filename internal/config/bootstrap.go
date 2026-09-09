@@ -21,7 +21,24 @@ const (
 // optionalBootstrapDocs are copied from the embedded assets into the config
 // directory on first run when present. They are skipped silently when the
 // asset is not bundled, satisfying the "skip if they don't exist" convention.
-var optionalBootstrapDocs = []string{"AGENTS.md", "BOOTSTRAP.md"}
+//
+// AGENTS.md is NOT here: it is workdir scaffolding, not config-root scaffolding,
+// so ScaffoldWorkspaceDocs owns it (along with SOUL.md and GUIDELINES.md) for
+// every workdir including this one. Two owners seeding one file would report it
+// twice — created, then preserved — in the same bootstrap pass.
+var optionalBootstrapDocs = []string{"BOOTSTRAP.md"}
+
+// PersonaFile is the agent's voice: a Claude Code output style (hence the YAML
+// frontmatter) that Murtaugh also injects as the persona, frontmatter stripped.
+// Seeded frontmatter-only, so a fresh agent has no voice until it onboards —
+// which is what makes AGENTS.md's "I don't have a name or personality yet" true
+// rather than immediately contradicted.
+const PersonaFile = "SOUL.md"
+
+// GuidelinesFile is the working-directory guidelines AGENTS.md links to from its
+// first section. Seeded empty so that link never dangles before onboarding fills
+// it in.
+const GuidelinesFile = "GUIDELINES.md"
 
 // DefaultSystemPromptFile is the bundled default system prompt. Bootstrap seeds
 // it into the config dir (preserved thereafter; refreshed only under force), and
@@ -67,7 +84,10 @@ func Bootstrap(configPath string) error {
 //     ones into a workdir on demand.
 //   - .claude/skills — a symlink to .agents/skills so a filesystem-discovering
 //     agent finds whatever lands there (bespoke skills + any exports).
-//   - AGENTS.md and BOOTSTRAP.md, when those docs are embedded in assets/.
+//   - BOOTSTRAP.md, when that doc is embedded in assets/.
+//   - the workdir scaffolding (AGENTS.md, SOUL.md, GUIDELINES.md and the Claude
+//     Code aliases) — because the config root is itself the workdir for any
+//     agent that does not set one. See ScaffoldWorkspaceDocs.
 func BootstrapWithReport(configPath string, force bool) (BootstrapReport, error) {
 	report := BootstrapReport{}
 	baseDir := filepath.Dir(configPath)
@@ -140,7 +160,93 @@ func BootstrapWithReport(configPath string, force bool) (BootstrapReport, error)
 	}
 	report.absorb(link.outcome, link.path)
 
+	// The config root is itself a workdir for any agent that does not set one, so
+	// it gets the same persona/guidelines scaffolding every other workdir does.
+	scaffold, err := ScaffoldWorkspaceDocs(baseDir)
+	if err != nil {
+		return report, err
+	}
+	for _, item := range scaffold {
+		report.absorb(item.outcome, item.path)
+	}
+
 	return report, nil
+}
+
+// ScaffoldWorkspaceDocs prepares a directory to be an agent's workdir: it seeds
+// AGENTS.md, SOUL.md and GUIDELINES.md, then links CLAUDE.md -> AGENTS.md and
+// .claude/output-styles/murtaugh.md -> SOUL.md.
+//
+// The seeded files are what make onboarding an EDIT rather than a create. That
+// distinction matters: AGENTS.md tells the agent to write its voice into SOUL.md
+// "preserving the existing frontmatter", and a fresh file has no frontmatter to
+// preserve — an agent left to invent it would eventually write its own name into
+// the `name:` key, which is the binding key Claude Code's outputStyle setting
+// matches on, and quietly break output-style selection.
+//
+// The two symlinks serve the interactive `claude` CLI only. Murtaugh's own path
+// reads SOUL.md directly (persona.Resolve) and passes the prose as
+// --append-system-prompt, so it does not depend on either link resolving. They
+// exist so an admin who opens a terminal in this workdir finds the agent's voice
+// in their output-style list and its docs loaded as project memory.
+//
+// Every write is non-destructive: existing files are preserved untouched and an
+// occupied link path is left alone, exactly like linkClaudeSkills. Safe to run
+// on every build, and safe to point at a directory that already has its own
+// AGENTS.md or CLAUDE.md.
+func ScaffoldWorkspaceDocs(workDir string) ([]skillCopyResult, error) {
+	if strings.TrimSpace(workDir) == "" {
+		return nil, nil
+	}
+	if err := os.MkdirAll(workDir, bootstrapDirPerm); err != nil {
+		return nil, fmt.Errorf("create workdir %q: %w", workDir, err)
+	}
+	var results []skillCopyResult
+	for _, name := range []string{"AGENTS.md", PersonaFile, GuidelinesFile} {
+		dst := filepath.Join(workDir, name)
+		outcome, err := copyAssetFile(name, dst, preserveExisting)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, skillCopyResult{path: dst, outcome: outcome})
+	}
+	// CLAUDE.md is an alias, not a second source of truth: AGENTS.md is the file
+	// the onboarding flow edits and the native backend reads.
+	claudeMD, err := ensureSymlink(filepath.Join(workDir, "CLAUDE.md"), "AGENTS.md")
+	if err != nil {
+		return nil, err
+	}
+	results = append(results, claudeMD)
+	// Relative target resolved from the link's own directory
+	// (.claude/output-styles/): ../../SOUL.md → <workDir>/SOUL.md.
+	style, err := ensureSymlink(
+		filepath.Join(workDir, ".claude", "output-styles", "murtaugh.md"),
+		filepath.Join("..", "..", PersonaFile),
+	)
+	if err != nil {
+		return nil, err
+	}
+	results = append(results, style)
+	return results, nil
+}
+
+// ensureSymlink creates link pointing at target (a path relative to the link's
+// own directory), creating parent directories as needed. Non-destructive and
+// idempotent: anything already at the link path — a prior symlink, a real file,
+// a directory — is preserved untouched.
+func ensureSymlink(link, target string) (skillCopyResult, error) {
+	if _, err := os.Lstat(link); err == nil {
+		return skillCopyResult{path: link, outcome: copyOutcomePreserved}, nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return skillCopyResult{}, fmt.Errorf("stat %q: %w", link, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(link), bootstrapDirPerm); err != nil {
+		return skillCopyResult{}, fmt.Errorf("create dir %q: %w", filepath.Dir(link), err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		return skillCopyResult{}, fmt.Errorf("symlink %q -> %q: %w", link, target, err)
+	}
+	return skillCopyResult{path: link, outcome: copyOutcomeCreated}, nil
 }
 
 // ReconcileExportedSkills makes <workDir>/.agents/skills hold exactly the bundled
@@ -321,22 +427,12 @@ func copyAssetTree(srcRoot, dstRoot string, policy copyPolicy) ([]skillCopyResul
 // non-destructive and idempotent: when anything already exists at the link
 // path (a prior symlink, a real directory, a file) it is preserved untouched.
 func linkClaudeSkills(baseDir string) (skillCopyResult, error) {
-	link := filepath.Join(baseDir, ".claude", "skills")
-	if _, err := os.Lstat(link); err == nil {
-		return skillCopyResult{path: link, outcome: copyOutcomePreserved}, nil
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return skillCopyResult{}, fmt.Errorf("stat %q: %w", link, err)
-	}
-	if err := os.MkdirAll(filepath.Dir(link), bootstrapDirPerm); err != nil {
-		return skillCopyResult{}, fmt.Errorf("create dir %q: %w", filepath.Dir(link), err)
-	}
 	// Relative target resolved from the link's own directory (.claude/):
 	// ../.agents/skills → <baseDir>/.agents/skills.
-	target := filepath.Join("..", ".agents", "skills")
-	if err := os.Symlink(target, link); err != nil {
-		return skillCopyResult{}, fmt.Errorf("symlink %q -> %q: %w", link, target, err)
-	}
-	return skillCopyResult{path: link, outcome: copyOutcomeCreated}, nil
+	return ensureSymlink(
+		filepath.Join(baseDir, ".claude", "skills"),
+		filepath.Join("..", ".agents", "skills"),
+	)
 }
 
 // copyAssetFile writes the embedded asset src to dst. It silently skips when

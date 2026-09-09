@@ -20,6 +20,7 @@ import (
 
 	"github.com/miere/murtaugh/assets"
 	"github.com/miere/murtaugh/internal/agent"
+	"github.com/miere/murtaugh/internal/agent/persona"
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/llm"
 	"github.com/miere/murtaugh/internal/mcpclient"
@@ -105,9 +106,11 @@ type inflight struct {
 type BuildDeps struct {
 	Registry   *tools.Registry
 	MCPServers map[string]config.MCPServerConfig
-	// WorkspaceDir is the workspace/config root for persona (SOUL.md), the
-	// system-prompt file, and the bespoke-skills dir. It is NOT the agent workdir
-	// (that is Root) — the two were disentangled by the validated-core refactor.
+	// WorkspaceDir is the workspace/config root for the default persona
+	// (SOUL.md), the system-prompt file, and the bespoke-skills dir. It is NOT
+	// the agent workdir (that is Root) — the two were disentangled by the
+	// validated-core refactor. A workdir-local SOUL.md outranks the one here;
+	// see persona.Resolve.
 	WorkspaceDir string
 	// Root is the agent's resolved workspace root (the files/terminal/attach
 	// root and the turn-context cwd). nil means the agent has no workspace; the
@@ -154,20 +157,23 @@ func Build(profile config.AgentProfile, deps BuildDeps) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	// The shared persona (SOUL.md, set up once for Murtaugh) is prepended to the
-	// static system prompt so it stays in the cacheable prefix. It is the same
-	// persona an ACP agent gets injected, keeping the two backends' voice aligned.
-	systemPrompt = PrependPersona(ReadSoul(deps.WorkspaceDir), systemPrompt)
-	// The Slack formatting dialect is appended last, and unconditionally: it
-	// describes the transport, not the agent, so it must survive an operator who
-	// replaces the whole system prompt with their own.
-	systemPrompt = AppendSlackFormat(systemPrompt)
 	// The agent workdir is resolved upstream (the seam) into deps.Root; an absent
 	// root means no workspace (the workdir-rooted tools were already pruned).
 	var workDir string
 	if deps.Root != nil {
 		workDir = deps.Root.Dir()
 	}
+	// The persona (SOUL.md) is appended AFTER the base prompt, still inside the
+	// static — and therefore cacheable — prefix. After, not before: the base
+	// prompt is operational scaffolding and the persona is voice, so the voice
+	// gets recency over it rather than being argued down by the tool discipline
+	// that follows. claude_code composes the same two pieces in the same order
+	// into --append-system-prompt, which is what keeps the backends aligned.
+	systemPrompt = AppendPersona(systemPrompt, persona.Resolve(profile.SoulFile, workDir, deps.WorkspaceDir))
+	// The Slack formatting dialect is appended last, and unconditionally: it
+	// describes the transport, not the agent, so it must survive an operator who
+	// replaces the whole system prompt with their own.
+	systemPrompt = AppendSlackFormat(systemPrompt)
 	logger := deps.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -427,25 +433,6 @@ func readAgentsDoc(workDir string) string {
 	return string(data)
 }
 
-// soulFile is the conventional file holding Murtaugh's shared persona (name and
-// personality, set up once). It lives in the config/workspace dir and is the
-// single source of voice shared by native and ACP agents.
-const soulFile = "SOUL.md"
-
-// ReadSoul loads <dir>/SOUL.md when present. Best-effort: a missing or unreadable
-// file yields "" (no persona), never an error. dir is the config/workspace dir
-// (BaseDir), where the persona is set up — not the agent's per-agent workdir.
-func ReadSoul(dir string) string {
-	if strings.TrimSpace(dir) == "" {
-		return ""
-	}
-	data, err := os.ReadFile(filepath.Join(dir, soulFile))
-	if err != nil {
-		return ""
-	}
-	return string(data)
-}
-
 // AppendSlackFormat appends the canonical Slack formatting rules to base,
 // returning base unchanged if the rules are unavailable (a malformed embed,
 // which never happens in practice). Exported because the claude_code backend
@@ -463,19 +450,21 @@ func AppendSlackFormat(base string) string {
 	return base + "\n\n" + rules
 }
 
-// PrependPersona wraps soul in a <persona> block and prepends it to base,
-// returning base unchanged when soul is empty. Used to fold the shared persona
-// into the static system prompt (native) ahead of the harness code-of-conduct.
-func PrependPersona(soul, base string) string {
+// AppendPersona wraps soul in a <persona> block and appends it to base,
+// returning base unchanged when soul is empty (the seeded, frontmatter-only
+// SOUL.md an agent has not onboarded into yet). soul is expected to arrive
+// frontmatter-free — persona.Resolve strips it.
+func AppendPersona(base, soul string) string {
 	soul = strings.TrimSpace(soul)
 	if soul == "" {
 		return base
 	}
 	block := "<persona>\n" + soul + "\n</persona>"
+	base = strings.TrimRight(base, "\n")
 	if strings.TrimSpace(base) == "" {
 		return block
 	}
-	return block + "\n\n" + base
+	return base + "\n\n" + block
 }
 
 // renderSkillsIndex builds the compact "- name: description" listing of the
