@@ -420,7 +420,16 @@ type RuntimeDefaults struct {
 
 // SessionDefaults tune chat-session lifecycle (both backends).
 type SessionDefaults struct {
+	// IdleTimeout is how long a QUIET conversation's session is cached before it
+	// is swept. It applies only to a session with no turn in flight — a working
+	// session is never idle, however long it has been working (that is what
+	// BusyTimeout is for).
 	IdleTimeout string `yaml:"idle_timeout" json:"idle_timeout"`
+	// BusyTimeout bounds how long one session may hold a turn open before the
+	// manager stops believing it is working and reaps it. It exists because an
+	// agent running overnight on a delegated task is expected, not broken, so the
+	// default is generous (18h) and this catches only a genuinely wedged session.
+	BusyTimeout string `yaml:"busy_timeout" json:"busy_timeout"`
 	// RequestTimeout bounds a chat turn by INACTIVITY, not total wall-clock: the
 	// timer resets on every chunk or task update the agent emits, so a long turn
 	// that keeps making progress is never killed mid-flight. Only an agent that
@@ -1329,6 +1338,7 @@ func (c RuntimeDefaults) Validate() error {
 		"defaults.acp.startup_timeout":               c.ACP.StartupTimeout,
 		"defaults.session.request_timeout":           c.Session.RequestTimeout,
 		"defaults.session.idle_timeout":              c.Session.IdleTimeout,
+		"defaults.session.busy_timeout":              c.Session.BusyTimeout,
 		"defaults.session.long_running_tool_timeout": c.Session.LongRunningToolTimeout,
 		"defaults.rendering.stream_append_interval":  c.Rendering.StreamAppendInterval,
 		"defaults.acp.cancel_grace_period":           c.ACP.CancelGracePeriod,
@@ -1521,6 +1531,15 @@ func (c RuntimeDefaults) EffectiveRequestTimeout() time.Duration {
 
 func (c RuntimeDefaults) EffectiveSessionIdleTimeout() time.Duration {
 	return durationOrDefault(c.Session.IdleTimeout, 30*time.Minute)
+}
+
+// EffectiveSessionBusyTimeout is the ceiling on a session that is actively
+// running a turn, as opposed to the idle timeout which only ever applies to a
+// quiet one. The 18h default is a deliberate choice, not a round number: agents
+// are expected to run long tasks overnight on the user's behalf, so this bounds
+// a wedged session without putting a clock on legitimate work.
+func (c RuntimeDefaults) EffectiveSessionBusyTimeout() time.Duration {
+	return durationOrDefault(c.Session.BusyTimeout, 18*time.Hour)
 }
 
 // EffectiveLongRunningToolTimeout is the per-tool ceiling: the longest a single

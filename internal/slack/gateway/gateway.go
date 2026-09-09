@@ -430,6 +430,14 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 	// degraded feature, not a failed agent) so the startup summary can surface
 	// them in logs and the journal.
 	agentToolProblems := make(map[string][]toolset.Problem)
+	// Record chat turns — and session evictions — to the acp_session stream only
+	// when it is enabled, so a disabled stream writes neither rows nor transcript
+	// files. Built ahead of the agent loop because each session manager's
+	// eviction observer is wired to it as the manager is constructed.
+	var sessionLog *sessionLogger
+	if cfg.Journal.EffectiveEnabled(journal.StreamACPSession) {
+		sessionLog = newSessionLogger(recorder, cfg.Journal.EffectiveBlobDir(cfg.BaseDir, cfg.BaseName), logger)
+	}
 	if !cfg.Chat.Enabled {
 		logger.Warn("chat disabled: set chat.enabled: true to enable DM and app_mention replies (delegation still runs)")
 	}
@@ -535,7 +543,11 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 				cfg.Defaults.EffectiveSessionIdleTimeout(),
 				cfg.Defaults.EffectiveMaxSessions(),
 			).WithLogger(logger.With("agent", name)).
+				WithBusyTimeout(cfg.Defaults.EffectiveSessionBusyTimeout()).
 				WithCancelOverride(interruptible).
+				WithEvictionObserver(func(e agent.Eviction) {
+					sessionLog.recordEviction(context.Background(), name, e)
+				}).
 				WithDescriptor(string(profile.ResolvedKind()), profile.ResolvedApproval())
 		}
 
@@ -579,12 +591,6 @@ func New(cfg config.Config, registry *tools.Registry, logger *slog.Logger, recor
 			return applyOverride(route)
 		}
 
-		// Record chat turns to the acp_session stream only when it is enabled,
-		// so a disabled stream writes neither rows nor transcript files.
-		var sessionLog *sessionLogger
-		if cfg.Journal.EffectiveEnabled(journal.StreamACPSession) {
-			sessionLog = newSessionLogger(recorder, cfg.Journal.EffectiveBlobDir(cfg.BaseDir, cfg.BaseName), logger)
-		}
 		// Resolve this bot's own Slack identity once, so thread backfill can mark
 		// the agent's prior replies as its own and the event loop can recognise —
 		// and refuse — its own messages.

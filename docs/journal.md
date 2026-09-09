@@ -24,7 +24,7 @@ own:
 |---|---|---|
 | `gateway` | Slack interactions: slash commands, button clicks / form submissions, workflow rules, link unfurls, **and socket-connection health** (connect / reconnect / stalled / heartbeat). This is the GDM stream. | 7 days |
 | `job` | `jobs run` executions (command or agent), with exit code and duration. | 30 days |
-| `acp_session` | Chat session turns — one `session.turn` row per turn, plus a full transcript under `blob_dir`. | 90 days |
+| `acp_session` | Chat session turns — one `session.turn` row per turn, plus a full transcript under `blob_dir` — and one `session.evicted` row each time the manager drops a cached session (`reason`: `idle` / `busy_timeout` / `capacity`). | 90 days |
 
 The `connection` events on the `gateway` stream are the place to look for *"why
 did the daemon go silent?"*.

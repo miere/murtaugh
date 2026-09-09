@@ -596,8 +596,27 @@ if the summary call fails. The token count is tracked per-`Conversation` (not th
 
 `SessionManager` caches sessions keyed by `ConversationKey`
 (`TeamID`/`ChannelID`/`ThreadTS`/`DM`). It initializes the client lazily (or via
-`Warm`), evicts on idle timeout / `max_sessions`, and reuses sessions so a Slack
-thread maps to one persistent agent conversation.
+`Warm`) and reuses sessions so a Slack thread maps to one persistent agent
+conversation.
+
+Eviction (`evictLocked`, run lazily on each new-session request) counts in-flight
+turns per session, and its governing rule is that **a session running a turn is
+not idle**:
+
+- `idle_timeout` (30m) applies only to a session with no turn in flight, and its
+  clock restarts when a turn *ends* — so a three-hour turn is followed by a full
+  idle window, not by instant eligibility.
+- `busy_timeout` (18h) is the runaway guard, and the only thing that can take a
+  working session. Long overnight work is expected; this catches a wedged one.
+- `max_sessions` evicts the least-recently-used **idle** session to make room.
+  When every slot is busy there is nothing to take, so `Prompt` returns
+  `*agent.CapacityError` and the user gets a "busy" warning card — the refusal is
+  deliberate, because the alternative is killing somebody's live turn.
+
+Every eviction names its reason in the log and on the journal's `acp_session`
+stream (`session.evicted`), via the manager's eviction observer. Before this the
+sweep was blind to in-flight work and silent about what it dropped, which is how
+an ordinary message in one channel came to kill a 45-minute turn in another.
 
 `ChatHandler.Handle` builds the key + `SessionMetadata`, sets the assistant
 status to `is thinking...`, then ranges over the prompt's event channel.

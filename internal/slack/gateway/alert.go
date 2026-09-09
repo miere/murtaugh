@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/miere/murtaugh/internal/agent"
 	"github.com/miere/murtaugh/internal/llm"
 	"github.com/miere/murtaugh/internal/slack/alertcard"
 	slackclient "github.com/miere/murtaugh/internal/slack/client"
@@ -108,6 +109,18 @@ func failSpec(err error) alertcard.Spec {
 	spec := alertcard.Spec{Level: alertcard.LevelError}
 	if err != nil {
 		spec.Detail = err.Error()
+	}
+
+	// Being full is not being broken. Every session slot is running somebody
+	// else's turn, so the honest answer is "come back in a minute" — an error
+	// card here would tell the user something crashed when nothing did, and
+	// would send them looking for a fault that does not exist.
+	if capacity, ok := agent.AtCapacity(err); ok {
+		spec.Level = alertcard.LevelWarn
+		spec.Title = "I'm really busy at the moment"
+		spec.Subtitle = fmt.Sprintf("I'm at full capacity, having %d tasks running at the moment.", capacity.Limit)
+		spec.NextSteps = "Try again once one of them finishes. Contact the admin user if you need to increase this number."
+		return spec
 	}
 
 	if failure, ok := llm.Classify(err); ok {

@@ -8,6 +8,7 @@ import (
 
 	"github.com/voocel/litellm/providers"
 
+	"github.com/miere/murtaugh/internal/agent"
 	"github.com/miere/murtaugh/internal/slack/alertcard"
 )
 
@@ -89,5 +90,30 @@ func TestFailSpecNilError(t *testing.T) {
 	}
 	if got := alertcard.PlainText(spec); strings.HasSuffix(got, "\n") {
 		t.Errorf("PlainText = %q, want no trailing newline", got)
+	}
+}
+
+// Being full is a warning, not a failure: nothing broke, every slot is simply
+// occupied. The card has to say so in the user's terms — how many are running
+// and who to ask for more — without the error styling that sends people looking
+// for a fault that does not exist.
+func TestFailSpecAtCapacityWarnsRatherThanErrors(t *testing.T) {
+	spec := failSpec(fmt.Errorf("prompt agent: %w", &agent.CapacityError{Limit: 12}))
+
+	if spec.Level != alertcard.LevelWarn {
+		t.Errorf("Level = %q, want a warning — nothing is broken", spec.Level)
+	}
+	if spec.Title != "I'm really busy at the moment" {
+		t.Errorf("Title = %q, want the busy headline", spec.Title)
+	}
+	if !strings.Contains(spec.Subtitle, "12 tasks running") {
+		t.Errorf("Subtitle = %q, want the configured max_sessions in it", spec.Subtitle)
+	}
+	if !strings.Contains(spec.NextSteps, "admin user") {
+		t.Errorf("NextSteps = %q, want the route to raising the limit", spec.NextSteps)
+	}
+	// The wrapping is still worth keeping for whoever opens the card.
+	if !strings.Contains(spec.Detail, "all 12 session slots") {
+		t.Errorf("Detail = %q, want the unabridged cause", spec.Detail)
 	}
 }
