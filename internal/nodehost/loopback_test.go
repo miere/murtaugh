@@ -158,6 +158,10 @@ func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *lo
 	if err != nil {
 		t.Fatalf("host: %v", err)
 	}
+	// Every rig below is a gateway that LEADS. A Host accepts nothing until it
+	// is told which election to defer to — see failover_test.go, where that
+	// default is the thing under test.
+	host.FollowLeader(elected{})
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -656,6 +660,8 @@ func TestAnUnknownCredentialIsRefusedBeforeTheUpgrade(t *testing.T) {
 	if err != nil {
 		t.Fatalf("host: %v", err)
 	}
+	// Leading, so the 401 below is the credential's refusal and not leadership's.
+	host.FollowLeader(elected{})
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)

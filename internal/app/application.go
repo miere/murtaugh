@@ -135,6 +135,9 @@ type Application struct {
 	// agents is the agent machinery this binary was built with. The zero value
 	// is a process that cannot run an agent at all.
 	agents Agents
+	// nodeEndpoint is the inbound runtime-node listener, when this binary opened
+	// one. The zero value is a gateway that accepts no nodes.
+	nodeEndpoint NodeEndpoint
 }
 
 // Agents is the agent machinery an entry point is willing to link into its
@@ -311,6 +314,45 @@ func (a *Application) RestartCoordinator() *RestartCoordinator { return a.restar
 // notice flow entirely. Returns the receiver for fluent wiring.
 func (a *Application) WithResumeMarkerPath(path string) *Application {
 	a.resumeMarkerPath = path
+	return a
+}
+
+// LeaderView is what the inbound node listener needs from the election: may I
+// accept, and where should I send a node I cannot. *election.Runner satisfies
+// it, and nothing here has to know that.
+type LeaderView interface {
+	Allow(ctx context.Context) bool
+	Leader(ctx context.Context) (config.LeaderAddress, bool)
+}
+
+// NodeEndpoint is the gateway's inbound listener for runtime nodes, as the
+// election needs to see it.
+//
+// It is a struct of functions rather than an import of internal/nodehost
+// because the wiring runs the other way round: the listener belongs to
+// cmd/murtaugh-gateway and starts with the process, while the election is built
+// in here and cannot exist until the Slack identity has been resolved. The
+// binary owns both ends and hands over the three points where they meet.
+type NodeEndpoint struct {
+	// Address reports where nodes reach this gateway. Called on every election
+	// tick, so a listener that binds late or an address that moves is published
+	// without anything having to notice.
+	Address func() config.LeaderAddress
+	// Follow is handed the election once it exists. It is what makes accepting
+	// a node leader-only, which is #170's Change H and the premise the whole
+	// redirect design rests on.
+	Follow func(LeaderView)
+	// Detach drops every attached node, and is called on demotion. A node whose
+	// gateway stood down cannot discover that for itself: it holds a socket
+	// nothing will ever route a conversation over again, and it would keep
+	// holding it. Dropping it is what makes it redial into the redirect.
+	Detach func(reason string)
+}
+
+// WithNodeEndpoint attaches the inbound node listener to the election. Returns
+// the receiver for fluent wiring.
+func (a *Application) WithNodeEndpoint(ep NodeEndpoint) *Application {
+	a.nodeEndpoint = ep
 	return a
 }
 

@@ -78,6 +78,7 @@ const (
 	fsLockTeamID     = "team_id"
 	fsLockAppID      = "app_id"
 	fsLockReleased   = "released"
+	fsLockAddress    = "node_address"
 )
 
 // DefaultLeaseTTL is how long a Firestore lease stays valid without renewal.
@@ -156,6 +157,10 @@ type lockState struct {
 	epoch      int64
 	expired    bool
 	updateTime time.Time
+	// address is where the holder accepts runtime nodes, empty when it accepts
+	// none — and empty for every document written before the field existed,
+	// which reads the same way and correctly.
+	address config.LeaderAddress
 }
 
 // read fetches the lock document and decides, in server time only, whether the
@@ -172,6 +177,10 @@ func (l *firestoreLocker) read(ctx context.Context) (lockState, error) {
 	state := lockState{exists: true, updateTime: snap.UpdateTime}
 	if v, err := snap.DataAt(fsLockOwner); err == nil {
 		state.owner, _ = v.(string)
+	}
+	if v, err := snap.DataAt(fsLockAddress); err == nil {
+		raw, _ := v.(string)
+		state.address = config.ParseLeaderAddress(raw)
 	}
 	if v, err := snap.DataAt(fsLockEpoch); err == nil {
 		switch n := v.(type) {
@@ -240,6 +249,11 @@ func (l *firestoreLocker) lockDoc(owner string, epoch int64) map[string]any {
 		fsLockTeamID:     l.identity.TeamID,
 		fsLockAppID:      l.identity.AppID,
 		fsLockReleased:   false,
+		// Cleared on every acquisition and on every renewal, because it belongs
+		// to whoever holds the lock and Publish is what puts it back. A takeover
+		// that inherited the previous holder's address would have every standby
+		// redirect nodes to a gateway that has stood down.
+		fsLockAddress: "",
 	}
 }
 
@@ -252,6 +266,70 @@ func (l *firestoreLocker) updatesFor(owner string, epoch int64) []firestore.Upda
 		updates = append(updates, firestore.Update{Path: path, Value: value})
 	}
 	return updates
+}
+
+// renewalUpdates is updatesFor without the address.
+//
+// A renewal must not disturb what Publish wrote. Sharing one update list with
+// acquisition would blank the address every few seconds, and a standby reading
+// the lock in one of those windows would turn a node away with nowhere to send
+// it — intermittently, which is the worst version of that bug.
+func (l *firestoreLocker) renewalUpdates(owner string, epoch int64) []firestore.Update {
+	updates := l.updatesFor(owner, epoch)
+	kept := updates[:0]
+	for _, update := range updates {
+		if update.Path == fsLockAddress {
+			continue
+		}
+		kept = append(kept, update)
+	}
+	return kept
+}
+
+// Publish records where this holder accepts runtime node connections.
+//
+// Guarded by the same update-time precondition every other write here carries,
+// so a node that has already been taken over cannot stamp its address onto its
+// successor's document. Losing that race is not an error: the renewal loop is
+// what discovers the lease is gone, and it will.
+func (l *firestoreLocker) Publish(ctx context.Context, lease config.Lease, addr config.LeaderAddress) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if !lease.Held() || lease.Key != l.identity.Key() || l.lastUpdate.IsZero() {
+		return nil
+	}
+	result, err := l.doc.Update(ctx,
+		[]firestore.Update{{Path: fsLockAddress, Value: addr.Encode()}},
+		firestore.LastUpdateTime(l.lastUpdate))
+	if err != nil {
+		if lostRace(err) {
+			return nil
+		}
+		return fmt.Errorf("publish the leader address: %w", err)
+	}
+	l.lastUpdate = result.UpdateTime
+	return nil
+}
+
+// Holder reads the live claim without contending for it, so a standby can name
+// the leader to a node it is turning away.
+//
+// A released or lapsed document reports ok=false. The document outlives both so
+// the epoch survives a handover, which means "the document exists" and "there is
+// a leader" are different questions — and answering the first when asked the
+// second sends a node back to the gateway it just left.
+func (l *firestoreLocker) Holder(ctx context.Context) (config.Lease, bool, error) {
+	state, err := l.read(ctx)
+	if err != nil {
+		return config.Lease{}, false, err
+	}
+	if !state.exists || state.expired {
+		return config.Lease{}, false, nil
+	}
+	lease := l.leaseFrom(state.owner, state.epoch, state.updateTime)
+	lease.Address = state.address
+	return lease, true, nil
 }
 
 // Acquire takes the lock when it is free or its lease has lapsed. A lock validly
@@ -312,7 +390,7 @@ func (l *firestoreLocker) Renew(ctx context.Context, lease config.Lease) (config
 	}
 
 	result, err := l.doc.Update(ctx,
-		l.updatesFor(lease.Owner, lease.Epoch),
+		l.renewalUpdates(lease.Owner, lease.Epoch),
 		firestore.LastUpdateTime(l.lastUpdate))
 	if err != nil {
 		if lostRace(err) {

@@ -74,6 +74,13 @@ type Options struct {
 	// runtime builder, which is the only thing that knows the gateway's
 	// per-agent approval gates, and may be replaced by a configuration reload.
 	Approve func(ctx context.Context, toolName, summary string) (bool, string)
+	// Advertise is the address, or the space- or comma-separated addresses,
+	// operators tell nodes to use, replacing what this machine can work out
+	// about itself. Several because #170 wants a name AND an address offered,
+	// and behind a TLS terminator neither of them is discoverable from here.
+	// Empty means "work it out" — see Host.Address, which explains why the
+	// worked-out answer is ws:// and when that is not good enough.
+	Advertise string
 }
 
 // Host owns the accept endpoint and the registry of connected nodes.
@@ -95,6 +102,12 @@ type Host struct {
 	pins config.ConversationPinStore
 
 	mu sync.Mutex
+	// leadership is the election this Host defers to before accepting anything.
+	// nil until FollowLeader is called, and nil accepts nothing — see leader.go.
+	leadership Leadership
+	// listen is the address the listener actually bound, which is what gets
+	// published for standbys to redirect to. Empty until serving starts.
+	listen string
 	// nodes is the registry, keyed per CONNECTION. See registry.go for why that
 	// is not per node, and why enumeration collapses the other way.
 	nodes map[string]*attached
@@ -168,13 +181,17 @@ func (h *Host) Handler() http.Handler {
 
 // Listen serves the node endpoint until ctx ends.
 //
-// Plain HTTP. #170 makes wss mandatory and this does not provide it: terminating
-// TLS here would mean owning certificate loading, renewal and pinning, which is
-// item 11's work and is the part the spec says to try on a real machine. Until
-// then the honest deployment is loopback — the `--role both` node the split is
-// exercised with — or a reverse proxy that already holds a certificate. The
-// dialler enforces the other half of this: it refuses plain ws:// to anything
-// but a loopback host.
+// Plain HTTP, and settled rather than deferred. #170 makes wss mandatory and
+// this process does not provide it: terminating TLS here would mean owning
+// certificate loading, renewal and pinning, and the deployments that need it
+// already have something that does all three. So the two supported shapes are
+// loopback — the `--role both` node the split is exercised with — and a reverse
+// proxy holding the certificate, whose address is what -node-advertise names.
+//
+// The dialler enforces the other half: it refuses plain ws:// to anything but a
+// loopback host, for a LEARNED address exactly as for a configured one. That is
+// what keeps the redirect from becoming a way to talk a node into putting its
+// credential on the wire in cleartext.
 func (h *Host) Listen(ctx context.Context, addr string) error {
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -193,6 +210,11 @@ func (h *Host) Serve(ctx context.Context, listener net.Listener) error {
 		// itself is bounded instead.
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	h.setListenAddr(listener.Addr().String())
+	// Forgotten again however serving ends. What this publishes is where nodes
+	// can be accepted, and an address that outlived its listener is one every
+	// standby in the fleet keeps redirecting nodes to.
+	defer h.setListenAddr("")
 	h.log.Info("runtime node endpoint listening", "addr", listener.Addr().String(), "path", nodesocket.Path)
 
 	done := make(chan error, 1)
@@ -208,7 +230,7 @@ func (h *Host) Serve(ctx context.Context, listener net.Listener) error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 		defer cancel()
 		_ = server.Shutdown(shutdownCtx)
-		h.detachAll()
+		h.DetachAll("the node endpoint is shutting down")
 		return nil
 	}
 }
@@ -234,6 +256,16 @@ func (h *Host) serveLink(w http.ResponseWriter, r *http.Request) {
 		// 401 would make a database outage look like a fleet-wide revocation.
 		h.log.Error("could not check a node credential", "error", err)
 		http.Error(w, "the credential store is unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Leadership is checked AFTER the credential and BEFORE the upgrade. After,
+	// so the redirect names the leader only to a node entitled to know; before,
+	// because a refusal that arrives as a close frame arrives as bare EOF — the
+	// transport collapses every ordinary close code and drops the reason text,
+	// and the node would redial the same address forever. See leader.go.
+	if leadership, ok := h.leading(r.Context()); !ok {
+		h.refuseNotLeading(w, r, leadership, record.NodeID)
 		return
 	}
 
@@ -384,12 +416,6 @@ func (h *Host) record(level journal.Level, state, summary string, node *attached
 		Keys:    journal.Keys{UserID: node.userID},
 		Payload: payload,
 	})
-}
-
-func (h *Host) detachAll() {
-	for _, node := range h.takeAll() {
-		node.close()
-	}
 }
 
 // close ends one connection. It is safe to call concurrently and repeatedly,

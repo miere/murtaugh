@@ -9,13 +9,18 @@ import (
 	"time"
 )
 
-// The dialler's refusals are the compensating control for deferring TLS to
-// item 11. #170 makes wss mandatory; nodehost.Listen deliberately does not
-// provide it, and the sentence that makes that acceptable is "the dialler
-// enforces the other half of this: it refuses plain ws:// to anything but a
-// loopback host". A relaxation or a reordering here ships a node's bearer
+// The dialler's refusals are the compensating control for terminating TLS
+// outside this process. #170 makes wss mandatory; nodehost.Listen deliberately
+// does not provide it, and the sentence that makes that acceptable is "the
+// dialler enforces the other half of this: it refuses plain ws:// to anything
+// but a loopback host". A relaxation or a reordering here ships a node's bearer
 // token — which travels in an Authorization header — in cleartext across a
 // real network, so it is pinned rather than trusted to a comment.
+//
+// It matters twice as much since failover: a node now dials addresses it was
+// GIVEN, by a gateway, over an unauthenticated handshake response. Those go
+// through the same ResolveEndpoint as the seed, so "the gateway told me to"
+// cannot talk a node out of this rule.
 
 func TestPlainWebSocketIsOnlyAllowedToALoopbackHost(t *testing.T) {
 	// Loopback is carved out because that is the `--role both` deployment the
@@ -29,8 +34,8 @@ func TestPlainWebSocketIsOnlyAllowedToALoopbackHost(t *testing.T) {
 		"wss://gateway.example.com",
 		"wss://gateway.example.com:9000",
 	} {
-		if _, err := resolveEndpoint(address); err != nil {
-			t.Errorf("resolveEndpoint(%q) = %v, want it accepted", address, err)
+		if _, err := ResolveEndpoint(address); err != nil {
+			t.Errorf("ResolveEndpoint(%q) = %v, want it accepted", address, err)
 		}
 	}
 
@@ -43,15 +48,15 @@ func TestPlainWebSocketIsOnlyAllowedToALoopbackHost(t *testing.T) {
 		// literal "localhost" are.
 		"ws://localhost.example.com:9000",
 	} {
-		endpoint, err := resolveEndpoint(address)
+		endpoint, err := ResolveEndpoint(address)
 		if err == nil {
-			t.Errorf("resolveEndpoint(%q) = %q with no error; a node credential would cross a real network in cleartext", address, endpoint)
+			t.Errorf("ResolveEndpoint(%q) = %q with no error; a node credential would cross a real network in cleartext", address, endpoint)
 			continue
 		}
 		// The operator has to be told what to change, not merely that something
 		// was refused.
 		if !strings.Contains(err.Error(), "wss://") {
-			t.Errorf("resolveEndpoint(%q) = %v, which does not say what to use instead", address, err)
+			t.Errorf("ResolveEndpoint(%q) = %v, which does not say what to use instead", address, err)
 		}
 	}
 }
@@ -67,8 +72,8 @@ func TestOnlyTheTwoWebSocketSchemesAreDialled(t *testing.T) {
 		"",
 		"   ",
 	} {
-		if endpoint, err := resolveEndpoint(address); err == nil {
-			t.Errorf("resolveEndpoint(%q) = %q with no error", address, endpoint)
+		if endpoint, err := ResolveEndpoint(address); err == nil {
+			t.Errorf("ResolveEndpoint(%q) = %q with no error", address, endpoint)
 		}
 	}
 }
@@ -83,13 +88,13 @@ func TestTheEndpointPathIsSuppliedButNotOverridden(t *testing.T) {
 		"ws://127.0.0.1:9000":             "ws://127.0.0.1:9000" + Path,
 		"wss://gateway.example.com/proxy": "wss://gateway.example.com/proxy",
 	} {
-		got, err := resolveEndpoint(address)
+		got, err := ResolveEndpoint(address)
 		if err != nil {
-			t.Errorf("resolveEndpoint(%q): %v", address, err)
+			t.Errorf("ResolveEndpoint(%q): %v", address, err)
 			continue
 		}
 		if got != want {
-			t.Errorf("resolveEndpoint(%q) = %q, want %q", address, got, want)
+			t.Errorf("ResolveEndpoint(%q) = %q, want %q", address, got, want)
 		}
 	}
 }

@@ -34,6 +34,33 @@
 // conversation PIN, which #170 says to store and item 10 does, as a side store
 // in the family internal/config/nodetokens.go established.
 //
+// # Only the elected gateway accepts, and a standby says where to go
+//
+// That sentence was prose here before anything enforced it, and a standby
+// happily accepted nodes it could never serve. It is now a predicate on the
+// accept path: FollowLeader installs the election, an un-wired Host accepts
+// nothing, and the check is the election's VERIFYING one rather than its cached
+// boolean — accepting a node is externally visible and long-lived, so a
+// suspended standby that woke up still believing it leads must not take one.
+//
+// A gateway that cannot accept REDIRECTS rather than dropping the connection. A
+// bare socket close is indistinguishable from a dead gateway, a rejected
+// credential and broken wifi, which is a support ticket with no evidence in it;
+// so the refusal is an HTTP status the node can act on, carrying the leader's
+// address in a header. The standby knows that address for free: it is already
+// contending for the election lock, and the leader writes where it accepts nodes
+// onto the lock record on promotion.
+//
+// Three answers, because a node has three different things to do about them:
+// 421 naming the leader (hop, at once), 421 naming nobody (the leader accepts no
+// nodes — there is nowhere in the fleet to go), and 503 (no gateway is elected
+// yet — wait). The credential is checked FIRST, so none of it is available to a
+// caller that has not proved which node it is.
+//
+// Demotion drops every attached node. A node cannot discover on its own that
+// the gateway it holds a socket to has stopped leading, and left attached it
+// would hold a connection nothing will ever route a conversation over.
+//
 // # A connection is the unit; a node is what you ask about
 //
 // The map is keyed per connection because #170 requires two credentials to be
