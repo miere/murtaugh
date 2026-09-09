@@ -67,7 +67,14 @@ type Runner struct {
 	// retry is how long a standby waits between acquisition attempts.
 	retry time.Duration
 
+	// address reports where this node accepts runtime nodes; nil when it
+	// accepts none.
+	address func() config.LeaderAddress
+
 	mu sync.Mutex
+	// published is the address last written to the lock record, so a tick that
+	// changes nothing costs no write.
+	published config.LeaderAddress
 	// lease is the currently held claim; zero when not leading.
 	lease config.Lease
 	// confirmed is when the lease was last proven ours, on both clocks.
@@ -91,6 +98,21 @@ type Options struct {
 	// Recorder journals the election. nil discards, which is what CLI/MCP
 	// builds and most tests want.
 	Recorder journal.Recorder
+	// Address reports where this node accepts runtime node connections, and is
+	// written into the lock record so a standby can redirect a node to the
+	// leader instead of dropping it.
+	//
+	// It is a function rather than a value because the answer is not final at
+	// startup: the listener may still be binding, and the port may be one the
+	// kernel chose. It is asked on every tick, so an address that appears late
+	// — or moves, as a laptop's does between networks — is published without
+	// anything having to notice the change and call back.
+	//
+	// nil, or a nil answer, means this gateway accepts no nodes. That is a
+	// legitimate state (it is what every gateway shipping today is), and it is
+	// published as such so a standby says "the leader takes no nodes" rather
+	// than redirecting to nowhere.
+	Address func() config.LeaderAddress
 }
 
 // New builds a Runner.
@@ -121,6 +143,7 @@ func New(opts Options) (*Runner, error) {
 		renew:       opts.Election.EffectiveRenew(),
 		demoteAfter: opts.Election.EffectiveDemoteAfter(),
 		retry:       opts.Election.EffectiveRenew(),
+		address:     opts.Address,
 	}
 
 	// A locker with no TTL detects holder death itself — the kernel drops a
@@ -157,6 +180,7 @@ func (r *Runner) Run(ctx context.Context) error {
 func (r *Runner) step(ctx context.Context) time.Duration {
 	if r.Leading() {
 		r.renewOnce(ctx)
+		r.publishAddress(ctx)
 		return r.renew
 	}
 	r.acquireOnce(ctx)
@@ -191,6 +215,13 @@ func (r *Runner) acquireOnce(ctx context.Context) {
 	r.logger.Info("promoted to leader", "epoch", lease.Epoch, "owner", lease.Owner, "backend", r.locker.Backend())
 	r.record(ctx, journal.LevelInfo, "promoted", "Took the leader lock", leaseFields(lease))
 
+	// Before OnPromote, so a node redirected here by a standby finds a gateway
+	// that is already accepting rather than one still starting up. Acquisition
+	// cleared whatever the previous holder wrote, so between that write and this
+	// one the record says "leader, no address" — which is the honest answer for
+	// a gateway whose listener has not bound yet.
+	r.publishAddress(ctx)
+
 	if r.cb.OnPromote != nil {
 		if err := r.cb.OnPromote(ctx, lease); err != nil {
 			// A node that cannot start serving must not sit on the lock that
@@ -199,6 +230,46 @@ func (r *Runner) acquireOnce(ctx context.Context) {
 			r.standDown(ctx, "promotion failed: "+err.Error())
 		}
 	}
+}
+
+// publishAddress writes this gateway's node-endpoint address onto the lock
+// record, so a standby can redirect a node here instead of dropping it.
+//
+// It is called on every tick rather than once at promotion, because the address
+// is not knowable at promotion in the cases that matter: a listener may still be
+// binding, its port may be one the kernel chose, and a laptop's routable address
+// changes when it changes network. Comparing against the last published value
+// keeps that to one write when something actually moved.
+//
+// A failure is a warning, never a demotion. Not being findable by a redirect
+// costs a node one backoff cycle against its own seed address; standing down
+// over it would cost the workspace a failover.
+func (r *Runner) publishAddress(ctx context.Context) {
+	if r.address == nil {
+		return
+	}
+	addr := r.address()
+
+	r.mu.Lock()
+	lease := r.lease
+	unchanged := !r.leading || addr.Equal(r.published)
+	r.mu.Unlock()
+	if unchanged {
+		return
+	}
+
+	if err := r.locker.Publish(ctx, lease, addr); err != nil {
+		r.logger.Warn("could not record where this gateway accepts runtime nodes; standbys cannot redirect nodes to it",
+			"error", err)
+		return
+	}
+	r.logger.Info("published this gateway's runtime node address", "address", addr.Encode())
+
+	r.mu.Lock()
+	if r.leading {
+		r.published = addr
+	}
+	r.mu.Unlock()
 }
 
 // renewOnce refreshes a held lease and stands down when the claim is lost or
@@ -274,6 +345,33 @@ func (r *Runner) Lease() config.Lease {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.lease
+}
+
+// Leader reports where the CURRENT leader accepts runtime node connections, and
+// whether there is a leader at all.
+//
+// It is the standby's half of the redirect: this node is already contending for
+// the lock, so the address costs it one read of a record it reads anyway rather
+// than a discovery mechanism of its own. ok=false means there is no live claim —
+// the leader stood down, or its lease lapsed and nobody has taken it yet — and
+// an empty address with ok=true means there is a leader that accepts no nodes.
+// Those are different answers and a caller must not collapse them: the first is
+// "try again", the second is "not here, and not there either".
+//
+// It answers about whoever holds the lock, including this node. Callers ask it
+// after Allow has said no, which is the only moment the question means anything.
+func (r *Runner) Leader(ctx context.Context) (config.LeaderAddress, bool) {
+	lease, ok, err := r.locker.Holder(ctx)
+	if err != nil {
+		// Not knowing where the leader is is not knowing there is none, but the
+		// caller has only one thing to do about either.
+		r.logger.Warn("could not read where the leader accepts runtime nodes", "error", err)
+		return nil, false
+	}
+	if !ok {
+		return nil, false
+	}
+	return lease.Address, true
 }
 
 // Allow reports whether this node may perform an externally visible action as
@@ -359,6 +457,10 @@ func (r *Runner) standDown(ctx context.Context, reason string) {
 	r.leading = false
 	r.lease = config.Lease{}
 	r.confirmed = instant{}
+	// Forgotten rather than cleared in the store: the next acquisition — by
+	// this node or any other — clears the record's address itself, and a node
+	// standing down has just proven it cannot be trusted to write there.
+	r.published = nil
 	r.mu.Unlock()
 
 	r.logger.Warn("standing down as leader", "reason", reason, "epoch", lease.Epoch)

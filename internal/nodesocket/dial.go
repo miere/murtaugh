@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -43,7 +42,7 @@ func Dial(ctx context.Context, rawURL string, opts DialOptions) (*Conn, error) {
 	if strings.TrimSpace(opts.Token) == "" {
 		return nil, fmt.Errorf("nodesocket: no node token to present")
 	}
-	endpoint, err := resolveEndpoint(rawURL)
+	endpoint, err := ResolveEndpoint(rawURL)
 	if err != nil {
 		return nil, err
 	}
@@ -62,13 +61,25 @@ func Dial(ctx context.Context, rawURL string, opts DialOptions) (*Conn, error) {
 
 	ws, resp, err := dialer.DialContext(ctx, endpoint, header)
 	if err != nil {
-		return nil, dialError(endpoint, resp, err)
+		// The response is READ, not discarded, and that is the whole of the
+		// failover design's node side: the WebSocket client reports every
+		// non-101 as the same "bad handshake" error, and does not follow
+		// redirects, so the status and headers it hands back are the only place
+		// a refusal can say what kind of refusal it was.
+		return nil, classify(endpoint, resp, err)
 	}
 	return newConn(ws, opts.WriteTimeout), nil
 }
 
-// resolveEndpoint normalises a seed address into the endpoint to dial.
-func resolveEndpoint(rawURL string) (string, error) {
+// ResolveEndpoint normalises a seed or learned address into the endpoint to
+// dial, and refuses the ones that would put a credential on the wire in
+// cleartext.
+//
+// It is exported because a LEARNED address has to go through it too. An address
+// that arrived from a gateway is not more trustworthy than one an operator
+// typed — it is less — so the wss rule is applied to it before anything decides
+// to dial it, rather than after.
+func ResolveEndpoint(rawURL string) (string, error) {
 	trimmed := strings.TrimSpace(rawURL)
 	if trimmed == "" {
 		return "", fmt.Errorf("nodesocket: no gateway address")
@@ -98,20 +109,4 @@ func isLoopback(host string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
-}
-
-// dialError turns a failed upgrade into something an operator can act on. The
-// bare error is "bad handshake", which is the same string for a wrong address,
-// a rejected token and a standby gateway.
-func dialError(endpoint string, resp *http.Response, err error) error {
-	if resp == nil {
-		return fmt.Errorf("nodesocket: dial %s: %w", endpoint, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-	detail := strings.TrimSpace(string(body))
-	if detail == "" {
-		detail = resp.Status
-	}
-	return fmt.Errorf("nodesocket: dial %s: %w (%s: %s)", endpoint, err, resp.Status, detail)
 }

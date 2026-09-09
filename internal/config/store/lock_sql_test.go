@@ -287,6 +287,126 @@ func TestSQLLockerBehaviours(t *testing.T) {
 				}
 			})
 
+			// The address on the lock record is what lets a standby redirect a
+			// node to the leader. Everything below is about the ways that read
+			// can send a node somewhere useless.
+			t.Run("a standby reads where the leader accepts nodes", func(t *testing.T) {
+				newLocker := build(t)
+				ctx := context.Background()
+
+				leader := newLocker(t, time.Minute)
+				lease, ok, err := leader.Acquire(ctx)
+				if err != nil || !ok {
+					t.Fatalf("Acquire: ok=%v err=%v", ok, err)
+				}
+				// Acquisition leaves no address: the listener may not have
+				// bound yet, and "leader, no address" is the honest answer for
+				// that moment.
+				standby := newLocker(t, time.Minute)
+				held, ok, err := standby.Holder(ctx)
+				if err != nil || !ok {
+					t.Fatalf("Holder: ok=%v err=%v", ok, err)
+				}
+				if !held.Address.Empty() {
+					t.Errorf("a freshly acquired lock already carries an address: %v", held.Address)
+				}
+
+				addr := config.LeaderAddress{"wss://gateway.example.com:8787", "wss://192.0.2.10:8787"}
+				if err := leader.Publish(ctx, lease, addr); err != nil {
+					t.Fatalf("Publish: %v", err)
+				}
+				held, ok, err = standby.Holder(ctx)
+				if err != nil || !ok {
+					t.Fatalf("Holder after publish: ok=%v err=%v", ok, err)
+				}
+				if !held.Address.Equal(addr) {
+					t.Errorf("Holder read %v, want %v", held.Address, addr)
+				}
+			})
+
+			t.Run("a released lock names no leader", func(t *testing.T) {
+				newLocker := build(t)
+				ctx := context.Background()
+
+				leader := newLocker(t, time.Minute)
+				lease, ok, err := leader.Acquire(ctx)
+				if err != nil || !ok {
+					t.Fatalf("Acquire: ok=%v err=%v", ok, err)
+				}
+				if err := leader.Publish(ctx, lease, config.LeaderAddress{"wss://old.example.com:8787"}); err != nil {
+					t.Fatalf("Publish: %v", err)
+				}
+				if err := leader.Release(ctx, lease); err != nil {
+					t.Fatalf("Release: %v", err)
+				}
+
+				// The row survives a release so the epoch survives a handover.
+				// Reading it as a live claim would redirect a node straight
+				// back to the gateway that just stood down — the loop #170
+				// warns about, and the one a naive read produces.
+				standby := newLocker(t, time.Minute)
+				if _, ok, err := standby.Holder(ctx); err != nil || ok {
+					t.Fatalf("Holder over a released lock: ok=%v err=%v; want no leader", ok, err)
+				}
+			})
+
+			t.Run("a takeover clears the old address", func(t *testing.T) {
+				newLocker := build(t)
+				ctx := context.Background()
+
+				old := newLocker(t, time.Second)
+				lease, ok, err := old.Acquire(ctx)
+				if err != nil || !ok {
+					t.Fatalf("Acquire: ok=%v err=%v", ok, err)
+				}
+				if err := old.Publish(ctx, lease, config.LeaderAddress{"wss://old.example.com:8787"}); err != nil {
+					t.Fatalf("Publish: %v", err)
+				}
+
+				time.Sleep(1500 * time.Millisecond)
+				challenger := newLocker(t, time.Minute)
+				if _, ok, err := challenger.Acquire(ctx); err != nil || !ok {
+					t.Fatalf("takeover Acquire: ok=%v err=%v", ok, err)
+				}
+				held, ok, err := challenger.Holder(ctx)
+				if err != nil || !ok {
+					t.Fatalf("Holder: ok=%v err=%v", ok, err)
+				}
+				if !held.Address.Empty() {
+					t.Errorf("the new leader inherited its predecessor's address %v", held.Address)
+				}
+			})
+
+			t.Run("a displaced holder cannot publish", func(t *testing.T) {
+				newLocker := build(t)
+				ctx := context.Background()
+
+				old := newLocker(t, time.Second)
+				lease, ok, err := old.Acquire(ctx)
+				if err != nil || !ok {
+					t.Fatalf("Acquire: ok=%v err=%v", ok, err)
+				}
+				time.Sleep(1500 * time.Millisecond)
+				challenger := newLocker(t, time.Minute)
+				if _, ok, err := challenger.Acquire(ctx); err != nil || !ok {
+					t.Fatalf("takeover Acquire: ok=%v err=%v", ok, err)
+				}
+
+				// The displaced node still believes it leads until its next
+				// renewal. If its address landed anyway, every standby in the
+				// fleet would send nodes to a gateway that has lost the lock.
+				if err := old.Publish(ctx, lease, config.LeaderAddress{"wss://ghost.example.com:8787"}); err != nil {
+					t.Fatalf("Publish by a displaced holder: %v", err)
+				}
+				held, ok, err := challenger.Holder(ctx)
+				if err != nil || !ok {
+					t.Fatalf("Holder: ok=%v err=%v", ok, err)
+				}
+				if !held.Address.Empty() {
+					t.Errorf("a displaced holder wrote its address onto the successor's lock: %v", held.Address)
+				}
+			})
+
 			t.Run("ttl defaults rather than expiring instantly", func(t *testing.T) {
 				newLocker := build(t)
 				// A zero TTL on this backend would mean "already expired", which

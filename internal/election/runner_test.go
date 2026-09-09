@@ -68,15 +68,22 @@ type fakeLocker struct {
 	verifyErr  error
 	releaseErr error
 
-	epoch    int64
-	acquires int
-	renews   int
-	verifies int
-	releases int
+	publishErr error
+	holderOK   bool
+	holderErr  error
+
+	epoch       int64
+	acquires    int
+	renews      int
+	verifies    int
+	releases    int
+	publishes   int
+	holderReads int
+	published   config.LeaderAddress
 }
 
 func newFakeLocker() *fakeLocker {
-	return &fakeLocker{ttl: 30 * time.Second, acquireOK: true, renewOK: true, verifyOK: true}
+	return &fakeLocker{ttl: 30 * time.Second, acquireOK: true, renewOK: true, verifyOK: true, holderOK: true}
 }
 
 func (l *fakeLocker) Acquire(context.Context) (config.Lease, bool, error) {
@@ -121,6 +128,38 @@ func (l *fakeLocker) Release(context.Context, config.Lease) error {
 	defer l.mu.Unlock()
 	l.releases++
 	return l.releaseErr
+}
+
+// Publish records the address the runner wrote, and how many times it wrote it —
+// the second being the interesting half: an address that has not moved must not
+// cost a write on every tick.
+func (l *fakeLocker) Publish(_ context.Context, lease config.Lease, addr config.LeaderAddress) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.publishes++
+	if l.publishErr != nil {
+		return l.publishErr
+	}
+	if !lease.Held() {
+		return nil
+	}
+	l.published = addr
+	return nil
+}
+
+// Holder answers as the real lockers do: a released or lapsed record is no
+// leader at all.
+func (l *fakeLocker) Holder(context.Context) (config.Lease, bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.holderReads++
+	if l.holderErr != nil {
+		return config.Lease{}, false, l.holderErr
+	}
+	if !l.holderOK {
+		return config.Lease{}, false, nil
+	}
+	return config.Lease{Key: "k", Owner: "node/1", Epoch: l.epoch, Address: l.published}, true, nil
 }
 
 func (l *fakeLocker) TTL() time.Duration { return l.ttl }
@@ -598,4 +637,16 @@ func TestNewRequiresALocker(t *testing.T) {
 	if _, err := New(Options{}); err == nil {
 		t.Fatal("New accepted a nil locker")
 	}
+}
+
+func (l *fakeLocker) publishCount() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.publishes
+}
+
+func (l *fakeLocker) publishedAddress() config.LeaderAddress {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.published
 }

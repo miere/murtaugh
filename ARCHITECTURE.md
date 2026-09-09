@@ -69,8 +69,11 @@ cmd/murtaugh/         Entry point: flag parsing, mode selection, signal handling
 cmd/murtaugh-gateway/ The Slack gateway alone, linking no agent machinery.
                       `-node-listen ADDR` opens the node endpoint; empty (the
                       default) accepts none and the process binds nothing.
+                      `-node-advertise` names the address(es) nodes are
+                      redirected to when this gateway leads.
 cmd/murtaugh-runtime/ The runtime-node entry point. May reach the agent
-                      packages. `-gateway URL` is required: it dials in.
+                      packages. `-gateway URL` is required: it dials in, and
+                      addresses learned from a redirect augment it.
 internal/app/         Composition root + Registry wiring. Names no agent
                       backend: `app.Agents` is injected by the entry point.
 internal/frontends/   CLI and MCP adapters over the Tool registry.
@@ -636,6 +639,12 @@ A new leader announces itself to the admin DM with hostname, local and public
 IP, version, PID, and the leadership epoch, plus whether it is the first leader
 or took over from a predecessor.
 
+**The lock record also carries where the leader accepts runtime nodes**
+(`Locker.Publish` / `Locker.Holder`, `config.Lease.Address`). It lives there
+rather than anywhere else because a standby is already contending for that lock,
+so learning the leader's address costs it a read it was making anyway — which is
+what lets it redirect a node instead of dropping it. See "Node failover" below.
+
 **The election is journalled** to the `gateway` stream under kind `election`, so
 `murtaugh journal query --stream gateway --kind election` reconstructs a
 failover after the fact. Four states are recorded — `promoted`, `renew_failed`,
@@ -1103,6 +1112,91 @@ initialised, because both backend families latch: `native` on its first
 session. A gateway that cannot answer fails the handshake; the node's redial loop
 retries. The set is then frozen for the process — descriptions and schemas
 refresh on reconnect, membership does not.
+
+### Node failover: only the leader accepts, a standby redirects (`internal/nodehost/leader.go`, `cmd/murtaugh-runtime/gateways.go`)
+
+**Only the elected gateway accepts node connections.** The listener is not what
+enforces it: it binds at process start and stays bound, because a standby that
+had to acquire a port at the moment it is promoted can be beaten to it by the
+process it is taking over from. The **accept** is gated, one layer up, on
+`election.Runner.Allow` — the verifying check, not the cached `Leading()`, since
+accepting a node is externally visible and long-lived and a suspended standby
+must not take one. A `Host` with no election installed accepts nothing.
+
+**A standby redirects rather than dropping the connection.** A bare socket close
+is indistinguishable from a dead gateway, a rejected credential and broken wifi.
+The refusal is therefore an HTTP status in the handshake — a close frame could
+not carry it either, since the transport collapses every ordinary close code to
+`io.EOF` and discards the reason text — and it names which refusal it was,
+because the node has a different thing to do about each (`internal/nodesocket/refusal.go`):
+
+| Answer | Meaning | The node |
+|---|---|---|
+| `421` + `Murtaugh-Leader` | wrong gateway, and here is the right one | hops at once, no backoff |
+| `421`, no header | the leader accepts no nodes | backs off; there is nowhere to go |
+| `503` | no gateway is elected yet | backs off, keeps every address |
+| `401` | credential rejected | logs it loudly; retrying cannot fix it |
+
+A fifth state exists and is deliberately **not** one of the node's four: a
+listener with no election wired at all. It answers the same `503`, because
+"wait" is still the only thing the node can do about it — and the node logs it
+with the same line, which reads as the benign self-healing state. But it is the
+only one of these that never heals: that gateway accepts no node for the life of
+the process. So `nodehost` logs *that* one at `ERROR` on the **gateway** side,
+where it is the only evidence there is.
+
+`421` rather than a `3xx`: a redirect invites an intermediary to replay the
+request — `Authorization` header and all — against a host the node never chose.
+The credential is verified **before** any of this, so the leader's location is
+never disclosed to a caller that has not proved which node it is, and the
+existing undifferentiated `401` stays exactly as uninformative as it was.
+
+**The standby knows the leader's address for free.** It is already contending for
+the election lock, so the leader writes where it accepts nodes onto the lock
+record (`config.Lease.Address`, `Locker.Publish`), and a standby reads it with
+`Locker.Holder`. Two properties of that read are load-bearing: acquisition
+**clears** the address (a takeover that inherited its predecessor's would send
+every node back to the gateway that just lost the lock), and `Holder` reports no
+leader for a **released or lapsed** record (every backend keeps the row so the
+epoch survives a handover, so "there is a row" and "there is a leader" are
+different questions). The address is republished whenever it changes, because it
+is not knowable at promotion: a listener may still be binding and its port may be
+one the kernel chose.
+
+**Addressing.** A gateway offers a hostname *and* an IP: an IP moves under DHCP,
+a changed network or a VPN, and a hostname does not resolve from every network a
+laptop wakes on. The discovered form is `ws://`, which is the truth about what
+the process serves — it terminates no TLS — so a non-loopback deployment names
+its terminator with `-node-advertise`, which **replaces** the discovered list and
+takes a list of its own so the pair survives. Configured addresses are used
+verbatim apart from a missing scheme; in particular the listener's port is never
+filled into one, because the terminator answers on its own. Nothing is offered
+at all until the listener has bound and nothing after it stops — a configured
+address is not evidence this process can accept anything, and two gateways on one
+machine both go for the node port. A node refuses a learned `ws://` address to a
+non-loopback host exactly as it refuses a configured one: "a gateway told me to"
+is not a reason to put a credential on the wire in cleartext.
+
+**Learned gateways augment the node's seed and never replace it.** The seed is
+first, permanent and returned to on every cycle; learned addresses are appended,
+deduplicated, bounded, and never written down, so a restart starts from what an
+operator configured. Without that rule a node asleep through a topology change
+wakes holding only addresses that no longer exist. Reconnection is jittered
+(including the first retry, which is the one every node in a fleet makes
+simultaneously), and a chain of redirects is bounded so two gateways naming each
+other cannot spin — per chain, so a backoff or an attachment returns the budget
+rather than leaving the node unable to follow a redirect ever again.
+
+**Demotion drops attached nodes**, after the Slack side has drained: a node
+cannot discover on its own that its gateway stopped leading, and left attached it
+holds a connection nothing will route a conversation over. The drop is
+**journalled, not announced** — a laptop sleeping at 18:00 disconnects every
+evening, and a nightly message trains the admin to ignore the one that matters.
+
+**Deployment constraint.** Redirect requires individual addressability, so a
+Cloud Run gateway must run with `max_instances = 1` (and `min_instances = 1` for
+a warm standby). Election already guarantees one gateway serves Slack, so nothing
+is lost.
 
 ### The two translations (`chat_request_translator.go`, `chat_event_translator.go`)
 

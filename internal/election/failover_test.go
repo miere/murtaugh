@@ -230,3 +230,106 @@ func awaitSingleLeader(t *testing.T, a, b *node, within time.Duration) *node {
 		time.Sleep(25 * time.Millisecond)
 	}
 }
+
+// TestTheLeaderPublishesWhereItAcceptsNodes is the election's half of #197's
+// redirect: a standby can only name the leader because the leader wrote itself
+// down.
+//
+// Three properties, and each of them is a way the redirect goes wrong. It is
+// published at promotion, or a node redirected during the first seconds of a
+// failover is sent nowhere. It is published again when it CHANGES, because the
+// address is not knowable at promotion — a listener may still be binding, and
+// its port may be one the kernel chose. And it is not rewritten when it has not
+// changed, or every gateway in the fleet writes to the lock row on every tick
+// for no reason.
+func TestTheLeaderPublishesWhereItAcceptsNodes(t *testing.T) {
+	locker, clock := newFakeLocker(), newFakeClock()
+
+	var address atomic.Pointer[config.LeaderAddress]
+	store := func(a config.LeaderAddress) { address.Store(&a) }
+	store(nil)
+
+	r, err := New(Options{
+		Locker:   locker,
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Clock:    clock,
+		Election: config.ElectionConfig{LeaseSeconds: 30, RenewSeconds: 10},
+		Address:  func() config.LeaderAddress { return *address.Load() },
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx := context.Background()
+	// A gateway whose listener has not bound yet has nothing to say, and says
+	// nothing: acquisition already cleared the record, so there is nothing to
+	// correct.
+	r.step(ctx)
+	if !r.Leading() {
+		t.Fatal("setup: not leading")
+	}
+	if got := locker.publishCount(); got != 0 {
+		t.Fatalf("a leader with no address to publish wrote %d times", got)
+	}
+
+	// The listener binds.
+	bound := config.LeaderAddress{"ws://127.0.0.1:8787"}
+	store(bound)
+	r.step(ctx)
+	if got := locker.publishedAddress(); !got.Equal(bound) {
+		t.Fatalf("published %v, want %v", got, bound)
+	}
+	if got := locker.publishCount(); got != 1 {
+		t.Fatalf("published %d times, want 1", got)
+	}
+
+	// Nothing has moved, so nothing is written.
+	r.step(ctx)
+	r.step(ctx)
+	if got := locker.publishCount(); got != 1 {
+		t.Fatalf("an unchanged address was rewritten: %d writes", got)
+	}
+
+	// The machine changed network. A node redirected to the old address would
+	// be sent to one that no longer routes.
+	moved := config.LeaderAddress{"wss://gateway.example.com:8787"}
+	store(moved)
+	r.step(ctx)
+	if got := locker.publishedAddress(); !got.Equal(moved) {
+		t.Fatalf("published %v after the address moved, want %v", got, moved)
+	}
+}
+
+// TestLeaderReadsTheRecordRatherThanItsOwnBelief is what a standby answers a
+// node with. A standby is not leading, so it has no lease of its own to read —
+// the answer has to come from the store, which is the whole reason the address
+// lives on the lock record and not in a gossip protocol.
+func TestLeaderReadsTheRecordRatherThanItsOwnBelief(t *testing.T) {
+	locker, clock := newFakeLocker(), newFakeClock()
+	locker.set(func(l *fakeLocker) {
+		l.acquireOK = false // this node is a standby
+		l.published = config.LeaderAddress{"wss://leader.example.com:8787"}
+	})
+	r := newTestRunner(t, locker, clock, Callbacks{})
+
+	ctx := context.Background()
+	r.step(ctx)
+	if r.Leading() {
+		t.Fatal("setup: a standby took the lock")
+	}
+
+	addr, ok := r.Leader(ctx)
+	if !ok {
+		t.Fatal("a standby could not read the live claim it is contending for")
+	}
+	if len(addr) != 1 || addr[0] != "wss://leader.example.com:8787" {
+		t.Fatalf("Leader() = %v", addr)
+	}
+
+	// A released or lapsed record is no leader. Reading it as one would send a
+	// node straight back to the gateway that just stood down.
+	locker.set(func(l *fakeLocker) { l.holderOK = false })
+	if addr, ok := r.Leader(ctx); ok {
+		t.Fatalf("a released lock named a leader at %v", addr)
+	}
+}

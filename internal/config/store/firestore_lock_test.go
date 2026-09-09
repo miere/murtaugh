@@ -351,3 +351,169 @@ func TestOpenLockerSelectsFirestore(t *testing.T) {
 		t.Errorf("Backend() = %q, want %q", got, config.BackendFirestore)
 	}
 }
+
+// TestFirestoreLockerAddressBehaviours is #197's redirect, on the only backend
+// that can arbitrate a real fleet.
+//
+// The flock backend is one machine and SQLite cannot coordinate two, so
+// Firestore is the only place the redirect means anything — and it was the one
+// place with no test of Publish, Holder or the renewal split at all.
+func TestFirestoreLockerAddressBehaviours(t *testing.T) {
+	t.Run("a standby reads where the leader accepts nodes", func(t *testing.T) {
+		fsc := firestoreTestConfig(t)
+		ctx := context.Background()
+
+		leader := openTestFirestoreLocker(t, fsc, time.Minute)
+		lease, ok, err := leader.Acquire(ctx)
+		if err != nil || !ok {
+			t.Fatalf("Acquire: ok=%v err=%v", ok, err)
+		}
+
+		// Acquisition leaves no address: the listener may still be binding, and
+		// "leader, no address" is the honest answer for that moment.
+		standby := openTestFirestoreLocker(t, fsc, time.Minute)
+		held, ok, err := standby.Holder(ctx)
+		if err != nil || !ok {
+			t.Fatalf("Holder: ok=%v err=%v", ok, err)
+		}
+		if !held.Address.Empty() {
+			t.Errorf("a freshly acquired lock already carries an address: %v", held.Address)
+		}
+
+		addr := config.LeaderAddress{"wss://gateway.example.com:8787", "wss://192.0.2.10:8787"}
+		if err := leader.Publish(ctx, lease, addr); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+		held, ok, err = standby.Holder(ctx)
+		if err != nil || !ok {
+			t.Fatalf("Holder after publish: ok=%v err=%v", ok, err)
+		}
+		if !held.Address.Equal(addr) {
+			t.Errorf("Holder read %v, want %v", held.Address, addr)
+		}
+	})
+
+	// The one the renewal split exists for, and the reason it is worth a test on
+	// this backend specifically: renewals happen every few seconds, so an
+	// address blanked by one is an address that is present most of the time and
+	// missing sometimes. A standby reading the lock inside one of those windows
+	// turns a node away with nowhere to send it, and does it intermittently —
+	// which is the worst version of that bug, because it looks like a network
+	// fault rather than a code one.
+	t.Run("a renewal does not blank the address", func(t *testing.T) {
+		fsc := firestoreTestConfig(t)
+		ctx := context.Background()
+
+		leader := openTestFirestoreLocker(t, fsc, time.Minute)
+		lease, ok, err := leader.Acquire(ctx)
+		if err != nil || !ok {
+			t.Fatalf("Acquire: ok=%v err=%v", ok, err)
+		}
+		addr := config.LeaderAddress{"wss://gateway.example.com:8787"}
+		if err := leader.Publish(ctx, lease, addr); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+
+		standby := openTestFirestoreLocker(t, fsc, time.Minute)
+		for round := range 3 {
+			renewed, ok, err := leader.Renew(ctx, lease)
+			if err != nil || !ok {
+				t.Fatalf("renew %d: ok=%v err=%v", round, ok, err)
+			}
+			lease = renewed
+
+			held, ok, err := standby.Holder(ctx)
+			if err != nil || !ok {
+				t.Fatalf("Holder after renew %d: ok=%v err=%v", round, ok, err)
+			}
+			if !held.Address.Equal(addr) {
+				t.Fatalf("renewal %d left the leader's address as %v, want %v: "+
+					"a standby reading the lock here would turn a node away with nowhere to send it",
+					round, held.Address, addr)
+			}
+		}
+	})
+
+	t.Run("a released lock names no leader", func(t *testing.T) {
+		fsc := firestoreTestConfig(t)
+		ctx := context.Background()
+
+		leader := openTestFirestoreLocker(t, fsc, time.Minute)
+		lease, ok, err := leader.Acquire(ctx)
+		if err != nil || !ok {
+			t.Fatalf("Acquire: ok=%v err=%v", ok, err)
+		}
+		if err := leader.Publish(ctx, lease, config.LeaderAddress{"wss://old.example.com:8787"}); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+		if err := leader.Release(ctx, lease); err != nil {
+			t.Fatalf("Release: %v", err)
+		}
+
+		// The document survives a release so the epoch survives a handover, so
+		// "there is a row" and "there is a leader" are different questions.
+		// Answering the first when asked the second sends a node straight back
+		// to the gateway that just stood down.
+		standby := openTestFirestoreLocker(t, fsc, time.Minute)
+		if _, ok, err := standby.Holder(ctx); err != nil || ok {
+			t.Fatalf("Holder over a released lock: ok=%v err=%v; want no leader", ok, err)
+		}
+	})
+
+	t.Run("a takeover clears the old address", func(t *testing.T) {
+		fsc := firestoreTestConfig(t)
+		ctx := context.Background()
+
+		old := openTestFirestoreLocker(t, fsc, time.Second)
+		lease, ok, err := old.Acquire(ctx)
+		if err != nil || !ok {
+			t.Fatalf("Acquire: ok=%v err=%v", ok, err)
+		}
+		if err := old.Publish(ctx, lease, config.LeaderAddress{"wss://old.example.com:8787"}); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+
+		time.Sleep(1500 * time.Millisecond)
+		challenger := openTestFirestoreLocker(t, fsc, time.Minute)
+		if _, ok, err := challenger.Acquire(ctx); err != nil || !ok {
+			t.Fatalf("takeover Acquire: ok=%v err=%v", ok, err)
+		}
+		held, ok, err := challenger.Holder(ctx)
+		if err != nil || !ok {
+			t.Fatalf("Holder: ok=%v err=%v", ok, err)
+		}
+		if !held.Address.Empty() {
+			t.Errorf("the new leader inherited its predecessor's address %v; every standby would send the fleet to a gateway that lost the lock", held.Address)
+		}
+	})
+
+	t.Run("a displaced holder cannot publish", func(t *testing.T) {
+		fsc := firestoreTestConfig(t)
+		ctx := context.Background()
+
+		old := openTestFirestoreLocker(t, fsc, time.Second)
+		lease, ok, err := old.Acquire(ctx)
+		if err != nil || !ok {
+			t.Fatalf("Acquire: ok=%v err=%v", ok, err)
+		}
+		time.Sleep(1500 * time.Millisecond)
+		challenger := openTestFirestoreLocker(t, fsc, time.Minute)
+		if _, ok, err := challenger.Acquire(ctx); err != nil || !ok {
+			t.Fatalf("takeover Acquire: ok=%v err=%v", ok, err)
+		}
+
+		// The displaced node still believes it leads until its next renewal.
+		// Losing this race is not an error — the renewal loop is what discovers
+		// the loss — but the write must not land.
+		if err := old.Publish(ctx, lease, config.LeaderAddress{"wss://ghost.example.com:8787"}); err != nil {
+			t.Fatalf("Publish by a displaced holder: %v", err)
+		}
+		held, ok, err := challenger.Holder(ctx)
+		if err != nil || !ok {
+			t.Fatalf("Holder: ok=%v err=%v", ok, err)
+		}
+		if !held.Address.Empty() {
+			t.Errorf("a displaced holder wrote its address onto the successor's document: %v", held.Address)
+		}
+	})
+}
