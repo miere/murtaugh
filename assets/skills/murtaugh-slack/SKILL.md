@@ -10,8 +10,8 @@ files:
   reference/asking.md:         { requires: [ask, present_plan], summary: "ask the user a question / get plan sign-off and block for the answer" }
   reference/blocks.md:         { requires: [slack, manage],    summary: "compose Block Kit (sections, actions, plan, card)" }
   reference/automations.md:    { requires: [manage],           summary: "conventions for scheduled clock-tick scripts that post to Slack" }
-  reference/workflow-rules.md: { requires: [manage],           summary: "wire what happens on a button click via cfg workflow-rule set" }
-  reference/unfurl.md:         { requires: [manage],           summary: "turn posted links into rich previews via cfg unfurl-rule set" }
+  reference/workflow-rules.md: { requires: [manage],           summary: "wire what happens on a button click via cfg workflow_rule set" }
+  reference/unfurl.md:         { requires: [manage],           summary: "turn posted links into rich previews via cfg unfurl_rule set" }
   examples/unfurl/:            { requires: [manage] }
 ---
 
@@ -28,14 +28,14 @@ the file your task needs:
 > `murtaugh cfg …` (chat routing, access, agents, jobs, workflow/unfurl rules) —
 > those commands re-validate the whole config and roll back a bad change, so you
 > **may** make the change that way (e.g. `cfg chat set`, `cfg access set`,
-> `cfg workflow-rule set --from-file`, `cfg unfurl-rule set --from-file`), then
+> `cfg workflow_rule set --from-file`, `cfg unfurl_rule set --from-file`), then
 > note that a **gateway restart** is needed to apply it. The exceptions are
 > **secrets and `config.yaml`** (Slack tokens / provider keys in `.env`, the
 > `oauth:`/`database:` blocks) — defer those to the operator.
 
 ## Guidelines (defaults — follow unless the user says otherwise)
 
-- **One message per entity** — post once, then `update-msg` in place against the
+- **One message per entity** — post once, then `update_msg` in place against the
   stored `ts`; use a thread reply for follow-ups. Don't repost on every tick.
 - **No secrets in a message** — never put tokens or PII in `action_id`,
   `block_id`, or a button `value`; they travel inside the message and are
@@ -43,5 +43,5 @@ the file your task needs:
 - **A channel post is visible to every member of the channel.** The allowlist
   gates *who can act*, not *who can see* — for single-recipient delivery use an
   ephemeral message or a DM.
-- **To *ask*, don't post.** A `send-msg` is fire-and-forget; to get an answer
+- **To *ask*, don't post.** A `send_msg` is fire-and-forget; to get an answer
   back use `ask` / `present_plan`, which block the turn.

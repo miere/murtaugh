@@ -114,10 +114,10 @@ class FakeMurtaugh(FakeRunner):
     Failure simulation:
       * ``fail_send`` / ``fail_update`` → the call returns rc=1 (so ``check=True``
         raises and ``check=False`` lets the routine observe a non-zero result).
-      * ``return_no_ts`` → ``send-msg`` JSON omits ``ts`` (to exercise fail-loud
+      * ``return_no_ts`` → ``send_msg`` JSON omits ``ts`` (to exercise fail-loud
         paths).
       * ``reactions`` → ``{channel: [message, ...]}`` (or a callable) returned by
-        ``slack fetch-reactions``.
+        ``slack fetch_reactions``.
     """
 
     def __init__(self, *, reactions=None, fail_send=False, fail_update=False,
@@ -137,21 +137,23 @@ class FakeMurtaugh(FakeRunner):
 
     @staticmethod
     def _slack_subcmd(args):
-        """Find the slack subcommand regardless of leading global flags
-        (e.g. ``--config <path> slack fetch-reactions …``)."""
+        """Find the slack subcommand in any spelling the real CLI accepts
+        (``slack send_msg``, ``slack send-msg``, ``slack_send_msg``)."""
         for i, a in enumerate(args):
             if a == "slack" and i + 1 < len(args):
-                return args[i + 1]
+                return args[i + 1].replace("-", "_")
+            if a.startswith("slack_"):
+                return a[len("slack_"):].replace("-", "_")
         return None
 
     def __call__(self, args, check=False):
         args = list(args)
         sub = self._slack_subcmd(args)
-        if sub == "send-msg":
+        if sub == "send_msg":
             return self._send(args, check)
-        if sub == "update-msg":
+        if sub == "update_msg":
             return self._update(args, check)
-        if sub == "fetch-reactions":
+        if sub == "fetch_reactions":
             return self._fetch_reactions(args)
         return super().__call__(args, check)
 
@@ -159,7 +161,7 @@ class FakeMurtaugh(FakeRunner):
         self.calls.append(args)
         if self.fail_send:
             if check:
-                raise RuntimeError("fake murtaugh slack send-msg failed")
+                raise RuntimeError("fake murtaugh slack send_msg failed")
             return _Result(1, "", "fake send failure")
         f = _flags(args)
         to = f.get("to", "")
@@ -178,7 +180,7 @@ class FakeMurtaugh(FakeRunner):
         self.calls.append(args)
         if self.fail_update:
             if check:
-                raise RuntimeError("fake murtaugh slack update-msg failed")
+                raise RuntimeError("fake murtaugh slack update_msg failed")
             return _Result(1, "", "fake update failure")
         f = _flags(args)
         self.updated.append({

@@ -5,8 +5,8 @@ When a message containing a matched link is posted, Slack sends a `link_shared`
 event; Murtaugh matches it against an `unfurl-rules` entry and renders a preview
 from a **template**, a **command** you run, or an **agent** you delegate to. This
 is operator config, stored in the config database and applied with
-`cfg unfurl-rule set --name <n> --from-file <rule.yaml>` (view/manage with
-`cfg unfurl-rule list|show|delete`). It's a sibling of `workflow-rules.md` — same
+`cfg unfurl_rule set --name <n> --from-file <rule.yaml>` (view/manage with
+`cfg unfurl_rule list|show|delete`). It's a sibling of `workflow-rules.md` — same
 shape: inbound Slack event → rule match → action. Each `cfg` change re-validates
 the whole config and rolls back an invalid rule; **restart the gateway** to apply.
 
@@ -31,7 +31,7 @@ Each rule's `--from-file` YAML holds the rule **body** (the `match` + `unfurl`
 fields below); `--name` is the rule's key:
 
 ```yaml
-# github-pr.yaml  →  cfg unfurl-rule set --name github-pr --from-file github-pr.yaml
+# github-pr.yaml  →  cfg unfurl_rule set --name github-pr --from-file github-pr.yaml
 match:
   domain: github.com
   url_pattern: '^https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/pull/(?P<number>\d+)'

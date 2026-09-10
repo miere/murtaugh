@@ -38,7 +38,7 @@ murtaugh setup agents \
 murtaugh setup launchd --binary-path "$BIN" --load true
 
 # 6. (optional) expose Murtaugh's tools to an MCP client.
-murtaugh setup mcp-register --client opencode --binary-path "$BIN"
+murtaugh setup mcp_register --client opencode --binary-path "$BIN"
 
 # Later: self-update the binary, then reload the daemon.
 # A bare `setup update` refuses to overwrite a dev build — add --force true.

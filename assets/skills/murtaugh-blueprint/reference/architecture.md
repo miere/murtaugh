@@ -22,11 +22,11 @@ your `automations/` and `templates/`.
 | Surface | What it is | Deep-dive skill |
 |---|---|---|
 | `automations/` | Python (or shell) routines that do the work | — (rules below) |
-| workflow rules (`cfg workflow-rule set`) | Slack workflow rules: reply / run / interactive (buttons) | `murtaugh-slack` (`workflow-rules.md`) |
+| workflow rules (`cfg workflow_rule set`) | Slack workflow rules: reply / run / interactive (buttons) | `murtaugh-slack` (`workflow-rules.md`) |
 | active Slack actions | post / update / read messages from code | `murtaugh-slack` (`messaging.md`) |
 | agents (`cfg agent create/update`) | agent definitions: provider/model, tools, approval gate, context/cache | `murtaugh-agents` |
 | `templates/` | static Block Kit payloads | `murtaugh-slack` (`blocks.md`) |
-| unfurl rules (`cfg unfurl-rule set`) | link previews: URL unfurling | `murtaugh-slack` (`unfurl.md`) |
+| unfurl rules (`cfg unfurl_rule set`) | link previews: URL unfurling | `murtaugh-slack` (`unfurl.md`) |
 | jobs (`cfg job set`) | scheduled / on-demand job execution | `murtaugh-jobs` |
 
 > **An agent carries an approval gate** (per agent, `cfg agent … --approval-terminal`)
@@ -62,7 +62,7 @@ your `automations/` and `templates/`.
 
 ## Automations (`automations/`)
 
-The routines Murtaugh runs (wired via `cfg job set` and `cfg workflow-rule set`). The
+The routines Murtaugh runs (wired via `cfg job set` and `cfg workflow_rule set`). The
 catalogue of *which* automations exist lives in `automations/AGENTS.md`; the
 *rules* for how they are structured are here.
 
@@ -89,7 +89,7 @@ Everything the routine needs lives inside it, so it can be reasoned about — an
 moved — as one unit. Within that folder:
 
 - **Exactly one entrypoint: `main.py`.** Nothing else in the folder is invoked
-  directly by a `cfg job` / `cfg workflow-rule` wiring. If a routine performs several
+  directly by a `cfg job` / `cfg workflow_rule` wiring. If a routine performs several
   independent operations, `main.py` is a thin **router** that dispatches to them
   by subcommand and holds no business logic itself. Each operation lives in its
   own module exposing `main(argv) -> int`, wired as `main.py <subcommand> [args]`
@@ -124,7 +124,7 @@ Routines are registered where Murtaugh invokes them, by their **deployed**
 absolute path under `~/.config/murtaugh/automations/...`:
 
 - Scheduled / on-demand jobs → `cfg job set` (see `murtaugh-jobs`).
-- Slack interaction / workflow triggers → `cfg workflow-rule set` (see
+- Slack interaction / workflow triggers → `cfg workflow_rule set` (see
   `murtaugh-slack`, `workflow-rules.md`).
 
 When you move or rename a routine, update those wirings too (re-run the `cfg`

@@ -10,7 +10,7 @@ return an error).
 
 ## How it's used
 
-You rarely run it by hand; an MCP client launches it. `setup_mcp-register` wires
+You rarely run it by hand; an MCP client launches it. `setup_mcp_register` wires
 the launch command (`<binary> mcp`) into the client config — see
 `reference/daemon-and-clients.md`. Once registered, the client can:
 
@@ -20,7 +20,7 @@ the launch command (`<binary> mcp`) into the client config — see
 
 ## Notes
 
-- It's the **same tools** the CLI exposes — `slack_send-msg`, `jobs_run`, etc. —
+- It's the **same tools** the CLI exposes — `slack_send_msg`, `jobs_run`, etc. —
   so anything documented in the other skills works identically over MCP; pass the
   schema properties as the tool's arguments.
 - **No config required to start.** Like the other setup-adjacent paths, the MCP

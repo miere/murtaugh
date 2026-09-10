@@ -6,10 +6,10 @@ registry:
 - **CLI** — direct invocation: `murtaugh <command> [flags...]`.
 - **MCP** — JSON-RPC stdio server (`murtaugh mcp`) exposing every tool below to
   AI clients. The MCP tool name is the registry name with every dot replaced by
-  an underscore (e.g. `jobs_run`, `slack_send-msg`) — some providers (e.g.
+  an underscore (e.g. `jobs_run`, `slack_send_msg`) — some providers (e.g.
   Gemini) reject a `.` in a function name, so it is normalised at the MCP
   boundary. The dotted form (`jobs.run`) remains the registry key, and the CLI
-  spells the same tool with a space (`jobs run`, `slack send-msg`).
+  spells the same tool with a space (`jobs run`, `slack send_msg`).
 - **Slack gateway** — the long-running Socket Mode daemon
   (`murtaugh slack gateway`).
 
@@ -18,7 +18,7 @@ Usage: murtaugh [--config PATH] <command> [flags...]
 ```
 
 Run `murtaugh help` for this full document, or `murtaugh help <command>`
-(e.g. `murtaugh help slack send-msg`) for a single command. `murtaugh <command>
+(e.g. `murtaugh help slack send_msg`) for a single command. `murtaugh <command>
 --help` works too. Agents reach the same reference through the `help` tool
 rather than shelling out for it.
 
@@ -77,11 +77,11 @@ sections below assume them.
 
 Several Slack tools accept channels, users, threads, and timestamps. Every
 tool resolves them through one resolver, so the same value works everywhere —
-in particular, a `channel` returned by `send-msg` can be handed straight to
-`fetch-msgs`, `fetch-reactions` or `update-msg`.
+in particular, a `channel` returned by `send_msg` can be handed straight to
+`fetch_msgs`, `fetch_reactions` or `update_msg`.
 
-- **A conversation** (`--to` on send-msg; `--channel` on fetch-msgs,
-  fetch-reactions and update-msg) accepts any of:
+- **A conversation** (`--to` on send_msg; `--channel` on fetch_msgs,
+  fetch_reactions and update_msg) accepts any of:
   - `#channel-name`, or the bare name without `#`;
   - a channel, group or DM ID — `C…`, `G…`, `D…` — or Slack's escaped
     `<#C…>` / `<#C…|name>`;
@@ -92,7 +92,7 @@ in particular, a `channel` returned by `send-msg` can be handed straight to
   IDs are used as given, without a lookup: a DM or a private channel never
   appears in `conversations.list`. Only a name is looked up there, and a
   private channel is only visible to that lookup once the bot is invited.
-- **A person** (`--from` on fetch-reactions, `--invite` on create-channel)
+- **A person** (`--from` on fetch_reactions, `--invite` on create_channel)
   accepts `@handle`, a bare handle, a user ID, or `<@U…>`. A handle is matched
   case-insensitively against legacy username, then display name, then real
   name. An ID is told apart from an all-caps handle by its digits: `U0B20G0ET9T`
@@ -111,7 +111,7 @@ in particular, a `channel` returned by `send-msg` can be handed straight to
 non-whitespace character is `[` or `{`) **or** a filesystem path to a `.json`
 file. Either way the content must be valid JSON or the command fails with
 `Error parsing blocks JSON: …`. `--blocks` is mutually exclusive with
-`--attachment` on `send-msg`.
+`--attachment` on `send_msg`.
 
 # Commands
 
@@ -229,7 +229,7 @@ uses the configured retention.
 murtaugh journal prune
 ```
 
-## murtaugh slack send-msg
+## murtaugh slack send_msg
 
 Post a message (or upload a file) to a Slack channel or user. By default the
 message is posted as the app, using the bot token from `oauth.bot_token` in
@@ -252,13 +252,13 @@ app-generated. Use it deliberately, and only where speaking as the human is
 intended.
 
 ```
-murtaugh slack send-msg --to "#deploys" --body "Build green :white_check_mark:"
-murtaugh slack send-msg --to "@miere" --body "ping" --thread 1716950455.123456
-murtaugh slack send-msg --to "#status" --body "Status" --blocks ./status-blocks.json
-murtaugh slack send-msg --to "#team" --body "Approving this — go ahead" --as admin
+murtaugh slack send_msg --to "#deploys" --body "Build green :white_check_mark:"
+murtaugh slack send_msg --to "@miere" --body "ping" --thread 1716950455.123456
+murtaugh slack send_msg --to "#status" --body "Status" --blocks ./status-blocks.json
+murtaugh slack send_msg --to "#team" --body "Approving this — go ahead" --as admin
 ```
 
-## murtaugh slack create-channel
+## murtaugh slack create_channel
 
 Create a public or private Slack channel, optionally inviting users and setting
 a topic/purpose. Uses the bot token from `oauth.bot_token` in `config.yaml`. The
@@ -274,11 +274,11 @@ for private ones (those scopes also cover the invites).
 | `--purpose` | no       | string  | Channel purpose/description to set after creation.                 |
 
 ```
-murtaugh slack create-channel --name launch-2026 --topic "Launch coordination"
-murtaugh slack create-channel --name incident-42 --private true --invite @miere --invite U07ABCDE
+murtaugh slack create_channel --name launch-2026 --topic "Launch coordination"
+murtaugh slack create_channel --name incident-42 --private true --invite @miere --invite U07ABCDE
 ```
 
-## murtaugh slack fetch-msgs
+## murtaugh slack fetch_msgs
 
 Fetch messages from a channel or thread, oldest-first. Capped at 100 messages.
 
@@ -289,12 +289,12 @@ Fetch messages from a channel or thread, oldest-first. Capped at 100 messages.
 | `--since`   | no       | string | `YYYY-MM-DD HH:mm:ss` Sydney time. Excludes older messages. Default 24h ago. |
 
 ```
-murtaugh slack fetch-msgs --channel deploys
-murtaugh slack fetch-msgs --channel deploys --since "2026-06-12 09:00:00"
-murtaugh slack fetch-msgs --channel C0123456789 --thread 1716950455.123456
+murtaugh slack fetch_msgs --channel deploys
+murtaugh slack fetch_msgs --channel deploys --since "2026-06-12 09:00:00"
+murtaugh slack fetch_msgs --channel C0123456789 --thread 1716950455.123456
 ```
 
-## murtaugh slack fetch-reactions
+## murtaugh slack fetch_reactions
 
 Fetch the messages in a channel that a specific user reacted to with a specific
 emoji. Scans up to 100 recent messages and filters them. Output is oldest-first.
@@ -307,10 +307,10 @@ emoji. Scans up to 100 recent messages and filters them. Output is oldest-first.
 | `--since`   | no       | string | `YYYY-MM-DD HH:mm:ss` Sydney time. Default 24h ago.                |
 
 ```
-murtaugh slack fetch-reactions --from @miere --emoji eyes --channel triage
+murtaugh slack fetch_reactions --from @miere --emoji eyes --channel triage
 ```
 
-## murtaugh slack update-msg
+## murtaugh slack update_msg
 
 Update an existing message in a channel, optionally rewriting its Block Kit
 blocks.
@@ -323,7 +323,7 @@ blocks.
 | `--blocks`  | no       | string | Block Kit JSON (inline string or file path).                                   |
 
 ```
-murtaugh slack update-msg --channel "#deploys" --ts 1716950455.123456 \
+murtaugh slack update_msg --channel "#deploys" --ts 1716950455.123456 \
   --body "Build finished" --blocks ./done-blocks.json
 ```
 
@@ -348,7 +348,7 @@ murtaugh --config /etc/murtaugh/config.yaml slack gateway
 Start the MCP stdio server. Serves every registered tool to an MCP client over
 JSON-RPC on stdin/stdout. stdout is reserved for protocol traffic — do not run
 this interactively expecting human output. Register it with a client via
-`setup mcp-register`.
+`setup mcp_register`.
 
 ```
 murtaugh mcp
@@ -421,21 +421,21 @@ murtaugh cfg access set  [--admin-user --allowed-users <u> (repeat) --debug]
 murtaugh cfg access show
 ```
 
-### Workflow & unfurl rules (`cfg workflow-rule`, `cfg unfurl-rule`)
+### Workflow & unfurl rules (`cfg workflow_rule`, `cfg unfurl_rule`)
 
 Rules are authored as YAML and loaded whole from a file (the rule shape is
 unchanged; only its home moved into the store).
 
 ```
-murtaugh cfg workflow-rule set    --name <n> --from-file <rule.yaml>
-murtaugh cfg workflow-rule list
-murtaugh cfg workflow-rule show   --name <n>
-murtaugh cfg workflow-rule delete --name <n>
+murtaugh cfg workflow_rule set    --name <n> --from-file <rule.yaml>
+murtaugh cfg workflow_rule list
+murtaugh cfg workflow_rule show   --name <n>
+murtaugh cfg workflow_rule delete --name <n>
 
-murtaugh cfg unfurl-rule set    --name <n> --from-file <rule.yaml>
-murtaugh cfg unfurl-rule list
-murtaugh cfg unfurl-rule show   --name <n>
-murtaugh cfg unfurl-rule delete --name <n>
+murtaugh cfg unfurl_rule set    --name <n> --from-file <rule.yaml>
+murtaugh cfg unfurl_rule list
+murtaugh cfg unfurl_rule show   --name <n>
+murtaugh cfg unfurl_rule delete --name <n>
 ```
 
 ### Read-only views (singletons)
@@ -466,7 +466,7 @@ SQLite, `--sqlite-path` overrides the default `config.db` location.
 murtaugh cfg agent create --name default --type native --provider gemini \
   --model gemini-2.5-pro --api-key-env GEMINI_API_KEY --tools files --tools terminal
 murtaugh cfg access set --admin-user @miere --allowed-users @alex --allowed-users @sam
-murtaugh cfg workflow-rule set --name deploy-approve --from-file ./rules/deploy.yaml
+murtaugh cfg workflow_rule set --name deploy-approve --from-file ./rules/deploy.yaml
 murtaugh cfg db migrate --to postgres --dsn-env MURTAUGH_DB_DSN
 ```
 
@@ -573,7 +573,7 @@ murtaugh setup agents --provider gemini --model gemini-2.5-pro \
 murtaugh setup agents --kind acp --agent-name goose --command /usr/local/bin/goose --args acp
 ```
 
-## murtaugh setup mcp-register
+## murtaugh setup mcp_register
 
 Register Murtaugh as an MCP server in a downstream AI client's config, merging
 into the existing file (other keys preserved) and backing it up first.
@@ -593,8 +593,8 @@ sessions/logs **by default** (no `--include` needed). Recording is best-effort �
 a failure there only adds a warning, it does not fail the client registration.
 
 ```
-murtaugh setup mcp-register --client opencode --binary-path /usr/local/bin/murtaugh
-murtaugh setup mcp-register --client goose --binary-path /usr/local/bin/murtaugh
+murtaugh setup mcp_register --client opencode --binary-path /usr/local/bin/murtaugh
+murtaugh setup mcp_register --client goose --binary-path /usr/local/bin/murtaugh
 ```
 
 ## murtaugh setup launchd
@@ -644,7 +644,7 @@ never asks an agent to gather the files.
 | Flag             | Required | Type            | Notes                                                                          |
 |------------------|----------|-----------------|--------------------------------------------------------------------------------|
 | `--note`         | no       | string          | Symptom description; recorded in the manifest.                                 |
-| `--include`      | no       | string (repeat) | Provider whose on-disk diagnostics to add (known: `goose`). Repeat per provider. Defaults to the providers in the store's `troubleshoot` settings (written by `setup mcp-register`), else all known providers.|
+| `--include`      | no       | string (repeat) | Provider whose on-disk diagnostics to add (known: `goose`). Repeat per provider. Defaults to the providers in the store's `troubleshoot` settings (written by `setup mcp_register`), else all known providers.|
 | `--out`          | no       | string          | Output path for the zip. Defaults to a timestamped file in the temp dir.       |
 | `--max-log-bytes`| no       | integer         | Tail cap per log file in bytes. Defaults to 5 MiB.                             |
 | `--redact`       | no       | boolean         | Redact known secrets. Defaults to `true`; only set `false` for local-only use. |
@@ -731,6 +731,6 @@ argument, prints just that command's section.
 
 ```
 murtaugh help
-murtaugh help slack send-msg
+murtaugh help slack send_msg
 murtaugh help jobs define
 ```
