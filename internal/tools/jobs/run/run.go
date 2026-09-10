@@ -1,5 +1,5 @@
-// Package run implements the `jobs.run` tool: execute a job defined in
-// jobs.yaml. The tool resolves the job by name against the loaded
+// Package run implements the `jobs.run` tool: execute a job defined in the
+// config store. The tool resolves the job by name against the loaded
 // configuration, applies the per-job timeout (default 10 minutes), and runs
 // the command with the configured args / workdir.
 //
@@ -115,7 +115,7 @@ func (t *Tool) RequiresApproval(args map[string]any) bool {
 
 // Description returns the human-facing summary used by MCP clients.
 func (t *Tool) Description() string {
-	return "Run a job defined in jobs.yaml by name."
+	return "Run a job already defined in the config store, by name (list them with `cfg job list`)."
 }
 
 // InputSchema returns the JSON Schema for the tool's arguments.
@@ -123,7 +123,7 @@ func (t *Tool) InputSchema() *jsonschema.Schema {
 	return &jsonschema.Schema{
 		Type: "object",
 		Properties: map[string]*jsonschema.Schema{
-			"name": {Type: "string", Description: "Name of the job as keyed in jobs.yaml."},
+			"name": {Type: "string", Description: "Job key as registered in the config store."},
 			"args": {
 				Type:        "array",
 				Items:       &jsonschema.Schema{Type: "string"},
@@ -165,7 +165,7 @@ func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 
 	job, ok := t.lookup(name)
 	if !ok {
-		return nil, fmt.Errorf("job %q not found in jobs.yaml", name)
+		return nil, fmt.Errorf("job %q not found in the config store", name)
 	}
 
 	// Agent-delegated job: hand the rendered prompt to the agent runner instead

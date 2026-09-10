@@ -31,6 +31,7 @@ func (t *mcpSetTool) InputSchema() *jsonschema.Schema {
 			"env":     {Type: "array", Items: &jsonschema.Schema{Type: "string"}, Description: "process env var KEY=VALUE (repeatable)"},
 			"url":     {Type: "string", Description: "remote transport: the server endpoint URL"},
 		},
+		Required: []string{"name"},
 	}
 }
 func (t *mcpSetTool) Invoke(ctx context.Context, args map[string]any) (any, error) {

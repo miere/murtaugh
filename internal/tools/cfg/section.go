@@ -14,11 +14,15 @@ import (
 // here and instantiated per section. Only create/update carry section-specific
 // typed flags and live in their own files.
 
-// nameSchema is the shared single-argument schema for show/delete.
+// nameSchema is the shared single-argument schema for show/delete. `name` is
+// declared required because Invoke enforces it via requireString: a schema
+// that omits it tells every MCP client the call is valid without one, and the
+// caller only learns otherwise from a failed invocation.
 func nameSchema(desc string) *jsonschema.Schema {
 	return &jsonschema.Schema{
 		Type:       "object",
 		Properties: map[string]*jsonschema.Schema{"name": {Type: "string", Description: desc}},
+		Required:   []string{"name"},
 	}
 }
 

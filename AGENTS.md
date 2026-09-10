@@ -72,6 +72,23 @@ binary, unable to reach Slack, with nobody able to tell the user.
   is visible in logs and the troubleshoot bundle. Reserve a fatal error for states
   where no client can be built at all.
 
+# A tool's schema is its documentation
+- A tool's `InputSchema` is the ONLY source of truth for its flags. `murtaugh
+  help` renders every flag table from it, so adding a parameter documents it —
+  there is no second place to update and no cross-check to remember.
+- `assets/cli-help.md` carries prose only: examples, consequences, flag
+  interactions, restart requirements. A flag table written there is discarded
+  at render time. Put the fact in the schema; put the reasoning in the prose.
+- Declare `Required` for every argument `Invoke` enforces. Omitting it tells
+  every MCP client the call is valid without the argument, and the caller only
+  finds out from a failed invocation — a whole class of agent retry loop.
+- Write `Description` for the reader who has to DECIDE: what the flag does to
+  the system, which flags it excludes, what happens if it is omitted. Both the
+  human reference and the model's per-turn context are rendered from it.
+- The registry-walking tests in `internal/app/docs_test.go` enforce the above.
+  Do NOT reintroduce a hand-maintained list of commands to check coverage
+  against; the previous one drifted and missed six tools.
+
 # Backend parity (ACP == native UX)
 - The two agent backends (`internal/agent/native` and the ACP `ProcessClient`)
   implement ONE `agent.Client` interface and feed ONE `agent.Event` stream into the

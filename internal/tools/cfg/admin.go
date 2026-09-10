@@ -75,12 +75,18 @@ func (t *validateTool) Invoke(ctx context.Context, _ map[string]any) (any, error
 	return okResult{Message: "config is valid"}, nil
 }
 
-// fileSchema is the shared --file argument for export/import.
-func fileSchema(desc string) *jsonschema.Schema {
-	return &jsonschema.Schema{
+// fileSchema is the shared --file argument for export/import. required
+// separates the two: export writes to stdout when the flag is omitted, while
+// import has nothing to read and fails in Invoke — so only import declares it.
+func fileSchema(desc string, required bool) *jsonschema.Schema {
+	s := &jsonschema.Schema{
 		Type:       "object",
 		Properties: map[string]*jsonschema.Schema{"file": {Type: "string", Description: desc}},
 	}
+	if required {
+		s.Required = []string{"file"}
+	}
+	return s
 }
 
 // exportTool (cfg.export) writes a full snapshot as JSON, to --file or stdout.
@@ -91,7 +97,7 @@ func (t *exportTool) Description() string {
 	return "Export the whole config store as a JSON snapshot (to --file or stdout)."
 }
 func (t *exportTool) InputSchema() *jsonschema.Schema {
-	return fileSchema("destination file; omit to print to stdout")
+	return fileSchema("destination file; omit to print to stdout", false)
 }
 func (t *exportTool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 	s, err := t.p()
@@ -125,7 +131,7 @@ func (t *importTool) Description() string {
 	return "Import a JSON config snapshot (from --file) into the store."
 }
 func (t *importTool) InputSchema() *jsonschema.Schema {
-	return fileSchema("snapshot file produced by `cfg export`")
+	return fileSchema("snapshot file produced by `cfg export`", true)
 }
 func (t *importTool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 	path, err := requireString(args, "file")

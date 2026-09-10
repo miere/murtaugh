@@ -38,6 +38,7 @@ func (t *ruleSetTool) InputSchema() *jsonschema.Schema {
 			"name":      {Type: "string", Description: "the " + t.label + " name (the key it is stored under)"},
 			"from_file": {Type: "string", Description: "path to a YAML file holding the " + t.label + " definition"},
 		},
+		Required: []string{"name", "from_file"},
 	}
 }
 func (t *ruleSetTool) Invoke(ctx context.Context, args map[string]any) (any, error) {

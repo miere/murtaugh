@@ -41,7 +41,7 @@ func (t *dbMigrateTool) InputSchema() *jsonschema.Schema {
 	return &jsonschema.Schema{
 		Type: "object",
 		Properties: map[string]*jsonschema.Schema{
-			"to":                    {Type: "string", Description: "target backend: postgres | sqlite | firestore"},
+			"to":                    {Type: "string", Enum: []any{"postgres", "sqlite", "firestore"}, Description: "target backend"},
 			"dsn_env":               {Type: "string", Description: "for postgres: name of the .env variable holding the DSN"},
 			"sqlite_path":           {Type: "string", Description: "for sqlite: destination database path"},
 			"firestore_project":     {Type: "string", Description: "for firestore: GCP project ID (omit to let ADC decide)"},
@@ -49,6 +49,7 @@ func (t *dbMigrateTool) InputSchema() *jsonschema.Schema {
 			"firestore_collection":  {Type: "string", Description: "for firestore: root collection (omit for \"murtaugh\")"},
 			"firestore_credentials": {Type: "string", Description: "for firestore: service-account key file (omit to use ADC)"},
 		},
+		Required: []string{"to"},
 	}
 }
 

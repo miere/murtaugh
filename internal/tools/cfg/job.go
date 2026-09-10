@@ -38,6 +38,7 @@ func (t *jobSetTool) InputSchema() *jsonschema.Schema {
 			"schedule": {Type: "string", Description: "cron schedule, 5-field (mutually exclusive with every)"},
 			"every":    {Type: "string", Description: "fixed interval as a Go duration (mutually exclusive with schedule)"},
 		},
+		Required: []string{"name"},
 	}
 }
 func (t *jobSetTool) Invoke(ctx context.Context, args map[string]any) (any, error) {
