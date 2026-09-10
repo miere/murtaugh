@@ -1,8 +1,8 @@
 # Messaging: post, update, and read
 
 The **active** Slack surface: how an agent or automation posts, updates, and
-reads messages through Murtaugh. Four tools — `slack_send-msg`,
-`slack_update-msg`, `slack_fetch-msgs`, `slack_fetch-reactions` — on the CLI
+reads messages through Murtaugh. Four tools — `slack_send_msg`,
+`slack_update_msg`, `slack_fetch_msgs`, `slack_fetch_reactions` — on the CLI
 (`murtaugh slack <tool> …`) and over MCP (`slack_<tool>`), backed by the
 gateway's bot token, so a script never needs a raw Slack token of its own. For
 the Block Kit you put in these messages see `blocks.md`.
@@ -16,17 +16,17 @@ the Block Kit you put in these messages see `blocks.md`.
 
 | Tool | Does | Slack method | Key args |
 |---|---|---|---|
-| `slack_send-msg` | post a message (blocks or text, optional file) | `chat.postMessage` | `to`, `body` |
-| `slack_update-msg` | replace an existing message's content | `chat.update` | `channel`, `ts` |
-| `slack_fetch-msgs` | read a channel or thread, oldest-first | `conversations.history`/`replies` | `channel` |
-| `slack_fetch-reactions` | find messages a user reacted to with an emoji | `conversations.history` | `from`, `emoji`, `channel` |
+| `slack_send_msg` | post a message (blocks or text, optional file) | `chat.postMessage` | `to`, `body` |
+| `slack_update_msg` | replace an existing message's content | `chat.update` | `channel`, `ts` |
+| `slack_fetch_msgs` | read a channel or thread, oldest-first | `conversations.history`/`replies` | `channel` |
+| `slack_fetch_reactions` | find messages a user reacted to with an emoji | `conversations.history` | `from`, `emoji`, `channel` |
 
 > On the CLI these are kebab flags carrying a value (`--to`, `--body`,
 > `--blocks`, `--attachment-type`, …) — there are no bare switches. Run
 > `murtaugh help slack <tool>` for the canonical reference (required vs optional
 > flags, the `#channel`/`@user`/ID `--to` forms, mutual exclusions, examples).
 
-## `slack_send-msg` — post a message
+## `slack_send_msg` — post a message
 
 *Send a message (optionally with an attachment) to a Slack channel or user.*
 
@@ -44,7 +44,7 @@ Returns `{ ok, channel, ts, to }` — **store `ts`** to update or thread later.
 
 Behavior:
 - **Destination resolution** is shared by every Slack tool, so the returned
-  `channel` works as-is in `fetch-msgs`, `fetch-reactions` and `update-msg`.
+  `channel` works as-is in `fetch_msgs`, `fetch_reactions` and `update_msg`.
   `#name` (or the bare name) → channel ID via `conversations.list`; a
   `C`/`G`/`D` ID or `<#C…>` is used directly; a person — `@handle`, a `U…`
   user ID, or the `<@U…>` you see in a mention — resolves to your DM with them,
@@ -63,11 +63,11 @@ Behavior:
   it never silently falls back to the bot.
 
 ```bash
-murtaugh slack send-msg --to "#dev" --body "Deploy started" \
+murtaugh slack send_msg --to "#dev" --body "Deploy started" \
   --blocks /path/to/card.json --thread 1700000000.000100
 ```
 
-## `slack_update-msg` — replace a message's content
+## `slack_update_msg` — replace a message's content
 
 *Update an existing message in a Slack channel.*
 
@@ -76,16 +76,16 @@ murtaugh slack send-msg --to "#dev" --body "Deploy started" \
 | `channel` | yes | Channel ID, or a channel name with a leading `#`. |
 | `ts` | yes | Timestamp of the message to update. |
 | `body` | no | Fallback text. Defaults to `"Message updated"`. |
-| `blocks` | no | Block Kit JSON string or file path (same as `send-msg`). |
+| `blocks` | no | Block Kit JSON string or file path (same as `send_msg`). |
 
 Returns `{ ok, channel, ts }`. Updates the original message in place — there is
 **no thread arg** (you can't move a message into a thread) and **no attachment
 arg** (update takes `--body` and/or `--blocks` only). `channel` takes the same
-forms as `send-msg`'s `to`; pass the `channel` send-msg returned and no lookup
+forms as `send_msg`'s `to`; pass the `channel` send_msg returned and no lookup
 happens.
 
 ```bash
-murtaugh slack update-msg --channel C123ABC --ts 1700000000.000100 \
+murtaugh slack update_msg --channel C123ABC --ts 1700000000.000100 \
   --blocks /path/to/card.json --body "Deploy complete"
 ```
 
@@ -96,8 +96,8 @@ Never repost on every tick.
 
 1. Compute a stable key for the entity (e.g. `repo#number`).
 2. Look up the key in a small state store (JSON file — see `automations.md`).
-   - **Not seen →** `send-msg`, then save `{ key: { ts, ...flags } }`.
-   - **Seen →** `update-msg` against the stored `ts` with freshly-rendered blocks.
+   - **Not seen →** `send_msg`, then save `{ key: { ts, ...flags } }`.
+   - **Seen →** `update_msg` against the stored `ts` with freshly-rendered blocks.
 3. Use a **thread reply** (`thread` = the stored `ts`) for follow-ups that should
    notify or accrue over time — e.g. tagging a reviewer when a PR becomes ready.
    Gate "post once" follow-ups behind a flag in the state store so a per-minute
@@ -135,7 +135,7 @@ A real Slack mention needs the **user ID**, not the handle: render `<@U0B20G0ET9
 Put the mention in the message `body` so the notification fires even if the
 block rendering is collapsed.
 
-## Reading: `slack_fetch-msgs` and `slack_fetch-reactions`
+## Reading: `slack_fetch_msgs` and `slack_fetch_reactions`
 
 Both read tools return **oldest-first** messages and share the same time-window
 semantics. Each result message carries `ts`, `user`, `text`, optional
@@ -146,7 +146,7 @@ semantics. Each result message carries `ts`, `user`, `text`, optional
 > most **100 messages** (no pagination) — narrow with `since`/`thread` rather
 > than expecting deep history.
 
-### `slack_fetch-msgs` — read a channel or thread
+### `slack_fetch_msgs` — read a channel or thread
 
 *Fetch messages from a Slack channel or thread, oldest first.*
 
@@ -160,11 +160,11 @@ With `thread`, returns the thread's replies; otherwise channel history. Slack
 returns newest-first; the tool reverses to oldest-first for you.
 
 ```bash
-murtaugh slack fetch-msgs --channel "#releases" --since "2026-06-10 09:00:00"
-murtaugh slack fetch-msgs --channel C123 --thread 1700000000.000100
+murtaugh slack fetch_msgs --channel "#releases" --since "2026-06-10 09:00:00"
+murtaugh slack fetch_msgs --channel C123 --thread 1700000000.000100
 ```
 
-### `slack_fetch-reactions` — find what a user reacted to
+### `slack_fetch_reactions` — find what a user reacted to
 
 *Fetch messages a specific user reacted to with a given emoji.*
 
@@ -181,13 +181,13 @@ equivalent. Use it for lightweight approvals — e.g. "which release notes did
 @lead 👍?".
 
 ```bash
-murtaugh slack fetch-reactions --from @lead --emoji thumbsup \
+murtaugh slack fetch_reactions --from @lead --emoji thumbsup \
   --channel "#releases" --since "2026-06-09 00:00:00"
 ```
 
 ## Resilience
 
-- A stored `ts` can go stale (message deleted). If `update-msg` fails with
+- A stored `ts` can go stale (message deleted). If `update_msg` fails with
   `message_not_found`, **re-post** and refresh the stored `ts`.
 - On a per-entity failure, log and continue with the others; don't let one bad
   entity abort the whole reconcile.

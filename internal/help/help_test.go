@@ -39,10 +39,10 @@ func TestSectionLookup(t *testing.T) {
 		{"jobs run", "## murtaugh jobs run"},
 		{"jobs.run", "## murtaugh jobs run"}, // dotted registry form
 		{"jobs_run", "## murtaugh jobs run"}, // MCP published form
-		{"slack send-msg", "## murtaugh slack send-msg"},
-		{"slack.send_msg", "## murtaugh slack send-msg"},
+		{"slack send_msg", "## murtaugh slack send_msg"},
+		{"slack.send_msg", "## murtaugh slack send_msg"},
 		{"  Jobs   Define ", "## murtaugh jobs define"}, // whitespace/case tolerant
-		{"setup mcp-register", "## murtaugh setup mcp-register"},
+		{"setup mcp_register", "## murtaugh setup mcp_register"},
 		{"present_plan", "## murtaugh present_plan"}, // generated, no prose section
 	}
 	for _, tc := range cases {
@@ -83,8 +83,8 @@ func TestRender(t *testing.T) {
 	if ref.Render(nil) != ref.Full() {
 		t.Error("Render(nil) should return the full document")
 	}
-	if got := ref.Render([]string{"slack", "send-msg"}); !strings.HasPrefix(got, "## murtaugh slack send-msg") {
-		t.Errorf("Render([slack send-msg]) = %q…", firstLine(got))
+	if got := ref.Render([]string{"slack", "send-msg"}); !strings.HasPrefix(got, "## murtaugh slack send_msg") {
+		t.Errorf("Render([slack send_msg]) = %q…", firstLine(got))
 	}
 	if got := ref.Render([]string{"nope"}); !strings.Contains(got, "No help section") {
 		t.Error("Render of an unknown command should fall back with a notice")
@@ -172,7 +172,7 @@ func TestCommandsCoversProseAndTools(t *testing.T) {
 	for _, c := range cmds {
 		index[c] = true
 	}
-	for _, want := range []string{"ping", "slack send-msg", "brand new-tool"} {
+	for _, want := range []string{"ping", "slack send_msg", "brand new-tool"} {
 		if !index[want] {
 			t.Errorf("Commands() missing %q", want)
 		}
@@ -188,9 +188,9 @@ func firstLine(s string) string {
 
 func TestSectionMatchesAnySpelling(t *testing.T) {
 	ref := New([]Doc{doc("slack.send_msg", nil)})
-	for _, name := range []string{"slack send_msg", "slack.send_msg", "slack_send_msg", "slack send-msg"} {
+	for _, name := range []string{"slack send_msg", "slack.send_msg", "slack_send_msg", "slack send_msg"} {
 		got, ok := ref.Section(name)
-		if !ok || !strings.HasPrefix(got, "## murtaugh slack send-msg") {
+		if !ok || !strings.HasPrefix(got, "## murtaugh slack send_msg") {
 			t.Errorf("Section(%q) = %q, %v; want the hand-written send-msg section", name, firstLine(got), ok)
 		}
 	}
@@ -205,7 +205,7 @@ func TestOrphansListsProseWithNoTool(t *testing.T) {
 	if index["ping"] {
 		t.Error("ping has a tool but was reported as an orphan")
 	}
-	if !index["slack send-msg"] {
-		t.Errorf("slack send-msg has no tool here but was not reported: %v", orphans)
+	if !index["slack send_msg"] {
+		t.Errorf("slack send_msg has no tool here but was not reported: %v", orphans)
 	}
 }

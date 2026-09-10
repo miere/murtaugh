@@ -31,7 +31,7 @@ With `load: true` it lints the plist (`plutil`) then `launchctl bootout` →
 murtaugh setup launchd --binary-path "$(which murtaugh)" --load true
 ```
 
-## `setup_mcp-register` — register Murtaugh in an MCP client
+## `setup_mcp_register` — register Murtaugh in an MCP client
 
 *Register Murtaugh as an MCP server in opencode, auggie, or goose.*
 
@@ -58,8 +58,8 @@ sessions and logs by default. This is best-effort: if the recording fails, the
 client registration still succeeds and the result carries a warning.
 
 ```bash
-murtaugh setup mcp-register --client opencode --binary-path "$(which murtaugh)"
-murtaugh setup mcp-register --client goose --binary-path "$(which murtaugh)"
+murtaugh setup mcp_register --client opencode --binary-path "$(which murtaugh)"
+murtaugh setup mcp_register --client goose --binary-path "$(which murtaugh)"
 ```
 
 ## `setup_update` — self-update the binary

@@ -40,7 +40,7 @@ def _run_gh(args, check=False):
 def main(argv=None, *, murtaugh=_run_murtaugh, gh=_run_gh, now=datetime.now,
          state_file=STATE_FILE, dry_run=DRY_RUN) -> int:
     store = load_state(state_file)
-    res = murtaugh(["slack", "send-msg", "--to", chan, "--body", body, "--json"])
+    res = murtaugh(["slack", "send_msg", "--to", chan, "--body", body, "--json"])
     posted = json.loads(res.stdout)   # {"ok","channel","ts"}
     if not dry_run:
         save_state(store, state_file)
@@ -129,8 +129,8 @@ def step_run(context):
 
 `context.state_file` is a fresh temp path the harness `environment.py` provides
 per scenario, so state never leaks between scenarios.
-`context.murtaugh` (a `FakeMurtaugh`) records the routine's `slack send-msg`/
-`update-msg` calls and answers them with the `--json` payload; the shared
+`context.murtaugh` (a `FakeMurtaugh`) records the routine's `slack send_msg`/
+`update_msg` calls and answers them with the `--json` payload; the shared
 `Then a Slack message is posted to "…"` step asserts against `context.murtaugh.sent`.
 
 Run it:

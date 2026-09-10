@@ -76,7 +76,7 @@ def step_n_posts(context, count):
 
 @then('a message is updated in place')
 def step_updated(context):
-    assert context.murtaugh.updated, "expected an update-msg call, got none"
+    assert context.murtaugh.updated, "expected an update_msg call, got none"
 
 
 @then('no message is updated in place')

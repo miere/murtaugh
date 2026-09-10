@@ -39,7 +39,7 @@ tree, Murtaugh migrates the whole tree into SQLite, slims `config.yaml` down to
 `murtaugh cfg db migrate --to postgres --dsn-env MURTAUGH_DB_DSN`.
 
 Every `setup_*` tool is idempotent, so re-running is safe. The file writers
-(`setup_slack`, `setup_env`, `setup_launchd`, `setup_mcp-register`) back up any
+(`setup_slack`, `setup_env`, `setup_launchd`, `setup_mcp_register`) back up any
 file they replace (`<file>.bak.<timestamp>`); `setup_agents` writes the config
 database. `setup_bootstrap` seeds the workspace and is safe to re-run.
 Every `cfg` mutation **re-validates the whole config** and rolls back an invalid
@@ -59,11 +59,11 @@ there's no on-disk skill copy to keep in sync — see `reference/config-tools.md
    claude_code), or leave chat disabled.
 6. **`murtaugh cfg …`** — everything else in the DB: `cfg access set` (admin +
    allowed users), `cfg chat set` (turn chat on, pick agents), `cfg job set`,
-   `cfg mcp set`, `cfg workflow-rule set` / `cfg unfurl-rule set`.
+   `cfg mcp set`, `cfg workflow_rule set` / `cfg unfurl_rule set`.
    → `reference/config-tools.md`
 7. **`setup_launchd`** *(macOS, optional)* — install the daemon as a LaunchAgent.
    → `reference/daemon-and-clients.md`
-8. **`setup_mcp-register`** *(optional)* — register Murtaugh in an MCP client.
+8. **`setup_mcp_register`** *(optional)* — register Murtaugh in an MCP client.
 
 Later: **`setup_update`** self-updates the binary from a GitHub release (and the
 next start auto-migrates any old YAML tree, as above).

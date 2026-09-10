@@ -63,7 +63,7 @@ only if **none** of the above apply — the change is pure static rendering or a
 single fixed mapping:
 
 - a static `templates/*.json` payload (only values interpolated);
-- a one-line workflow rule (`cfg workflow-rule set`) with a fixed `template`/`reply` and no logic;
+- a one-line workflow rule (`cfg workflow_rule set`) with a fixed `template`/`reply` and no logic;
 - a config/threshold/schedule tweak.
 
 | Change | Tier |
@@ -89,11 +89,11 @@ its JSON output:
 > CLI seam to fake. Test those at the Go level, not in `behave`.
 
 ```
-murtaugh slack send-msg --to "#chan" --body "…" --json   ->   {"ok":true,"channel":"C…","ts":"170…"}
+murtaugh slack send_msg --to "#chan" --body "…" --json   ->   {"ok":true,"channel":"C…","ts":"170…"}
 ```
 
 > Prerequisite: this assumes the `murtaugh` CLI supports `--json` structured
-> output on `slack send-msg`/`update-msg`/`fetch-reactions`. That is a
+> output on `slack send_msg`/`update_msg`/`fetch_reactions`. That is a
 > Murtaugh-core capability the model depends on.
 
 Build every non-trivial routine with an **injection seam** so the CLI runners and
@@ -111,14 +111,14 @@ def _run_gh(args, check=False):
 
 def main(argv=None, *, murtaugh=_run_murtaugh, gh=_run_gh, now=datetime.now) -> int:
     ...
-    res = murtaugh(["slack", "send-msg", "--to", channel, "--body", body, "--json"])
+    res = murtaugh(["slack", "send_msg", "--to", channel, "--body", body, "--json"])
     posted = json.loads(res.stdout)          # {"ok","channel","ts"}
     rows = json.loads(gh(["pr", "list", "--json", "…"]).stdout)
     when = now()                             # not datetime.now() directly
 ```
 
-- **Slack** → route through the injected `murtaugh` runner (`slack send-msg`,
-  `slack update-msg`, `slack fetch-reactions`, all with `--json`); tests pass a
+- **Slack** → route through the injected `murtaugh` runner (`slack send_msg`,
+  `slack update_msg`, `slack fetch_reactions`, all with `--json`); tests pass a
   `FakeMurtaugh`. Never call `subprocess.run(["murtaugh", ...])` inline.
 - **`gh`** → route through the injected `gh` runner; tests pass a `FakeGh`. Never
   call `subprocess.run(["gh", ...])` inline.
@@ -212,7 +212,7 @@ The blueprint ships a harness at `../harness/` so each customisation composes
 instead of rebuilding mocking:
 
 - `fakes.py` — `FakeMurtaugh` (Slack-aware fake `murtaugh` runner: understands
-  `slack send-msg`/`update-msg`/`fetch-reactions`, records them structurally,
+  `slack send_msg`/`update_msg`/`fetch_reactions`, records them structurally,
   returns the `--json` payload, and can simulate failures / dropped timestamps),
   `FakeGh`/`FakeRunner` (scriptable command runner), `FakeClock`. No
   machine-specific imports.

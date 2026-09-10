@@ -171,7 +171,7 @@ skills — the install-flow essentials:
     --env VAULTRE_TOKEN=${VAULTRE_TOKEN}
   ```
 - **Jobs** (`cfg job set …` — see `murtaugh-jobs`), **workflow / unfurl rules**
-  (`cfg workflow-rule set --from-file …` / `cfg unfurl-rule set --from-file …` —
+  (`cfg workflow_rule set --from-file …` / `cfg unfurl_rule set --from-file …` —
   see `murtaugh-slack`).
 
 Store-wide helpers: `cfg show` (whole config), `cfg validate`, `cfg export

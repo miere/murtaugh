@@ -10,7 +10,7 @@ emphasis quietly lands on the wrong words.
 | Your reply to the user (streamed or posted) | **standard Markdown** |
 | A `markdown` block's `text` | **standard Markdown** |
 | A `mrkdwn` text object inside a blocks payload | **Slack mrkdwn** |
-| `send-msg`'s `text` field | **Slack mrkdwn** |
+| `send_msg`'s `text` field | **Slack mrkdwn** |
 | A canvas document | **standard Markdown** |
 
 ## Standard Markdown — your replies
@@ -33,7 +33,7 @@ Because every heading below `#` renders the same, a `##` → `###` → `####`
 hierarchy communicates nothing to the reader. Use `#` for a title and `##` for
 sections, and stop there.
 
-## Slack mrkdwn — Block Kit and `send-msg`
+## Slack mrkdwn — Block Kit and `send_msg`
 
 | Syntax | Notes |
 |---|---|
@@ -79,5 +79,5 @@ Murtaugh's two reply transports use different Slack APIs. Streaming sends a
 `markdown_text` chunk to `chat.appendStream`; the buffered fallback (used where a
 surface cannot host a stream, notably a canvas) posts via `chat.postMessage`,
 whose `text` field is mrkdwn. The buffered path now wraps replies in a `markdown`
-block so both speak standard Markdown — but `send-msg` and Block Kit text objects
+block so both speak standard Markdown — but `send_msg` and Block Kit text objects
 still take mrkdwn, which is why the split survives.

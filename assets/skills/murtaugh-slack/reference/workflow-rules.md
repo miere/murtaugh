@@ -4,8 +4,8 @@ How Murtaugh turns a button click into a response — the *reactive* half of Sla
 For composing and sending the message that carries the buttons, see
 `messaging.md`; for the blocks themselves, see `blocks.md`. This is operator
 config, stored in the config database and applied with
-`cfg workflow-rule set --name <n> --from-file <rule.yaml>` (view/manage with
-`cfg workflow-rule list|show|delete`). The `--from-file` YAML holds the rule
+`cfg workflow_rule set --name <n> --from-file <rule.yaml>` (view/manage with
+`cfg workflow_rule list|show|delete`). The `--from-file` YAML holds the rule
 **body** — the fields shown below, minus the outer map and name key; `--name` is
 the rule's key. Each `cfg` change re-validates the whole config and rolls back an
 invalid rule; **restart the gateway** to apply.
@@ -38,8 +38,8 @@ invalid rule; **restart the gateway** to apply.
 ## Stable routing keys
 
 Give every actionable element a stable `action_id` (and its block a `block_id`) so
-rules can target it precisely. **Check existing rules with `cfg workflow-rule
-list` / `cfg workflow-rule show` and reuse their keys** — e.g. the code-review flow
+rules can target it precisely. **Check existing rules with `cfg workflow_rule
+list` / `cfg workflow_rule show` and reuse their keys** — e.g. the code-review flow
 already uses `block_id: github_pull_request` with `action_id`s `approve_only` and
 `approve_merge`. Inventing parallel keys for the same behaviour leaves your
 buttons unwired.
@@ -50,7 +50,7 @@ buttons unwired.
 `--from-file` YAML for a rule holds its body (here, the `pr-approve` rule):
 
 ```yaml
-# pr-approve.yaml  →  cfg workflow-rule set --name pr-approve --from-file pr-approve.yaml
+# pr-approve.yaml  →  cfg workflow_rule set --name pr-approve --from-file pr-approve.yaml
 request_event: interactive
 match:
   type: block_actions
@@ -157,8 +157,8 @@ ephemeral, scope `allowed_users`, gate destructive actions) rather than ship-and
 ## Related
 
 - A worked, wired example lives in `examples/` (the `code-review-approval` rule
-  body you'd pass to `cfg workflow-rule set`) with its template at
+  body you'd pass to `cfg workflow_rule set`) with its template at
   `templates/code-review/02-approved.json`. Inspect installed rules with
-  `cfg workflow-rule show --name code-review-approval`.
+  `cfg workflow_rule show --name code-review-approval`.
 - Unfurling bare URLs into rich previews is a *different* mechanism (unfurl rules
   + `link_shared`), covered by `unfurl.md` in this skill.

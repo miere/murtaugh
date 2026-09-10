@@ -13,7 +13,7 @@ How to **organise and implement a customisation** of Murtaugh — the architectu
 and conventions that keep automations, Slack workflow rules, Block Kit templates,
 and scheduled jobs consistent, discoverable, and maintainable. Use this whenever
 the user is **building or changing how Murtaugh behaves**: adding or editing an
-automation routine, wiring a Slack workflow rule (`cfg workflow-rule set`), creating
+automation routine, wiring a Slack workflow rule (`cfg workflow_rule set`), creating
 a Block Kit template, scheduling a job (`cfg job set`), or reorganising any of these.
 It is **not** needed for ordinary chat, reading data (reminders, mail, etc.), or
 one-off tasks that don't touch the config.
@@ -34,7 +34,7 @@ one-off tasks that don't touch the config.
 `automations/` layout (`shared/`, self-contained routine folders, the single
 `main.py` entrypoint, `state/`, routine-local `lib/`, imports), how `templates/`
 and `skills/` work, and how customisations are wired into the config store via
-`cfg workflow-rule set` / `cfg job set`.
+`cfg workflow_rule set` / `cfg job set`.
 
 ## Workflow — follow this every time you customise
 
@@ -50,7 +50,7 @@ and `skills/` work, and how customisations are wired into the config store via
    routine-local helpers → that routine's `lib/`; state → that routine's
    `state/`; static Block Kit → a `templates/` file.
 5. **Wire it.** Register the entrypoint by its deployed `~/.config/murtaugh/...`
-   path with `cfg job set` (schedule) and/or `cfg workflow-rule set` (Slack
+   path with `cfg job set` (schedule) and/or `cfg workflow_rule set` (Slack
    trigger), then restart the gateway to apply.
 6. **Update the registry.** Add or update the routine's entry in
    `automations/AGENTS.md` in the *same* change. A stale registry is a bug.
