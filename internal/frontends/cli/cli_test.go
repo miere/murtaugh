@@ -259,3 +259,23 @@ func TestRun_LiteralUnderscoreNameWins(t *testing.T) {
 		t.Fatalf("Run returned error: %v", err)
 	}
 }
+
+// Scripts written against the old hyphenated names must keep working after the
+// snake_case rename, and a model shelling out types the MCP form.
+func TestRun_AnySpellingReachesTheSameTool(t *testing.T) {
+	for _, argv := range [][]string{
+		{"slack", "send_msg"},
+		{"slack", "send-msg"},
+		{"slack_send_msg"},
+		{"slack.send_msg"},
+	} {
+		f, stdout, _ := newTestFrontend(t, &fakeTool{name: "slack.send_msg", result: "reached"})
+		if err := f.Run(context.Background(), argv); err != nil {
+			t.Errorf("Run(%v): %v", argv, err)
+			continue
+		}
+		if got := stdout.String(); got != "reached\n" {
+			t.Errorf("Run(%v) printed %q, want the tool's output", argv, got)
+		}
+	}
+}

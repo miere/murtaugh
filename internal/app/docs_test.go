@@ -79,16 +79,10 @@ func TestEveryFlagIsDocumented(t *testing.T) {
 // The generated half cannot produce one of these, so only a stale hand-written
 // section can.
 func TestNoProseSectionOutlivesItsTool(t *testing.T) {
-	registered := map[string]bool{}
-	for _, d := range helpDocs(t) {
-		registered[strings.ReplaceAll(strings.ReplaceAll(d.Name(), ".", " "), "_", " ")] = true
-	}
-	for _, cmd := range HelpReference("test").Commands() {
-		key := strings.ReplaceAll(cmd, "_", " ")
-		if registered[key] || nonToolCommands[key] {
-			continue
+	for _, cmd := range HelpReference("test").Orphans() {
+		if !nonToolCommands[cmd] {
+			t.Errorf("cli-help.md documents %q, but no tool is registered under that name", cmd)
 		}
-		t.Errorf("cli-help.md documents %q, but no tool is registered under that name", cmd)
 	}
 }
 
