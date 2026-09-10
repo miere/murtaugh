@@ -3,8 +3,14 @@ package client
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
+	"strings"
 
 	slackgo "github.com/slack-go/slack"
 )
@@ -219,18 +225,64 @@ func (c *SlackClient) CreateChannel(ctx context.Context, p CreateChannelParams) 
 	return res, nil
 }
 
-// EditCanvas applies a single change to a canvas via canvases.edit. delete omits
-// the document content; every other operation carries the markdown.
+// EditCanvas sends deletes itself, because slack-go always serialises an empty
+// document_content and Slack rejects a delete that carries one.
 func (c *SlackClient) EditCanvas(ctx context.Context, p CanvasEditParams) error {
-	change := slackgo.CanvasChange{Operation: p.Operation, SectionID: p.SectionID}
-	if p.Operation != "delete" {
-		change.DocumentContent = slackgo.DocumentContent{Type: "markdown", Markdown: p.Markdown}
+	if p.Operation == "delete" {
+		return c.deleteCanvasSection(ctx, p.CanvasID, p.SectionID)
+	}
+	change := slackgo.CanvasChange{
+		Operation:       p.Operation,
+		SectionID:       p.SectionID,
+		DocumentContent: slackgo.DocumentContent{Type: "markdown", Markdown: p.Markdown},
 	}
 	if err := c.api.EditCanvasContext(ctx, slackgo.EditCanvasParams{
 		CanvasID: p.CanvasID,
 		Changes:  []slackgo.CanvasChange{change},
 	}); err != nil {
 		return slackError("canvases.edit", err)
+	}
+	return nil
+}
+
+func (c *SlackClient) deleteCanvasSection(ctx context.Context, canvasID, sectionID string) error {
+	changes, err := json.Marshal([]canvasDelete{{Operation: "delete", SectionID: sectionID}})
+	if err != nil {
+		return err
+	}
+	return c.postForm(ctx, "canvases.edit", url.Values{
+		"canvas_id": {canvasID},
+		"changes":   {string(changes)},
+	})
+}
+
+type canvasDelete struct {
+	Operation string `json:"operation"`
+	SectionID string `json:"section_id"`
+}
+
+func (c *SlackClient) postForm(ctx context.Context, method string, values url.Values) error {
+	values.Set("token", c.token)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint+method, strings.NewReader(values.Encode()))
+	if err != nil {
+		return slackError(method, err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return slackError(method, err)
+	}
+	defer resp.Body.Close()
+	var out struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
+		return slackError(method, fmt.Errorf("decode response (HTTP %d): %w", resp.StatusCode, err))
+	}
+	if !out.OK {
+		return slackError(method, errors.New(out.Error))
 	}
 	return nil
 }
