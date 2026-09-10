@@ -118,7 +118,7 @@ func TestBridgeUnsafe(t *testing.T) {
 func TestACPAggregatorRegisterSession(t *testing.T) {
 	reg := registryWith("ask")
 	srv := mcpbridge.NewServer("/tmp/murtaugh-test-agg.sock", nil)
-	aggr, err := newACPAggregator(srv, reg, resolvedFor(t, "", "ask"), nil, nil, nil)
+	aggr, err := newACPAggregator(srv, reg, resolvedFor(t, "", "ask"), nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("newACPAggregator: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestACPAggregatorToolsetAndClose(t *testing.T) {
 	reg := registryWith("ask", "slack.send_msg")
 	srv := mcpbridge.NewServer("/tmp/murtaugh-test-agg2.sock", nil)
 	// No external MCP servers configured: the toolset is just the built-ins.
-	aggr, err := newACPAggregator(srv, reg, resolvedFor(t, "", "ask", "slack"), nil, nil, nil)
+	aggr, err := newACPAggregator(srv, reg, resolvedFor(t, "", "ask", "slack"), nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("newACPAggregator: %v", err)
 	}

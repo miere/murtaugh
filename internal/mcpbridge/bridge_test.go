@@ -136,3 +136,26 @@ func TestUnregisterStopsNewClaims(t *testing.T) {
 		t.Fatal("token still registered after Unregister")
 	}
 }
+
+// Only the session's own backend knows the alias; the same tool keeps its name in
+// every other session.
+func TestBridgePublishesUnderTheSessionsAliases(t *testing.T) {
+	srv, ctx := startServer(t)
+	aliased, err := srv.Register(Session{Tools: []tools.Tool{&echoTool{name: "ask"}}, Aliases: map[string]string{"ask": "AskUserQuestion"}})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	plain, err := srv.Register(Session{Tools: []tools.Tool{&echoTool{name: "ask"}}})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	for token, want := range map[string]string{aliased: "AskUserQuestion", plain: "ask"} {
+		list, err := connectThroughBridge(t, ctx, srv.SocketPath(), token).ListTools(ctx, &mcpsdk.ListToolsParams{})
+		if err != nil {
+			t.Fatalf("ListTools: %v", err)
+		}
+		if len(list.Tools) != 1 || list.Tools[0].Name != want {
+			t.Errorf("session published %+v, want one tool named %s", list.Tools, want)
+		}
+	}
+}

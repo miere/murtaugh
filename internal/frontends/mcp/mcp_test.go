@@ -276,7 +276,7 @@ func TestAggregator_GateDeniesAndSkipsInvoke(t *testing.T) {
 	tool := &gatedTool{name: "jobs.run", requires: true, summary: "run nightly job", invoked: &invoked}
 	approver := &fakeApprover{allow: false, note: "denied by human"}
 
-	session := newConnectedClient(t, NewFromTools([]tools.Tool{tool}, approver))
+	session := newConnectedClient(t, NewFromTools([]tools.Tool{tool}, approver, nil))
 	res := callTool(t, session, "jobs_run")
 
 	if invoked {
@@ -295,7 +295,7 @@ func TestAggregator_GateAllowsAndInvokes(t *testing.T) {
 	tool := &gatedTool{name: "jobs.run", requires: true, summary: "run", invoked: &invoked}
 	approver := &fakeApprover{allow: true}
 
-	session := newConnectedClient(t, NewFromTools([]tools.Tool{tool}, approver))
+	session := newConnectedClient(t, NewFromTools([]tools.Tool{tool}, approver, nil))
 	res := callTool(t, session, "jobs_run")
 
 	if !invoked {
@@ -310,7 +310,7 @@ func TestAggregator_NoApproverNeverGates(t *testing.T) {
 	invoked := false
 	tool := &gatedTool{name: "jobs.run", requires: true, invoked: &invoked}
 
-	session := newConnectedClient(t, NewFromTools([]tools.Tool{tool}, nil))
+	session := newConnectedClient(t, NewFromTools([]tools.Tool{tool}, nil, nil))
 	_ = callTool(t, session, "jobs_run")
 
 	if !invoked {
@@ -318,12 +318,9 @@ func TestAggregator_NoApproverNeverGates(t *testing.T) {
 	}
 }
 
-// --- MCPName override -------------------------------------------------------
-
 type namedTool struct {
 	tools.Tool
-	name      string
-	published string
+	name string
 }
 
 func (t namedTool) Name() string        { return t.name }
@@ -331,45 +328,41 @@ func (t namedTool) Description() string { return "a tool" }
 func (t namedTool) InputSchema() *jsonschema.Schema {
 	return &jsonschema.Schema{Type: "object"}
 }
-func (t namedTool) MCPName() string { return t.published }
 func (t namedTool) Invoke(context.Context, map[string]any) (any, error) {
 	return "ok", nil
 }
 
-func TestPublishedNameUsesTheOverride(t *testing.T) {
-	got := publishedName(namedTool{name: "ask", published: "AskUserQuestion"})
-	if got != "AskUserQuestion" {
+func TestPublishedNameUsesTheBackendAlias(t *testing.T) {
+	f := NewFromTools(nil, nil, map[string]string{"ask": "AskUserQuestion"})
+	if got := f.publishedName(namedTool{name: "ask"}); got != "AskUserQuestion" {
 		t.Errorf("publishedName = %q, want AskUserQuestion", got)
 	}
-}
-
-// An empty override is ignored rather than publishing a nameless tool.
-func TestPublishedNameFallsBackToTheRegistryKey(t *testing.T) {
-	if got := publishedName(namedTool{name: "jobs.define", published: ""}); got != "jobs_define" {
-		t.Errorf("publishedName = %q, want jobs_define", got)
+	if got := f.publishedName(namedTool{name: "jobs.define"}); got != "jobs_define" {
+		t.Errorf("publishedName = %q, want jobs_define for a tool with no alias", got)
 	}
 }
 
-// An override is sanitised like any other name: implementing an interface must
-// not be a way to smuggle characters a provider will reject.
-func TestPublishedNameSanitisesTheOverride(t *testing.T) {
-	if got := publishedName(namedTool{name: "ask", published: "Ask.User Question"}); got != "Ask_User_Question" {
-		t.Errorf("publishedName = %q, want the override sanitised", got)
+// The standalone server has no backend, so every tool keeps its own name there.
+func TestPublishedNameWithoutAliasesIsTheToolsOwn(t *testing.T) {
+	if got := NewFromTools(nil, nil, nil).publishedName(namedTool{name: "ask"}); got != "ask" {
+		t.Errorf("publishedName = %q, want ask", got)
 	}
 }
 
-// The collision guard has to see overrides too. Without this, a tool could
-// quietly shadow another by publishing under its name — and the MCP SDK shadows
-// duplicates silently rather than erroring.
-func TestOverrideCollisionPanics(t *testing.T) {
+func TestPublishedNameSanitisesTheAlias(t *testing.T) {
+	f := NewFromTools(nil, nil, map[string]string{"ask": "Ask.User Question"})
+	if got := f.publishedName(namedTool{name: "ask"}); got != "Ask_User_Question" {
+		t.Errorf("publishedName = %q, want the alias sanitised", got)
+	}
+}
+
+// The MCP SDK silently shadows a duplicate name, so an alias that lands on another
+// tool's name has to fail loudly instead.
+func TestAliasCollisionPanics(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {
-			t.Fatal("expected a panic when an override collides with another tool")
+			t.Fatal("expected a panic when an alias collides with another tool")
 		}
 	}()
-	f := NewFromTools([]tools.Tool{
-		namedTool{name: "ask", published: "ping"},
-		namedTool{name: "ping", published: ""},
-	}, nil)
-	f.Server()
+	NewFromTools([]tools.Tool{namedTool{name: "ask"}, namedTool{name: "ping"}}, nil, map[string]string{"ask": "ping"}).Server()
 }

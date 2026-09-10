@@ -121,6 +121,9 @@ binary, unable to reach Slack, with nobody able to tell the user.
 - A tool whose output lands in the thread the user is already talking in has
   no prefix: `attach`, `ask`, `present_plan`. A Slack tool whose output can
   land anywhere else carries `slack_`, so the model can tell the two apart.
+- A name another agent runtime already knows, like Claude Code's
+  `AskUserQuestion`, is an alias that runtime's backend declares
+  (`claudecode.ToolAliases`), never the tool's own name.
 - This covers our own tools only. Tools proxied from other MCP servers keep
   the names their servers give them.
 - `TestToolNamesAreSnakeCase` in `internal/app` enforces the pattern across
