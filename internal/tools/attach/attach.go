@@ -1,7 +1,7 @@
 // Package attach implements the `attach` tool: deliver a file from the agent's
 // workspace to the user as a first-class reply attachment.
 //
-// Unlike `slack.send-msg`, this tool is transport-agnostic — it knows nothing
+// Unlike `slack.send_msg`, this tool is transport-agnostic — it knows nothing
 // about Slack channels or threads. It returns an *agent.AttachmentEvent and the
 // native loop turns that into an EventAttachment, which the chat handler uploads
 // into the turn's own conversation. That keeps "reply with a file" consistent

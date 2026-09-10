@@ -166,7 +166,7 @@ func absDiffSeconds(a, b string) float64 {
 	return d
 }
 
-// send-msg returned this DM ID and fetch-msgs then refused it as "not found".
+// slack_send_msg returned this DM ID and slack_fetch_msgs then refused it as "not found".
 func TestInvoke_ReadsBackAConversationSendMsgReturned(t *testing.T) {
 	for _, ref := range []string{"D0B69D0JVUK", "U0B20G0ET9T", "<@U0B20G0ET9T>", "@U0B20G0ET9T"} {
 		fake := &slacktest.FakeAPI{
