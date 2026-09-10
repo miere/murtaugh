@@ -229,7 +229,7 @@ func (c *acpSession) aggregatorServers(meta agent.SessionMetadata) ([]any, func(
 	if c.opts.Aggregator == nil {
 		return []any{}, nil
 	}
-	spec, release, err := c.opts.Aggregator.RegisterSession(meta)
+	spec, release, err := c.opts.Aggregator.RegisterSession(meta, c.emitTurnEvent)
 	if err != nil {
 		c.log.Warn("aggregator registration failed; ACP agent will have no Murtaugh tools", "error", err)
 		return []any{}, nil
@@ -250,6 +250,30 @@ func (c *acpSession) aggregatorServers(meta agent.SessionMetadata) ([]any, func(
 		"env":     env,
 	}
 	return []any{server}, release
+}
+
+func (c *acpSession) emitTurnEvent(ev agent.Event) bool {
+	c.mu.Lock()
+	sub := c.active
+	scope := c.scope
+	if sub != nil {
+		sub.wg.Add(1)
+	}
+	c.mu.Unlock()
+	if sub == nil {
+		return false
+	}
+	defer sub.wg.Done()
+	ctx := context.Background()
+	if scope.ctx != nil {
+		ctx = scope.ctx
+	}
+	select {
+	case sub.events <- ev:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func (c *acpSession) sessionCWD() string {

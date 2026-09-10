@@ -64,14 +64,9 @@ func (t *Tool) InputSchema() *jsonschema.Schema {
 	}
 }
 
-// Invoke validates the requested file and returns an *agent.AttachmentEvent for
-// the native loop to emit. The path is resolved against the workspace root and
-// rejected if it escapes; the bytes are NOT read here — the resolved path is
-// carried through to the chat handler, which streams the file to Slack at upload
-// time — so a large attachment is never buffered in the conversation. Validation
-// (in-root, exists, non-empty, regular file, size ceiling) happens here so the
-// model gets an actionable error it can recover from rather than a late failure.
-func (t *Tool) Invoke(_ context.Context, args map[string]any) (any, error) {
+// Invoke hands the file to the turn's emitter when it runs behind the MCP bridge,
+// because a result returned over MCP only ever reaches the model, never the user.
+func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 	path, _ := args["path"].(string)
 	title, _ := args["title"].(string)
 	comment, _ := args["comment"].(string)
@@ -100,10 +95,18 @@ func (t *Tool) Invoke(_ context.Context, args map[string]any) (any, error) {
 		return nil, fmt.Errorf("error: %q is %d bytes, over the %d-byte attachment limit", path, info.Size(), int64(maxAttachmentBytes))
 	}
 
-	return &agent.AttachmentEvent{
+	att := &agent.AttachmentEvent{
 		Filename: filepath.Base(abs),
 		Title:    title,
 		Comment:  comment,
 		Path:     abs,
-	}, nil
+	}
+	emit, ok := agent.TurnEmitterFromContext(ctx)
+	if !ok {
+		return att, nil
+	}
+	if !emit(agent.Event{Type: agent.EventAttachment, Attachment: att}) {
+		return nil, fmt.Errorf("error: there is no conversation in progress to attach %q to", path)
+	}
+	return fmt.Sprintf("Attached %s (%d bytes) to your reply.", att.Filename, info.Size()), nil
 }

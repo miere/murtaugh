@@ -96,12 +96,8 @@ func (a *acpAggregator) Close() error {
 	return nil
 }
 
-// RegisterSession registers this session's toolset under a fresh token and
-// returns the stdio bridge server to advertise. The session's Slack location is
-// injected into every tool-call context so the approver posts in the right
-// thread.
-func (a *acpAggregator) RegisterSession(meta agent.SessionMetadata) (agent.MCPServerSpec, func(), error) {
-	decorate := turnDecorator(meta, a.agentEnv)
+func (a *acpAggregator) RegisterSession(meta agent.SessionMetadata, emit agent.TurnEmitter) (agent.MCPServerSpec, func(), error) {
+	decorate := turnDecorator(meta, a.agentEnv, emit)
 	token, err := a.server.Register(mcpbridge.Session{
 		Tools:       a.resolvedToolset(),
 		Approver:    a.approver,
@@ -122,19 +118,9 @@ func (a *acpAggregator) RegisterSession(meta agent.SessionMetadata) (agent.MCPSe
 	return spec, func() { a.server.Unregister(token) }, nil
 }
 
-// turnDecorator returns a context decorator that carries what a bridged tool
-// needs to know about its caller: the session's Slack location (so an
-// interactive tool posts in the right thread) and the agent's own environment
-// (so a tool that spawns a process spawns it as the agent, not as the daemon).
-//
-// It returns nil only when there is NEITHER — a non-chat session for an agent
-// with no environment stays undecorated, matching GateApprover's headless
-// behaviour. A headless session for an agent that DOES have an environment still
-// gets it: a delegated job authenticating gcloud has the same split-brain problem
-// a chat turn does, and no thread to report it in.
-func turnDecorator(meta agent.SessionMetadata, agentEnv []string) func(context.Context) context.Context {
+func turnDecorator(meta agent.SessionMetadata, agentEnv []string, emit agent.TurnEmitter) func(context.Context) context.Context {
 	hasLocation := strings.TrimSpace(meta.ChannelID) != ""
-	if !hasLocation && len(agentEnv) == 0 {
+	if !hasLocation && len(agentEnv) == 0 && emit == nil {
 		return nil
 	}
 	loc := agent.TurnLocation{ChannelID: meta.ChannelID, ThreadTS: meta.ThreadTS}
@@ -142,7 +128,7 @@ func turnDecorator(meta agent.SessionMetadata, agentEnv []string) func(context.C
 		if hasLocation {
 			ctx = agent.WithTurnLocation(ctx, loc)
 		}
-		return agent.WithTurnEnv(ctx, agentEnv)
+		return agent.WithTurnEmitter(agent.WithTurnEnv(ctx, agentEnv), emit)
 	}
 }
 

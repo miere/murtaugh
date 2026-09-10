@@ -13,7 +13,7 @@ import (
 // the context: the thread to answer in, and the environment to spawn with.
 func TestTurnDecoratorCarriesBothFacts(t *testing.T) {
 	env := []string{"CLOUDSDK_CONFIG=/srv/work/.gcloud"}
-	decorate := turnDecorator(agent.SessionMetadata{ChannelID: "C1", ThreadTS: "1.1"}, env)
+	decorate := turnDecorator(agent.SessionMetadata{ChannelID: "C1", ThreadTS: "1.1"}, env, nil)
 	if decorate == nil {
 		t.Fatal("no decorator for a session that has both a location and an environment")
 	}
@@ -34,7 +34,7 @@ func TestTurnDecoratorCarriesBothFacts(t *testing.T) {
 // report it in — so "no channel" must not mean "no environment".
 func TestTurnDecoratorRunsForHeadlessSessions(t *testing.T) {
 	env := []string{"AWS_CONFIG_FILE=/srv/work/.aws/config"}
-	decorate := turnDecorator(agent.SessionMetadata{}, env)
+	decorate := turnDecorator(agent.SessionMetadata{}, env, nil)
 	if decorate == nil {
 		t.Fatal("a headless session for an agent with an environment got no decorator")
 	}
@@ -53,7 +53,18 @@ func TestTurnDecoratorRunsForHeadlessSessions(t *testing.T) {
 // TestTurnDecoratorIsNilWhenThereIsNothingToSay keeps the existing contract:
 // a native-shaped, non-chat session stays undecorated.
 func TestTurnDecoratorIsNilWhenThereIsNothingToSay(t *testing.T) {
-	if decorate := turnDecorator(agent.SessionMetadata{}, nil); decorate != nil {
+	if decorate := turnDecorator(agent.SessionMetadata{}, nil, nil); decorate != nil {
 		t.Error("a session with neither a location nor an environment was decorated anyway")
+	}
+}
+
+func TestTurnDecoratorCarriesTheEmitterForAHeadlessSession(t *testing.T) {
+	emit := agent.TurnEmitter(func(agent.Event) bool { return true })
+	decorate := turnDecorator(agent.SessionMetadata{}, nil, emit)
+	if decorate == nil {
+		t.Fatal("a session with only an emitter got no decorator")
+	}
+	if _, ok := agent.TurnEmitterFromContext(decorate(context.Background())); !ok {
+		t.Fatal("decorated context carries no emitter")
 	}
 }

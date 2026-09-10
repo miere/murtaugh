@@ -44,11 +44,9 @@ type SessionMetadata struct {
 // agent package stays free of those dependencies. nil means the agent is told
 // about no Murtaugh MCP server (the prior behaviour).
 type Aggregator interface {
-	// RegisterSession binds a session (its Slack location drives where approval
-	// prompts are asked) and returns the MCP server spec to advertise in
-	// session/new, plus a release to call when the session ends. An error means
-	// no server is advertised; the agent simply gets no Murtaugh tools.
-	RegisterSession(meta SessionMetadata) (server MCPServerSpec, release func(), err error)
+	// RegisterSession takes the session's emitter so a bridged tool can reach the user
+	// through the turn's own stream rather than a side channel.
+	RegisterSession(meta SessionMetadata, emit TurnEmitter) (server MCPServerSpec, release func(), err error)
 }
 
 // MCPServerSpec is the stdio MCP server an ACP agent is asked to spawn — the
@@ -223,6 +221,28 @@ func WithTurnLocation(ctx context.Context, loc TurnLocation) context.Context {
 func TurnLocationFromContext(ctx context.Context) (TurnLocation, bool) {
 	loc, ok := ctx.Value(turnLocationKey{}).(TurnLocation)
 	return loc, ok && loc.ChannelID != ""
+}
+
+// TurnEmitter adds an event to the session's in-flight turn, reporting false when no
+// turn is in flight, so a tool never claims to have delivered what nobody will see.
+type TurnEmitter func(Event) bool
+
+type turnEmitterKey struct{}
+
+// WithTurnEmitter exists because tools behind the MCP bridge run outside the backend
+// and cannot otherwise put anything on the turn's stream.
+func WithTurnEmitter(ctx context.Context, emit TurnEmitter) context.Context {
+	if emit == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, turnEmitterKey{}, emit)
+}
+
+// TurnEmitterFromContext is absent for the native loop, which reads events straight
+// from tool results instead.
+func TurnEmitterFromContext(ctx context.Context) (TurnEmitter, bool) {
+	emit, ok := ctx.Value(turnEmitterKey{}).(TurnEmitter)
+	return emit, ok
 }
 
 type turnEnvKey struct{}

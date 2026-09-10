@@ -14,11 +14,13 @@ type fakeAggregator struct {
 	registered int
 	released   int
 	meta       agent.SessionMetadata
+	emit       agent.TurnEmitter
 }
 
-func (f *fakeAggregator) RegisterSession(meta agent.SessionMetadata) (agent.MCPServerSpec, func(), error) {
+func (f *fakeAggregator) RegisterSession(meta agent.SessionMetadata, emit agent.TurnEmitter) (agent.MCPServerSpec, func(), error) {
 	f.registered++
 	f.meta = meta
+	f.emit = emit
 	spec := agent.MCPServerSpec{
 		Name:    "murtaugh",
 		Command: "/bin/murtaugh",
@@ -80,6 +82,9 @@ func TestNewSession_RegistersAggregatorAndReleasesOnClose(t *testing.T) {
 	}
 	if agg.meta.ChannelID != "C1" {
 		t.Fatalf("session metadata not forwarded to aggregator: %+v", agg.meta)
+	}
+	if agg.emit == nil {
+		t.Fatal("session did not hand the aggregator its turn emitter")
 	}
 	c.CloseSession(sess.ID)
 	if agg.released != 1 {
