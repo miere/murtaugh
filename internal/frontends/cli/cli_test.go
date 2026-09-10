@@ -223,3 +223,39 @@ func TestRun_PassesParsedArgs_ToTool(t *testing.T) {
 		t.Fatalf("tool got attachment_type=%v, want %v", got, want)
 	}
 }
+
+// TestRun_MCPUnderscoreForm_ResolvesSameTool covers the spelling mismatch a
+// model hits: its tool list only ever shows `jobs_run`, so that is what it
+// types when it falls back to a terminal.
+func TestRun_MCPUnderscoreForm_ResolvesSameTool(t *testing.T) {
+	for _, argv := range [][]string{
+		{"jobs_run", "--name", "demo"},
+		{"jobs", "run", "--name", "demo"},
+	} {
+		tl := &fakeTool{
+			name: "jobs.run",
+			schema: &jsonschema.Schema{
+				Type:       "object",
+				Properties: map[string]*jsonschema.Schema{"name": {Type: "string"}},
+			},
+			result: "ok",
+		}
+		f, _, _ := newTestFrontend(t, tl)
+		if err := f.Run(context.Background(), argv); err != nil {
+			t.Fatalf("Run(%v) returned error: %v", argv, err)
+		}
+		if got, want := tl.got["name"], "demo"; got != want {
+			t.Fatalf("Run(%v): tool got name=%v, want %v", argv, got, want)
+		}
+	}
+}
+
+// TestRun_LiteralUnderscoreNameWins ensures the underscore fallback does not
+// shadow a tool whose registry name genuinely contains one.
+func TestRun_LiteralUnderscoreNameWins(t *testing.T) {
+	tl := &fakeTool{name: "present_plan", result: "ok"}
+	f, _, _ := newTestFrontend(t, tl)
+	if err := f.Run(context.Background(), []string{"present_plan"}); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+}

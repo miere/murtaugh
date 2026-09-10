@@ -24,6 +24,7 @@ import (
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/frontends/cli"
 	"github.com/miere/murtaugh/internal/frontends/mcp"
+	"github.com/miere/murtaugh/internal/help"
 	"github.com/miere/murtaugh/internal/journal"
 	"github.com/miere/murtaugh/internal/slack/askcard"
 	"github.com/miere/murtaugh/internal/slack/authcard"
@@ -34,6 +35,7 @@ import (
 	"github.com/miere/murtaugh/internal/tools/ask"
 	authrequest "github.com/miere/murtaugh/internal/tools/auth/request"
 	cfgtools "github.com/miere/murtaugh/internal/tools/cfg"
+	"github.com/miere/murtaugh/internal/tools/helptool"
 	"github.com/miere/murtaugh/internal/tools/jobs/define"
 	"github.com/miere/murtaugh/internal/tools/jobs/run"
 	journalprune "github.com/miere/murtaugh/internal/tools/journal/prune"
@@ -300,6 +302,12 @@ func buildRegistry(cfg config.Config, cfgStore config.Store, configPath, version
 	reg := tools.NewRegistry()
 	reg.Register(ping.New())
 	reg.Register(versiontool.New(version))
+
+	// `help` documents the registry it lives in, so its doc source is a
+	// closure resolved at call time rather than a captured slice — at this
+	// point the registry holds two tools. Over MCP it is how an agent looks up
+	// a command's flags instead of probing the CLI for them.
+	reg.Register(helptool.New(func() []help.Doc { return HelpDocs(reg) }))
 
 	jobsLookup := func(name string) (config.JobProfile, bool) {
 		j, ok := cfg.Jobs[name]

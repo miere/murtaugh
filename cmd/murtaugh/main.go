@@ -26,7 +26,6 @@ import (
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/config/migrate"
 	configstore "github.com/miere/murtaugh/internal/config/store"
-	"github.com/miere/murtaugh/internal/help"
 	"github.com/miere/murtaugh/internal/journal"
 	"github.com/miere/murtaugh/internal/mcpbridge"
 )
@@ -81,9 +80,11 @@ func run(rawArgs []string) error {
 	}
 	// Help is resolved before config bootstrap/load so `murtaugh help` (and
 	// `murtaugh <command> --help`) work on a machine that has never been
-	// configured. The single embedded reference is the source of truth.
+	// configured. app.HelpReference builds a dependency-free registry for this
+	// reason: the flag tables come from the tools themselves, so they cannot
+	// disagree with what the binary will actually accept.
 	if tokens, ok := helpRequest(args); ok {
-		fmt.Fprint(os.Stdout, help.Render(tokens))
+		fmt.Fprint(os.Stdout, app.HelpReference(version).Render(tokens))
 		return nil
 	}
 	mode, rest := selectMode(args)

@@ -62,6 +62,7 @@ var ToolFamilies = []ToolFamily{
 	{Name: "jobs", Label: "Jobs", Description: "Run and define scheduled jobs."},
 	{Name: "journal", Label: "Journal", Description: "Query and trim the event journal."},
 	{Name: "troubleshoot", Label: "Troubleshoot", Description: "Collect a diagnostics bundle."},
+	{Name: "help", Label: "Help", Description: "Look up a Murtaugh command's exact flags instead of guessing at them.", Default: true},
 	{Name: "ping", Label: "Ping", Description: "Check that the tool surface answers."},
 	{Name: "version", Label: "Version", Description: "Report the running version."},
 	{Name: toolset.GroupManage, Label: "Manage", Description: "See the skills that teach configuring Murtaugh.", AdminOnly: true},

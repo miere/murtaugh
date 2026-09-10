@@ -16,7 +16,7 @@ import (
 // flags apply to whichever backend --type selects: --command/--arg/--env for
 // acp and claude_code, --model for native and claude_code. Booleans and arrays
 // follow the CLI convention (--flag true; repeat --arg for lists).
-func agentSchema(nameRequired bool) *jsonschema.Schema {
+func agentSchema(typeRequired bool) *jsonschema.Schema {
 	props := map[string]*jsonschema.Schema{
 		"name":                   {Type: "string", Description: "agent name (the key it is stored under)"},
 		"type":                   {Type: "string", Description: "backend: native | acp | claude_code"},
@@ -51,8 +51,15 @@ func agentSchema(nameRequired bool) *jsonschema.Schema {
 		"arg":     {Type: "array", Items: &jsonschema.Schema{Type: "string"}, Description: "backend process argument (repeatable; acp/claude_code)"},
 		"env":     {Type: "array", Items: &jsonschema.Schema{Type: "string"}, Description: "backend env var KEY=VALUE (repeatable; acp/claude_code)"},
 	}
-	_ = nameRequired // required-ness is enforced in Invoke, not the schema
-	return &jsonschema.Schema{Type: "object", Properties: props}
+	// Both verbs require --name; only create requires --type, since update
+	// inherits the stored backend. Declaring it here rather than leaving it to
+	// Invoke means an MCP client rejects the malformed call before it is made,
+	// and `murtaugh help cfg agent create` shows the flag as required.
+	required := []string{"name"}
+	if typeRequired {
+		required = append(required, "type")
+	}
+	return &jsonschema.Schema{Type: "object", Properties: props, Required: required}
 }
 
 // agentCreateTool creates a new agent from typed flags.

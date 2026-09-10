@@ -19,7 +19,19 @@ Usage: murtaugh [--config PATH] <command> [flags...]
 
 Run `murtaugh help` for this full document, or `murtaugh help <command>`
 (e.g. `murtaugh help slack send-msg`) for a single command. `murtaugh <command>
---help` works too.
+--help` works too. Agents reach the same reference through the `help` tool
+rather than shelling out for it.
+
+**This file is half of the reference.** Every flag table you see in the
+rendered output is generated from the owning tool's `InputSchema` at render
+time — flag names, types, requiredness, enum values and repeatability all come
+from the code, so they cannot drift from what the binary accepts. A tool with
+no section here still gets a complete generated one appended.
+
+What this file contributes is everything a schema cannot say: worked examples,
+the consequence of a flag, which changes need a daemon restart, how two flags
+interact. **Editing a flag table below has no effect** — the renderer replaces
+it. Change the tool's schema instead, and put the reasoning here.
 
 # Global conventions
 

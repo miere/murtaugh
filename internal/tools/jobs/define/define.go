@@ -73,7 +73,7 @@ func (t *Tool) ApprovalSummary(args map[string]any) string {
 
 // Description returns the human-facing summary used by MCP clients.
 func (t *Tool) Description() string {
-	return "Register a job (command, args, workdir, timeout, schedule/every) in jobs.yaml."
+	return "Register a job (command, args, workdir, timeout, schedule/every) in the config store. Equivalent to `cfg job set`; the job is held for admin approval before its first scheduled run."
 }
 
 // InputSchema returns the JSON Schema for the tool's arguments. `args` is a
