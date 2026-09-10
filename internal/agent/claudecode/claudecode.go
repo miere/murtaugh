@@ -227,7 +227,7 @@ func (c *Client) NewSession(ctx context.Context, meta agent.SessionMetadata) (ag
 	// own tools (slack.*, jobs, …) — parity with the ACP/native backends. A failure
 	// here degrades to no Murtaugh tools rather than failing the turn.
 	if c.opts.Aggregator != nil {
-		spec, release, err := c.opts.Aggregator.RegisterSession(meta)
+		spec, release, err := c.opts.Aggregator.RegisterSession(meta, sess.emitTurnEvent)
 		if err != nil {
 			c.log.Warn("claudecode: aggregator registration failed; agent will have no Murtaugh tools", "session", sessionID, "error", err)
 		} else if cfg, cerr := mcpConfigArg(spec); cerr != nil {
@@ -899,6 +899,16 @@ func permissionTitle(input json.RawMessage) string {
 		}
 	}
 	return string(input)
+}
+
+func (s *procSession) emitTurnEvent(ev agent.Event) bool {
+	s.mu.Lock()
+	sub := s.active
+	s.mu.Unlock()
+	if sub == nil {
+		return false
+	}
+	return sendEvent(sub, ev)
 }
 
 // sendEvent delivers on a turn's channel, recovering from the race where the turn

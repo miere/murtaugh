@@ -14,13 +14,15 @@ type fakeAggregator struct {
 	err        error
 	registered int
 	released   int
+	emit       agent.TurnEmitter
 }
 
-func (f *fakeAggregator) RegisterSession(agent.SessionMetadata) (agent.MCPServerSpec, func(), error) {
+func (f *fakeAggregator) RegisterSession(_ agent.SessionMetadata, emit agent.TurnEmitter) (agent.MCPServerSpec, func(), error) {
 	if f.err != nil {
 		return agent.MCPServerSpec{}, nil, f.err
 	}
 	f.registered++
+	f.emit = emit
 	return f.spec, func() { f.released++ }, nil
 }
 
@@ -36,6 +38,9 @@ func TestAggregatorServersEmitsBridgeServer(t *testing.T) {
 	servers, release := c.aggregatorServers(agent.SessionMetadata{})
 	if len(servers) != 1 {
 		t.Fatalf("expected one mcp server, got %d", len(servers))
+	}
+	if fake.emit == nil {
+		t.Fatal("session did not hand the aggregator its turn emitter")
 	}
 	srv, ok := servers[0].(map[string]any)
 	if !ok {

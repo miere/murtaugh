@@ -87,3 +87,43 @@ func TestNew_NilRootInvokeErrors(t *testing.T) {
 		t.Fatal("expected error when no root is configured")
 	}
 }
+
+// A result returned over MCP only reaches the model, so behind the bridge the file
+// must go onto the turn instead, and the model gets a confirmation, not the struct.
+func TestInvoke_BehindTheBridgeEmitsOntoTheTurn(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "report.md"), []byte("# findings"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var got []agent.Event
+	ctx := agent.WithTurnEmitter(context.Background(), func(ev agent.Event) bool {
+		got = append(got, ev)
+		return true
+	})
+
+	res, err := New(newRoot(t, dir)).Invoke(ctx, map[string]any{"path": "report.md", "title": "Findings"})
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if len(got) != 1 || got[0].Type != agent.EventAttachment || got[0].Attachment == nil {
+		t.Fatalf("turn received %+v, want one attachment", got)
+	}
+	if a := got[0].Attachment; a.Path != filepath.Join(dir, "report.md") || a.Title != "Findings" {
+		t.Fatalf("attachment = %+v", a)
+	}
+	if msg, ok := res.(string); !ok || msg != "Attached report.md (10 bytes) to your reply." {
+		t.Fatalf("result = %#v, want a one-line confirmation", res)
+	}
+}
+
+func TestInvoke_BehindTheBridgeWithNoTurnFails(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "report.md"), []byte("# findings"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := agent.WithTurnEmitter(context.Background(), func(agent.Event) bool { return false })
+
+	if _, err := New(newRoot(t, dir)).Invoke(ctx, map[string]any{"path": "report.md"}); err == nil {
+		t.Fatal("claimed success with no conversation to attach to")
+	}
+}

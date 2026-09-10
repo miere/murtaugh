@@ -123,7 +123,7 @@ func TestACPAggregatorRegisterSession(t *testing.T) {
 		t.Fatalf("newACPAggregator: %v", err)
 	}
 
-	spec, release, err := aggr.RegisterSession(agent.SessionMetadata{ChannelID: "C1", ThreadTS: "1.2"})
+	spec, release, err := aggr.RegisterSession(agent.SessionMetadata{ChannelID: "C1", ThreadTS: "1.2"}, nil)
 	if err != nil {
 		t.Fatalf("RegisterSession: %v", err)
 	}
