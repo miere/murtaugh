@@ -103,7 +103,7 @@ func TestUsageLine(t *testing.T) {
 		},
 		{
 			name: "required flags are spelled out",
-			doc: doc("slack.send-msg", &jsonschema.Schema{
+			doc: doc("slack.send_msg", &jsonschema.Schema{
 				Type: "object",
 				Properties: map[string]*jsonschema.Schema{
 					"body":   {Type: "string"},
@@ -112,7 +112,7 @@ func TestUsageLine(t *testing.T) {
 				},
 				Required: []string{"body", "to"},
 			}),
-			want: "murtaugh slack send-msg --body <string> --to <string> [flags]",
+			want: "murtaugh slack send_msg --body <string> --to <string> [flags]",
 		},
 		{
 			name: "optional only",
@@ -140,11 +140,11 @@ func TestUsageLine(t *testing.T) {
 }
 
 // TestRenderSectionNamesTheMCPForm matters because the three spellings of a
-// tool are the thing a model gets wrong: it sees `slack_send-msg` in its tool
+// tool are the thing a model gets wrong: it sees `slack_send_msg` in its tool
 // list and types that at a shell.
 func TestRenderSectionNamesTheMCPForm(t *testing.T) {
-	got := RenderSection(doc("slack.send-msg", nil))
-	if !strings.Contains(got, "`slack_send-msg`") {
+	got := RenderSection(doc("slack.send_msg", nil))
+	if !strings.Contains(got, "`slack_send_msg`") {
 		t.Errorf("section does not name the MCP form:\n%s", got)
 	}
 	if plain := RenderSection(doc("ping", nil)); strings.Contains(plain, "Over MCP") {

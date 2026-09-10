@@ -15,7 +15,7 @@ import (
 
 func TestTool_Metadata(t *testing.T) {
 	tool := New("")
-	if tool.Name() != "slack.fetch-msgs" {
+	if tool.Name() != "slack.fetch_msgs" {
 		t.Fatalf("Name = %q", tool.Name())
 	}
 	schema := tool.InputSchema()

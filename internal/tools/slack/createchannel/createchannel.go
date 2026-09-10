@@ -1,4 +1,4 @@
-// Package createchannel implements the `slack.create-channel` tool: create a
+// Package createchannel implements the `slack.create_channel` tool: create a
 // public or private Slack channel, optionally inviting users and setting a
 // topic/purpose.
 package createchannel
@@ -15,7 +15,7 @@ import (
 	slacklib "github.com/miere/murtaugh/internal/slack/client"
 )
 
-// Tool is the `slack.create-channel` capability.
+// Tool is the `slack.create_channel` capability.
 type Tool struct {
 	client *slacklib.LazyClient
 	warn   io.Writer
@@ -35,7 +35,7 @@ func NewWith(client *slacklib.LazyClient, warn io.Writer) *Tool {
 }
 
 // Name returns the registry key.
-func (t *Tool) Name() string { return "slack.create-channel" }
+func (t *Tool) Name() string { return "slack.create_channel" }
 
 // Description returns the human-facing summary used by MCP clients.
 func (t *Tool) Description() string {

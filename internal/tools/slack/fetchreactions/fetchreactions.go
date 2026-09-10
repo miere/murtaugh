@@ -1,4 +1,4 @@
-// Package fetchreactions implements the `slack.fetch-reactions` tool: fetch
+// Package fetchreactions implements the `slack.fetch_reactions` tool: fetch
 // the messages in a channel that a given user reacted to with a given emoji.
 package fetchreactions
 
@@ -15,7 +15,7 @@ import (
 // HistoryLimit caps the history pull.
 const HistoryLimit = 100
 
-// Tool is the `slack.fetch-reactions` capability.
+// Tool is the `slack.fetch_reactions` capability.
 type Tool struct {
 	client *slacklib.LazyClient
 }
@@ -32,7 +32,7 @@ func NewWith(client *slacklib.LazyClient) *Tool {
 }
 
 // Name returns the registry key.
-func (t *Tool) Name() string { return "slack.fetch-reactions" }
+func (t *Tool) Name() string { return "slack.fetch_reactions" }
 
 // Description returns the human-facing summary used by MCP clients.
 func (t *Tool) Description() string {
