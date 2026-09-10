@@ -1,6 +1,6 @@
 // Package troubleshootcfg records downstream diagnostics providers into
 // Murtaugh's machine-managed troubleshoot.yaml. Two setup tools reach for it:
-// setup.mcp-register (when it registers Murtaugh into a client that is itself a
+// setup.mcp_register (when it registers Murtaugh into a client that is itself a
 // known provider, e.g. goose) and setup.agents (when it configures a claude_code
 // agent). Keeping the read-modify-write in one place means both surfaces stay in
 // lockstep instead of drifting into two copies.

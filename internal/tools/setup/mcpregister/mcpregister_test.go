@@ -12,8 +12,8 @@ import (
 
 func TestTool_Metadata(t *testing.T) {
 	tl := New(stubResolver(t), nil, nil)
-	if tl.Name() != "setup.mcp-register" {
-		t.Fatalf("Name() = %q, want setup.mcp-register", tl.Name())
+	if tl.Name() != "setup.mcp_register" {
+		t.Fatalf("Name() = %q, want setup.mcp_register", tl.Name())
 	}
 	schema := tl.InputSchema()
 	if schema == nil {

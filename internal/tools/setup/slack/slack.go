@@ -4,7 +4,7 @@
 //
 // The tool is deliberately narrow: it owns Slack credentials + the access/chat
 // entry point. Agent configuration is owned by `setup.agents` / `cfg agent`,
-// MCP wiring by `setup.mcp-register`.
+// MCP wiring by `setup.mcp_register`.
 package slack
 
 import (

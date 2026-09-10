@@ -114,6 +114,18 @@ binary, unable to reach Slack, with nobody able to tell the user.
   Do NOT reintroduce a hand-maintained list of commands to check coverage
   against; the previous one drifted and missed six tools.
 
+# Tool names
+- Every tool we give an agent is named so that, with its dots turned into
+  underscores, it matches `^[a-z]+(_[a-z]+)*$`: lowercase words joined by
+  single underscores. `slack.send_msg` publishes as `slack_send_msg`.
+- A tool whose output lands in the thread the user is already talking in has
+  no prefix: `attach`, `ask`, `present_plan`. A Slack tool whose output can
+  land anywhere else carries `slack_`, so the model can tell the two apart.
+- This covers our own tools only. Tools proxied from other MCP servers keep
+  the names their servers give them.
+- `TestToolNamesAreSnakeCase` in `internal/app` enforces the pattern across
+  the registry and the per-agent native tools.
+
 # Backend parity (ACP == native UX)
 - The two agent backends (`internal/agent/native` and the ACP `ProcessClient`)
   implement ONE `agent.Client` interface and feed ONE `agent.Event` stream into the

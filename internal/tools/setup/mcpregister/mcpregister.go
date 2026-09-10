@@ -1,4 +1,4 @@
-// Package mcpregister implements the `setup.mcp-register` tool: register
+// Package mcpregister implements the `setup.mcp_register` tool: register
 // Murtaugh as an MCP server in a downstream client's config file. Three
 // clients are supported as first-class targets:
 //
@@ -27,7 +27,7 @@ import (
 // os.UserHomeDir; tests inject a temp directory.
 type HomeResolver func() (string, error)
 
-// Tool is the `setup.mcp-register` capability.
+// Tool is the `setup.mcp_register` capability.
 type Tool struct {
 	home HomeResolver
 	// troubleshootPath returns Murtaugh's machine-managed troubleshoot.yaml.
@@ -48,7 +48,7 @@ func New(home HomeResolver, troubleshootPath func() string, knownProviders []str
 }
 
 // Name returns the registry key.
-func (t *Tool) Name() string { return "setup.mcp-register" }
+func (t *Tool) Name() string { return "setup.mcp_register" }
 
 // Description returns the human-facing summary used by MCP clients.
 func (t *Tool) Description() string {
