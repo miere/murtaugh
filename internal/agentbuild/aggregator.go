@@ -30,6 +30,7 @@ type acpAggregator struct {
 	builtins []tools.Tool
 	approver mcp.Approver
 	mcpCfgs  []mcpclient.ServerConfig
+	aliases  map[string]string
 	logger   *slog.Logger
 	// agentEnv is the profile's own environment, carried onto every tool-call
 	// context so a bridged tool that spawns a process on this agent's behalf
@@ -49,7 +50,7 @@ type acpAggregator struct {
 // effective (pruned) allowlist and its workspace Root; approver (may be nil)
 // gates side-effecting calls; mcpCfgs is the global, authoritative MCP server set
 // (native.MCPServerConfigs).
-func newACPAggregator(server *mcpbridge.Server, registry *tools.Registry, resolved ResolvedAgent, approver mcp.Approver, mcpCfgs []mcpclient.ServerConfig, logger *slog.Logger) (*acpAggregator, error) {
+func newACPAggregator(server *mcpbridge.Server, registry *tools.Registry, resolved ResolvedAgent, approver mcp.Approver, mcpCfgs []mcpclient.ServerConfig, aliases map[string]string, logger *slog.Logger) (*acpAggregator, error) {
 	ts, err := resolveBuiltins(registry, resolved)
 	if err != nil {
 		return nil, err
@@ -67,6 +68,7 @@ func newACPAggregator(server *mcpbridge.Server, registry *tools.Registry, resolv
 		builtins: ts,
 		approver: approver,
 		mcpCfgs:  mcpCfgs,
+		aliases:  aliases,
 		logger:   logger,
 		agentEnv: resolved.Profile.EnvOverrides(),
 	}, nil
@@ -106,6 +108,7 @@ func (a *acpAggregator) RegisterSession(meta agent.SessionMetadata) (agent.MCPSe
 		Tools:       a.resolvedToolset(),
 		Approver:    a.approver,
 		WithContext: decorate,
+		Aliases:     a.aliases,
 	})
 	if err != nil {
 		return agent.MCPServerSpec{}, nil, err

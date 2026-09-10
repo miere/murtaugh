@@ -6,6 +6,7 @@ import (
 	"testing"
 	"testing/fstest"
 
+	"github.com/miere/murtaugh/internal/agent/claudecode"
 	"github.com/miere/murtaugh/internal/tools"
 	"github.com/miere/murtaugh/internal/tools/files"
 	"github.com/miere/murtaugh/internal/toolset"
@@ -40,4 +41,14 @@ func ourTools(t *testing.T) []tools.Tool {
 		t.Fatalf("resolved %d native tools for %d groups; some group was dropped", len(native), len(groups))
 	}
 	return append(docsRegistry("test").All(), native...)
+}
+
+// An alias keyed by a name we no longer register would silently stop applying,
+// and the model would lose the tool it reaches for by reflex.
+func TestBackendAliasesNameRegisteredTools(t *testing.T) {
+	for name, alias := range claudecode.ToolAliases {
+		if _, ok := docsRegistry("test").Get(name); !ok {
+			t.Errorf("claude_code publishes %q as %q, but no tool is registered as %q", name, alias, name)
+		}
+	}
 }

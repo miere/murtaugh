@@ -63,6 +63,9 @@ type Session struct {
 	// used to carry the session's Slack TurnLocation so the approver posts to the
 	// right thread. nil is identity.
 	WithContext func(context.Context) context.Context
+	// Aliases are the names this session's backend knows some tools by; nil publishes
+	// every tool under its own name.
+	Aliases map[string]string
 }
 
 // Server is the gateway-side aggregator: a unix-socket listener that serves each
@@ -215,7 +218,7 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 		Reader: connReader{r: br, c: conn},
 		Writer: conn,
 	}
-	server := mcp.NewFromTools(sess.Tools, sess.Approver).Server()
+	server := mcp.NewFromTools(sess.Tools, sess.Approver, sess.Aliases).Server()
 	if err := server.Run(runCtx, transport); err != nil && !errors.Is(err, io.EOF) {
 		s.log.Warn("mcp aggregator session ended", "error", err)
 	}

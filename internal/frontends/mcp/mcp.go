@@ -43,6 +43,7 @@ type Approver interface {
 type Frontend struct {
 	tools    []tools.Tool
 	approver Approver
+	aliases  map[string]string
 }
 
 // New constructs an MCP Frontend backed by the given registry, ungated. This is
@@ -51,13 +52,10 @@ func New(reg *tools.Registry) *Frontend {
 	return &Frontend{tools: reg.All()}
 }
 
-// NewFromTools constructs an MCP Frontend serving an explicit resolved toolset,
-// optionally gated by approver. This is the per-agent aggregator surface: the
-// toolset is whatever toolset.Resolve produced for the agent (built-ins plus
-// proxied external MCP tools), and approver applies the same human-in-the-loop
-// gate the native loop applies.
-func NewFromTools(ts []tools.Tool, approver Approver) *Frontend {
-	return &Frontend{tools: ts, approver: approver}
+// NewFromTools takes aliases because only the per-agent aggregator knows which backend
+// it serves, and so which built-in names that backend's model already expects.
+func NewFromTools(ts []tools.Tool, approver Approver, aliases map[string]string) *Frontend {
+	return &Frontend{tools: ts, approver: approver, aliases: aliases}
 }
 
 // Server builds an *mcpsdk.Server with every tool wired in. It is exposed so
@@ -74,12 +72,12 @@ func (f *Frontend) Server() *mcpsdk.Server {
 	// whose tools collide with a built-in), not a runtime condition.
 	seen := make(map[string]string, len(f.tools))
 	for _, t := range f.tools {
-		published := publishedName(t)
+		published := f.publishedName(t)
 		if prior, dup := seen[published]; dup {
 			panic(fmt.Sprintf("mcp: tool name collision: %q and %q both publish as %q", prior, t.Name(), published))
 		}
 		seen[published] = t.Name()
-		registerTool(s, t, f.approver)
+		registerTool(s, t, published, f.approver)
 	}
 	return s
 }
@@ -103,29 +101,9 @@ func mcpToolName(name string) string {
 	return invalidMCPNameChar.ReplaceAllString(name, "_")
 }
 
-// MCPNamer is the optional interface a tool implements to publish under a name
-// other than its registry key. Same idiom as tools.ApprovalClassifier: opt-in,
-// checked with a type assertion, ignored by every tool that does not need it.
-//
-// It exists for tools that stand in for a name the model already knows. The
-// `ask` tool publishes as AskUserQuestion so a Claude Code agent — whose
-// built-in of that name is suppressed because it cannot render headlessly —
-// reaches for the replacement by reflex instead of having to be taught a new
-// one. The registry key stays `ask`, so `murtaugh ask` and the dotted-key
-// convention are unaffected.
-type MCPNamer interface {
-	MCPName() string
-}
-
-// publishedName is the LLM-facing id for a tool: its MCPName override when it
-// declares one, otherwise its sanitised registry key. An override is sanitised
-// too — a tool does not get to bypass the character rules by implementing an
-// interface.
-func publishedName(t tools.Tool) string {
-	if namer, ok := t.(MCPNamer); ok {
-		if name := strings.TrimSpace(namer.MCPName()); name != "" {
-			return mcpToolName(name)
-		}
+func (f *Frontend) publishedName(t tools.Tool) string {
+	if alias := strings.TrimSpace(f.aliases[t.Name()]); alias != "" {
+		return mcpToolName(alias)
 	}
 	return mcpToolName(t.Name())
 }
@@ -142,7 +120,7 @@ func (f *Frontend) Serve(ctx context.Context) error {
 // tool opts into approval (implements ApprovalClassifier and requires it for
 // this call), the human gate runs before Invoke — the same ordering as the
 // native loop (internal/agent/native/loop.go).
-func registerTool(s *mcpsdk.Server, t tools.Tool, approver Approver) {
+func registerTool(s *mcpsdk.Server, t tools.Tool, published string, approver Approver) {
 	schema := t.InputSchema()
 	if schema == nil {
 		schema = emptyObjectSchema()
@@ -152,7 +130,7 @@ func registerTool(s *mcpsdk.Server, t tools.Tool, approver Approver) {
 		if err != nil {
 			return errorResult(err), nil
 		}
-		if denied, note := gate(ctx, t, args, approver); denied {
+		if denied, note := gate(ctx, t, published, args, approver); denied {
 			// Mirror the native loop: a denial is not an error abort. The note
 			// is fed back as the tool's result so the agent can react and pick
 			// another path, rather than the whole call failing.
@@ -173,7 +151,7 @@ func registerTool(s *mcpsdk.Server, t tools.Tool, approver Approver) {
 		}, nil
 	}
 	s.AddTool(&mcpsdk.Tool{
-		Name:        publishedName(t),
+		Name:        published,
 		Description: t.Description(),
 		InputSchema: schema,
 	}, handler)
@@ -185,7 +163,7 @@ func registerTool(s *mcpsdk.Server, t tools.Tool, approver Approver) {
 // allowed it). This is the aggregator's port of the native loop's pre-Invoke
 // gate, using the same optional ApprovalClassifier/ApprovalSummarizer tool
 // interfaces.
-func gate(ctx context.Context, t tools.Tool, args map[string]any, approver Approver) (denied bool, note string) {
+func gate(ctx context.Context, t tools.Tool, published string, args map[string]any, approver Approver) (denied bool, note string) {
 	if approver == nil {
 		return false, ""
 	}
@@ -193,7 +171,7 @@ func gate(ctx context.Context, t tools.Tool, args map[string]any, approver Appro
 	if !ok || !classifier.RequiresApproval(args) {
 		return false, ""
 	}
-	summary := publishedName(t)
+	summary := published
 	if summarizer, ok := t.(tools.ApprovalSummarizer); ok {
 		summary = summarizer.ApprovalSummary(args)
 	}

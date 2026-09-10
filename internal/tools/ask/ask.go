@@ -43,16 +43,6 @@ func New(broker *interaction.Broker, cards *askcard.Flow) *Tool {
 // Name returns the registry key.
 func (t *Tool) Name() string { return "ask" }
 
-// MCPName publishes this tool to LLM clients as AskUserQuestion rather than
-// `ask`.
-//
-// Claude Code ships a built-in of that name which cannot render in a headless
-// session — the claudecode backend suppresses it with --disallowedTools. A model
-// that has learned to reach for AskUserQuestion then finds one, with the payload
-// it already knows, and never has to be told the substitution happened. The
-// registry key stays `ask`, so `murtaugh ask` and the CLI are untouched.
-func (t *Tool) MCPName() string { return "AskUserQuestion" }
-
 // Description is the model-facing summary. It is deliberately explicit that the
 // tool blocks for a real answer and must not be second-guessed.
 func (t *Tool) Description() string {

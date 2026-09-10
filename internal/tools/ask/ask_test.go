@@ -397,17 +397,6 @@ func TestInputSchemaMatchesClaudesPayload(t *testing.T) {
 	}
 }
 
-func TestMCPNameIsAskUserQuestion(t *testing.T) {
-	if got := New(nil, nil).MCPName(); got != "AskUserQuestion" {
-		t.Errorf("MCPName() = %q, want AskUserQuestion", got)
-	}
-	// The registry key is deliberately unchanged: the CLI and the dotted-key
-	// convention still key on `ask`.
-	if got := New(nil, nil).Name(); got != "ask" {
-		t.Errorf("Name() = %q, want ask", got)
-	}
-}
-
 // Claude sends options as objects with a description. The description has to
 // survive into the card, since it is doing the explanatory work the label cannot.
 func TestParseOptionsAcceptsClaudeObjects(t *testing.T) {

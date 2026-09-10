@@ -99,7 +99,7 @@ func Client(resolved ResolvedAgent, deps Deps) (agent.Client, error) {
 			if deps.Approver != nil {
 				approver = mcpApprover{inner: deps.Approver}
 			}
-			aggr, err := newACPAggregator(deps.Bridge, deps.Registry, resolved, approver, native.MCPServerConfigs(deps.MCPServers), logger)
+			aggr, err := newACPAggregator(deps.Bridge, deps.Registry, resolved, approver, native.MCPServerConfigs(deps.MCPServers), nil, logger)
 			if err != nil {
 				return nil, fmt.Errorf("agentbuild: build ACP aggregator: %w", err)
 			}
@@ -135,7 +135,7 @@ func Client(resolved ResolvedAgent, deps Deps) (agent.Client, error) {
 			if deps.Approver != nil {
 				approver = mcpApprover{inner: deps.Approver}
 			}
-			aggr, err := newACPAggregator(deps.Bridge, deps.Registry, resolved, approver, native.MCPServerConfigs(deps.MCPServers), logger)
+			aggr, err := newACPAggregator(deps.Bridge, deps.Registry, resolved, approver, native.MCPServerConfigs(deps.MCPServers), claudecode.ToolAliases, logger)
 			if err != nil {
 				return nil, fmt.Errorf("agentbuild: build claude_code aggregator: %w", err)
 			}

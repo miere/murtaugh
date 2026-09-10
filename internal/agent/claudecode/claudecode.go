@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,6 +18,19 @@ import (
 	"github.com/miere/murtaugh/assets"
 	"github.com/miere/murtaugh/internal/agent"
 )
+
+// ToolAliases names our tools after the built-ins this backend disables, because those
+// built-ins cannot render headlessly and the model already knows how to call them.
+var ToolAliases = map[string]string{"ask": "AskUserQuestion"}
+
+func disallowedBuiltins() string {
+	names := make([]string, 0, len(ToolAliases))
+	for _, builtin := range ToolAliases {
+		names = append(names, builtin)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ",")
+}
 
 // defaultArgs launches `claude` in headless bidirectional stream-json mode: a
 // long-lived process that reads NDJSON user turns on stdin and streams NDJSON
@@ -28,13 +42,6 @@ import (
 // control_request instead of auto-denying. Verified against 2.1.216 — without it
 // a headless turn silently denies every gated tool (spec 019 §6).
 //
-// `--disallowedTools AskUserQuestion` removes Claude Code's own
-// question-asking built-in. It renders in the terminal UI, which a headless
-// session does not have, so every call to it fails and the model is left
-// unable to ask anything. Murtaugh publishes a replacement over MCP under the
-// same name (internal/tools/ask, via MCPName), so hiding the built-in is what
-// makes the model reach for the one that works — with the payload it already
-// knows. Without this flag the built-in shadows it.
 // `--append-system-prompt` carries everything Murtaugh contributes to the
 // session's system prompt: the agent's persona and the Slack formatting rules.
 // A claude_code session deliberately never sees assets/system-prompt.md — the
@@ -52,7 +59,7 @@ func defaultArgs(persona string) []string {
 		"--output-format", "stream-json",
 		"--verbose",
 		"--permission-prompt-tool", "stdio",
-		"--disallowedTools", "AskUserQuestion",
+		"--disallowedTools", disallowedBuiltins(),
 	}
 	if appended := appendSystemPrompt(persona); appended != "" {
 		args = append(args, "--append-system-prompt", appended)
