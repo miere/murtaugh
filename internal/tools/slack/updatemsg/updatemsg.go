@@ -5,7 +5,6 @@ package updatemsg
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
 
@@ -44,7 +43,7 @@ func (t *Tool) InputSchema() *jsonschema.Schema {
 	return &jsonschema.Schema{
 		Type: "object",
 		Properties: map[string]*jsonschema.Schema{
-			"channel": {Type: "string", Description: "Channel ID, or channel name with leading #."},
+			"channel": {Type: "string", Description: "Conversation the message is in — pass the channel send-msg returned, or any of: " + slacklib.ConversationRefHelp},
 			"ts":      {Type: "string", Description: "Timestamp of the message to update."},
 			"body":    {Type: "string", Description: "Fallback text for the update. Defaults to 'Message updated'."},
 			"blocks":  {Type: "string", Description: "Block Kit blocks: either a JSON string (starts with [ or {) or a path to a JSON file."},
@@ -91,14 +90,9 @@ func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 		return nil, err
 	}
 
-	var channelID string
-	if strings.HasPrefix(channel, "#") {
-		channelID, err = slacklib.ResolveChannel(ctx, api, channel)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		channelID = channel
+	channelID, err := slacklib.ResolveTarget(ctx, api, channel)
+	if err != nil {
+		return nil, err
 	}
 
 	rawBlocks, err := slacklib.ResolveBlocks(blocks)

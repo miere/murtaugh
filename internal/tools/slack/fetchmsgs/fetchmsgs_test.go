@@ -3,6 +3,7 @@ package fetchmsgs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -163,4 +164,25 @@ func absDiffSeconds(a, b string) float64 {
 		d = -d
 	}
 	return d
+}
+
+// send-msg returned this DM ID and fetch-msgs then refused it as "not found".
+func TestInvoke_ReadsBackAConversationSendMsgReturned(t *testing.T) {
+	for _, ref := range []string{"D0B69D0JVUK", "U0B20G0ET9T", "<@U0B20G0ET9T>", "@U0B20G0ET9T"} {
+		fake := &slacktest.FakeAPI{
+			DMFor:           map[string]string{"U0B20G0ET9T": "D0B69D0JVUK"},
+			ListChannelsErr: errors.New("a DM is never in conversations.list"),
+		}
+		res, err := NewWith(fake.LazyClient()).Invoke(context.Background(), map[string]any{"channel": ref})
+		if err != nil {
+			t.Errorf("Invoke(channel=%q): %v", ref, err)
+			continue
+		}
+		if got := res.(Result).Channel; got != "D0B69D0JVUK" {
+			t.Errorf("Invoke(channel=%q) read %q, want the DM D0B69D0JVUK", ref, got)
+		}
+		if len(fake.HistoryCalls) != 1 || fake.HistoryCalls[0].ChannelID != "D0B69D0JVUK" {
+			t.Errorf("Invoke(channel=%q) history calls = %+v, want one against D0B69D0JVUK", ref, fake.HistoryCalls)
+		}
+	}
 }

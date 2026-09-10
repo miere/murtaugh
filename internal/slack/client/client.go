@@ -209,11 +209,22 @@ func (l *LazyClient) Get() (SlackAPI, error) {
 	return l.client, l.err
 }
 
-// slackError wraps a slack-go error with a diagnostic prefix naming the API
-// method, e.g. "Slack error (chat.postMessage): channel_not_found".
 func slackError(method string, err error) error {
 	if err == nil {
 		return nil
 	}
-	return fmt.Errorf("Slack error (%s): %s", method, err.Error())
+	msg := fmt.Sprintf("Slack error (%s): %s", method, err.Error())
+	if hint, ok := slackErrorHints[err.Error()]; ok {
+		msg += " — " + hint
+	}
+	return errors.New(msg)
+}
+
+var slackErrorHints = map[string]string{
+	"not_in_channel":    "the bot is not a member of this channel. Ask the user to invite it (/invite @<bot>), or use a channel it is already in.",
+	"channel_not_found": "no conversation with that ID is visible to the bot: it does not exist, or it is a private channel or someone else's DM the bot was never added to.",
+	"is_archived":       "the channel is archived and cannot be posted to or joined.",
+	"missing_scope":     "the bot token lacks the OAuth scope this call needs. The admin must add it in the Slack app settings and reinstall the app; retrying will not help.",
+	"invalid_blocks":    "Slack rejected the Block Kit payload. Common causes: mrkdwn in a plain_text field, text over a field's length limit, or more than 50 blocks. Validate at https://app.slack.com/block-kit-builder.",
+	"msg_too_long":      "the message text exceeds Slack's limit. Split it, or upload it as an attachment instead.",
 }
