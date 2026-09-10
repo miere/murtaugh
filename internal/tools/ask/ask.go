@@ -110,11 +110,11 @@ func (t *Tool) InputSchema() *jsonschema.Schema {
 								Properties: map[string]*jsonschema.Schema{
 									"label": {
 										Type:        "string",
-										Description: "A short label for the option.",
+										Description: "A short label for the option — a few words. It comes back verbatim as the answer.",
 									},
 									"description": {
 										Type:        "string",
-										Description: "A longer explanation of what choosing this option means.",
+										Description: "One short clause on what choosing this option means. Slack fits label and description into 75 characters together and cuts off the rest, so put longer context in the question instead.",
 									},
 								},
 								Required: []string{"label"},
