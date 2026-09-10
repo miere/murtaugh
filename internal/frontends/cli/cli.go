@@ -123,33 +123,38 @@ func (f *Frontend) writeJSONLine(v any) error {
 	return nil
 }
 
-// resolve picks the registered tool name out of args and returns the
-// remaining tokens to pass to flag parsing. It tries the LONGEST dotted prefix
-// first (up to maxNameDepth tokens) so a 3-level name like "cfg.agent.create"
-// wins over a shorter tool sharing its prefix, falling back through
-// "cfg.agent" and "cfg". This keeps the flat and two-level conventions
-// (`ping`, `jobs run`) working unchanged while enabling `cfg agent create`.
 func (f *Frontend) resolve(args []string) (string, []string, error) {
 	depth := len(args)
 	if depth > maxNameDepth {
 		depth = maxNameDepth
 	}
 	for n := depth; n >= 1; n-- {
-		joined := strings.Join(args[:n], ".")
-		if _, ok := f.registry.Get(joined); ok {
-			return joined, args[n:], nil
-		}
-		// The same tool is published to LLM clients with its dots replaced by
-		// underscores ("jobs_run"), which is the only spelling a model sees in
-		// its tool list — so that is what it types when it shells out instead.
-		// Accepting it here costs nothing and removes a whole class of "unknown
-		// command" retry loop. The literal form is tried first, so a tool
-		// genuinely named with an underscore (present_plan) still wins.
-		if dotted := strings.ReplaceAll(joined, "_", "."); dotted != joined {
-			if _, ok := f.registry.Get(dotted); ok {
-				return dotted, args[n:], nil
-			}
+		if name, ok := f.lookup(args[:n]); ok {
+			return name, args[n:], nil
 		}
 	}
 	return "", nil, fmt.Errorf("unknown command: %s (run `murtaugh help` to list commands)", args[0])
+}
+
+func (f *Frontend) lookup(tokens []string) (string, bool) {
+	if joined := strings.Join(tokens, "."); f.hasTool(joined) {
+		return joined, true
+	}
+	want := looseName(strings.Join(tokens, " "))
+	for _, t := range f.registry.All() {
+		if looseName(t.Name()) == want {
+			return t.Name(), true
+		}
+	}
+	return "", false
+}
+
+func (f *Frontend) hasTool(name string) bool {
+	_, ok := f.registry.Get(name)
+	return ok
+}
+
+func looseName(s string) string {
+	s = strings.NewReplacer(".", " ", "_", " ", "-", " ").Replace(strings.ToLower(s))
+	return strings.Join(strings.Fields(s), " ")
 }

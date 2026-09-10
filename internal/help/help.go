@@ -114,13 +114,27 @@ func (r *Reference) Commands() []string {
 	for _, s := range sections {
 		if !seen[s.command] {
 			seen[s.command] = true
-			out = append(out, s.command)
+			out = append(out, s.header)
 		}
 	}
 	for _, d := range r.docs {
 		if k := normalizeKey(d.Name()); !seen[k] {
 			seen[k] = true
 			out = append(out, commandOf(d.Name()))
+		}
+	}
+	return out
+}
+
+// Orphans lists prose sections no tool backs, because a renamed or removed tool
+// otherwise leaves its old section behind with nothing to fail.
+func (r *Reference) Orphans() []string {
+	byCommand := r.index()
+	var out []string
+	_, sections := parse(prose())
+	for _, s := range sections {
+		if _, ok := byCommand[s.command]; !ok {
+			out = append(out, s.header)
 		}
 	}
 	return out
@@ -152,6 +166,7 @@ func prose() string {
 // header line included in text.
 type section struct {
 	command string
+	header  string
 	text    string
 }
 
@@ -187,8 +202,10 @@ func parse(doc string) (string, []section) {
 		if n+1 < len(starts) && starts[n+1] < end {
 			end = starts[n+1]
 		}
+		header := strings.TrimSpace(strings.TrimPrefix(lines[start], commandPrefix))
 		out = append(out, section{
-			command: normalizeKey(strings.TrimPrefix(lines[start], commandPrefix)),
+			command: normalizeKey(header),
+			header:  header,
 			text:    strings.Join(lines[start:end], "\n"),
 		})
 	}
@@ -274,5 +291,6 @@ func normalizeKey(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	s = strings.ReplaceAll(s, ".", " ")
 	s = strings.ReplaceAll(s, "_", " ")
+	s = strings.ReplaceAll(s, "-", " ")
 	return strings.Join(strings.Fields(s), " ")
 }

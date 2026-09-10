@@ -185,3 +185,27 @@ func firstLine(s string) string {
 	}
 	return s
 }
+
+func TestSectionMatchesAnySpelling(t *testing.T) {
+	ref := New([]Doc{doc("slack.send_msg", nil)})
+	for _, name := range []string{"slack send_msg", "slack.send_msg", "slack_send_msg", "slack send-msg"} {
+		got, ok := ref.Section(name)
+		if !ok || !strings.HasPrefix(got, "## murtaugh slack send-msg") {
+			t.Errorf("Section(%q) = %q, %v; want the hand-written send-msg section", name, firstLine(got), ok)
+		}
+	}
+}
+
+func TestOrphansListsProseWithNoTool(t *testing.T) {
+	orphans := New([]Doc{doc("ping", nil)}).Orphans()
+	index := map[string]bool{}
+	for _, o := range orphans {
+		index[o] = true
+	}
+	if index["ping"] {
+		t.Error("ping has a tool but was reported as an orphan")
+	}
+	if !index["slack send-msg"] {
+		t.Errorf("slack send-msg has no tool here but was not reported: %v", orphans)
+	}
+}
