@@ -17,7 +17,7 @@ shared Tool registry:
   (`kind: acp`) — with live response streaming, and renders **custom link
   unfurls** for shared URLs.
 - **CLI** — human-facing direct invocation (`murtaugh <tool> [...]`), including
-  the Slack tools under the `slack` namespace (`murtaugh slack send-msg`, …).
+  the Slack tools under the `slack` namespace (`murtaugh slack send_msg`, …).
 - **MCP** — JSON-RPC stdio server (`murtaugh mcp`) that exposes every
   registered tool to AI clients.
 
@@ -65,7 +65,7 @@ internal/tools/       Shared Tool interface + one package per tool.
   jobs/run/           Tool `jobs.run`: execute a job stored in the config store.
   jobs/define/        Tool `jobs.define`: register a job in the config store.
   journal/            Tools `journal.query`/`.stats`/`.prune`: inspect the event journal.
-  slack/              Slack tools: send-msg, fetch-msgs, fetch-reactions, update-msg.
+  slack/              Slack tools: send_msg, fetch_msgs, fetch_reactions, update_msg.
   cfg/                Tools `cfg.*`: read/write the config store (agents, mcp,
                       jobs, chat, access, rules, defaults, db migrate) with
                       validate-and-rollback on every mutation.
@@ -194,7 +194,7 @@ does and which flags it takes. It is embedded into the binary (via the
 `assets` `go:embed` directive) and surfaced by the `internal/help` package:
 
 - `murtaugh help` prints the whole document; `murtaugh help <command>` (e.g.
-  `murtaugh help slack send-msg`) and `murtaugh <command> --help` print a single
+  `murtaugh help slack send_msg`) and `murtaugh <command> --help` print a single
   command's section.
 - CLI usage errors and the bare-invocation usage line point users at
   `murtaugh help`.

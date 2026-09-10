@@ -14,7 +14,7 @@ Every registered tool is callable directly from your terminal:
 ```sh
 murtaugh ping                      # → pong
 
-murtaugh slack send-msg --to '#general' --body 'hello'
+murtaugh slack send_msg --to '#general' --body 'hello'
 murtaugh jobs run --name nightly-deploy
 murtaugh journal query --stream gateway --since 1h --level error
 murtaugh cfg agent list            # administer the config store
@@ -97,7 +97,7 @@ This exposes **every registered tool** to MCP-capable AI clients (Claude
 Desktop, IDE extensions, etc.) over JSON-RPC on stdio. Stdout is reserved for the
 protocol; diagnostics go to stderr.
 
-Over MCP, tool names are dotted (`jobs.run`, `journal.query`, `slack.send-msg`,
+Over MCP, tool names are dotted (`jobs.run`, `journal.query`, `slack.send_msg`,
 `cfg.agent.create`) where the CLI uses spaces (`murtaugh jobs run`,
 `murtaugh cfg agent create`). The whole `cfg` surface is available over MCP too,
 so a connected agent can reconfigure Murtaugh with the same validation and
@@ -110,7 +110,7 @@ clients (backing up any existing client config first). You can also do it
 yourself:
 
 ```sh
-murtaugh setup mcp-register ...    # see `murtaugh help setup mcp-register`
+murtaugh setup mcp_register ...    # see `murtaugh help setup mcp_register`
 ```
 
 Point your MCP client at the `murtaugh mcp` command and it will discover the full

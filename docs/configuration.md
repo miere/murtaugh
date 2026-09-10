@@ -33,7 +33,7 @@ into the store for you.
 # --- Slack (required to run the gateway) ---
 SLACK_APP_TOKEN=xapp-replace-me
 SLACK_BOT_TOKEN=xoxb-replace-me
-# Optional: the admin's own user token (xoxp-…). Enables `slack send-msg --as
+# Optional: the admin's own user token (xoxp-…). Enables `slack send_msg --as
 # admin`, which posts under the admin's real identity. Leave unset to disable.
 # SLACK_USER_TOKEN=xoxp-replace-me
 
@@ -67,7 +67,7 @@ oauth:
   app_token: ${SLACK_APP_TOKEN}   # xapp-… Socket Mode token
   bot_token: ${SLACK_BOT_TOKEN}   # xoxb-… bot token
   user_token: ${SLACK_USER_TOKEN} # xoxp-… admin user token; optional.
-                                  # Enables `slack send-msg --as admin` (posts
+                                  # Enables `slack send_msg --as admin` (posts
                                   # under the admin's real identity). Omit to disable.
 
 database:
@@ -290,15 +290,15 @@ These carry richer nested structure, so they are set from a YAML fragment on
 disk rather than a flat flag list:
 
 ```sh
-murtaugh cfg workflow-rule set --name code-review-approval --from-file rule.yaml
-murtaugh cfg workflow-rule list
-murtaugh cfg workflow-rule show --name code-review-approval
-murtaugh cfg workflow-rule delete --name code-review-approval
+murtaugh cfg workflow_rule set --name code-review-approval --from-file rule.yaml
+murtaugh cfg workflow_rule list
+murtaugh cfg workflow_rule show --name code-review-approval
+murtaugh cfg workflow_rule delete --name code-review-approval
 
-murtaugh cfg unfurl-rule set --name github-pr --from-file unfurl.yaml
-murtaugh cfg unfurl-rule list
-murtaugh cfg unfurl-rule show --name github-pr
-murtaugh cfg unfurl-rule delete --name github-pr
+murtaugh cfg unfurl_rule set --name github-pr --from-file unfurl.yaml
+murtaugh cfg unfurl_rule list
+murtaugh cfg unfurl_rule show --name github-pr
+murtaugh cfg unfurl_rule delete --name github-pr
 ```
 
 See [Slack → workflow rules](slack.md#workflow-rules) and

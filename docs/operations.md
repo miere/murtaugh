@@ -114,7 +114,7 @@ the `gateway` stream are where to look for *"why did the daemon go silent?"*.
 ### Ship a diagnostics bundle
 
 ```sh
-murtaugh slack send-msg ...        # if Slack itself works
+murtaugh slack send_msg ...        # if Slack itself works
 /murtaugh troubleshoot             # from Slack: bundles config.yaml + a config-store dump
 ```
 
