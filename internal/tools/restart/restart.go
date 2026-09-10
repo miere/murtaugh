@@ -122,10 +122,6 @@ func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 	return Result{OK: true, Channel: res.Channel, TS: res.TS}, nil
 }
 
-// resolveDestination returns the channel ID to post the card to. An explicit
-// channel always wins (resolved via the shared #channel/@user/ID resolver).
-// Otherwise it opens the admin's DM: ResolveTarget rejects raw U… IDs, so a
-// bare user ID is opened directly, while a handle is routed through @-resolution.
 func (t *Tool) resolveDestination(ctx context.Context, api slacklib.SlackAPI, channel string) (string, error) {
 	if channel != "" {
 		return slacklib.ResolveTarget(ctx, api, channel)
@@ -133,26 +129,9 @@ func (t *Tool) resolveDestination(ctx context.Context, api slacklib.SlackAPI, ch
 	if t.adminUser == "" {
 		return "", fmt.Errorf("Error: no channel given and no admin user configured (configuration.admin_user) to ask")
 	}
-	if isUserID(t.adminUser) {
-		return api.OpenDM(ctx, t.adminUser)
-	}
 	target := t.adminUser
 	if !strings.HasPrefix(target, "@") {
 		target = "@" + target
 	}
 	return slacklib.ResolveTarget(ctx, api, target)
-}
-
-// isUserID reports whether s looks like a raw Slack user ID (U… / W…), which
-// ResolveTarget rejects and which must instead be opened via OpenDM.
-func isUserID(s string) bool {
-	if len(s) < 2 {
-		return false
-	}
-	switch s[0] {
-	case 'U', 'W':
-		return strings.ToUpper(s) == s
-	default:
-		return false
-	}
 }

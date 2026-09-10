@@ -75,21 +75,28 @@ sections below assume them.
 
 ## Slack target & identifier resolution
 
-Several Slack tools accept channels, users, threads, and timestamps. The
-accepted forms are consistent:
+Several Slack tools accept channels, users, threads, and timestamps. Every
+tool resolves them through one resolver, so the same value works everywhere —
+in particular, a `channel` returned by `send-msg` can be handed straight to
+`fetch-msgs`, `fetch-reactions` or `update-msg`.
 
-- **`--to` (send-msg only)** accepts `#channel-name`, `@user-handle`, or a raw
-  `C…`/`G…`/`D…` ID. `@user` opens (or reuses) a DM. A bare `U…` user ID is
-  **rejected** — use `@handle` or open the DM yourself. Anything not starting
-  with `#`, `@`, `C`, `G`, or `D` is an error.
-- **`--channel` (fetch-msgs, fetch-reactions)** accepts a channel name with or
-  without a leading `#`, or a channel ID. Names are matched against
-  `conversations.list`.
-- **`--channel` (update-msg)** is resolved by name **only** when it starts with
-  `#`; any other value is passed through unchanged as a channel ID.
-- **`--from` / user handles** accept the handle with or without a leading `@`.
-  Matching is case-insensitive and tries legacy username, then display name,
-  then real name.
+- **A conversation** (`--to` on send-msg; `--channel` on fetch-msgs,
+  fetch-reactions and update-msg) accepts any of:
+  - `#channel-name`, or the bare name without `#`;
+  - a channel, group or DM ID — `C…`, `G…`, `D…` — or Slack's escaped
+    `<#C…>` / `<#C…|name>`;
+  - a person — `@handle`, a user ID `U…`/`W…`, `@U…`, or Slack's escaped
+    `<@U…>` / `<@U…|name>` — which resolves to the bot's DM with them,
+    opening it if needed.
+
+  IDs are used as given, without a lookup: a DM or a private channel never
+  appears in `conversations.list`. Only a name is looked up there, and a
+  private channel is only visible to that lookup once the bot is invited.
+- **A person** (`--from` on fetch-reactions, `--invite` on create-channel)
+  accepts `@handle`, a bare handle, a user ID, or `<@U…>`. A handle is matched
+  case-insensitively against legacy username, then display name, then real
+  name. An ID is told apart from an all-caps handle by its digits: `U0B20G0ET9T`
+  is an ID, `QA` is a name.
 - **`@mentions` inside `--body`** are auto-expanded to `<@USERID>` Slack mention
   syntax. An unresolvable `@handle` is left as plain text and a warning is
   printed to stderr.

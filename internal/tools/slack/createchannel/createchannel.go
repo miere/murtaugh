@@ -149,16 +149,12 @@ func (t *Tool) resolveInvitees(ctx context.Context, api slacklib.SlackAPI, raw a
 		if entry == "" {
 			continue
 		}
-		if strings.HasPrefix(entry, "@") {
-			userID, err := slacklib.ResolveUser(ctx, api, entry)
-			if err != nil {
-				fmt.Fprintf(t.warn, "Warning: invitee '%s' not found, skipping.\n", entry)
-				continue
-			}
-			ids = append(ids, userID)
+		userID, err := slacklib.ResolveUser(ctx, api, entry)
+		if err != nil {
+			fmt.Fprintf(t.warn, "Warning: invitee '%s' not found, skipping.\n", entry)
 			continue
 		}
-		ids = append(ids, entry)
+		ids = append(ids, userID)
 	}
 	return ids, nil
 }

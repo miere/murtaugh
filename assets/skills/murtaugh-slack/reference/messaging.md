@@ -43,10 +43,13 @@ the Block Kit you put in these messages see `blocks.md`.
 Returns `{ ok, channel, ts, to }` — **store `ts`** to update or thread later.
 
 Behavior:
-- **Destination resolution:** `#name` → channel ID via `conversations.list`;
-  `@handle` → user (matched case-insensitively against username, then display
-  name, then real name), and a DM is opened automatically; a raw `C`/`G`/`D` ID
-  is used directly.
+- **Destination resolution** is shared by every Slack tool, so the returned
+  `channel` works as-is in `fetch-msgs`, `fetch-reactions` and `update-msg`.
+  `#name` (or the bare name) → channel ID via `conversations.list`; a
+  `C`/`G`/`D` ID or `<#C…>` is used directly; a person — `@handle`, a `U…`
+  user ID, or the `<@U…>` you see in a mention — resolves to your DM with them,
+  opened automatically. You never need to look up a DM id before posting or
+  reading one.
 - **Blocks vs attachment** are mutually exclusive; `blocks` JSON is validated
   before posting; `attachment` must be a file that exists on disk.
 - **Mention expansion:** `@handle` tokens in `body` are resolved to `<@U…>`
@@ -77,9 +80,9 @@ murtaugh slack send-msg --to "#dev" --body "Deploy started" \
 
 Returns `{ ok, channel, ts }`. Updates the original message in place — there is
 **no thread arg** (you can't move a message into a thread) and **no attachment
-arg** (update takes `--body` and/or `--blocks` only). A `channel` starting with
-`#` is resolved via `conversations.list`; anything else (including raw IDs like
-`C123ABC`) is used as-is — pass the stored channel ID to skip the lookup.
+arg** (update takes `--body` and/or `--blocks` only). `channel` takes the same
+forms as `send-msg`'s `to`; pass the `channel` send-msg returned and no lookup
+happens.
 
 ```bash
 murtaugh slack update-msg --channel C123ABC --ts 1700000000.000100 \

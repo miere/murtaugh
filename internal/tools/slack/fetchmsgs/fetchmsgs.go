@@ -37,7 +37,7 @@ func (t *Tool) Name() string { return "slack.fetch-msgs" }
 
 // Description returns the human-facing summary used by MCP clients.
 func (t *Tool) Description() string {
-	return "Fetch messages from a Slack channel or thread, oldest first."
+	return "Fetch messages from a Slack channel, DM or thread, oldest first. Accepts the same destinations as slack_send-msg, so a channel or DM id it returned can be read back here."
 }
 
 // InputSchema returns the JSON Schema for the tool's arguments.
@@ -45,7 +45,7 @@ func (t *Tool) InputSchema() *jsonschema.Schema {
 	return &jsonschema.Schema{
 		Type: "object",
 		Properties: map[string]*jsonschema.Schema{
-			"channel": {Type: "string", Description: "Channel name (with or without #) or channel ID."},
+			"channel": {Type: "string", Description: "Conversation to read: " + slacklib.ConversationRefHelp},
 			"thread":  {Type: "string", Description: "Thread timestamp (e.g. 1234567890.123456) to fetch replies from."},
 			"since":   {Type: "string", Description: "Exclude messages sent before this Sydney datetime (YYYY-MM-DD HH:mm:ss). Default: 24h ago."},
 		},
@@ -79,7 +79,7 @@ func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 		return nil, err
 	}
 
-	channelID, err := slacklib.ResolveChannel(ctx, api, channel)
+	channelID, err := slacklib.ResolveTarget(ctx, api, channel)
 	if err != nil {
 		return nil, err
 	}

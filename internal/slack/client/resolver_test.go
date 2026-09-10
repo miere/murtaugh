@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -54,11 +55,113 @@ func TestResolveTarget_PassesThroughChannelIDs(t *testing.T) {
 	}
 }
 
-func TestResolveTarget_RejectsRawUserID(t *testing.T) {
-	api := &fakeAPI{}
-	_, err := ResolveTarget(context.Background(), api, "U987")
-	if err == nil || !strings.Contains(err.Error(), "--to must start with #") {
-		t.Fatalf("ResolveTarget(U987) err = %v, want rejection", err)
+// Built from inputs that failed in real agent sessions; listing errors so an ID that
+// triggers a lookup fails, since DMs never appear in conversations.list.
+func TestResolveTarget_EveryFormAnAgentHolds(t *testing.T) {
+	noLookup := &fakeAPI{
+		dmFor:           map[string]string{"U0B20G0ET9T": "D0B69D0JVUK", "W0ENTERPR1": "D0ENTDM01"},
+		listChannelsErr: errors.New("ListChannels must not be called for an id"),
+		listUsersErr:    errors.New("ListUsers must not be called for an id"),
+	}
+	cases := []struct{ in, want string }{
+		{"U0B20G0ET9T", "D0B69D0JVUK"},
+		{"@U0B20G0ET9T", "D0B69D0JVUK"},
+		{"<@U0B20G0ET9T>", "D0B69D0JVUK"},
+		{"<@U0B20G0ET9T|miere>", "D0B69D0JVUK"},
+		{"W0ENTERPR1", "D0ENTDM01"},
+		{"D0B69D0JVUK", "D0B69D0JVUK"},
+		{"C08FH7W48CC", "C08FH7W48CC"},
+		{"<#C08FH7W48CC>", "C08FH7W48CC"},
+		{"<#C08FH7W48CC|nc-alerts>", "C08FH7W48CC"},
+		{"  G0PRIVATE1  ", "G0PRIVATE1"},
+	}
+	for _, tc := range cases {
+		got, err := ResolveTarget(context.Background(), noLookup, tc.in)
+		if err != nil {
+			t.Errorf("ResolveTarget(%q): %v", tc.in, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("ResolveTarget(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestResolveTarget_NamesStillResolve(t *testing.T) {
+	api := &fakeAPI{
+		channels: []Channel{{ID: "C0BFN6TN9JP", Name: "nc-reports"}},
+		users:    []User{{ID: "U0B20G0ET9T", Name: "miere", DisplayName: "Miere"}},
+		dmFor:    map[string]string{"U0B20G0ET9T": "D0B69D0JVUK"},
+	}
+	cases := []struct{ in, want string }{
+		{"@Miere", "D0B69D0JVUK"},
+		{"@miere", "D0B69D0JVUK"},
+		{"#nc-reports", "C0BFN6TN9JP"},
+		{"nc-reports", "C0BFN6TN9JP"},
+	}
+	for _, tc := range cases {
+		got, err := ResolveTarget(context.Background(), api, tc.in)
+		if err != nil || got != tc.want {
+			t.Errorf("ResolveTarget(%q) = %q, %v; want %q", tc.in, got, err, tc.want)
+		}
+	}
+}
+
+// A digit is what separates an ID from an all-caps display name.
+func TestResolveTarget_AllCapsHandleIsNotAnID(t *testing.T) {
+	api := &fakeAPI{
+		users: []User{{ID: "U0QA00001", DisplayName: "QA"}},
+		dmFor: map[string]string{"U0QA00001": "D0QADM001"},
+	}
+	got, err := ResolveTarget(context.Background(), api, "@QA")
+	if err != nil || got != "D0QADM001" {
+		t.Fatalf("ResolveTarget(@QA) = %q, %v; want D0QADM001", got, err)
+	}
+}
+
+func TestResolveChannel_NotFoundTeachesTheForms(t *testing.T) {
+	_, err := ResolveTarget(context.Background(), &fakeAPI{}, "#alerts")
+	if err == nil {
+		t.Fatal("ResolveTarget(#alerts) succeeded against an empty workspace")
+	}
+	for _, want := range []string{"Channel 'alerts' not found", "private channel", "D…", "<@U…>"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+}
+
+func TestResolveChannel_RejectsAPerson(t *testing.T) {
+	for _, in := range []string{"@miere", "U0B20G0ET9T", "<@U0B20G0ET9T>"} {
+		_, err := ResolveChannel(context.Background(), &fakeAPI{}, in)
+		if err == nil || !strings.Contains(err.Error(), "names a person") {
+			t.Errorf("ResolveChannel(%q) err = %v, want a names-a-person error", in, err)
+		}
+	}
+}
+
+func TestResolveUser_AcceptsEveryIDForm(t *testing.T) {
+	api := &fakeAPI{listUsersErr: errors.New("ListUsers must not be called for an id")}
+	for _, in := range []string{"U0B20G0ET9T", "@U0B20G0ET9T", "<@U0B20G0ET9T>", "<@U0B20G0ET9T|miere>"} {
+		got, err := ResolveUser(context.Background(), api, in)
+		if err != nil || got != "U0B20G0ET9T" {
+			t.Errorf("ResolveUser(%q) = %q, %v; want U0B20G0ET9T", in, got, err)
+		}
+	}
+}
+
+// Accepting bare IDs would otherwise rewrite the @U… inside <@U…> into <<@U…>>.
+func TestResolveMentions_LeavesEscapedMentionsAlone(t *testing.T) {
+	in := "ping <@U0B20G0ET9T> about it"
+	if got := ResolveMentions(context.Background(), &fakeAPI{}, in, io.Discard); got != in {
+		t.Fatalf("ResolveMentions(%q) = %q, want it unchanged", in, got)
+	}
+}
+
+func TestResolveMentions_ExpandsBareUserID(t *testing.T) {
+	got := ResolveMentions(context.Background(), &fakeAPI{}, "cc @U0B20G0ET9T", io.Discard)
+	if got != "cc <@U0B20G0ET9T>" {
+		t.Fatalf("ResolveMentions = %q, want %q", got, "cc <@U0B20G0ET9T>")
 	}
 }
 
