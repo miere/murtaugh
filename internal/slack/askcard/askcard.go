@@ -298,16 +298,49 @@ func (q Question) label(i int) string {
 	return fmt.Sprintf("%d. %s", i+1, text)
 }
 
-// optionText renders one option as mrkdwn: the label italicised, then the
-// description. Slack's radio/checkbox options do carry a native `description`
-// field, but it renders in a dimmer, smaller style that buries a description
-// doing real explanatory work — which is exactly what these carry.
 func (o Option) optionText() string {
-	label := strings.TrimSpace(o.Label)
-	if d := strings.TrimSpace(o.Description); d != "" {
-		return "_" + label + "_ - " + d
+	const italics, sep = 2, len(" - ")
+	label := clampSlackText(strings.TrimSpace(o.Label), maxOptionText-italics)
+	text := "_" + label + "_"
+	d := strings.TrimSpace(o.Description)
+	if room := maxOptionText - utf16Len(text) - sep; d != "" && room >= 2 {
+		text += " - " + clampSlackText(d, room)
 	}
-	return "_" + label + "_"
+	return text
+}
+
+const maxOptionText = 75
+
+func clampSlackText(s string, limit int) string {
+	if utf16Len(s) <= limit {
+		return s
+	}
+	budget := limit - 1
+	runes := []rune(s)
+	cut := 0
+	for used := 0; cut < len(runes); cut++ {
+		n := 1
+		if runes[cut] > 0xFFFF {
+			n = 2
+		}
+		if used+n > budget {
+			break
+		}
+		used += n
+	}
+	return strings.TrimRight(string(runes[:cut]), " ") + "…"
+}
+
+func utf16Len(s string) int {
+	n := 0
+	for _, r := range s {
+		if r > 0xFFFF {
+			n += 2
+		} else {
+			n++
+		}
+	}
+	return n
 }
 
 // Renderer turns the card templates into the raw Block Kit JSON the Slack client

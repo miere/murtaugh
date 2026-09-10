@@ -371,3 +371,97 @@ func TestValidationMessageNamesTheGaps(t *testing.T) {
 		t.Errorf("the message should point at the escape hatch; got %q", one)
 	}
 }
+
+func rebootstrapQuestions() Spec {
+	return Spec{
+		Questions: []Question{
+			{
+				Key:      "q0",
+				Header:   "Environment",
+				Question: "Which environment am I rebootstrapping `Business` in? The ticket only says \"the target environment\" and does not name one explicitly.",
+				Options: []Option{
+					{Label: "raywhite-production", Description: "The AU production monolith. Every live agency reads from it, so a rebootstrap here is visible to customers until it completes, and the DAPI queue will back up for the duration of the run."},
+					{Label: "raywhite-testing", Description: "The shared testing environment used by QA before a release is promoted."},
+					{Label: "raywhite-development", Description: "Development sandbox only."},
+					{Label: "nc-uk-production", Description: "The UK production monolith. Separate data, separate queues, and no AU agencies are affected by anything done here."},
+				},
+			},
+			{
+				Key:      "q1",
+				Header:   "Blast radius",
+				Question: "How should I roll it out?",
+				Options: []Option{
+					{Label: "Canary then full", Description: "Rebootstrap a single business first, verify the output against the source of truth, then run the remainder once it checks out — slower, but a bad mapping is caught on one record instead of all of them."},
+					{Label: "Straight to full", Description: "Run every business in one pass. Fastest, and fine if the mapping is already known good, but a bad mapping lands everywhere at once and has to be rebootstrapped again."},
+				},
+			},
+		},
+	}
+}
+
+// Slack rejects the whole card when any option's text exceeds 75 characters.
+func TestPendingCardFitsSlackOptionLimit(t *testing.T) {
+	f := &Flow{}
+	doc := decode(t, PendingTemplate, f.data(rebootstrapQuestions(), "corr", StatePending, "", "", nil))
+	for _, in := range blocksOfType(childBlocks(t, doc), "input") {
+		opts, _ := in["element"].(map[string]any)["options"].([]any)
+		for _, o := range opts {
+			text := o.(map[string]any)["text"].(map[string]any)["text"].(string)
+			if n := utf16Len(text); n > maxOptionText {
+				t.Errorf("option text is %d characters, over Slack's %d: %q", n, maxOptionText, text)
+			}
+		}
+	}
+}
+
+// Slack rejects an initial_option that does not exactly match one of the options.
+func TestClampedInitialOptionMatchesItsOption(t *testing.T) {
+	f := &Flow{}
+	doc := decode(t, PendingTemplate, f.data(rebootstrapQuestions(), "corr", StatePending,
+		"Question 2 still needs an answer.", "", map[string][]string{"q0": {"raywhite-production"}}))
+	el := blocksOfType(childBlocks(t, doc), "input")[0]["element"].(map[string]any)
+	initial, ok := el["initial_option"].(map[string]any)
+	if !ok {
+		t.Fatal("no initial_option on the answered question")
+	}
+	if got := initial["value"]; got != "raywhite-production" {
+		t.Fatalf("initial_option value = %v; the label must round-trip unclamped", got)
+	}
+	want := el["options"].([]any)[0].(map[string]any)["text"]
+	if got := initial["text"]; got.(map[string]any)["text"] != want.(map[string]any)["text"] {
+		t.Errorf("initial_option text %v does not match its option %v", got, want)
+	}
+}
+
+func TestOptionText(t *testing.T) {
+	long := strings.Repeat("word ", 40)
+	cases := []struct {
+		name string
+		opt  Option
+		want func(string) bool
+	}{
+		{"fits unchanged", Option{Label: "Redis", Description: "Fast ephemeral delivery."},
+			func(s string) bool { return s == "_Redis_ - Fast ephemeral delivery." }},
+		{"long description is clipped", Option{Label: "Redis", Description: long},
+			func(s string) bool { return strings.HasPrefix(s, "_Redis_ - word") && strings.HasSuffix(s, "…") }},
+		{"underscore in label stays balanced", Option{Label: "raywhite_production", Description: long},
+			func(s string) bool {
+				return strings.HasPrefix(s, "_raywhite_production_ - ") && !strings.HasSuffix(s, "_…")
+			}},
+		{"long label keeps its italics closed", Option{Label: long},
+			func(s string) bool { return strings.HasPrefix(s, "_word") && strings.HasSuffix(s, "…_") }},
+		{"no room left drops the description", Option{Label: strings.Repeat("x", 71), Description: "gone"},
+			func(s string) bool { return !strings.Contains(s, "gone") }},
+		{"astral emoji count double", Option{Label: "Ship", Description: strings.Repeat("🚀", 60)},
+			func(s string) bool { return utf16Len(s) <= maxOptionText }},
+	}
+	for _, tc := range cases {
+		got := tc.opt.optionText()
+		if n := utf16Len(got); n > maxOptionText {
+			t.Errorf("%s: %d characters, over %d: %q", tc.name, n, maxOptionText, got)
+		}
+		if !tc.want(got) {
+			t.Errorf("%s: optionText() = %q", tc.name, got)
+		}
+	}
+}
