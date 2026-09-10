@@ -6,6 +6,31 @@
 - NEVER start, restart, or replace the Slack gateway while a healthy one is
   already connected — see "Never clobber a live gateway" below.
 
+# Code comments
+
+- Explain only the *why*, and only when the code and its context don't already
+  make it clear.
+- Never describe what the code does, how it does it, its intent, its inputs and
+  outputs, or when it panics.
+- Only public types, functions, methods and constants get a comment.
+- A comment is never longer than two lines.
+
+# Commits and pull requests
+
+- A stack of pull requests is a set of small pieces of one deliverable, not the
+  story of how it was built. The fewer pieces the better. Anything built in one
+  step and removed in a later one is waste: fold it into the end state.
+- Commits follow the same rule.
+- Pull requests that must be released together are stacked with `gh stack`.
+- More than 20 files in a commit, or more than 30 in a pull request, is probably
+  wrong. If you really need more, the body must explain why.
+- The title summarises *what* changes. No ticket numbers, no `feat:` or `fix:`
+  style prefixes.
+- The body has one paragraph on *what* changes and one on *why*. Never the how.
+- If there is a ticket, end the body with `Relates-to #N`, `Closes #N` or
+  `Fixes #N`.
+- Write like a person, in words a junior engineer would follow.
+
 # Never clobber a live gateway
 
 The machine you are running on is very likely the machine hosting the live
