@@ -94,7 +94,7 @@ type Problem struct {
 // MCP servers (always included). Native groups (files/terminal/skills/attach) are
 // synthesized; every other allowlist entry selects registry tools whose name
 // equals the entry or whose namespace (the part before the first '.') equals it
-// — so "slack" pulls in slack.send-msg, slack.fetch-msgs, … and "ping" pulls in
+// — so "slack" pulls in slack.send_msg, slack.fetch_msgs, … and "ping" pulls in
 // ping. Duplicates (by tool name) are removed, preserving first-seen order:
 // native, then registry (allowlist order), then MCP.
 func Resolve(allow []string, mcpTools []tools.Tool, deps Deps) ([]tools.Tool, []Problem, error) {

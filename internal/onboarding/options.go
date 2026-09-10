@@ -21,8 +21,8 @@ import (
 //
 // A family is an allowlist entry as toolset.Resolve understands it: either a
 // synthesized native group (files/terminal/skills/attach) or a registry
-// namespace that selects every tool under it ("slack" pulls in slack.send-msg,
-// slack.fetch-msgs, …). The catalogue is curated rather than derived from the
+// namespace that selects every tool under it ("slack" pulls in slack.send_msg,
+// slack.fetch_msgs, …). The catalogue is curated rather than derived from the
 // registry because a picker needs what a registry cannot supply — a label, a
 // sentence of consequence, and a considered default. internal/app's
 // TestToolFamilyCatalogueCoversTheRegistry keeps it from drifting behind a

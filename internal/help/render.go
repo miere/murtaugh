@@ -272,8 +272,6 @@ func ensureSentence(s string) string {
 	return s + "."
 }
 
-// commandOf converts a dotted registry key into the spaced CLI form
-// ("slack.send-msg" → "slack send-msg").
 func commandOf(name string) string { return strings.ReplaceAll(name, ".", " ") }
 
 // flagOf converts a snake_case schema property into its kebab-case flag

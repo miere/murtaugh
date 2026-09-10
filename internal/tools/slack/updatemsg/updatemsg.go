@@ -43,7 +43,7 @@ func (t *Tool) InputSchema() *jsonschema.Schema {
 	return &jsonschema.Schema{
 		Type: "object",
 		Properties: map[string]*jsonschema.Schema{
-			"channel": {Type: "string", Description: "Conversation the message is in — pass the channel send-msg returned, or any of: " + slacklib.ConversationRefHelp},
+			"channel": {Type: "string", Description: "Conversation the message is in — pass the channel slack_send_msg returned, or any of: " + slacklib.ConversationRefHelp},
 			"ts":      {Type: "string", Description: "Timestamp of the message to update."},
 			"body":    {Type: "string", Description: "Fallback text for the update. Defaults to 'Message updated'."},
 			"blocks":  {Type: "string", Description: "Block Kit blocks: either a JSON string (starts with [ or {) or a path to a JSON file."},
