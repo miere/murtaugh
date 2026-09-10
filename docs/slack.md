@@ -19,13 +19,13 @@ one-shot CLI tools under the `slack` namespace. They reuse the gateway's
 `oauth.bot_token`, so no extra configuration is needed for the common case.
 
 ```sh
-murtaugh slack send-msg --to '#general' --body 'hello'
-murtaugh slack fetch-msgs --channel general
-murtaugh slack fetch-reactions --channel general --from @ada --emoji thumbsup
-murtaugh slack update-msg --channel C123 --ts 1234.5678 --body 'edited'
+murtaugh slack send_msg --to '#general' --body 'hello'
+murtaugh slack fetch_msgs --channel general
+murtaugh slack fetch_reactions --channel general --from @ada --emoji thumbsup
+murtaugh slack update_msg --channel C123 --ts 1234.5678 --body 'edited'
 ```
 
-`send-msg` posts as the app by default. To post as the **human admin** instead,
+`send_msg` posts as the app by default. To post as the **human admin** instead,
 add `--as admin`; this requires the optional `oauth.user_token` (the admin's
 `xoxp-…` token, see [configuration](configuration.md#configyaml)). Such a
 message carries the admin's real Slack identity — indistinguishable from one
@@ -35,7 +35,7 @@ intended.
 **Conventions** (the agent follows these; they're good practice for your own
 automations too):
 
-- **One message per entity.** Post once, store the `ts`, then `update-msg` in
+- **One message per entity.** Post once, store the `ts`, then `update_msg` in
   place; use a thread reply for follow-ups. Don't repost on every tick.
 - **No secrets in a message.** Never put tokens or PII in `action_id`,
   `block_id`, or a button `value` — they travel inside the message and are
@@ -50,7 +50,7 @@ automations too):
 
 ## Asking the user
 
-`send-msg` is fire-and-forget. To get an **answer back**, an agent uses the
+`send_msg` is fire-and-forget. To get an **answer back**, an agent uses the
 blocking tools:
 
 - **`ask`** — pose a question with options as clickable Slack buttons and wait
@@ -78,7 +78,7 @@ back to the embedded `assets/` defaults. The repo ships starter templates under
 
 ## Workflow rules
 
-Add rules with `cfg workflow-rule set` to react to Slack interactive events
+Add rules with `cfg workflow_rule set` to react to Slack interactive events
 (button clicks, form submissions). Rules match the raw interaction payload; the
 first match wins, and its triggers run in order.
 
@@ -116,10 +116,10 @@ trigger:
 ```
 
 ```sh
-murtaugh cfg workflow-rule set --name code-review-approval --from-file rule.yaml
-murtaugh cfg workflow-rule list
-murtaugh cfg workflow-rule show --name code-review-approval
-murtaugh cfg workflow-rule delete --name code-review-approval
+murtaugh cfg workflow_rule set --name code-review-approval --from-file rule.yaml
+murtaugh cfg workflow_rule list
+murtaugh cfg workflow_rule show --name code-review-approval
+murtaugh cfg workflow_rule delete --name code-review-approval
 ```
 
 `delegate-to-agent` prompts are rendered as Go templates against the interaction
@@ -135,7 +135,7 @@ one-shot session — no shared chat memory.
 
 ## Link unfurling
 
-Add rules with `cfg unfurl-rule set` to replace shared URLs with rich Block Kit
+Add rules with `cfg unfurl_rule set` to replace shared URLs with rich Block Kit
 previews. An `unfurl` action is exactly one of `template`, `run`, or
 `delegate-to-agent`. Each rule's body is a YAML fragment loaded into the store by
 name:
@@ -163,11 +163,11 @@ unfurl:
 ```
 
 ```sh
-murtaugh cfg unfurl-rule set --name github-pr --from-file github-pr.yaml
-murtaugh cfg unfurl-rule set --name github-issues --from-file github-issues.yaml
-murtaugh cfg unfurl-rule list
-murtaugh cfg unfurl-rule show --name github-pr
-murtaugh cfg unfurl-rule delete --name github-pr
+murtaugh cfg unfurl_rule set --name github-pr --from-file github-pr.yaml
+murtaugh cfg unfurl_rule set --name github-issues --from-file github-issues.yaml
+murtaugh cfg unfurl_rule list
+murtaugh cfg unfurl_rule show --name github-pr
+murtaugh cfg unfurl_rule delete --name github-pr
 ```
 
 Prompts and templates can reference `{{ .URL }}`, `{{ .Domain }}`, and named

@@ -70,7 +70,7 @@ murtaugh setup slack ...          # write config.yaml's oauth block (OAuth token
 murtaugh setup env ...            # upsert provider keys into .env
 murtaugh setup agents ...         # create a native or ACP agent (writes to the config store)
 murtaugh setup launchd ...        # (macOS) install the daemon
-murtaugh setup mcp-register ...   # (optional) register Murtaugh in an MCP client
+murtaugh setup mcp_register ...   # (optional) register Murtaugh in an MCP client
 ```
 
 Run `murtaugh help setup <tool>` for the exact flags of each. `setup bootstrap`,
