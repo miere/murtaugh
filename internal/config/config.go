@@ -49,7 +49,7 @@ type Config struct {
 
 // TroubleshootConfig is the machine-managed troubleshoot.yaml sibling. It
 // records which downstream providers' on-disk diagnostics the bundler should
-// include by default. setup.mcp-register appends to Providers when it registers
+// include by default. setup.mcp_register appends to Providers when it registers
 // Murtaugh into a client that is also a known diagnostics provider (e.g. goose).
 type TroubleshootConfig struct {
 	Providers []string `yaml:"providers" json:"providers,omitempty"`

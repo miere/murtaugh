@@ -30,7 +30,7 @@ func TestRegistry_ContainsAllExpectedTools(t *testing.T) {
 		{"setup.bootstrap", []string{}}, // optional --force flag; no required fields
 		{"setup.slack", []string{"app_token", "bot_token", "admin_user"}},
 		{"setup.agents", []string{}},
-		{"setup.mcp-register", []string{"client", "binary_path"}},
+		{"setup.mcp_register", []string{"client", "binary_path"}},
 		{"setup.launchd", []string{"binary_path"}},
 		{"setup.update", []string{}},
 		{"journal.query", []string{}},
@@ -75,7 +75,7 @@ func TestUsageLine_ListsFlatToolsNamespacesAndModes(t *testing.T) {
 	for _, want := range []string{
 		"ping",
 		"jobs <define|run>",
-		"setup <agents|bootstrap|env|launchd|mcp-register|slack|update>",
+		"setup <agents|bootstrap|env|launchd|mcp_register|slack|update>",
 		"slack <canvas|create_channel|fetch_msgs|fetch_reactions|gateway|send_msg|update_msg>",
 		"mcp",
 	} {

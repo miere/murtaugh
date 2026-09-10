@@ -186,7 +186,7 @@ func TestMCPToolName(t *testing.T) {
 	cases := map[string]string{
 		"jobs.define":        "jobs_define",
 		"journal.query":      "journal_query",
-		"setup.mcp-register": "setup_mcp-register", // hyphen already valid, kept
+		"setup.mcp_register": "setup_mcp_register", // hyphen already valid, kept
 		"slack.send_msg":     "slack_send_msg",
 		"ping":               "ping", // already valid, unchanged
 		"a.b.c":              "a_b_c",

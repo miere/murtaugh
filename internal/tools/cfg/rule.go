@@ -74,7 +74,7 @@ func RuleTools(p Provider) []tools.Tool {
 	workflowSet := &ruleSetTool{
 		p:       p,
 		section: config.SectionWorkflowRule,
-		name:    "cfg.workflow-rule.set",
+		name:    "cfg.workflow_rule.set",
 		label:   "workflow rule",
 		decode: func(data []byte) (any, error) {
 			var rule config.WorkflowRuleConfig
@@ -87,7 +87,7 @@ func RuleTools(p Provider) []tools.Tool {
 	unfurlSet := &ruleSetTool{
 		p:       p,
 		section: config.SectionUnfurlRule,
-		name:    "cfg.unfurl-rule.set",
+		name:    "cfg.unfurl_rule.set",
 		label:   "unfurl rule",
 		decode: func(data []byte) (any, error) {
 			var rule config.UnfurlRuleConfig
@@ -98,8 +98,8 @@ func RuleTools(p Provider) []tools.Tool {
 		},
 	}
 	out := []tools.Tool{workflowSet}
-	out = append(out, sectionTools(p, config.SectionWorkflowRule, "cfg.workflow-rule", "workflow rule")...)
+	out = append(out, sectionTools(p, config.SectionWorkflowRule, "cfg.workflow_rule", "workflow rule")...)
 	out = append(out, unfurlSet)
-	out = append(out, sectionTools(p, config.SectionUnfurlRule, "cfg.unfurl-rule", "unfurl rule")...)
+	out = append(out, sectionTools(p, config.SectionUnfurlRule, "cfg.unfurl_rule", "unfurl rule")...)
 	return out
 }

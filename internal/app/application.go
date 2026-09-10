@@ -432,7 +432,7 @@ func buildRegistry(cfg config.Config, cfgStore config.Store, configPath, version
 
 // effectiveTroubleshootProviders resolves which downstream providers a bundle
 // should include by default: the set configured in troubleshoot.yaml (written
-// by setup.mcp-register) when non-empty, otherwise every provider Murtaugh
+// by setup.mcp_register) when non-empty, otherwise every provider Murtaugh
 // knows how to collect diagnostics for. Missing files are skipped at collection
 // time, so the all-known fallback is safe on a machine that only runs some of
 // them.
