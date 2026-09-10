@@ -1,4 +1,4 @@
-// Package fetchmsgs implements the `slack.fetch-msgs` tool: fetch a channel
+// Package fetchmsgs implements the `slack.fetch_msgs` tool: fetch a channel
 // or thread's messages, oldest-first, optionally filtered by --since (Sydney
 // time, default 24h ago).
 package fetchmsgs
@@ -15,7 +15,7 @@ import (
 // HistoryLimit caps the number of messages fetched from conversations.history.
 const HistoryLimit = 100
 
-// Tool is the `slack.fetch-msgs` capability.
+// Tool is the `slack.fetch_msgs` capability.
 type Tool struct {
 	client *slacklib.LazyClient
 }
@@ -33,11 +33,11 @@ func NewWith(client *slacklib.LazyClient) *Tool {
 }
 
 // Name returns the registry key.
-func (t *Tool) Name() string { return "slack.fetch-msgs" }
+func (t *Tool) Name() string { return "slack.fetch_msgs" }
 
 // Description returns the human-facing summary used by MCP clients.
 func (t *Tool) Description() string {
-	return "Fetch messages from a Slack channel, DM or thread, oldest first. Accepts the same destinations as slack_send-msg, so a channel or DM id it returned can be read back here."
+	return "Fetch messages from a Slack channel, DM or thread, oldest first. Accepts the same destinations as slack_send_msg, so a channel or DM id it returned can be read back here."
 }
 
 // InputSchema returns the JSON Schema for the tool's arguments.

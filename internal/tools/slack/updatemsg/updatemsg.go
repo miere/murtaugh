@@ -1,4 +1,4 @@
-// Package updatemsg implements the `slack.update-msg` tool: update an
+// Package updatemsg implements the `slack.update_msg` tool: update an
 // existing message in a channel, optionally rewriting its Block Kit blocks.
 package updatemsg
 
@@ -14,7 +14,7 @@ import (
 // DefaultBody is the fallback text Slack receives when --body is omitted.
 const DefaultBody = "Message updated"
 
-// Tool is the `slack.update-msg` capability.
+// Tool is the `slack.update_msg` capability.
 type Tool struct {
 	client *slacklib.LazyClient
 }
@@ -31,7 +31,7 @@ func NewWith(client *slacklib.LazyClient) *Tool {
 }
 
 // Name returns the registry key.
-func (t *Tool) Name() string { return "slack.update-msg" }
+func (t *Tool) Name() string { return "slack.update_msg" }
 
 // Description returns the human-facing summary used by MCP clients.
 func (t *Tool) Description() string {

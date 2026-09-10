@@ -13,8 +13,8 @@ import (
 
 func TestTool_Metadata(t *testing.T) {
 	tool := New("")
-	if tool.Name() != "slack.create-channel" {
-		t.Fatalf("Name = %q, want slack.create-channel", tool.Name())
+	if tool.Name() != "slack.create_channel" {
+		t.Fatalf("Name = %q, want slack.create_channel", tool.Name())
 	}
 	schema := tool.InputSchema()
 	if schema == nil || schema.Type != "object" {

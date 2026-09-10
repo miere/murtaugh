@@ -40,7 +40,7 @@ func TestSectionLookup(t *testing.T) {
 		{"jobs.run", "## murtaugh jobs run"}, // dotted registry form
 		{"jobs_run", "## murtaugh jobs run"}, // MCP published form
 		{"slack send-msg", "## murtaugh slack send-msg"},
-		{"slack.send-msg", "## murtaugh slack send-msg"},
+		{"slack.send_msg", "## murtaugh slack send-msg"},
 		{"  Jobs   Define ", "## murtaugh jobs define"}, // whitespace/case tolerant
 		{"setup mcp-register", "## murtaugh setup mcp-register"},
 		{"present_plan", "## murtaugh present_plan"}, // generated, no prose section

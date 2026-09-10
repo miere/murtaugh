@@ -1,4 +1,4 @@
-// Package sendmsg implements the `slack.send-msg` tool: post a message (or
+// Package sendmsg implements the `slack.send_msg` tool: post a message (or
 // upload a file) to a Slack channel or DM.
 package sendmsg
 
@@ -14,7 +14,7 @@ import (
 	slacklib "github.com/miere/murtaugh/internal/slack/client"
 )
 
-// Tool is the `slack.send-msg` capability.
+// Tool is the `slack.send_msg` capability.
 type Tool struct {
 	client      *slacklib.LazyClient
 	adminClient *slacklib.LazyClient
@@ -42,7 +42,7 @@ func NewWith(client, adminClient *slacklib.LazyClient, warn io.Writer) *Tool {
 }
 
 // Name returns the registry key.
-func (t *Tool) Name() string { return "slack.send-msg" }
+func (t *Tool) Name() string { return "slack.send_msg" }
 
 // Description returns the human-facing summary used by MCP clients.
 func (t *Tool) Description() string {

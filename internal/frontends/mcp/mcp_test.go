@@ -187,7 +187,7 @@ func TestMCPToolName(t *testing.T) {
 		"jobs.define":        "jobs_define",
 		"journal.query":      "journal_query",
 		"setup.mcp-register": "setup_mcp-register", // hyphen already valid, kept
-		"slack.send-msg":     "slack_send-msg",
+		"slack.send_msg":     "slack_send_msg",
 		"ping":               "ping", // already valid, unchanged
 		"a.b.c":              "a_b_c",
 	}

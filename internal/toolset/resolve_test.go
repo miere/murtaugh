@@ -47,13 +47,13 @@ func newRegistry(toolNames ...string) *tools.Registry {
 }
 
 func TestResolve_RegistrySelectionByNameAndNamespace(t *testing.T) {
-	reg := newRegistry("ping", "slack.send-msg", "slack.fetch-msgs", "jobs.run", "restart")
+	reg := newRegistry("ping", "slack.send_msg", "slack.fetch_msgs", "jobs.run", "restart")
 	got, _, err := Resolve([]string{"ping", "slack"}, nil, Deps{Registry: reg})
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
 	have := names(got)
-	for _, want := range []string{"ping", "slack.send-msg", "slack.fetch-msgs"} {
+	for _, want := range []string{"ping", "slack.send_msg", "slack.fetch_msgs"} {
 		if !have[want] {
 			t.Errorf("expected %q in toolset, got %v", want, have)
 		}

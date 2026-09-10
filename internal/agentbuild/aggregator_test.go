@@ -53,7 +53,7 @@ func toolNames(ts []tools.Tool) []string {
 }
 
 func TestResolveBuiltinsCuratesAndStripsGroups(t *testing.T) {
-	reg := registryWith("ping", "ask", "slack.send-msg", "slack.fetch-msgs", "setup.env", "restart")
+	reg := registryWith("ping", "ask", "slack.send_msg", "slack.fetch_msgs", "setup.env", "restart")
 	// Allow a namespace (slack), an exact tool (ask), a curated-out namespace
 	// (setup), and a native-only group (files) that must not synthesize anything.
 	// A real workdir is supplied so files survives the seam's prune and we are
@@ -63,7 +63,7 @@ func TestResolveBuiltinsCuratesAndStripsGroups(t *testing.T) {
 		t.Fatalf("resolveBuiltins: %v", err)
 	}
 	names := toolNames(got)
-	for _, want := range []string{"ask", "slack.send-msg", "slack.fetch-msgs"} {
+	for _, want := range []string{"ask", "slack.send_msg", "slack.fetch_msgs"} {
 		if !slices.Contains(names, want) {
 			t.Fatalf("expected %q in resolved set, got %v", want, names)
 		}
@@ -108,7 +108,7 @@ func TestBridgeUnsafe(t *testing.T) {
 			t.Fatalf("%q should be bridge-unsafe", n)
 		}
 	}
-	for _, n := range []string{"ask", "slack.send-msg", "setupx", "restart"} {
+	for _, n := range []string{"ask", "slack.send_msg", "setupx", "restart"} {
 		if bridgeUnsafe(n) {
 			t.Fatalf("%q should be bridge-safe", n)
 		}
@@ -143,7 +143,7 @@ func TestACPAggregatorRegisterSession(t *testing.T) {
 }
 
 func TestACPAggregatorToolsetAndClose(t *testing.T) {
-	reg := registryWith("ask", "slack.send-msg")
+	reg := registryWith("ask", "slack.send_msg")
 	srv := mcpbridge.NewServer("/tmp/murtaugh-test-agg2.sock", nil)
 	// No external MCP servers configured: the toolset is just the built-ins.
 	aggr, err := newACPAggregator(srv, reg, resolvedFor(t, "", "ask", "slack"), nil, nil, nil)
@@ -155,7 +155,7 @@ func TestACPAggregatorToolsetAndClose(t *testing.T) {
 		t.Fatalf("Close before use: %v", err)
 	}
 	got := toolNames(aggr.resolvedToolset())
-	if len(got) != 2 || !slices.Contains(got, "ask") || !slices.Contains(got, "slack.send-msg") {
+	if len(got) != 2 || !slices.Contains(got, "ask") || !slices.Contains(got, "slack.send_msg") {
 		t.Fatalf("resolved toolset = %v, want the two built-ins", got)
 	}
 	// Close after the (empty) manager opened must also succeed.

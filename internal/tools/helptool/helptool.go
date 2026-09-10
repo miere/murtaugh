@@ -47,7 +47,7 @@ func (t *Tool) InputSchema() *jsonschema.Schema {
 		Properties: map[string]*jsonschema.Schema{
 			"command": {
 				Type:        "string",
-				Description: "Command to document, in any spelling: \"slack send-msg\", \"slack.send-msg\" or \"slack_send-msg\". Omit to list every command.",
+				Description: "Command to document, in any spelling: \"slack send_msg\", \"slack.send_msg\" or \"slack_send_msg\". Omit to list every command.",
 			},
 		},
 	}
