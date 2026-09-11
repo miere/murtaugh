@@ -50,6 +50,8 @@ type Options struct {
 	Advertise *Advertiser
 
 	SignIns *SignIns
+
+	Credentials *Credentials
 	// Configure applies the agent profiles a Slack onboarding form produced for
 	// this node's owner, into this node's OWN store.
 	//
@@ -182,6 +184,10 @@ func Serve(ctx context.Context, conn nodelink.Conn, client agent.Client, opts Op
 	if opts.SignIns != nil {
 		opts.SignIns.bind(s)
 		defer opts.SignIns.unbind(s)
+	}
+	if opts.Credentials != nil {
+		opts.Credentials.bind(s)
+		defer opts.Credentials.unbind(s)
 	}
 
 	select {

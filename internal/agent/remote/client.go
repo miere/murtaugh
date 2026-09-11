@@ -77,6 +77,8 @@ type Options struct {
 	Owner string
 
 	SignIns func(ctx context.Context, prompt *agent.SignInPrompt, settled <-chan agent.SignInSettled, shown func(error))
+
+	Credentials func(agentwire.CredentialHealth)
 	// EventBuffer is a turn's channel depth. Zero takes defaultEventBuffer.
 	EventBuffer int
 	// WindowBytes, AckThreshold, AckInterval and Epoch are passed through to
@@ -101,6 +103,8 @@ type Client struct {
 	signIn     func(ctx context.Context, prompt *agent.SignInPrompt, settled <-chan agent.SignInSettled, shown func(error))
 	transfers  *transfers
 	buffer     int
+
+	credentials func(agentwire.CredentialHealth)
 
 	nextID atomic.Int64
 	closes chan string
@@ -151,6 +155,8 @@ func New(conn nodelink.Conn, opts Options) *Client {
 		answers:    make(map[string]*agentwire.PendingDecision),
 		signIns:    make(map[string]chan struct{}),
 		headless:   make(map[string]*headlessSignIn),
+
+		credentials: opts.Credentials,
 	}
 	c.link = nodelink.New(conn, nodelink.Options{
 		Handler:      c.consume,

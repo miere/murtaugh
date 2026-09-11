@@ -656,7 +656,7 @@ func New(cfg config.Config, logger *slog.Logger, recorder journal.Recorder, brok
 		// claude_code agent is reachable by jobs, workflow rules and unfurls even
 		// when chat is disabled, and its credential still has to be kept alive.
 		credWarden: credwarden.New(credwarden.Options{
-			Identities: claudeCodeIdentities(cfg.Agents),
+			Identities: credwarden.ClaudeCodeIdentities(cfg.Agents),
 			Logger:     logger,
 		}),
 		credRepair:        credRepair,

@@ -25,6 +25,7 @@ import (
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/config/migrate"
 	configstore "github.com/miere/murtaugh/internal/config/store"
+	"github.com/miere/murtaugh/internal/credwarden"
 	"github.com/miere/murtaugh/internal/help"
 	"github.com/miere/murtaugh/internal/mcpbridge"
 	"github.com/miere/murtaugh/internal/nodeclaim"
@@ -163,6 +164,11 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
+	var credentials *nodeserve.Credentials
+	if warden := credwarden.New(credwarden.Options{Identities: servedIdentities(cfg, name), Logger: logger}); warden != nil {
+		credentials = reportCredentials(warden, logger)
+		go warden.Run(ctx)
+	}
 
 	// What this node claims, set BEFORE the first dial so the handshake answer
 	// carries it. A node that advertised after attaching would be attached and
@@ -228,6 +234,8 @@ func run(args []string) error {
 		// Fired by nodeserve AFTER the answer is on the wire, never by the
 		// applier: it cancels the context this very connection is served on.
 		restart: restart,
+
+		credentials: credentials,
 	})
 }
 
@@ -371,6 +379,8 @@ type attachment struct {
 	configure  func(context.Context, agentwire.NodeConfiguration) (agentwire.NodeConfigured, error)
 	restart    func()
 
+	credentials *nodeserve.Credentials
+
 	// dial and wait are the loop's two seams, nil in every binary and set only
 	// by the loop's own test.
 	//
@@ -454,6 +464,7 @@ func attach(ctx context.Context, logger *slog.Logger, a attachment) error {
 			Gate:        a.gate,
 			Background:  a.background,
 			SignIns:     a.signIns,
+			Credentials: a.credentials,
 			Advertise:   a.claim,
 			Configure:   a.configure,
 			Restart:     a.restart,

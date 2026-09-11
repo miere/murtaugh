@@ -71,6 +71,9 @@ const (
 	// MethodSignInSettled is answered so the node sends the next update only
 	// once the gateway holds the last, which keeps the card's states in order.
 	MethodSignInSettled Method = "node.sign_in.settled"
+	// MethodCredentialHealth is answered so the node sends its reports one at a
+	// time, and a recovery can never arrive ahead of the failure it ends.
+	MethodCredentialHealth Method = "node.credential_health"
 )
 
 // Message is one payload: what the envelope wraps.
