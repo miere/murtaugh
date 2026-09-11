@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/miere/murtaugh/internal/agent"
-	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/slack/alertcard"
 )
 
@@ -134,7 +133,7 @@ func awaitSettled(t *testing.T, r *settlingRenderer, why string) {
 func TestBackgroundSinkRendersRegisteredSession(t *testing.T) {
 	sink := newBackgroundEventsRouter(nil, 0)
 	var made []*recordingRenderer
-	sink.bind(func(config.ProgressDisplay, string, string, StreamWriterOptions) chatRenderer {
+	sink.bind(func(string, string, StreamWriterOptions) chatRenderer {
 		r := &recordingRenderer{}
 		made = append(made, r)
 		return r
@@ -160,7 +159,7 @@ func TestBackgroundSinkRendersRegisteredSession(t *testing.T) {
 func TestBackgroundSinkDropsUnregisteredSession(t *testing.T) {
 	sink := newBackgroundEventsRouter(nil, 0)
 	built := false
-	sink.bind(func(config.ProgressDisplay, string, string, StreamWriterOptions) chatRenderer {
+	sink.bind(func(string, string, StreamWriterOptions) chatRenderer {
 		built = true
 		return &recordingRenderer{}
 	})
@@ -174,7 +173,7 @@ func TestBackgroundSinkDropsUnregisteredSession(t *testing.T) {
 func TestBackgroundSinkFreshRendererPerTurn(t *testing.T) {
 	sink := newBackgroundEventsRouter(nil, 0)
 	built := 0
-	sink.bind(func(config.ProgressDisplay, string, string, StreamWriterOptions) chatRenderer {
+	sink.bind(func(string, string, StreamWriterOptions) chatRenderer {
 		built++
 		return &recordingRenderer{}
 	})
@@ -206,7 +205,7 @@ func TestBackgroundSinkFreshRendererPerTurn(t *testing.T) {
 func TestBackgroundStretchThatGoesSilentEndsWithTheStallNotice(t *testing.T) {
 	sink := newBackgroundEventsRouter(nil, 30*time.Millisecond)
 	r := newSettlingRenderer()
-	sink.bind(func(config.ProgressDisplay, string, string, StreamWriterOptions) chatRenderer { return r })
+	sink.bind(func(string, string, StreamWriterOptions) chatRenderer { return r })
 	sink.Register("sess", bgTarget{channelID: "C", threadTS: "1"})
 
 	sink.Handle("sess", agent.Event{Type: agent.EventText, Text: "half a thought"})
@@ -244,7 +243,7 @@ func TestBackgroundStallDoesNotRenderAsAnAgentError(t *testing.T) {
 	// A window long enough that the watcher goroutine cannot reach the renderer:
 	// this test drives the expiry itself, so there is no race to lose.
 	sink := newBackgroundEventsRouter(discardLogger(), time.Hour)
-	sink.bind(func(config.ProgressDisplay, string, string, StreamWriterOptions) chatRenderer {
+	sink.bind(func(string, string, StreamWriterOptions) chatRenderer {
 		return alertRenderer(stream, msgr, api)
 	})
 	sink.Register("sess", bgTarget{channelID: "C1", threadTS: "100.0"})
@@ -288,7 +287,7 @@ func TestBackgroundStretchSurvivesEventsSpacedInsideTheWindow(t *testing.T) {
 	const window = 100 * time.Millisecond
 	sink := newBackgroundEventsRouter(nil, window)
 	r := newSettlingRenderer()
-	sink.bind(func(config.ProgressDisplay, string, string, StreamWriterOptions) chatRenderer { return r })
+	sink.bind(func(string, string, StreamWriterOptions) chatRenderer { return r })
 	sink.Register("sess", bgTarget{channelID: "C", threadTS: "1"})
 
 	started := time.Now()
@@ -323,7 +322,7 @@ func TestBackgroundStretchSurvivesEventsSpacedInsideTheWindow(t *testing.T) {
 func TestBackgroundExpiryRetiresTheStretch(t *testing.T) {
 	sink := newBackgroundEventsRouter(nil, 20*time.Millisecond)
 	var made []*settlingRenderer
-	sink.bind(func(config.ProgressDisplay, string, string, StreamWriterOptions) chatRenderer {
+	sink.bind(func(string, string, StreamWriterOptions) chatRenderer {
 		r := newSettlingRenderer()
 		made = append(made, r)
 		return r
@@ -388,7 +387,7 @@ func TestBackgroundRouterArmsEachStretchWithTheConfiguredWindow(t *testing.T) {
 	// And the configured window is what a stretch is actually armed with — a knob
 	// the constructor keeps to itself would be no knob at all.
 	sink := newBackgroundEventsRouter(nil, 42*time.Second)
-	sink.bind(func(config.ProgressDisplay, string, string, StreamWriterOptions) chatRenderer {
+	sink.bind(func(string, string, StreamWriterOptions) chatRenderer {
 		return &recordingRenderer{}
 	})
 	sink.Register("sess", bgTarget{})

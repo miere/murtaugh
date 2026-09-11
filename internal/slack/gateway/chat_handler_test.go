@@ -11,7 +11,6 @@ import (
 	"github.com/slack-go/slack"
 
 	"github.com/miere/murtaugh/internal/agent"
-	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/slack/alertcard"
 )
 
@@ -43,11 +42,6 @@ func TestHandle_UsesPassedRouteNotResolver(t *testing.T) {
 	}
 }
 
-// tasksProgress forces the full task-card rendering, for the tests that assert
-// TaskCardWriter behaviour specifically. The handler default is the simplified
-// single-line view.
-func tasksProgress(string) config.ProgressDisplay { return config.ProgressDisplayTasks }
-
 // allStreamWrites returns every chunk group written to the stream — the initial
 // start options plus every append — so a test can assert what landed regardless
 // of which of the (now separate) text/tool streams carried it.
@@ -64,10 +58,6 @@ func allStreamWrites(t *testing.T, api *fakeStreamAPI) [][]slack.StreamChunk {
 	return groups
 }
 
-// assertToolTextSeparation is the coherence guarantee for tasks mode: no single
-// stream write ever mixes tool (plan/task) chunks with reply (markdown) chunks.
-// Task cards and reply text always land in separate messages, so a card can never
-// interleave into an unflushed text run.
 func assertToolTextSeparation(t *testing.T, api *fakeStreamAPI) {
 	t.Helper()
 	for i, chunks := range allStreamWrites(t, api) {
@@ -309,11 +299,34 @@ func TestChatHandlerResolvesACPPermissionInOrder(t *testing.T) {
 	}
 }
 
+// How a turn is drawn is the gateway's alone, so a handler given no setting at
+// all must still draw tool activity as task cards and never as a status line.
+func TestChatHandlerDrawsToolProgressAsTaskCards(t *testing.T) {
+	api := &fakeStreamAPI{}
+	msgr := &fakeStatusMessenger{}
+	sessions := map[string]ChatSessionManager{"default": &fakeChatSessionsRenamedTask{}}
+	resolver := func(req ChatRequest) ChatRoute { return ChatRoute{Agent: "default", ReplyOnThread: true} }
+	handler := NewChatHandler(api, sessions, resolver, time.Hour, 5, nil).WithStatusMessenger(msgr)
+	if err := handler.handleResolving(context.Background(), ChatRequest{TeamID: "T1", ChannelID: "C1", UserID: "U1", MessageTS: "123.4", Text: "hi", Source: "test"}); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	var cards int
+	for _, chunks := range allStreamWrites(t, api) {
+		cards += len(taskChunks(chunks))
+	}
+	if cards == 0 {
+		t.Fatal("the tool run was not drawn as a task card")
+	}
+	if msgr.posts != 0 {
+		t.Fatalf("the tool run posted %d status-line messages; progress is only ever task cards", msgr.posts)
+	}
+}
+
 func TestChatHandlerFinalisesRenamedTaskOnSuccess(t *testing.T) {
 	api := &fakeStreamAPI{}
 	sessions := map[string]ChatSessionManager{"default": &fakeChatSessionsRenamedTask{}}
 	resolver := func(req ChatRequest) ChatRoute { return ChatRoute{Agent: "default", ReplyOnThread: true} }
-	handler := NewChatHandler(api, sessions, resolver, time.Hour, 5, nil).WithProgressDisplay(tasksProgress)
+	handler := NewChatHandler(api, sessions, resolver, time.Hour, 5, nil)
 	if err := handler.handleResolving(context.Background(), ChatRequest{TeamID: "T1", ChannelID: "C1", UserID: "U1", MessageTS: "123.4", Text: "hi", Source: "test"}); err != nil {
 		t.Fatalf("Handle returned error: %v", err)
 	}
@@ -380,7 +393,7 @@ func TestChatHandlerRoutesTaskEventsToTaskCardWriter(t *testing.T) {
 	fakeSessions := &fakeChatSessionsWithTasks{}
 	sessions := map[string]ChatSessionManager{"default": fakeSessions}
 	resolver := func(req ChatRequest) ChatRoute { return ChatRoute{Agent: "default", ReplyOnThread: true} }
-	handler := NewChatHandler(api, sessions, resolver, time.Hour, 5, nil).WithProgressDisplay(tasksProgress)
+	handler := NewChatHandler(api, sessions, resolver, time.Hour, 5, nil)
 	err := handler.handleResolving(context.Background(), ChatRequest{TeamID: "T1", ChannelID: "C1", UserID: "U1", MessageTS: "123.4", Text: "hi", Source: "test"})
 	if err != nil {
 		t.Fatalf("Handle returned error: %v", err)
@@ -417,7 +430,7 @@ func TestChatHandlerAppendsFinalTextAfterTaskCompletes(t *testing.T) {
 	fakeSessions := &fakeChatSessionsWithCompletedTaskThenText{}
 	sessions := map[string]ChatSessionManager{"default": fakeSessions}
 	resolver := func(req ChatRequest) ChatRoute { return ChatRoute{Agent: "default", ReplyOnThread: true} }
-	handler := NewChatHandler(api, sessions, resolver, time.Hour, 5, nil).WithProgressDisplay(tasksProgress)
+	handler := NewChatHandler(api, sessions, resolver, time.Hour, 5, nil)
 	err := handler.handleResolving(context.Background(), ChatRequest{TeamID: "T1", ChannelID: "C1", UserID: "U1", MessageTS: "123.4", Text: "hi", Source: "test"})
 	if err != nil {
 		t.Fatalf("Handle returned error: %v", err)
@@ -471,7 +484,7 @@ func TestChatHandlerCompletesStillRunningTasksOnSuccess(t *testing.T) {
 	api := &fakeStreamAPI{}
 	sessions := map[string]ChatSessionManager{"default": &fakeChatSessionsRunningTaskThenComplete{}}
 	resolver := func(req ChatRequest) ChatRoute { return ChatRoute{Agent: "default", ReplyOnThread: true} }
-	handler := NewChatHandler(api, sessions, resolver, time.Hour, 5, nil).WithProgressDisplay(tasksProgress)
+	handler := NewChatHandler(api, sessions, resolver, time.Hour, 5, nil)
 	if err := handler.handleResolving(context.Background(), ChatRequest{TeamID: "T1", ChannelID: "C1", UserID: "U1", MessageTS: "123.4", Text: "hi", Source: "test"}); err != nil {
 		t.Fatalf("Handle returned error: %v", err)
 	}
@@ -948,9 +961,6 @@ func TestChatHandlerIdleTimeoutStopsAgentAndPostsNotice(t *testing.T) {
 	if len(fake.cancelled) != 1 || fake.cancelled[0] != "sess-1" {
 		t.Fatalf("expected one session/cancel for sess-1, got %v", fake.cancelled)
 	}
-	// The notice landed as its own discrete context-block message (not folded into
-	// the reply stream), so a stall reads as a light aside rather than a dead UI.
-	// The aside is the last thing posted, after the reply and progress line settle.
 	if got := optionValue(msgr.postOptions, "text"); !strings.Contains(got, "nudge it") {
 		t.Fatalf("expected the idle-timeout aside to be posted as a context block, got text: %q", got)
 	}

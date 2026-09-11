@@ -10,7 +10,6 @@ import (
 
 	"github.com/miere/murtaugh/assets"
 	"github.com/miere/murtaugh/internal/agent"
-	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/slack/alertcard"
 	"github.com/slack-go/slack"
 )
@@ -64,9 +63,6 @@ type ChatHandler struct {
 	// (the default) records nothing; the gateway wires it only when that stream
 	// is enabled.
 	sessionLog *sessionLogger
-	// progressDisplay resolves the per-agent progress rendering. nil defaults
-	// every agent to the simplified single-line view.
-	progressDisplay func(agent string) config.ProgressDisplay
 	// templateDir is where the buffered reply's Block Kit template is looked up
 	// before the embedded assets tree, so an operator can restyle it without a
 	// rebuild. Empty means the working directory (the embedded default wins).
@@ -74,10 +70,7 @@ type ChatHandler struct {
 	// userNames resolves a Slack user id to a display name when the buffered
 	// transport rewrites mentions out of the reply prose. A nil cache resolves
 	// nothing and the raw id is shown — cosmetic only; the mention still fires.
-	userNames *userNameCache
-	// statusMessenger lets the simplified renderer post/edit/delete its own
-	// context-block message. nil makes the simplified line a no-op (tests that
-	// do not wire Slack); the gateway always supplies it in production.
+	userNames       *userNameCache
 	statusMessenger statusMessenger
 	// backfiller renders an existing Slack thread into a transcript when a brand-
 	// new ACP session is opened for it, so the agent starts with the prior
@@ -228,10 +221,6 @@ func (h *ChatHandler) effectiveIdleTimeout() time.Duration {
 	return defaultIdleTimeout
 }
 
-// postIdleAside posts the idle-timeout notice as its own context-block message —
-// the same low-key surface the progress line uses — threaded below the settled
-// reply. A nil messenger (tests without Slack, or a headless deploy) no-ops, so a
-// missing surface never turns a stall into a crash.
 func (h *ChatHandler) postIdleAside(ctx context.Context, channelID, threadTS string) {
 	if h.statusMessenger == nil {
 		return
@@ -252,17 +241,7 @@ func (h *ChatHandler) WithSessionLogger(sl *sessionLogger) *ChatHandler {
 	return h
 }
 
-// WithProgressDisplay sets the resolver that picks each agent's progress
-// rendering. nil (the default) renders every agent in simplified mode. Returns
-// the handler for chaining.
-func (h *ChatHandler) WithProgressDisplay(resolve func(agent string) config.ProgressDisplay) *ChatHandler {
-	h.progressDisplay = resolve
-	return h
-}
-
-// WithStatusMessenger wires the Slack surface the simplified progress renderer
-// uses to manage its own context-block message. Returns the handler for
-// chaining. nil leaves the simplified line a no-op.
+// A canvas cannot host a stream, and the idle-timeout aside is not part of one.
 func (h *ChatHandler) WithStatusMessenger(m statusMessenger) *ChatHandler {
 	h.statusMessenger = m
 	return h
@@ -363,34 +342,9 @@ func (h *ChatHandler) WithAlerts(dir string, api alertMessagePoster) *ChatHandle
 	return h
 }
 
-// resolveProgressDisplay returns the configured mode for the agent, defaulting
-// to simplified when no resolver is wired or it returns an empty value.
-func (h *ChatHandler) resolveProgressDisplay(agent string) config.ProgressDisplay {
-	if h.progressDisplay == nil {
-		return config.ProgressDisplaySimplified
-	}
-	if mode := h.progressDisplay(agent); mode != "" {
-		return mode
-	}
-	return config.ProgressDisplaySimplified
-}
-
-// newChatRenderer builds the per-turn renderer. There is a single segmentation
-// model (sectionRenderer) — an ordered, seal-on-boundary sequence of separate
-// messages — so ordering is coherent for every agent, native or ACP. The resolved
-// progress mode only picks the tool-block cosmetic: grouped task cards (tasks) or
-// a compact status line (simplified, the default). Both ride the same
-// segmentation and each own a message distinct from the reply text, so a tool
-// update can never interleave into an unflushed text run.
-func (h *ChatHandler) newChatRenderer(mode config.ProgressDisplay, channelID, threadTS string, opts StreamWriterOptions) chatRenderer {
+func (h *ChatHandler) newChatRenderer(channelID, threadTS string, opts StreamWriterOptions) chatRenderer {
 	newBlock := func() toolBlock {
-		if mode == config.ProgressDisplayTasks {
-			// Task cards stream, and downgrade to buffered PlanBlock posting on a
-			// canvas surface — keeping the real cards rather than regressing to a
-			// status line (spec 021, issue #87).
-			return newDefaultCardBlock(h.api, h.statusMessenger, channelID, threadTS, opts, h.logger)
-		}
-		return NewStatusLineWriter(h.statusMessenger, channelID, threadTS, 0, h.logger)
+		return newDefaultCardBlock(h.api, h.statusMessenger, channelID, threadTS, opts, h.logger)
 	}
 	return newSectionRenderer(
 		// The reply-text transport negotiates streaming vs buffered posting: a
@@ -602,13 +556,12 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest, route ChatRou
 	if req.DM {
 		teamID, userID = "", ""
 	}
-	progressMode := h.resolveProgressDisplay(agentName)
 	streamOpts := StreamWriterOptions{
 		ThreadTS: streamThreadTS, TeamID: teamID, UserID: userID,
 		Interval: h.interval, MinChars: h.minChars, Logger: h.logger,
 		TemplateDir: h.templateDir, ResolveUserName: h.userNames.Name,
 	}
-	renderer := h.newChatRenderer(progressMode, req.ChannelID, streamThreadTS, streamOpts)
+	renderer := h.newChatRenderer(req.ChannelID, streamThreadTS, streamOpts)
 	// Tell the background events router where this conversation renders, so a subagent that
 	// finishes after this turn ends is posted into the same thread. Keyed by the
 	// deterministic session id — the same id claude_code fires OnBackground with.
@@ -616,7 +569,6 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest, route ChatRou
 		h.backgroundEventsRouter.Register(agent.DeriveSessionID(metadata), bgTarget{
 			channelID:  req.ChannelID,
 			threadTS:   streamThreadTS,
-			mode:       progressMode,
 			streamOpts: streamOpts,
 		})
 	}

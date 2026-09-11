@@ -2,25 +2,19 @@ package gateway
 
 import (
 	"context"
-	"strings"
 	"testing"
 	"time"
+
+	"github.com/slack-go/slack"
 
 	"github.com/miere/murtaugh/internal/agent"
 )
 
-// newTestSectionRenderer wires a sectionRenderer to the test fakes: every text
-// section is a StreamWriter over api, every tool block a StatusLineWriter over
-// msgr. A huge throttle interval keeps the status line's in-place updates from
-// firing, so post/start counts reflect sections, not refreshes.
-func newTestSectionRenderer(api *fakeStreamAPI, msgr *fakeStatusMessenger) *sectionRenderer {
+func newTestSectionRenderer(api, cards *fakeStreamAPI) *sectionRenderer {
+	opts := StreamWriterOptions{ThreadTS: "100.0", Interval: time.Hour, MinChars: 1, Logger: discardLogger()}
 	return newSectionRenderer(
-		func() SlackSink {
-			return NewStreamWriter(api, "C1", StreamWriterOptions{ThreadTS: "100.0", Interval: time.Hour, MinChars: 1, Logger: discardLogger()})
-		},
-		func() toolBlock {
-			return NewStatusLineWriter(msgr, "C1", "100.0", time.Hour, discardLogger())
-		},
+		func() SlackSink { return NewStreamWriter(api, "C1", opts) },
+		func() toolBlock { return newCardToolBlock(cards, "C1", opts, discardLogger()) },
 		nil, nil, "C1", "100.0",
 		discardLogger(),
 	)
@@ -34,8 +28,8 @@ func newTestSectionRenderer(api *fakeStreamAPI, msgr *fakeStatusMessenger) *sect
 // must produce exactly: block, message, block, message.
 func TestSectionRenderer_AlternatesBlocksAndMessages(t *testing.T) {
 	api := &fakeStreamAPI{}
-	msgr := &fakeStatusMessenger{}
-	r := newTestSectionRenderer(api, msgr)
+	cards := &fakeStreamAPI{}
+	r := newTestSectionRenderer(api, cards)
 	ctx := context.Background()
 
 	// Block 1: three contiguous tools coalesce into one block.
@@ -52,8 +46,8 @@ func TestSectionRenderer_AlternatesBlocksAndMessages(t *testing.T) {
 		t.Fatalf("Finish: %v", err)
 	}
 
-	if msgr.posts != 2 {
-		t.Errorf("expected 2 tool-block messages, got %d", msgr.posts)
+	if cards.starts != 2 {
+		t.Errorf("expected 2 tool-block messages, got %d", cards.starts)
 	}
 	if len(api.startOptions) != 2 {
 		t.Errorf("expected 2 text messages, got %d", len(api.startOptions))
@@ -63,13 +57,12 @@ func TestSectionRenderer_AlternatesBlocksAndMessages(t *testing.T) {
 	}
 }
 
-// TestSectionRenderer_BlockSummarizesItsTools verifies a finalized tool block
-// resolves to a compact summary of the tools it ran, not a single "Done
-// thinking".
-func TestSectionRenderer_BlockSummarizesItsTools(t *testing.T) {
+// A turn that ends with tools still in flight must not leave their cards
+// spinning, since a spinner that never stops reads as work still going on.
+func TestSectionRenderer_BlockCompletesItsCards(t *testing.T) {
 	api := &fakeStreamAPI{}
-	msgr := &fakeStatusMessenger{}
-	r := newTestSectionRenderer(api, msgr)
+	cards := &fakeStreamAPI{}
+	r := newTestSectionRenderer(api, cards)
 	ctx := context.Background()
 
 	_ = r.Task(ctx, &agent.TaskEvent{ID: "1", Title: "read", Status: agent.TaskStatusInProgress})
@@ -79,9 +72,19 @@ func TestSectionRenderer_BlockSummarizesItsTools(t *testing.T) {
 		t.Fatalf("Finish: %v", err)
 	}
 
-	summary := optionValue(msgr.updateOptions, "text")
-	if !strings.Contains(summary, "read · skill · write") {
-		t.Errorf("block summary = %q, want it to list the tools that ran", summary)
+	last := map[string]slack.TaskCardStatus{}
+	for _, chunks := range allStreamWrites(t, cards) {
+		for _, task := range taskChunks(chunks) {
+			last[task.ID] = task.Status
+		}
+	}
+	for _, id := range []string{"1", "2", "3"} {
+		if last[id] != slack.TaskCardStatusComplete {
+			t.Errorf("card %s ended %q, want complete (all: %v)", id, last[id], last)
+		}
+	}
+	if cards.stops != 1 {
+		t.Errorf("the tool block's message was stopped %d times, want once", cards.stops)
 	}
 }
 
@@ -93,8 +96,8 @@ func TestSectionRenderer_BlockSummarizesItsTools(t *testing.T) {
 // stays one streamed message; the plan renders once, as a trailing block.
 func TestSectionRenderer_PlanSnapshotsDoNotChopReply(t *testing.T) {
 	api := &fakeStreamAPI{}
-	msgr := &fakeStatusMessenger{}
-	r := newTestSectionRenderer(api, msgr)
+	cards := &fakeStreamAPI{}
+	r := newTestSectionRenderer(api, cards)
 	ctx := context.Background()
 
 	_ = r.Text(ctx, "The config diff shows a new coder-mono ")
@@ -114,8 +117,8 @@ func TestSectionRenderer_PlanSnapshotsDoNotChopReply(t *testing.T) {
 	if api.stops != 1 {
 		t.Errorf("expected the single reply committed once, got stops=%d", api.stops)
 	}
-	if msgr.posts != 1 {
-		t.Errorf("expected the plan to render as exactly one tool block, got %d", msgr.posts)
+	if cards.starts != 1 {
+		t.Errorf("expected the plan to render as exactly one tool block, got %d", cards.starts)
 	}
 }
 
@@ -125,8 +128,8 @@ func TestSectionRenderer_PlanSnapshotsDoNotChopReply(t *testing.T) {
 // a text→tools transition.
 func TestSectionRenderer_ToolUpdateDoesNotReseal(t *testing.T) {
 	api := &fakeStreamAPI{}
-	msgr := &fakeStatusMessenger{}
-	r := newTestSectionRenderer(api, msgr)
+	cards := &fakeStreamAPI{}
+	r := newTestSectionRenderer(api, cards)
 	ctx := context.Background()
 
 	_ = r.Task(ctx, &agent.TaskEvent{ID: "t1", Title: "read", Status: agent.TaskStatusInProgress})
@@ -141,8 +144,8 @@ func TestSectionRenderer_ToolUpdateDoesNotReseal(t *testing.T) {
 	if len(api.startOptions) != 1 {
 		t.Errorf("a repeat tool id must not open a second reply message, got %d", len(api.startOptions))
 	}
-	if msgr.posts != 1 {
-		t.Errorf("expected exactly one tool block, got %d", msgr.posts)
+	if cards.starts != 1 {
+		t.Errorf("expected exactly one tool block, got %d", cards.starts)
 	}
 }
 
@@ -151,8 +154,8 @@ func TestSectionRenderer_ToolUpdateDoesNotReseal(t *testing.T) {
 // stays two messages (before/after the tool), with a single block between them.
 func TestSectionRenderer_PlanFoldsIntoToolBlock(t *testing.T) {
 	api := &fakeStreamAPI{}
-	msgr := &fakeStatusMessenger{}
-	r := newTestSectionRenderer(api, msgr)
+	cards := &fakeStreamAPI{}
+	r := newTestSectionRenderer(api, cards)
 	ctx := context.Background()
 
 	_ = r.Task(ctx, &agent.TaskEvent{ID: "plan-0", Title: "check diff", Status: agent.TaskStatusInProgress, Kind: agent.TaskKindPlan})
@@ -163,8 +166,8 @@ func TestSectionRenderer_PlanFoldsIntoToolBlock(t *testing.T) {
 		t.Fatalf("Finish: %v", err)
 	}
 
-	if msgr.posts != 1 {
-		t.Errorf("plan should fold into the tool block, not add its own; got %d blocks", msgr.posts)
+	if cards.starts != 1 {
+		t.Errorf("plan should fold into the tool block, not add its own; got %d blocks", cards.starts)
 	}
 	if len(api.startOptions) != 2 {
 		t.Errorf("expected two text messages around the single block, got %d", len(api.startOptions))
@@ -175,16 +178,16 @@ func TestSectionRenderer_PlanFoldsIntoToolBlock(t *testing.T) {
 // stays one streamed message with no tool block — the common chat case.
 func TestSectionRenderer_TextOnlyIsASingleMessage(t *testing.T) {
 	api := &fakeStreamAPI{}
-	msgr := &fakeStatusMessenger{}
-	r := newTestSectionRenderer(api, msgr)
+	cards := &fakeStreamAPI{}
+	r := newTestSectionRenderer(api, cards)
 	ctx := context.Background()
 
 	_ = r.Text(ctx, "just an answer")
 	if err := r.Finish(ctx, nil); err != nil {
 		t.Fatalf("Finish: %v", err)
 	}
-	if msgr.posts != 0 {
-		t.Errorf("a tool-less reply must post no tool block, got %d", msgr.posts)
+	if cards.starts != 0 {
+		t.Errorf("a tool-less reply must post no tool block, got %d", cards.starts)
 	}
 	if len(api.startOptions) != 1 || api.stops != 1 {
 		t.Errorf("expected one streamed message, got starts=%d stops=%d", len(api.startOptions), api.stops)

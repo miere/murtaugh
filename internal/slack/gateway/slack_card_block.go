@@ -11,14 +11,6 @@ import (
 	"github.com/miere/murtaugh/internal/agent"
 )
 
-// bufferedCardBlock renders tasks-mode tool cards on a surface that cannot stream
-// (a canvas): the same Plan/Task-card blocks the streaming path emits as chunks are
-// instead posted as a single message (chat.postMessage with a PlanBlock) and edited
-// in place (chat.update) as statuses change. The only visible difference from
-// streaming is Slack's small "(edited)" label — so tasks mode keeps its real cards
-// on a canvas rather than regressing to a plain status line (spec 021 §2, no-UX-
-// regression). It is a toolBlock, so sectionRenderer drives it identically to
-// cardToolBlock.
 type bufferedCardBlock struct {
 	messenger statusMessenger
 	channelID string
@@ -30,7 +22,7 @@ type bufferedCardBlock struct {
 	order     []string // task ids in first-seen order
 	titles    map[string]string
 	statuses  map[string]slack.TaskCardStatus
-	running   map[string]bool // ids not yet in a terminal state, for FinishWith
+	running   map[string]bool
 
 	posted    bool
 	msgTS     string
@@ -78,9 +70,9 @@ func (b *bufferedCardBlock) UpdateFromEvent(ctx context.Context, ev *agent.TaskE
 	return b.render(ctx, false)
 }
 
-// FinishWith resolves any still-running card to complete and paints the final
-// state, then stops. There is no stream to close — the message is already posted.
-func (b *bufferedCardBlock) FinishWith(ctx context.Context, _ string) error {
+// The posted message is the only record of the run, and a card left spinning in
+// it reads as unfinished work.
+func (b *bufferedCardBlock) Finish(ctx context.Context) error {
 	if b.stopped {
 		return nil
 	}
@@ -215,8 +207,8 @@ func (c *defaultCardBlock) UpdateFromEvent(ctx context.Context, ev *agent.TaskEv
 	return err
 }
 
-func (c *defaultCardBlock) FinishWith(ctx context.Context, done string) error {
-	return c.current().FinishWith(ctx, done)
+func (c *defaultCardBlock) Finish(ctx context.Context) error {
+	return c.current().Finish(ctx)
 }
 
 func (c *defaultCardBlock) downgrade() {

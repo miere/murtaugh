@@ -36,13 +36,10 @@ func alertRenderer(stream *fakeStreamAPI, msgr *fakeStatusMessenger, api alertMe
 	if api != nil {
 		poster = newAlertPoster(api, testAlertCards(), "C1", "100.0")
 	}
+	opts := StreamWriterOptions{ThreadTS: "100.0", Interval: time.Hour, MinChars: 1, Logger: discardLogger()}
 	return newSectionRenderer(
-		func() SlackSink {
-			return NewStreamWriter(stream, "C1", StreamWriterOptions{ThreadTS: "100.0", Interval: time.Hour, MinChars: 1, Logger: discardLogger()})
-		},
-		func() toolBlock {
-			return NewStatusLineWriter(msgr, "C1", "100.0", time.Hour, discardLogger())
-		},
+		func() SlackSink { return NewStreamWriter(stream, "C1", opts) },
+		func() toolBlock { return newDefaultCardBlock(stream, msgr, "C1", "100.0", opts, discardLogger()) },
 		nil, poster, "C1", "100.0",
 		discardLogger(),
 	)
