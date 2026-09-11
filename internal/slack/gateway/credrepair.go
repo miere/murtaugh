@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/miere/murtaugh/internal/agentruntime"
 	"github.com/miere/murtaugh/internal/auth"
 	"github.com/miere/murtaugh/internal/claudeauth"
 	"github.com/miere/murtaugh/internal/config"
@@ -104,6 +105,13 @@ func newCredentialRepair(flow *authcard.Flow, agents map[string]config.AgentProf
 		logger = slog.Default()
 	}
 	return &credentialRepair{flow: flow, agents: agents, logger: logger, drain: restartDrain}
+}
+
+func localCredentialRepair(flow *authcard.Flow, agents map[string]config.AgentProfile, runtime agentruntime.Runtime, logger *slog.Logger) *credentialRepair {
+	if !runtime.InProcess {
+		return nil
+	}
+	return newCredentialRepair(flow, agents, logger)
 }
 
 // Handles reports whether this error is a Claude Code credential failure on a

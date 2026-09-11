@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/miere/murtaugh/internal/agent"
+	"github.com/miere/murtaugh/internal/auth"
 )
 
 type fakeDisplay struct {
@@ -387,5 +388,29 @@ func TestASignInThatFinishesAfterItsOwnerLostAccessCountsAsDeclined(t *testing.T
 	}
 	if got := display.states(); got[len(got)-1] != agent.SignInFailed {
 		t.Fatalf("settled %v, want it to end failed", got)
+	}
+}
+
+func TestARepairStillWaitsForTheOwnersApproval(t *testing.T) {
+	marker, command := marked(t)
+	profile, err := auth.Custom(command, true)
+	if err != nil {
+		t.Fatalf("custom: %v", err)
+	}
+	refused := &fakeDisplay{answers: []agent.DisplayAnswer{{Outcome: agent.DisplayDenied}}}
+	if err := Repair(context.Background(), refused, "Claude Code", profile); err == nil {
+		t.Fatal("a declined repair succeeded")
+	}
+	time.Sleep(200 * time.Millisecond)
+	if exists(marker) {
+		t.Fatal("a repair ran its command without the owner's approval")
+	}
+
+	approved := &fakeDisplay{answers: approvedThen(agent.DisplayAnswer{Outcome: agent.DisplayAnswered, Code: "GOOD"})}
+	if err := Repair(context.Background(), approved, "Claude Code", profile); err != nil {
+		t.Fatalf("an approved repair failed: %v", err)
+	}
+	if !exists(marker) || len(approved.raised) != 1 || approved.raised[0].Tool != "Claude Code" {
+		t.Fatalf("the repair raised %+v", approved.raised)
 	}
 }

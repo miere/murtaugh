@@ -50,6 +50,12 @@ type Options struct {
 	Advertise *Advertiser
 
 	SignIns *SignIns
+
+	Credentials *Credentials
+
+	Failed func(error) error
+
+	RenewCredential func(ctx context.Context) (agentwire.CredentialRenewal, error)
 	// Configure applies the agent profiles a Slack onboarding form produced for
 	// this node's owner, into this node's OWN store.
 	//
@@ -91,6 +97,8 @@ type Server struct {
 	// refuses the method; see Options.Configure.
 	configure func(ctx context.Context, cfg agentwire.NodeConfiguration) (agentwire.NodeConfigured, error)
 	restart   func()
+	failed    func(error) error
+	renew     func(ctx context.Context) (agentwire.CredentialRenewal, error)
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -151,6 +159,8 @@ func Serve(ctx context.Context, conn nodelink.Conn, client agent.Client, opts Op
 		claim:     opts.Advertise,
 		configure: opts.Configure,
 		restart:   opts.Restart,
+		failed:    opts.Failed,
+		renew:     opts.RenewCredential,
 	}
 	s.ctx, s.cancel = context.WithCancel(ctx)
 	defer s.cancel()
@@ -182,6 +192,10 @@ func Serve(ctx context.Context, conn nodelink.Conn, client agent.Client, opts Op
 	if opts.SignIns != nil {
 		opts.SignIns.bind(s)
 		defer opts.SignIns.unbind(s)
+	}
+	if opts.Credentials != nil {
+		opts.Credentials.bind(s)
+		defer opts.Credentials.unbind(s)
 	}
 
 	select {
@@ -309,6 +323,8 @@ func (s *Server) serve(msg agentwire.Message) {
 		s.serveCloseSession(msg)
 	case agentwire.MethodConfigure:
 		s.serveConfigure(msg)
+	case agentwire.MethodRenewCredential:
+		s.serveRenewCredential(msg)
 	case agentwire.MethodClose:
 		s.reply(msg.ID, agentwire.Empty{})
 		s.cancel()
@@ -386,7 +402,7 @@ func (s *Server) servePrompt(msg agentwire.Message) {
 	events, err := s.client.Prompt(turnCtx, body.SessionID, body.Prompt.Decode())
 	if err != nil {
 		s.endTurn(msg.ID, false)
-		s.fault(msg.ID, err)
+		s.fault(msg.ID, s.turnFailed(err))
 		return
 	}
 	// The acceptance goes out before the first event so a gateway reading its
@@ -646,6 +662,26 @@ func (s *Server) shutdown() {
 	s.dismissTurnAsks("")
 	s.failCalls()
 	s.cancel()
+}
+
+func (s *Server) serveRenewCredential(msg agentwire.Message) {
+	if s.renew == nil {
+		s.fault(msg.ID, errors.New("nodeserve: this node has no credential it can sign in again"))
+		return
+	}
+	renewal, err := s.renew(s.ctx)
+	if err != nil {
+		s.fault(msg.ID, err)
+		return
+	}
+	s.reply(msg.ID, renewal)
+}
+
+func (s *Server) turnFailed(err error) error {
+	if s.failed == nil || err == nil {
+		return err
+	}
+	return s.failed(err)
 }
 
 func (s *Server) reply(id string, body any) {

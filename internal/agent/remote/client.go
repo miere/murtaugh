@@ -77,6 +77,8 @@ type Options struct {
 	Owner string
 
 	SignIns func(ctx context.Context, prompt *agent.SignInPrompt, settled <-chan agent.SignInSettled, shown func(error))
+
+	Credentials func(agentwire.CredentialHealth)
 	// EventBuffer is a turn's channel depth. Zero takes defaultEventBuffer.
 	EventBuffer int
 	// WindowBytes, AckThreshold, AckInterval and Epoch are passed through to
@@ -101,6 +103,8 @@ type Client struct {
 	signIn     func(ctx context.Context, prompt *agent.SignInPrompt, settled <-chan agent.SignInSettled, shown func(error))
 	transfers  *transfers
 	buffer     int
+
+	credentials func(agentwire.CredentialHealth)
 
 	nextID atomic.Int64
 	closes chan string
@@ -151,6 +155,8 @@ func New(conn nodelink.Conn, opts Options) *Client {
 		answers:    make(map[string]*agentwire.PendingDecision),
 		signIns:    make(map[string]chan struct{}),
 		headless:   make(map[string]*headlessSignIn),
+
+		credentials: opts.Credentials,
 	}
 	c.link = nodelink.New(conn, nodelink.Options{
 		Handler:      c.consume,
@@ -299,6 +305,16 @@ func (c *Client) Configure(ctx context.Context, cfg agentwire.NodeConfiguration)
 	var out agentwire.NodeConfigured
 	if err := c.call(ctx, agentwire.MethodConfigure, cfg, &out); err != nil {
 		return agentwire.NodeConfigured{}, err
+	}
+	return out, nil
+}
+
+// RenewCredential is not on agent.Client for the reason Configure is not: only
+// a caller that knows it is talking to a node can ask a node to sign in.
+func (c *Client) RenewCredential(ctx context.Context) (agentwire.CredentialRenewal, error) {
+	var out agentwire.CredentialRenewal
+	if err := c.call(ctx, agentwire.MethodRenewCredential, agentwire.Empty{}, &out); err != nil {
+		return agentwire.CredentialRenewal{}, err
 	}
 	return out, nil
 }

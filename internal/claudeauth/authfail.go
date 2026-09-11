@@ -1,12 +1,5 @@
-// Package claudeauth recognises, from its prose, a Claude Code failure that a
-// re-authentication would fix.
-//
-// It sits outside internal/agent/claudecode on purpose. Its one consumer is the
-// gateway's credential-repair path, which decides whether to ask the admin to
-// sign in again — a gateway policy, not a backend capability — and the gateway
-// must remain incapable of reaching an agent backend (#170 Change E). The
-// backend itself never asks the question: the marker list is matched against
-// text that has already left it.
+// Package claudeauth lives outside the backend, so whoever repairs a Claude
+// Code credential can recognise a failure without linking an agent backend.
 package claudeauth
 
 import (

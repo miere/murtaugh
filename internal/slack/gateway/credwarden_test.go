@@ -2,99 +2,15 @@ package gateway
 
 import (
 	"context"
+	"io"
+	"log/slog"
+	"strings"
 	"testing"
 
+	"github.com/miere/murtaugh/internal/agentruntime"
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/credwarden"
 )
-
-func TestClaudeCodeIdentitiesIgnoresOtherBackends(t *testing.T) {
-	agents := map[string]config.AgentProfile{
-		"native": {Native: &config.NativeProfile{Provider: "gemini", Model: "m", APIKeyEnv: "K"}},
-		// An ACP agent may well be Claude Code behind an adapter, but the adapter's
-		// command is arbitrary. Guessing would be a heuristic that fails quietly, so
-		// ACP credentials are the admin's responsibility by decision.
-		"acp":    {ACP: &config.ACPProfile{Command: "/opt/claude-acp-bridge"}},
-		"claude": {ClaudeCode: &config.ClaudeCodeProfile{Command: "/usr/local/bin/claude"}},
-	}
-
-	got := claudeCodeIdentities(agents)
-	if len(got) != 1 {
-		t.Fatalf("expected only the claude_code agent to be watched, got %d: %v", len(got), got)
-	}
-	if got[0].Command != "/usr/local/bin/claude" {
-		t.Fatalf("unexpected command %q", got[0].Command)
-	}
-	if got[0].Home != "" {
-		t.Fatalf("expected an inherited HOME, got %q", got[0].Home)
-	}
-}
-
-// N claude_code profiles pointing at one binary share ONE credential. Two
-// wardens refreshing it concurrently would have the second present a token the
-// first just retired — the exact failure the warden exists to prevent.
-func TestClaudeCodeIdentitiesCollapseToOneWatcherPerCredential(t *testing.T) {
-	agents := map[string]config.AgentProfile{
-		"a": {ClaudeCode: &config.ClaudeCodeProfile{Command: "/usr/local/bin/claude"}},
-		"b": {ClaudeCode: &config.ClaudeCodeProfile{Command: "/usr/local/bin/claude"}},
-		"c": {ClaudeCode: &config.ClaudeCodeProfile{Command: "/usr/local/bin/claude"}},
-	}
-
-	w := credwarden.New(credwarden.Options{Identities: claudeCodeIdentities(agents)})
-	if w == nil {
-		t.Fatal("expected a warden for three claude_code agents")
-	}
-	if got := w.Identities(); len(got) != 1 {
-		t.Fatalf("expected 3 profiles to collapse to 1 credential, got %d: %v", len(got), got)
-	}
-}
-
-// A profile CAN redirect HOME through its env map, which points it at a
-// different credential file. Missing that would leave the agent watched under
-// the wrong identity, or silently sharing a watcher with a different store.
-func TestClaudeCodeIdentitiesSeparatesHomeOverride(t *testing.T) {
-	agents := map[string]config.AgentProfile{
-		"default": {ClaudeCode: &config.ClaudeCodeProfile{Command: "/usr/local/bin/claude"}},
-		"tenant": {ClaudeCode: &config.ClaudeCodeProfile{
-			Command: "/usr/local/bin/claude",
-			Env:     map[string]string{"HOME": "/srv/tenant"},
-		}},
-	}
-
-	w := credwarden.New(credwarden.Options{Identities: claudeCodeIdentities(agents)})
-	got := w.Identities()
-	if len(got) != 2 {
-		t.Fatalf("expected a HOME override to be a distinct credential, got %d: %v", len(got), got)
-	}
-
-	var homes []string
-	for _, id := range got {
-		homes = append(homes, id.Home)
-	}
-	if !hasString(homes, "/srv/tenant") || !hasString(homes, "") {
-		t.Fatalf("expected both the inherited and overridden HOME, got %v", homes)
-	}
-}
-
-func TestClaudeCodeIdentitiesSkipsBlankCommand(t *testing.T) {
-	agents := map[string]config.AgentProfile{
-		"broken": {ClaudeCode: &config.ClaudeCodeProfile{Command: "   "}},
-	}
-	if got := claudeCodeIdentities(agents); len(got) != 0 {
-		t.Fatalf("expected no identity for a blank command, got %v", got)
-	}
-}
-
-// No claude_code agent means no warden at all — the gate is the existence of a
-// profile, not a config flag an operator can forget.
-func TestNoClaudeCodeAgentYieldsNoWarden(t *testing.T) {
-	agents := map[string]config.AgentProfile{
-		"native": {Native: &config.NativeProfile{Provider: "gemini", Model: "m", APIKeyEnv: "K"}},
-	}
-	if w := credwarden.New(credwarden.Options{Identities: claudeCodeIdentities(agents)}); w != nil {
-		t.Fatal("expected no warden when no claude_code agent is configured")
-	}
-}
 
 func TestStartBackgroundIsNoOpWithoutAWarden(t *testing.T) {
 	g := &Gateway{}
@@ -118,11 +34,50 @@ func TestStopBackgroundIsIdempotent(t *testing.T) {
 	g.StopBackground() // and stopping twice must not panic
 }
 
-func hasString(in []string, want string) bool {
-	for _, s := range in {
-		if s == want {
-			return true
+func gatewayOver(t *testing.T, runtime agentruntime.Runtime) (*Gateway, agentruntime.Hooks) {
+	t.Helper()
+	var hooks agentruntime.Hooks
+	g := New(config.Config{
+		OAuth:  config.OAuthConfig{AppToken: "xapp-test", BotToken: "xoxb-test"},
+		Access: config.AccessConfig{AdminUser: "UADMIN", AllowedUsers: []string{"UOWNER"}},
+		Agents: map[string]config.AgentProfile{"claude": {ClaudeCode: &config.ClaudeCodeProfile{Command: "/usr/local/bin/claude"}}},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, nil, nil, nil, func(h agentruntime.Hooks) agentruntime.Runtime {
+		hooks = h
+		return runtime
+	})
+	return g, hooks
+}
+
+func TestAGatewayWhoseAgentsRunOnNodesWatchesNoCredential(t *testing.T) {
+	if g, _ := gatewayOver(t, agentruntime.Runtime{}); g.credWarden != nil {
+		t.Fatalf("a gateway with no agents of its own watches %v", g.credWarden.Identities())
+	}
+	if g, _ := gatewayOver(t, agentruntime.Runtime{InProcess: true}); g.credWarden == nil {
+		t.Fatal("a gateway running its own claude_code agent does not keep its credential fresh")
+	}
+}
+
+func TestANodesCredentialReportReachesItsOwnerAndTheStatus(t *testing.T) {
+	reports := []agentruntime.CredentialHealth{nodeReport(true)}
+	g, hooks := gatewayOver(t, agentruntime.Runtime{CredentialReports: func() []agentruntime.CredentialHealth { return reports }})
+	sink := &cardSink{}
+	g.credAlerts = testAlerter(t, sink, "UADMIN")
+	if hooks.CredentialHealth == nil {
+		t.Fatal("the gateway gave the runtime nowhere to report a node's credentials")
+	}
+	hooks.CredentialHealth(nodeReport(true))
+	posts, _ := sink.snapshot()
+	if len(posts) != 1 || posts[0].ChannelID != "D-UOWNER" {
+		var channels []string
+		for _, p := range posts {
+			channels = append(channels, p.ChannelID)
+		}
+		t.Fatalf("posted to %v, want one card in the node owner's DM", channels)
+	}
+	status := g.credentialStatusText()
+	for _, want := range []string{"node-1", "<@UOWNER>", "/usr/local/bin/claude", "failing", "no expiresAt"} {
+		if !strings.Contains(status, want) {
+			t.Errorf("status does not show %q:\n%s", want, status)
 		}
 	}
-	return false
 }

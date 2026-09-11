@@ -229,13 +229,13 @@ type Gateway struct {
 	// tests never start it.
 	journalSweep      func(context.Context) error
 	journalSweepEvery time.Duration
-	// credWarden refreshes each claude_code credential from OUTSIDE the agent
-	// sandbox, shortly before it lapses — a boxed `claude` can read its
-	// credential but cannot write the rotated one back, and a rotation that
-	// cannot be persisted destroys the credential rather than merely failing.
-	// Derived from the agent set at construction (see claudeCodeIdentities)
-	// rather than configured; nil when no claude_code agent is defined.
-	credWarden *credwarden.Warden
+
+	credWarden      *credwarden.Warden
+	credAlerts      *credentialAlerter
+	credReports     func() []agentruntime.CredentialHealth
+	pinnedNode      func(ctx context.Context, conversation agent.ConversationKey) (agentruntime.NodeRef, error)
+	connectedNodes  func() []agentruntime.NodeRef
+	renewCredential func(ctx context.Context, nodeID string) (agentruntime.RenewalStatus, error)
 	// backgroundCancel stops the daemon-lifetime work started by
 	// StartBackground (today: the credential warden). Guarded by backgroundMu;
 	// nil means nothing is running.
@@ -427,13 +427,6 @@ func New(cfg config.Config, logger *slog.Logger, recorder journal.Recorder, brok
 		logger.Error("startup Slack ping disabled", "error", err)
 	}
 
-	// Built once and shared by both entry points: the chat handler reaches it when
-	// a turn fails on a rejected credential, and the `auth` slash verb reaches it
-	// when the admin repairs one pre-emptively. It must exist even with chat
-	// disabled, since claude_code agents still serve jobs, workflow rules and
-	// unfurls.
-	credRepair := newCredentialRepair(authFlow, cfg.Agents, logger)
-
 	var chat *ChatHandler
 	var sessions map[string]ChatSessionManager
 	// This bot's own Slack identity, resolved once by the auth.test below and
@@ -507,6 +500,7 @@ func New(cfg config.Config, logger *slog.Logger, recorder journal.Recorder, brok
 	// #170 is going; every consumer below already handles the empty runtime,
 	// because it is also what a deployment with no agents configured produces.
 	cards := display.New(broker, askFlow).WithSignIns(authFlow, logger)
+	var built atomic.Pointer[Gateway]
 	var runtime agentruntime.Runtime
 	if buildRuntime != nil {
 		hooks := agentruntime.Hooks{
@@ -515,12 +509,18 @@ func New(cfg config.Config, logger *slog.Logger, recorder journal.Recorder, brok
 			SignIn: func(ctx context.Context, prompt *agent.SignInPrompt, settled <-chan agent.SignInSettled, shown func(error)) {
 				cards.ShowSignIn(ctx, agent.TurnLocation{}, prompt, settled, shown)
 			},
+			CredentialHealth: func(h agentruntime.CredentialHealth) {
+				if g := built.Load(); g != nil {
+					g.alertNodeCredential(h)
+				}
+			},
 		}
 		if bgRouter != nil {
 			hooks.BackgroundEvents = bgRouter.Handle
 		}
 		runtime = buildRuntime(hooks)
 	}
+	credRepair := localCredentialRepair(authFlow, cfg.Agents, runtime, logger)
 	// agentToolProblems records the tool groups dropped while building each agent
 	// (a degraded feature, not a failed agent) so the startup summary can surface
 	// them in logs and the journal.
@@ -652,13 +652,13 @@ func New(cfg config.Config, logger *slog.Logger, recorder journal.Recorder, brok
 		chatSessions: sessions,
 		selfUserID:   selfUserID,
 		selfBotID:    selfBotID,
-		// Built from the whole agent set, not from the chat loop above: a
-		// claude_code agent is reachable by jobs, workflow rules and unfurls even
-		// when chat is disabled, and its credential still has to be kept alive.
-		credWarden: credwarden.New(credwarden.Options{
-			Identities: claudeCodeIdentities(cfg.Agents),
-			Logger:     logger,
-		}),
+
+		credWarden:      localCredentialWarden(cfg.Agents, runtime, logger),
+		credReports:     runtime.CredentialReports,
+		pinnedNode:      runtime.PinnedNode,
+		connectedNodes:  runtime.ConnectedNodes,
+		renewCredential: runtime.RenewCredential,
+
 		credRepair:        credRepair,
 		chatRouting:       cfg.Chat,
 		chatDefaults:      chatDefaults,
@@ -702,9 +702,11 @@ func New(cfg config.Config, logger *slog.Logger, recorder journal.Recorder, brok
 	// Same reason the coalescer is wired below: the credential alerter reads the
 	// LIVE admin identity, which starts as a handle and is rewritten to a user ID
 	// during startup, so it has to ask g rather than close over a startup copy.
-	g.credWarden.SetObserver(credentialAlertObserver(newCredentialAlerter(
+	g.credAlerts = newCredentialAlerter(
 		alertCards, alertAPI, alertEditor, alertDM,
-		func() string { return g.access().AdminUser }, logger)))
+		func() string { return g.access().AdminUser }, logger)
+	g.credWarden.SetObserver(credentialAlertObserver(g.credAlerts))
+	built.Store(g)
 	// The coalescer needs g's dispatch/interrupt hooks, so it is wired after the
 	// struct exists. It owns the decision of when and what to dispatch per
 	// conversation; startChat merely submits each message to it.

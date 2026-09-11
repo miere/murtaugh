@@ -134,6 +134,14 @@ A `claude_code` agent runs on the Claude Code CLI's own OAuth credential — the
 one `claude auth login` writes. Murtaugh keeps it alive and can repair it from
 Slack, so a lapsed login does not mean SSH-ing to the host.
 
+The credential belongs to the machine the agent runs on, so that machine does
+the work. A runtime node (`murtaugh-runtime`) looks after the credentials of its
+own `claude_code` agents and sends anything that needs a person to the **node's
+owner** — the Slack user its token was minted for. A gateway that runs agents
+itself (`murtaugh slack gateway`) looks after theirs and asks the admin. A
+gateway whose agents all run on nodes (`murtaugh-gateway`) holds no Claude Code
+credential, so it watches nothing and never starts a sign-in on its own machine.
+
 ### Why it needs keeping alive
 
 A sandboxed agent (`sandbox: seatbelt`) can **read** its credential but cannot
@@ -150,8 +158,8 @@ exactly like Anthropic revoking the token out of the blue.
 
 ### The warden
 
-The gateway watches each Claude Code credential's expiry and, shortly before it
-lapses, runs one minimal **unsandboxed** `claude` turn. Claude Code refreshes and
+The machine the agents run on watches each Claude Code credential's expiry and,
+shortly before it lapses, runs one minimal **unsandboxed** `claude` turn. Claude Code refreshes and
 persists normally, because nothing is denying the write, and sandboxed sessions
 only ever read a credential that is already valid.
 
@@ -169,7 +177,7 @@ however long the machine was away; re-reading means a credential that lapsed
 overnight is noticed on the next pass instead of after a timer that was asleep
 too.
 
-It runs for the **daemon's** lifetime, not the leader's. A Claude Code credential
+On a gateway it runs for the **daemon's** lifetime, not the leader's. A Claude Code credential
 is scoped to the machine — one keychain item shared by every `claude_code` agent
 on the host — while leadership is scoped to the cluster. A standby that let its
 own credential lapse would turn the next failover into a promotion of a node that
@@ -185,6 +193,12 @@ It is also deliberately **not** a job. A job would be runnable by name,
 redefinable, and silently disable-able by any agent holding the `jobs` tool
 group; the warden is internal, so there is nothing to enumerate or turn off.
 
+When a credential starts failing, the warden says so once rather than on every
+retry: a card in the admin's DM for the gateway's own agents, or in the node
+owner's DM for a node's, edited in place once it recovers. A node tells its
+gateway where each credential stands every time it connects, so an outage that
+began while it was disconnected is still reported.
+
 Two consequences worth knowing:
 
 - It spends a **small amount of quota**: one throwaway prompt per refresh.
@@ -197,20 +211,35 @@ Two consequences worth knowing:
 ### Repairing a login
 
 ```sh
-/murtaugh auth status   # admin-only: expiry, last refresh, last error per credential
-/murtaugh auth          # admin-only: start a Claude Code sign-in now
+/murtaugh auth status   # admin-only: what each credential's warden last saw
+/murtaugh auth login          # start a Claude Code sign-in now
+/murtaugh auth login <node>   # on a node you name, where no node is pinned
 ```
 
-`auth status` reports timings only, never token material: observed expiry, when
-the warden next intends to look, how many turns it has spent against the current
-expiry without moving it, and the last error. `auth` posts the
-[Auth Request](agents.md#what-an-agent-can-do-tools) card to your DMs: open the
-link, sign in, paste the code back.
+`auth status` reports timings only, never token material. For a gateway's own
+agents that is the observed expiry, when the warden next intends to look, how
+many turns it has spent against the current expiry without moving it, and the
+last error. For agents on nodes it is what each connected node last reported:
+whether the credential works, its expiry, the error, and how long ago.
+
+`auth login` posts the [Auth Request](agents.md#what-an-agent-can-do-tools)
+card: open the link, sign in, paste the code back. On a gateway running its own
+agents it is admin-only and the card comes to you. On a gateway whose agents run
+on nodes it signs in the node **the conversation you type it in is pinned to**
+— typed in a thread, that thread's conversation — and the card goes to that
+node's owner; the admin or that owner may run it. Where no node is pinned, name
+one: `auth login <node>` accepts a connected node you own (the admin may name
+any), and without a name the reply lists the nodes you may name. Murtaugh never
+picks a node for you. A node whose owner may no longer use the gateway is
+refused, and asking again replaces a sign-in the node already has open.
 
 You rarely need to ask. When a turn fails because the credential was rejected,
-the gateway posts that card **unprompted** and tells the user in-thread that
-their turn is blocked pending the admin. One card is posted no matter how many
-conversations fail at once.
+the machine the agent runs on starts the sign-in **unprompted** — a node DMs its
+owner, a gateway running its own agents DMs the admin — and the user is told
+in-thread that their turn is blocked until it is done. One sign-in runs at a
+time per credential, no matter how many conversations fail at once. If the owner
+cannot be shown one, or turns it down or leaves it, the user is told so and the
+node waits ten minutes before asking again on its own.
 
 > **A caveat worth stating.** The sandbox is not a boundary for this credential.
 > Reads are allow-by-default and the keychain is reachable over IPC, so any agent
@@ -227,7 +256,7 @@ One process runs it all:
 - the **chat agents** and their streaming replies ([Agent chat](agents.md));
 - the **workflow** and **unfurl** handlers ([Slack](slack.md));
 - the **job scheduler** ([Jobs](jobs.md));
-- the **Claude Code credential warden** (above);
+- the **Claude Code credential warden** for the agents it runs itself (above);
 - the **event journal** writer ([Gateway Debug Mode](journal.md)).
 
 If the gateway is down, scheduled jobs don't fire and Slack events go unanswered

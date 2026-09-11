@@ -189,3 +189,23 @@ func TestSetObserverAttachesAfterConstruction(t *testing.T) {
 		t.Fatalf("got %d notifications through the late-attached observer, want 1", len(got))
 	}
 }
+
+func TestHealthsSayWhereEachCredentialStandsNow(t *testing.T) {
+	failing := true
+	w, _ := observedWarden(t, &failing, base.Add(time.Hour))
+
+	if got := w.Healths(); len(got) != 1 || got[0].Degraded || !got[0].ExpiresAt.IsZero() {
+		t.Fatalf("before any pass: %+v, want one credential, not failing and not yet read", got)
+	}
+	w.checkOne(context.Background(), testID)
+	w.checkOne(context.Background(), testID)
+	got := w.Healths()
+	if len(got) != 1 || !got[0].Degraded || got[0].Reason == "" || got[0].Since.IsZero() {
+		t.Fatalf("mid-outage: %+v, want it failing, with the reason and since when", got)
+	}
+	failing = false
+	w.checkOne(context.Background(), testID)
+	if got := w.Healths(); got[0].Degraded || got[0].Reason != "" || !got[0].ExpiresAt.Equal(base.Add(time.Hour)) {
+		t.Fatalf("after recovery: %+v, want it working with the expiry it read", got[0])
+	}
+}

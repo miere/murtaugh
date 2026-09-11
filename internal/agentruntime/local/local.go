@@ -66,7 +66,7 @@ func SocketPath() string {
 }
 
 func build(cfg config.Config, registry *tools.Registry, logger *slog.Logger, hooks agentruntime.Hooks) agentruntime.Runtime {
-	rt := agentruntime.Runtime{}
+	rt := agentruntime.Runtime{InProcess: true}
 	if len(cfg.Agents) == 0 {
 		// No agents: no aggregator to serve, no delegator to hand out. The zero
 		// Runtime is exactly what every consumer already handles.

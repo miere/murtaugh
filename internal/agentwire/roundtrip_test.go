@@ -22,7 +22,6 @@ import (
 
 	"github.com/miere/murtaugh/internal/agent"
 	"github.com/miere/murtaugh/internal/agent/acp"
-	"github.com/miere/murtaugh/internal/claudeauth"
 	"github.com/miere/murtaugh/internal/llm"
 )
 
@@ -234,15 +233,25 @@ func TestRoundTripErrorIdentity(t *testing.T) {
 			},
 		},
 		{
-			// gateway/credrepair.go matches on prose, not identity, so the wire
-			// has to carry the full text unabridged — including the child's
-			// stderr suffix a failed launch drags along.
-			name:     "claude_code credential rejection matched on its text",
+			name:     "a credential failure the node has asked its owner to fix",
+			err:      fmt.Errorf("%w: %w", agent.ErrCredentialRejected, errors.New("claudecode: session failed: API Error: 401 Invalid API key · Please run /login")),
+			wantKind: ErrorCredential,
+			check: func(t *testing.T, decoded error) {
+				if !errors.Is(decoded, agent.ErrCredentialRejected) {
+					t.Error("errors.Is(decoded, agent.ErrCredentialRejected) = false; the gateway would not tell the user the owner was asked")
+				}
+				if !strings.Contains(decoded.Error(), "401 Invalid API key") {
+					t.Errorf("message = %q, want the CLI's own words", decoded.Error())
+				}
+			},
+		},
+		{
+			name:     "a credential failure the node did not mark stays the node's business",
 			err:      fmt.Errorf("claudecode: session failed: %w", errors.New("API Error: 401 Invalid API key · Please run /login")),
 			wantKind: ErrorUnknown,
 			check: func(t *testing.T, decoded error) {
-				if !claudeauth.IsAuthFailure(decoded) {
-					t.Errorf("claudeauth.IsAuthFailure(decoded) = false for %q; the admin would never be asked to re-authenticate", decoded)
+				if errors.Is(decoded, agent.ErrCredentialRejected) {
+					t.Error("the wire invented a credential failure the node never named")
 				}
 			},
 		},
