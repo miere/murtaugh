@@ -209,6 +209,58 @@ func TestVerifyDoesNotTreatAStoreFailureAsARejection(t *testing.T) {
 	}
 }
 
+func TestRecheckRejectsWhatVerifyWouldRejectOnceTheSecretIsProven(t *testing.T) {
+	ctx := context.Background()
+	expiry := now.Add(time.Hour)
+	store := newMemStore()
+	live := mustParse(t, enrol(t, store, "alpha", "U-alpha", expiry)).Selector
+	revoked := mustParse(t, enrol(t, store, "alpha", "U-alpha", time.Time{})).Selector
+	if _, _, err := store.Revoke(ctx, revoked, now); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, tc := range map[string]struct {
+		selector string
+		at       time.Time
+		want     error
+	}{
+		"live":    {selector: live, at: now},
+		"revoked": {selector: revoked, at: now, want: ErrRevoked},
+		"expired": {selector: live, at: expiry, want: ErrExpired},
+		"gone":    {selector: "ffffffffffffffff", at: now, want: ErrUnknownCredential},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := Recheck(ctx, store, tc.selector, tc.at)
+			if tc.want == nil {
+				if err != nil {
+					t.Fatalf("Recheck(%s) = %v, want nil", name, err)
+				}
+				return
+			}
+			if !errors.Is(err, tc.want) || !errors.Is(err, ErrNotAuthorized) {
+				t.Fatalf("Recheck(%s) = %v, want %v wrapping ErrNotAuthorized", name, err, tc.want)
+			}
+		})
+	}
+}
+
+// A connection dropped over a database hiccup would take the whole fleet down
+// with the database.
+func TestRecheckDoesNotTreatAStoreFailureAsARejection(t *testing.T) {
+	store := newMemStore()
+	selector := mustParse(t, enrol(t, store, "alpha", "U-alpha", time.Time{})).Selector
+	boom := errors.New("connection refused")
+	store.failWith = boom
+
+	err := Recheck(context.Background(), store, selector, now)
+	if !errors.Is(err, boom) {
+		t.Fatalf("Recheck = %v, want the store's own error", err)
+	}
+	if errors.Is(err, ErrNotAuthorized) {
+		t.Fatal("a store outage was reported as a failed authorisation")
+	}
+}
+
 func TestTwoCredentialsForOneNodeVerifyAtOnceThenOneIsRevoked(t *testing.T) {
 	store := newMemStore()
 	ctx := context.Background()

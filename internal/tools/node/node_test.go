@@ -453,9 +453,9 @@ func TestRevokeArgumentErrors(t *testing.T) {
 	}
 }
 
-// Revoking stops new handshakes but closes no open connection yet; an operator who
-// thought otherwise would stop investigating too early.
-func TestRevokeReportsTheLimitationItCannotYetFix(t *testing.T) {
+// The drop lags the revoke by up to one gateway re-check; an operator who
+// expected it at once would chase a node that is about to go.
+func TestRevokeSaysWhenLiveConnectionsDrop(t *testing.T) {
 	_, m, _, r := toolsFor(t)
 	minted := mint(t, m, map[string]any{"node": "n1", "user": "U012ABCDEF"})
 
@@ -463,8 +463,8 @@ func TestRevokeReportsTheLimitationItCannotYetFix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
-	if !strings.Contains(res.(revokeResult).String(), nodetoken.RevocationLimitation) {
-		t.Fatalf("the revoke rendering does not carry the limitation:\n%s", res.(revokeResult).String())
+	if !strings.Contains(res.(revokeResult).String(), nodetoken.RevocationNotice) {
+		t.Fatalf("the revoke rendering does not say when live connections drop:\n%s", res.(revokeResult).String())
 	}
 }
 
