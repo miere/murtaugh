@@ -780,7 +780,8 @@ caller stops rather than retrying the call that lacked credentials.
 
 The owner must be allowed to use the gateway, and is checked again on every
 click: an owner who has lost access is not sent a card, and one who loses it
-while the card is open has their answer refused and the sign-in stopped. The
+while the card is open has their sign-in stopped, even one that finishes
+afterwards: it counts as declined and the agent is not told it signed in. The
 sign-in also stops when its turn ends or the node's connection drops.
 
 ```

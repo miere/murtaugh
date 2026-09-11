@@ -220,8 +220,17 @@ func (f *Flow) isAdminUser(userID string) bool {
 // click, so access withdrawn while a card is open stops the sign-in.
 func (f *Flow) SetAuthorised(allowed func(string) bool) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.allowed = allowed
+	open := make([]*Card, 0, len(f.sessions))
+	for _, c := range f.sessions {
+		open = append(open, c)
+	}
+	f.mu.Unlock()
+	for _, c := range open {
+		if !f.authorised(c.recipient) {
+			_ = c.reply(Reply{Kind: ReplyRefused, UserID: c.recipient, Reason: RefusedReason})
+		}
+	}
 }
 
 func (f *Flow) authorised(userID string) bool {

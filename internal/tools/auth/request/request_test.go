@@ -14,6 +14,7 @@ import (
 
 type fakeDisplay struct {
 	refuse  bool
+	revoked bool
 	answers []agent.DisplayAnswer
 	prompts chan *agent.SignInPrompt
 
@@ -44,6 +45,16 @@ func (d *fakeDisplay) SettleSignIn(_ context.Context, update agent.SignInSettled
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.settled = append(d.settled, update.State)
+	if update.State == agent.SignInConfirming {
+		confirm := agent.DisplayAnswer{Outcome: agent.DisplayApproved}
+		if d.revoked {
+			confirm = agent.DisplayAnswer{Outcome: agent.DisplayUnavailable, Note: "lost access"}
+		}
+		select {
+		case update.Prompt.Answer <- confirm:
+		default:
+		}
+	}
 	if update.URL != "" {
 		d.links = append(d.links, update.URL)
 	}
@@ -193,8 +204,8 @@ func TestABuiltInSignInRunsAtOnceAndSettles(t *testing.T) {
 	if len(display.raised) != 1 || display.raised[0] != want {
 		t.Fatalf("raised %+v, want %+v", display.raised, want)
 	}
-	if got := display.states(); len(got) != 2 || got[0] != agent.SignInWorking || got[1] != agent.SignInSuccess {
-		t.Fatalf("settled %v, want working then success", got)
+	if got := display.states(); len(got) != 3 || got[0] != agent.SignInWorking || got[1] != agent.SignInConfirming || got[2] != agent.SignInSuccess {
+		t.Fatalf("settled %v, want working, confirming, then success", got)
 	}
 }
 
@@ -365,5 +376,16 @@ func TestACustomCommandThatIsNotApprovedNeverRuns(t *testing.T) {
 				t.Fatal("the command ran without its owner's approval")
 			}
 		})
+	}
+}
+
+func TestASignInThatFinishesAfterItsOwnerLostAccessCountsAsDeclined(t *testing.T) {
+	display := &fakeDisplay{revoked: true, answers: approvedThen()}
+	out, err := New(display).Invoke(inConversation(), map[string]any{"tool": "vendor-mcp", "profile": "custom", "command": `echo "https://example.com/auth"`})
+	if err == nil || !strings.Contains(err.Error(), "lost access") || out != nil {
+		t.Fatalf("a sign-in finishing after its owner lost access returned %v, %v", out, err)
+	}
+	if got := display.states(); got[len(got)-1] != agent.SignInFailed {
+		t.Fatalf("settled %v, want it to end failed", got)
 	}
 }

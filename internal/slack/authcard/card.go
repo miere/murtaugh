@@ -278,6 +278,12 @@ func (c *Card) approve(ctx context.Context, userID string) error {
 	return c.reply(Reply{Kind: ReplyApproved, UserID: userID})
 }
 
+// Allowed is asked again as a sign-in finishes, because access withdrawn while
+// it ran has to deny it even though every click came before.
+func (c *Card) Allowed() bool {
+	return c.flow.authorised(c.recipient)
+}
+
 func (c *Card) linked() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()

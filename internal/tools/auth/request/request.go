@@ -29,6 +29,8 @@ type Tool struct {
 	urlWait  time.Duration
 }
 
+const confirmTimeout = 30 * time.Second
+
 // New leaves the tool registered but inert with a nil display, which is right
 // wherever nothing can draw a card.
 func New(display Display) *Tool {
@@ -215,8 +217,7 @@ func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 		case <-login.Exited():
 			ok, detail := login.Result()
 			if ok {
-				settle(agent.SignInSuccess, "")
-				return Result{Authenticated: true, Tool: toolName, Profile: profile.Name}, nil
+				return t.confirm(ctx, prompt, settle, toolName, profile.Name)
 			}
 			settle(agent.SignInFailed, detail)
 			return nil, fmt.Errorf("Error: authentication for %s failed: %s", toolName, detail)
@@ -225,6 +226,32 @@ func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 			settle(agent.SignInTimedOut, "the sign-in expired before it was completed")
 			return nil, fmt.Errorf("Error: the sign-in for %s expired before it was completed. Stop and tell the user; do not retry", toolName)
 
+		case <-ctx.Done():
+			settle(agent.SignInCancelled, "")
+			return nil, fmt.Errorf("Error: the sign-in for %s was cancelled", toolName)
+		}
+	}
+}
+
+func (t *Tool) confirm(ctx context.Context, prompt *agent.SignInPrompt, settle func(agent.SignInState, string), toolName, profileName string) (any, error) {
+	settle(agent.SignInConfirming, "")
+	timer := time.NewTimer(confirmTimeout)
+	defer timer.Stop()
+	for {
+		select {
+		case answer := <-prompt.Answer:
+			switch answer.Outcome {
+			case agent.DisplayApproved:
+				settle(agent.SignInSuccess, "")
+				return Result{Authenticated: true, Tool: toolName, Profile: profileName}, nil
+			case agent.DisplayAnswered:
+				continue
+			}
+			settle(agent.SignInFailed, "the owner of this machine lost access before the sign-in finished")
+			return nil, fmt.Errorf("Error: the owner of this machine lost access before the sign-in for %s finished, so it counts as declined. Stop and tell the user; do not retry", toolName)
+		case <-timer.C:
+			settle(agent.SignInFailed, "nobody confirmed the owner could still use the gateway")
+			return nil, fmt.Errorf("Error: the sign-in for %s finished, but nobody could confirm its owner may still use the gateway, so it counts as declined. Stop and tell the user; do not retry", toolName)
 		case <-ctx.Done():
 			settle(agent.SignInCancelled, "")
 			return nil, fmt.Errorf("Error: the sign-in for %s was cancelled", toolName)

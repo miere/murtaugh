@@ -101,6 +101,10 @@ const (
 	SignInFailed    SignInState = "failed"
 	SignInTimedOut  SignInState = "timeout"
 	SignInCancelled SignInState = "cancelled"
+
+	// SignInConfirming holds a finished sign-in until the gateway confirms its
+	// owner still has access, because losing access must win over finishing.
+	SignInConfirming SignInState = "confirming"
 )
 
 // Terminal is shared by the node and the gateway so both stop listening for a

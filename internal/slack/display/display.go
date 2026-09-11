@@ -100,6 +100,14 @@ func (s *Slack) ShowSignIn(ctx context.Context, loc agent.TurnLocation, prompt *
 			switch {
 			case update.State == agent.SignInReady:
 				card.Link(ctx, update.URL)
+			case update.State == agent.SignInConfirming:
+				if card.Allowed() {
+					answer(agent.DisplayAnswer{Outcome: agent.DisplayApproved, UserID: prompt.Owner})
+					continue
+				}
+				answer(agent.DisplayAnswer{Outcome: agent.DisplayUnavailable, Note: authcard.RefusedReason})
+				card.Settle(authcard.StateFailed, authcard.RefusedReason)
+				return
 			case !update.State.Terminal():
 				card.Working(ctx)
 			default:

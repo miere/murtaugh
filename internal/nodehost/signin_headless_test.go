@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -204,5 +205,80 @@ func TestASignInForAnOwnerWhoMayNotUseTheGatewayIsRefusedBeforeAnythingRuns(t *t
 	defer slack.mu.Unlock()
 	if len(slack.posts) != 0 {
 		t.Fatalf("posted %d messages for an owner who may not use the gateway", len(slack.posts))
+	}
+}
+
+func TestLosingAccessMidSignInStopsTheNodesCommand(t *testing.T) {
+	slack, flow, draw := ownerCards(t)
+	rig := dialLoopback(t, newScriptedAgent(func(*scriptedTurn) {}), drawingSignIns(draw))
+
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	result := headlessSignIn(rig, map[string]any{
+		"tool":    "gcp-mcp",
+		"profile": "custom",
+		"command": `echo $$ > ` + pidFile + `; host=example.com; echo "Go to https://$host/auth"; exec sleep 30`,
+	})
+	_, corr := slack.dmCard(t)
+	if err := flow.HandleClick(context.Background(), corr, authcard.ActionApprove, nodeOwner, "t"); err != nil {
+		t.Fatalf("owner approve: %v", err)
+	}
+	slack.awaitLink(t, "https://example.com/auth")
+
+	flow.SetAuthorised(func(id string) bool { return id == "UADMIN" })
+
+	select {
+	case err := <-result:
+		if err == nil || !strings.Contains(err.Error(), "lost access") {
+			t.Fatalf("a sign-in whose owner lost access ended with %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the sign-in went on after its owner lost access")
+	}
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("read pid: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatalf("parse pid %q: %v", raw, err)
+	}
+	waitFor(t, "the login command to stop", func() bool { return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) })
+}
+
+func TestASignInFinishingAfterItsOwnerLostAccessIsDenied(t *testing.T) {
+	slack := &cardSlack{}
+	flow := authcard.New(slacklib.NewLazyClientWith(func() (slacklib.SlackAPI, error) { return slack, nil }),
+		authcard.NewRenderer("", assets.FS), "UADMIN", nil)
+	var allowed atomic.Bool
+	allowed.Store(true)
+	flow.SetAuthorised(func(id string) bool { return allowed.Load() && id == nodeOwner })
+	cards := display.New(nil, nil).WithSignIns(flow, nil)
+	rig := dialLoopback(t, newScriptedAgent(func(*scriptedTurn) {}), drawingSignIns(func(ctx context.Context, prompt *agent.SignInPrompt, settled <-chan agent.SignInSettled, shown func(error)) {
+		cards.ShowSignIn(ctx, agent.TurnLocation{}, prompt, settled, shown)
+	}))
+
+	release := filepath.Join(t.TempDir(), "release")
+	result := headlessSignIn(rig, map[string]any{
+		"tool":    "gcp-mcp",
+		"profile": "custom",
+		"command": `host=example.com; echo "Go to https://$host/auth"; while [ ! -f "` + release + `" ]; do sleep 0.05; done`,
+	})
+	_, corr := slack.dmCard(t)
+	if err := flow.HandleClick(context.Background(), corr, authcard.ActionApprove, nodeOwner, "t"); err != nil {
+		t.Fatalf("owner approve: %v", err)
+	}
+	slack.awaitLink(t, "https://example.com/auth")
+
+	allowed.Store(false)
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	select {
+	case err := <-result:
+		if err == nil || !strings.Contains(err.Error(), "lost access") {
+			t.Fatalf("a sign-in finishing after its owner lost access ended with %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the sign-in never finished")
 	}
 }

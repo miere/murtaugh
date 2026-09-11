@@ -281,3 +281,22 @@ func TestTheThreadIsToldEvenWhenTheRequesterIsTheOwner(t *testing.T) {
 		t.Fatalf("posted %d messages; want the thread notice and the DM card", len(posts))
 	}
 }
+
+func TestLosingAccessWithdrawsTheCardsAlreadyOpen(t *testing.T) {
+	api := newSyncAPI()
+	f := newTestFlow(api)
+	f.SetAuthorised(func(id string) bool { return id == ownerID })
+	card, err := f.Show(context.Background(), showing())
+	if err != nil {
+		t.Fatalf("Show: %v", err)
+	}
+	defer card.Settle(StateCancelled, "")
+
+	f.SetAuthorised(func(id string) bool { return id == adminID })
+	if got := awaitReply(t, card); got.Kind != ReplyRefused || got.UserID != ownerID {
+		t.Fatalf("an open card for someone who lost access got %+v", got)
+	}
+	if card.Allowed() {
+		t.Fatal("the card still counts its recipient as allowed")
+	}
+}

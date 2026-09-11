@@ -284,3 +284,28 @@ func TestADeclinedCommandTellsTheNode(t *testing.T) {
 	}
 	r.finished(t)
 }
+
+func TestAFinishedSignInIsConfirmedOnlyWhileItsOwnerMayUseTheGateway(t *testing.T) {
+	r := drawSignIn(t)
+	r.settled <- agent.SignInSettled{Prompt: r.prompt, State: agent.SignInConfirming}
+	if got := r.answer(t); got.Outcome != agent.DisplayApproved {
+		t.Fatalf("a sign-in finished by an owner who still has access was answered %+v", got)
+	}
+	r.settled <- agent.SignInSettled{Prompt: r.prompt, State: agent.SignInSuccess}
+	r.finished(t)
+
+	r = drawSignIn(t)
+	*r.allowed = false
+	r.settled <- agent.SignInSettled{Prompt: r.prompt, State: agent.SignInConfirming}
+	if got := r.answer(t); got.Outcome == agent.DisplayApproved {
+		t.Fatal("a sign-in finished after its owner lost access was confirmed")
+	}
+	r.finished(t)
+	_, updates := r.api.snapshot()
+	for _, u := range updates {
+		if u.ChannelID == "D-UOWNER" && strings.Contains(string(u.Blocks), "lost access") {
+			return
+		}
+	}
+	t.Fatal("the owner's card does not say the sign-in was stopped for losing access")
+}
