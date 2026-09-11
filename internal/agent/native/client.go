@@ -167,13 +167,8 @@ func Build(profile config.AgentProfile, deps BuildDeps) (*Client, error) {
 	// static — and therefore cacheable — prefix. After, not before: the base
 	// prompt is operational scaffolding and the persona is voice, so the voice
 	// gets recency over it rather than being argued down by the tool discipline
-	// that follows. claude_code composes the same two pieces in the same order
-	// into --append-system-prompt, which is what keeps the backends aligned.
+	// that follows.
 	systemPrompt = AppendPersona(systemPrompt, persona.Resolve(profile.SoulFile, workDir, deps.WorkspaceDir))
-	// The Slack formatting dialect is appended last, and unconditionally: it
-	// describes the transport, not the agent, so it must survive an operator who
-	// replaces the whole system prompt with their own.
-	systemPrompt = AppendSlackFormat(systemPrompt)
 	logger := deps.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -448,23 +443,6 @@ func readAgentsDoc(workDir string) string {
 		return ""
 	}
 	return string(data)
-}
-
-// AppendSlackFormat appends the canonical Slack formatting rules to base,
-// returning base unchanged if the rules are unavailable (a malformed embed,
-// which never happens in practice). Exported because the claude_code backend
-// needs the same text for --append-system-prompt: one dialect rule, both
-// backends, no drift.
-func AppendSlackFormat(base string) string {
-	rules := strings.TrimSpace(assets.SlackFormat())
-	if rules == "" {
-		return base
-	}
-	base = strings.TrimRight(base, "\n")
-	if base == "" {
-		return rules
-	}
-	return base + "\n\n" + rules
 }
 
 // AppendPersona wraps soul in a <persona> block and appends it to base,

@@ -3,6 +3,8 @@ package native
 import (
 	"strings"
 	"testing"
+
+	"github.com/miere/murtaugh/internal/config"
 )
 
 // The persona is appended AFTER the base prompt, not before it: the base is
@@ -27,17 +29,22 @@ func TestAppendPersona(t *testing.T) {
 	}
 }
 
-// Assembly order is base → persona → Slack rules, and the transport rules stay
-// last so they survive an operator who replaces the whole system prompt.
-func TestPersonaSitsBetweenBaseAndSlackRules(t *testing.T) {
-	got := AppendSlackFormat(AppendPersona("BASE-MARKER", "SOUL-MARKER"))
-	base := strings.Index(got, "BASE-MARKER")
-	soul := strings.Index(got, "SOUL-MARKER")
-	rules := strings.Index(got, "Formatting for Slack")
-	if base < 0 || soul < 0 || rules < 0 {
-		t.Fatalf("a section went missing: base=%d soul=%d rules=%d\n%s", base, soul, rules, got)
+// The gateway turns an agent's Markdown into Slack's format itself, so the
+// prompt must not teach the model a Slack dialect it no longer has to write.
+func TestBuildLeavesSlackFormattingOutOfThePrompt(t *testing.T) {
+	t.Setenv("TEST_FORMAT_KEY", "x")
+	base := t.TempDir()
+	c, err := Build(config.AgentProfile{
+		WorkDir: base,
+		Native:  &config.NativeProfile{Provider: "gemini", Model: "gemini-2.5-pro", APIKeyEnv: "TEST_FORMAT_KEY"},
+	}, BuildDeps{WorkspaceDir: base, Root: rootFor(t, base)})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
 	}
-	if !(base < soul && soul < rules) {
-		t.Fatalf("wrong order (want base < persona < rules): base=%d soul=%d rules=%d", base, soul, rules)
+	system := BuildSystemPrompt(c.systemPrompt, c.agentsDoc, c.skillsIndex)
+	for _, gone := range []string{"Formatting for Slack", "mrkdwn", "Formatting rules are appended"} {
+		if strings.Contains(system, gone) {
+			t.Fatalf("the system prompt still carries Slack formatting (%q):\n%s", gone, system)
+		}
 	}
 }
