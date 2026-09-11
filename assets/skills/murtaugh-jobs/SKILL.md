@@ -3,7 +3,7 @@ name: murtaugh-jobs
 description: Define, run, and schedule Murtaugh jobs (stored in the config database) via `murtaugh cfg job` and the jobs_run/jobs_define tools — a shell command or an agent, run manually or on a cron/interval.
 requires: [jobs]
 files:
-  reference/configuring.md: { requires: [jobs], summary: "define a job (cfg job set) — command / agent+prompt / arg / workdir / timeout" }
+  reference/configuring.md: { requires: [jobs], summary: "define a job (cfg job set) — command / agent+prompt / report-to / arg / workdir / timeout" }
   reference/scheduling.md:  { requires: [jobs], summary: "choose a schedule (cron) / every (interval) value; held-job approval" }
   reference/running.md:     { requires: [jobs], summary: "run a job by hand or wire jobs_run / jobs_define" }
 ---
@@ -13,8 +13,8 @@ files:
 A **job** is a named unit of work stored in the **config database** and managed
 with `murtaugh cfg job …` (`cfg job set|list|show|delete`, also `cfg.*` over MCP).
 It runs **either** a shell command (with args, working directory, and timeout)
-**or** an agent (`--agent` + `--prompt`, fire-and-forget) — the two are mutually
-exclusive. Jobs run **on demand** (CLI, MCP, or a workflow trigger) and can
+**or** an agent (`--agent` + `--prompt`, optionally reporting its reply to Slack
+with `--report-to`) — the two are mutually exclusive. Jobs run **on demand** (CLI, MCP, or a workflow trigger) and can
 additionally run **automatically** on a schedule. Use this whenever a task
 involves defining, running, or scheduling work that Murtaugh executes — backups,
 syncs, reconcile scripts, clock-tick automations, or agent-delegated chores.
@@ -48,7 +48,7 @@ without a human OK.
 
 | When you're… | Read |
 |---|---|
-| Defining a job's command / agent+prompt / arg / workdir / timeout | `reference/configuring.md` |
+| Defining a job's command / agent+prompt / report-to / arg / workdir / timeout | `reference/configuring.md` |
 | Choosing or writing a `schedule` / `every` value | `reference/scheduling.md` |
 | Running a job by hand or wiring `jobs_run` / `jobs_define` | `reference/running.md` |
 | Wanting worked `cfg job set` examples | `examples/` |

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/miere/murtaugh/internal/agentruntime"
 	"github.com/miere/murtaugh/internal/config"
 )
 
@@ -25,8 +26,8 @@ func failingGateway(t *testing.T, runErr error) (*Gateway, *recordingMessaging) 
 		messaging:     msg,
 		cfg:           config.AccessConfig{AdminUser: "U-admin"},
 		scheduledJobs: map[string]config.JobProfile{"nightly": {Schedule: "0 3 * * *"}},
-		runJob: func(context.Context, string) error {
-			return runErr
+		runJob: func(context.Context, string) (*agentruntime.Reply, error) {
+			return nil, runErr
 		},
 	}
 	return gw, msg
@@ -63,7 +64,7 @@ func TestRepeatedFailuresAlertOnceAndRearmOnRecovery(t *testing.T) {
 		messaging:     msg,
 		cfg:           config.AccessConfig{AdminUser: "U-admin"},
 		scheduledJobs: map[string]config.JobProfile{"nightly": {Schedule: "* * * * *"}},
-		runJob:        func(context.Context, string) error { return current },
+		runJob:        func(context.Context, string) (*agentruntime.Reply, error) { return nil, current },
 	}
 
 	gw.runScheduledJob(context.Background(), "nightly")

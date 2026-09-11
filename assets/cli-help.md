@@ -137,6 +137,9 @@ your terminal (and are captured into the JSON result over MCP).
 - Exit code is reported in the result; a non-zero exit is **not** a CLI error
   (the job ran), but the scheduler treats it as a failed run.
 - Fails if the job name is not found or the job has no `command`.
+- An agent job's final reply comes back in the result (`reply`). `jobs run`
+  keeps none of it in the journal, and running it by hand never posts to
+  `report_to`: only a scheduled run on the gateway reports or keeps a reply.
 
 ```
 murtaugh jobs run --name nightly-backup
@@ -396,7 +399,7 @@ murtaugh cfg mcp delete --name <n>
 ### Jobs (`cfg job`)
 
 ```
-murtaugh cfg job set    --name <n> [--command --args --workdir --timeout --schedule|--every]
+murtaugh cfg job set    --name <n> [--command --arg --workdir --timeout | --agent --prompt --report-to] [--schedule|--every]
 murtaugh cfg job list
 murtaugh cfg job show   --name <n>
 murtaugh cfg job delete --name <n>
@@ -406,6 +409,14 @@ murtaugh cfg job delete --name <n>
 executes a job by name. Like `jobs define`, `cfg job set` stamps every entry it
 writes `confirmed: false`, holding a new or edited job until the admin approves
 its next scheduled run.
+
+`--report-to` has the gateway post an agent job's final reply after each
+scheduled run, as the bot. The gateway keeps or posts a reply only when the node
+that ran the job belongs to the gateway admin (or the agent ran inside the
+gateway itself). For anyone else's node the reply is neither posted nor kept,
+with or without `--report-to`; the journal notes only that it was withheld, and
+the admin is told by DM when a report was withheld. It takes effect on the next
+gateway restart, like every job change.
 
 ### Chat routing (`cfg chat`) — singleton
 

@@ -16,7 +16,10 @@ import (
 
 // completingClient is an agent.Client that accepts one prompt and immediately
 // completes the turn, so a delegated job run finishes without a real backend.
-type completingClient struct{ prompts int }
+type completingClient struct {
+	prompts int
+	reply   string
+}
 
 func (c *completingClient) Initialize(context.Context) error { return nil }
 
@@ -26,7 +29,10 @@ func (c *completingClient) NewSession(context.Context, agent.SessionMetadata) (a
 
 func (c *completingClient) Prompt(context.Context, string, agent.PromptRequest) (<-chan agent.Event, error) {
 	c.prompts++
-	ch := make(chan agent.Event, 1)
+	ch := make(chan agent.Event, 2)
+	if c.reply != "" {
+		ch <- agent.Event{Type: agent.EventText, Text: c.reply}
+	}
 	ch <- agent.Event{Type: agent.EventComplete}
 	close(ch)
 	return ch, nil
@@ -72,7 +78,7 @@ func TestScheduledRunnerUsesTheGatewayDelegator(t *testing.T) {
 		})
 
 	exec := testApp().newScheduledRunner(agentJobConfig(), gatewayRunner)
-	if err := exec(context.Background(), "digest"); err != nil {
+	if _, err := exec(context.Background(), "digest"); err != nil {
 		t.Fatalf("scheduled run failed: %v", err)
 	}
 	if !used {
@@ -80,6 +86,22 @@ func TestScheduledRunnerUsesTheGatewayDelegator(t *testing.T) {
 	}
 	if client.prompts != 1 {
 		t.Fatalf("agent prompted %d times, want 1", client.prompts)
+	}
+}
+
+// The gateway can only report a job whose reply reaches it, so the runner it is
+// handed must return what the agent said rather than drop it.
+func TestScheduledRunnerHandsTheReplyToTheGateway(t *testing.T) {
+	client := &completingClient{reply: "backups are green"}
+	gatewayRunner := agentdelegate.NewRunner(agentJobConfig().Agents, config.RuntimeDefaults{}, t.TempDir(), slog.Default()).
+		WithClientFactory(func(config.AgentProfile, *slog.Logger) agent.Client { return client })
+
+	reply, err := testApp().newScheduledRunner(agentJobConfig(), gatewayRunner)(context.Background(), "digest")
+	if err != nil {
+		t.Fatalf("scheduled run failed: %v", err)
+	}
+	if reply == nil || reply.Text != "backups are green" || !reply.InProcess {
+		t.Fatalf("reply = %+v, want the agent's text marked as run in process", reply)
 	}
 }
 
@@ -91,7 +113,7 @@ func TestScheduledRunnerWithoutAgentsReportsTheMisconfiguration(t *testing.T) {
 	cfg.Agents = nil
 
 	exec := testApp().newScheduledRunner(cfg, nil)
-	err := exec(context.Background(), "digest")
+	_, err := exec(context.Background(), "digest")
 	if err == nil {
 		t.Fatal("expected an error for an agent job with no agents configured")
 	}
