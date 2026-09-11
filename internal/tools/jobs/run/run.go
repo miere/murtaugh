@@ -23,6 +23,7 @@ import (
 
 	"github.com/google/jsonschema-go/jsonschema"
 
+	"github.com/miere/murtaugh/internal/agentruntime"
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/journal"
 )
@@ -41,6 +42,12 @@ type JobLookup func(name string) (config.JobProfile, bool)
 // own tools). *agentdelegate.Runner satisfies it.
 type AgentDelegator interface {
 	RunAndForget(ctx context.Context, agent, prompt string) error
+}
+
+// ReplyingDelegator exists because the gateway can only judge and report a job's
+// reply when the runner hands it back together with where it ran.
+type ReplyingDelegator interface {
+	RunForReply(ctx context.Context, agent, prompt string) (agentruntime.Reply, error)
 }
 
 // Tool is the `jobs.run` capability.
@@ -143,6 +150,9 @@ type Result struct {
 	ExitCode int    `json:"exit_code"`
 	Stdout   string `json:"stdout,omitempty"`
 	Stderr   string `json:"stderr,omitempty"`
+	// Nil rather than empty when the runner could not hand a reply back, so an agent
+	// that said nothing is never confused with a runner that dropped what it said.
+	Reply *agentruntime.Reply `json:"reply,omitempty"`
 }
 
 // String renders a one-line CLI confirmation.
@@ -237,14 +247,26 @@ func (t *Tool) invokeAgent(ctx context.Context, name string, job config.JobProfi
 	defer cancel()
 
 	start := time.Now()
-	if err := t.delegator.RunAndForget(runCtx, job.Agent, prompt); err != nil {
+	reply, err := t.delegate(runCtx, job.Agent, prompt)
+	if err != nil {
 		t.record(ctx, journal.LevelError, fmt.Sprintf("agent job %q failed", name), name,
 			map[string]any{"agent": job.Agent, "error": err.Error(), "duration_ms": time.Since(start).Milliseconds()})
 		return nil, fmt.Errorf("job %q: %w", name, err)
 	}
 	t.record(ctx, journal.LevelInfo, fmt.Sprintf("agent job %q completed", name), name,
 		map[string]any{"agent": job.Agent, "duration_ms": time.Since(start).Milliseconds()})
-	return Result{Name: name, Agent: job.Agent}, nil
+	return Result{Name: name, Agent: job.Agent, Reply: reply}, nil
+}
+
+func (t *Tool) delegate(ctx context.Context, agent, prompt string) (*agentruntime.Reply, error) {
+	if replying, ok := t.delegator.(ReplyingDelegator); ok {
+		reply, err := replying.RunForReply(ctx, agent, prompt)
+		if err != nil {
+			return nil, err
+		}
+		return &reply, nil
+	}
+	return nil, t.delegator.RunAndForget(ctx, agent, prompt)
 }
 
 // jobTimeout resolves the job's execution timeout, defaulting to 10 minutes

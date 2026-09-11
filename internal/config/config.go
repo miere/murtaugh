@@ -875,6 +875,9 @@ type JobProfile struct {
 	// expand to the runtime args passed to `jobs run`.
 	Agent  string `yaml:"agent" json:"agent"`
 	Prompt string `yaml:"prompt" json:"prompt"`
+	// ReportTo is set by the gateway admin and never by a node, because a job
+	// has no conversation of its own for its reply to land in.
+	ReportTo string `yaml:"report_to" json:"report_to,omitempty"`
 	// Schedule, when set, runs the job automatically on a cron schedule
 	// using standard 5-field cron syntax (e.g. "0 2 * * *" for 02:00 daily).
 	// Mutually exclusive with Every.
@@ -1405,6 +1408,9 @@ func (c Config) Validate() error {
 			}
 		default:
 			errs = append(errs, fmt.Errorf("jobs[%s] requires either command or agent + prompt", name))
+		}
+		if strings.TrimSpace(job.ReportTo) != "" && !hasAgent {
+			errs = append(errs, fmt.Errorf("jobs[%s].report_to needs an agent job: a command job has no reply to report", name))
 		}
 		if job.Timeout != "" {
 			if _, err := time.ParseDuration(job.Timeout); err != nil {

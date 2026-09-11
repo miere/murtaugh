@@ -25,6 +25,7 @@ import (
 
 	"github.com/miere/murtaugh/internal/agent"
 	"github.com/miere/murtaugh/internal/agentbuild"
+	"github.com/miere/murtaugh/internal/agentruntime"
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/mcpbridge"
 	"github.com/miere/murtaugh/internal/nodetoken"
@@ -177,6 +178,15 @@ func (r *Runner) RunAndForget(ctx context.Context, agentName, prompt string) err
 		r.logger.Debug("delegate-to-agent discarding fire-and-forget output", "agent", agentName, "bytes", len(out))
 	}
 	return nil
+}
+
+// No node stands behind a run made inside the gateway's own process.
+func (r *Runner) RunForReply(ctx context.Context, agentName, prompt string) (agentruntime.Reply, error) {
+	out, err := r.Run(ctx, agentName, prompt)
+	if err != nil {
+		return agentruntime.Reply{}, err
+	}
+	return agentruntime.Reply{Text: out, InProcess: true}, nil
 }
 
 // Run drives one isolated turn: it starts a fresh agent, opens a session, sends

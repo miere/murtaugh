@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-co-op/gocron/v2"
 
+	"github.com/miere/murtaugh/internal/agentruntime"
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/slack/alertcard"
 	"github.com/miere/murtaugh/internal/slack/approvalcard"
@@ -19,7 +20,7 @@ import (
 // injects a closure over the jobs.run tool so scheduled runs reuse the exact
 // execution path — timeout, workdir, exit-code handling — as manual ones,
 // and the gateway stays free of any dependency on the tools layer.
-type ScheduledRunner func(ctx context.Context, name string) error
+type ScheduledRunner func(ctx context.Context, name string) (*agentruntime.Reply, error)
 
 // JobConfirmer records an approved job's confirmation durably — it stamps the
 // entry `confirmed: true` in the config store. The composition root injects a
@@ -118,13 +119,15 @@ func (a *Gateway) runScheduledJob(ctx context.Context, name string) {
 		return
 	}
 	a.logger.Info("running scheduled job", "job", name)
-	if err := a.runJob(ctx, name); err != nil {
+	reply, err := a.runJob(ctx, name)
+	if err != nil {
 		a.logger.Error("scheduled job failed", "job", name, "error", err)
 		a.notifyJobFailure(ctx, name, err)
 		return
 	}
 	a.logger.Info("scheduled job completed", "job", name)
 	a.markJobHealthy(name)
+	a.settleJobReply(ctx, name, reply)
 }
 
 // notifyJobFailure tells the admin that a scheduled run failed, once per run of
@@ -312,6 +315,9 @@ func jobNote(job config.JobProfile) string {
 	who := ""
 	if agent := strings.TrimSpace(job.Agent); agent != "" {
 		who = fmt.Sprintf(" through the `%s` agent", agent)
+	}
+	if dest := strings.TrimSpace(job.ReportTo); dest != "" {
+		who += fmt.Sprintf(" and reports its reply to `%s`", dest)
 	}
 	return fmt.Sprintf("Runs %s%s — approving allows every later run too.", schedulePhrase(job), who)
 }

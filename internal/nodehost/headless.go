@@ -80,18 +80,17 @@ type headlessDelegator struct {
 // backs the workflow engine's reply-to-slack arm and link unfurling, both of
 // which render the result.
 func (d *headlessDelegator) RunForJSON(ctx context.Context, agentName, prompt string) ([]byte, error) {
-	out, err := d.run(ctx, agentName, prompt, "run_for_json")
+	out, _, err := d.run(ctx, agentName, prompt, "run_for_json")
 	if err != nil {
 		return nil, err
 	}
 	return oneshot.ExpectJSON(out, agentName, d.log)
 }
 
-// RunAndForget drives a delegation on the main node and discards the text. It
-// backs scheduled jobs and top-level workflow triggers, where the agent is
-// expected to act through its own tools rather than hand anything back.
+// A top-level workflow trigger's agent acts through its own tools and has
+// nothing to hand back.
 func (d *headlessDelegator) RunAndForget(ctx context.Context, agentName, prompt string) error {
-	out, err := d.run(ctx, agentName, prompt, "run_and_forget")
+	out, _, err := d.run(ctx, agentName, prompt, "run_and_forget")
 	if err != nil {
 		return err
 	}
@@ -101,11 +100,21 @@ func (d *headlessDelegator) RunAndForget(ctx context.Context, agentName, prompt 
 	return nil
 }
 
+// The gateway decides from the node's owner whether to repeat a reply, and a
+// node is never trusted to name its own owner.
+func (d *headlessDelegator) RunForReply(ctx context.Context, agentName, prompt string) (agentruntime.Reply, error) {
+	out, node, err := d.run(ctx, agentName, prompt, "run_for_reply")
+	if err != nil {
+		return agentruntime.Reply{}, err
+	}
+	return agentruntime.Reply{Text: out, NodeID: node.nodeID, NodeOwner: node.userID}, nil
+}
+
 // run resolves the main node and drives one turn on it.
-func (d *headlessDelegator) run(ctx context.Context, agentName, prompt, verb string) (string, error) {
+func (d *headlessDelegator) run(ctx context.Context, agentName, prompt, verb string) (string, *attached, error) {
 	node, err := d.host.mainNode(ctx, agentName, verb)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	d.log.Info("delegating headless work to the main node", "node_id", node.nodeID, "agent", agentName, "verb", verb)
 	// The node's CLIENT is deliberately neither initialized nor closed here.
@@ -120,11 +129,12 @@ func (d *headlessDelegator) run(ctx context.Context, agentName, prompt, verb str
 	// node's session manager never sees it. Left open it is one retained session
 	// — and on ACP one live subprocess — per job, per workflow trigger and per
 	// pasted link, for as long as the node stays up.
-	return oneshot.Drive(ctx, node.client, oneshot.Request{
+	out, err := oneshot.Drive(ctx, node.client, oneshot.Request{
 		Agent:       agentName,
 		Prompt:      prompt,
 		IdleTimeout: d.idleTimeout,
 	})
+	return out, node, err
 }
 
 // mainNode resolves the designated main node, or says loudly why it could not.

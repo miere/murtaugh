@@ -596,12 +596,6 @@ func (a Agents) localDelegator(cfg config.Config, registry *tools.Registry) run.
 // frontends use (streaming child output to the process stdout/stderr, which
 // launchd captures), and maps a non-zero exit code onto an error so the
 // gateway logs the run as failed.
-//
-// delegator is the gateway's shared one-shot runner, which carries the running
-// MCP aggregator: an agent job fired by cron therefore reaches the same tools a
-// chat agent does, and a prompt that ends "post the result to #ops" can. nil
-// (no agents configured) falls back to the unbridged CLI runner, which fails
-// such a job with a clear error rather than silently doing nothing.
 func (a *Application) newScheduledRunner(cfg config.Config, delegator agentruntime.Delegator) gateway.ScheduledRunner {
 	recorder, registry := a.recorder, a.registry
 	lookup := func(name string) (config.JobProfile, bool) {
@@ -615,15 +609,19 @@ func (a *Application) newScheduledRunner(cfg config.Config, delegator agentrunti
 		jobDelegator = delegator
 	}
 	runTool := run.New(lookup).WithDelegator(jobDelegator).WithRecorder(recorder)
-	return func(ctx context.Context, name string) error {
+	return func(ctx context.Context, name string) (*agentruntime.Reply, error) {
 		result, err := runTool.Invoke(ctx, map[string]any{"name": name})
 		if err != nil {
-			return err
+			return nil, err
 		}
-		if r, ok := result.(run.Result); ok && r.ExitCode != 0 {
-			return fmt.Errorf("exited with code %d", r.ExitCode)
+		r, ok := result.(run.Result)
+		if !ok {
+			return nil, nil
 		}
-		return nil
+		if r.ExitCode != 0 {
+			return nil, fmt.Errorf("exited with code %d", r.ExitCode)
+		}
+		return r.Reply, nil
 	}
 }
 

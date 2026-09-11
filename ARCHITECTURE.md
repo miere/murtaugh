@@ -580,8 +580,15 @@ other key is rejected at parse time.
 `url_pattern`, non-blank channel entries, and exactly one action.
 
 `JobProfile` runs **either** a `command` **or** an agent (`agent` + `prompt`,
-mutually exclusive). An agent job is fire-and-forget; its prompt supports
-positional `{{ N }}` placeholders filled from the run-time/configured args.
+mutually exclusive). An agent job's prompt supports positional `{{ N }}`
+placeholders filled from the run-time/configured args. Its final reply comes back
+as an `agentruntime.Reply` naming where it ran (in process, or the node id and
+the owner on that node's credential). `jobs.run` keeps none of it. After a
+scheduled run the gateway decides first: when the run was in process or the
+node's owner is the gateway admin it journals the reply (`job.reply`, long ones
+in a blob) and posts it to the job's `report_to`; for anyone else's node it
+journals only that the reply was withheld and DMs the admin when a report was
+lost.
 
 **Delegation runs at chat parity.** Every delegate-to-agent surface (jobs,
 workflow triggers, unfurls) shares ONE `agentdelegate.Runner`, built by

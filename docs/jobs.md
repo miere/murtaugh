@@ -2,8 +2,8 @@
 
 A **job** is a named unit of work in the config store, managed with
 `murtaugh cfg job …`. It runs **either** a shell command (with args, working
-directory, and timeout) **or** an agent (`--agent` + `--prompt`,
-fire-and-forget) — the two are mutually exclusive. Jobs run **on demand** (CLI,
+directory, and timeout) **or** an agent (`--agent` + `--prompt`, optionally
+reporting its reply with `--report-to`) — the two are mutually exclusive. Jobs run **on demand** (CLI,
 MCP, or a workflow trigger) and can additionally run **automatically** on a
 schedule.
 
@@ -48,6 +48,11 @@ murtaugh cfg job set --name nightly-backup \
 murtaugh cfg job set --name hourly-sync \
   --command /usr/local/bin/sync.sh --every 1h
 
+# Agent-delegated job, cron-scheduled, reporting its reply to #ops.
+murtaugh cfg job set --name nightly-digest \
+  --agent default --prompt 'Summarise last night'"'"'s alerts.' \
+  --schedule "0 7 * * *" --report-to "#ops"
+
 # Agent-delegated job.
 murtaugh cfg job set --name code-review-job \
   --agent default \
@@ -64,17 +69,57 @@ murtaugh cfg job delete --name code-review-job
   command resolves against `--workdir`, which defaults to the workspace
   (`~/.config/murtaugh`). `--arg` is repeatable.
 - An **agent job** (`--agent` + `--prompt`) starts the named agent in an isolated
-  one-shot session and sends the rendered prompt; it is fire-and-forget — the
-  agent acts through its own tools. When the run is fired by the daemon
+  one-shot session and sends the rendered prompt. What happens to the agent's
+  final reply depends on whose machine ran it — see "What happens to an agent
+  job's reply" below. When the run is fired by the daemon
   (a schedule, or `jobs run` inside the gateway) the agent gets the same tools
-  and MCP servers it has in chat, so "post the result to #ops" works. Two
-  things it does not get: an **approval gate** — nobody is in a thread to
-  answer a card, so the agent's own `approval` policy is the only gate — and
-  the `ask`/`present_plan` tools, which need a live conversation and fail with
-  a clear error. Run the same job straight from the CLI and it drops to the
-  backend's own built-ins: the aggregator only runs inside the daemon.
+  and MCP servers it has in chat. On a runtime node that set has no Slack tools
+  — a node never talks to Slack — so a prompt ending "post the result to #ops"
+  cannot be carried out there; name the destination with `--report-to` instead
+  (below). Two things the agent does not get anywhere: an **approval gate** —
+  nobody is in a thread to answer a card, so the agent's own `approval` policy
+  is the only gate — and the `ask`/`present_plan` tools, which need a live
+  conversation and fail with a clear error. Run the same job straight from the
+  CLI and it drops to the backend's own built-ins: the aggregator only runs
+  inside the daemon.
 - Prompts (and command args) support **positional placeholders** `{{ 1 }}`,
   `{{ 2 }}`, … that expand to the args passed at run time.
+
+---
+
+## What happens to an agent job's reply (`--report-to`)
+
+`--report-to` names where the **gateway** posts the agent's final reply after a
+scheduled run: `#channel-name`, a channel ID, `@handle` or a user ID (a person
+gets it in their DM with the bot). It is accepted on agent jobs only. The reply
+is posted as the bot, as-is, in the same Markdown the agent wrote.
+
+Who ran the job decides everything else. The gateway looks at the node that ran
+it — its owner is the user its node token was minted for — after the run and
+before it keeps or shows anything:
+
+- **The gateway admin's own node** (the owner is `access.admin_user`), **or the
+  gateway's own process** (`murtaugh slack gateway` runs agents itself). The
+  reply is kept in the journal as a `job.reply` event on the `job` stream (a
+  long one is kept whole in a journal blob file), and posted to `--report-to`
+  when the job has one.
+- **Anyone else's node.** The reply is neither posted nor kept, whether or not
+  the job has `--report-to`: no journal row and no blob file carries a word of
+  it. The journal gets a `job.reply` event saying it was withheld, naming the
+  job, the node, its owner and the `--report-to` destination if there is one.
+  When the job has `--report-to`, the admin is also sent a DM saying the report
+  was withheld and whose node ran it — once, until a report for that job gets
+  through again.
+
+`jobs run` itself keeps no reply: its own `job.run` event records only the
+agent and how long the run took. The destination only ever comes from the job's
+own definition in the gateway's configuration; nothing a node or its agent says
+can change it.
+
+A run that fails is not reported: the admin gets the failed-job alert instead.
+An empty reply is not posted, and a reply that cannot be delivered (unknown
+channel, bot not invited) is journalled at ERROR. Clear the setting with
+`--report-to ""`.
 
 ---
 

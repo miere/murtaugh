@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/miere/murtaugh/internal/agentruntime"
 	"github.com/miere/murtaugh/internal/config"
 )
 
@@ -75,6 +76,9 @@ func TestJobNote(t *testing.T) {
 	if !strings.Contains(note, "researcher") {
 		t.Errorf("note = %q, want it to name the agent that will carry the job out", note)
 	}
+	if note := jobNote(config.JobProfile{Agent: "researcher", Every: "1h", ReportTo: "#ops"}); !strings.Contains(note, "#ops") {
+		t.Errorf("note = %q, want it to name where the reply will be reported", note)
+	}
 }
 
 func TestStartSchedulerNoOpWithoutRunner(t *testing.T) {
@@ -91,7 +95,7 @@ func TestStartSchedulerNoOpWhenNoScheduledJobs(t *testing.T) {
 	a := &Gateway{
 		logger:        discardLogger(),
 		scheduledJobs: map[string]config.JobProfile{"manual": {Command: "/bin/echo"}},
-		runJob:        func(context.Context, string) error { return nil },
+		runJob:        func(context.Context, string) (*agentruntime.Reply, error) { return nil, nil },
 	}
 	stop := a.startScheduler(context.Background())
 	stop()
@@ -105,12 +109,12 @@ func TestStartSchedulerHoldsUnconfirmedJobWithoutBroker(t *testing.T) {
 		scheduledJobs: map[string]config.JobProfile{
 			"held": {Command: "/bin/echo", Every: "20ms", Confirmed: &unconfirmed},
 		},
-		runJob: func(_ context.Context, name string) error {
+		runJob: func(_ context.Context, name string) (*agentruntime.Reply, error) {
 			select {
 			case fired <- name:
 			default:
 			}
-			return nil
+			return nil, nil
 		},
 		// No interaction broker wired, so the first-run confirmation can never be
 		// granted and the held job must not run.
@@ -140,12 +144,12 @@ func TestStartSchedulerFiresConfirmedAndManualNilJobs(t *testing.T) {
 			// Hand-written (Confirmed nil) interval job: must fire (unaffected).
 			"plain": {Command: "/bin/echo", Every: "20ms"},
 		},
-		runJob: func(_ context.Context, name string) error {
+		runJob: func(_ context.Context, name string) (*agentruntime.Reply, error) {
 			select {
 			case fired <- name:
 			default:
 			}
-			return nil
+			return nil, nil
 		},
 	}
 
@@ -171,7 +175,7 @@ func TestStartSchedulerFiresIntervalJob(t *testing.T) {
 	a := &Gateway{
 		logger:        discardLogger(),
 		scheduledJobs: map[string]config.JobProfile{"tick": {Command: "/bin/echo", Every: "50ms"}},
-		runJob: func(_ context.Context, name string) error {
+		runJob: func(_ context.Context, name string) (*agentruntime.Reply, error) {
 			mu.Lock()
 			names = append(names, name)
 			mu.Unlock()
@@ -179,7 +183,7 @@ func TestStartSchedulerFiresIntervalJob(t *testing.T) {
 			case fired <- name:
 			default:
 			}
-			return nil
+			return nil, nil
 		},
 	}
 

@@ -31,6 +31,7 @@ import (
 	"github.com/miere/murtaugh/internal/slack/configcard"
 	"github.com/miere/murtaugh/internal/slack/display"
 	askbroker "github.com/miere/murtaugh/internal/slack/interaction"
+	"github.com/miere/murtaugh/internal/slack/replyblock"
 	"github.com/miere/murtaugh/internal/toolset"
 	"github.com/miere/murtaugh/internal/unfurl"
 	"github.com/miere/murtaugh/internal/updates"
@@ -180,7 +181,8 @@ type Gateway struct {
 	// by confirmedJobsMu, because it is the same per-job bookkeeping and a
 	// second mutex over the same map key set is how the two drift. See
 	// notifyJobFailure.
-	failingJobs map[string]bool
+	failingJobs  map[string]bool
+	withheldJobs map[string]bool
 	// persistJobConfirmation stamps an approved job `confirmed: true` in the
 	// config store, so the approval outlives this process. Wired by the
 	// composition root (WithJobConfirmer) as a closure over the store. nil
@@ -342,6 +344,9 @@ type Gateway struct {
 	configCards     *configcard.Renderer
 	configChanges   map[string]*pendingConfigChange
 	configChangesMu sync.Mutex
+	reports         slackclient.SlackAPI
+	reportBlocks    *replyblock.Renderer
+	replyBlobs      *journal.BlobStore
 	// nodeReport describes this node for the takeover announcement: hostname,
 	// addresses, version. Resolved lazily on promotion, not at construction,
 	// because a node's public address can change between boot and failover.
@@ -405,12 +410,14 @@ func New(cfg config.Config, logger *slog.Logger, recorder journal.Recorder, brok
 	// personally rather than posted into a thread — currently the credential
 	// warden's. It comes from the same client that posts the card.
 	var alertDM func(context.Context, string) (string, error)
+	var reports slackclient.SlackAPI
 	if alertClient, err := slackclient.NewClientWithHTTP(cfg.OAuth.BotToken, gatedHTTP); err != nil {
 		logger.Warn("alert cards disabled: could not build Slack client", "error", err)
 	} else {
 		alertAPI = alertClient
 		alertEditor = alertClient
 		alertDM = alertClient.OpenDM
+		reports = alertClient
 	}
 
 	// Built after the alert client because the startup greeting is itself an
@@ -665,6 +672,9 @@ func New(cfg config.Config, logger *slog.Logger, recorder journal.Recorder, brok
 		botToken:          cfg.OAuth.BotToken,
 		alertCards:        alertCards,
 		alertAPI:          alertAPI,
+		reports:           reports,
+		reportBlocks:      replyblock.NewRenderer(cfg.BaseDir, nil),
+		replyBlobs:        jobReplyBlobs(cfg),
 		alertEditor:       alertEditor,
 		approvalCards:     approvalCards,
 		configCards:       configcard.NewRenderer(cfg.BaseDir, assets.FS),
