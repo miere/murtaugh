@@ -79,11 +79,7 @@ type Gateway struct {
 	// reports rather than hanging.
 	auth *authcard.Flow
 	// askCards routes ask-card clicks back into the blocked `ask` tool call.
-	askCards *askcard.Flow
-	// serveTools runs the agent runtime's tool surface — today the MCP
-	// aggregator an acp/claude_code agent reaches through `murtaugh mcp-bridge` —
-	// until its context ends. Called on every promotion, so it must be
-	// restartable. nil when the runtime has nothing to serve.
+	askCards   *askcard.Flow
 	serveTools func(context.Context) error
 	// delegator is the shared one-shot runner behind every delegate-to-agent
 	// surface (jobs, workflow triggers, unfurls). Exposed via Delegator so the
@@ -176,13 +172,8 @@ type Gateway struct {
 	// writes the durable half so a restart does not re-ask.
 	confirmedJobs   map[string]bool
 	confirmedJobsMu sync.Mutex
-	// failingJobs records which jobs the last run of failed, so the admin is
-	// alerted on the EDGE into failure rather than on every occurrence. Guarded
-	// by confirmedJobsMu, because it is the same per-job bookkeeping and a
-	// second mutex over the same map key set is how the two drift. See
-	// notifyJobFailure.
-	failingJobs  map[string]bool
-	withheldJobs map[string]bool
+	failingJobs     map[string]bool
+	withheldJobs    map[string]bool
 	// persistJobConfirmation stamps an approved job `confirmed: true` in the
 	// config store, so the approval outlives this process. Wired by the
 	// composition root (WithJobConfirmer) as a closure over the store. nil
@@ -322,12 +313,8 @@ type Gateway struct {
 	writeAgentProfiles AgentProfileWriter
 	configDir          string
 	probeClient        onboarding.Doer
-	// writeNodeProfiles applies the SAME form to a runtime node instead of to
-	// this gateway, and pendingNodes is who is entitled to submit it. Together
-	// they are #170 Change I's onboarding trigger: a node that attaches with
-	// nothing configured gets its owner offered the form. See node_setup.go.
-	writeNodeProfiles NodeProfileWriter
-	pendingNodes      pendingNodes
+	writeNodeProfiles  NodeProfileWriter
+	pendingNodes       pendingNodes
 	// claimAdmin persists the first-user-wins administrator adoption. nil keeps
 	// the claim in memory for this process only (CLI/MCP and tests).
 	claimAdmin AdminClaimer
@@ -452,33 +439,17 @@ func New(cfg config.Config, logger *slog.Logger, recorder journal.Recorder, brok
 	// resolved map, not the one New was handed.
 	chatDefaults := &cfg.Chat.Defaults
 	var bgRouter *backgroundEventsRouter
-	// Chat agents are gated: a side-effecting tool call asks the user for
-	// approval in the thread. nil broker leaves them ungated. Headless and
-	// delegated agents never get an approver.
-	//
-	// Both gates are built per agent because each carries that agent's approval
-	// settings — approval.keep_resolved decides whether its settled cards are
-	// kept or swept, and one shared gate could only ever honour one agent's
-	// choice. profile.Approval is already the resolved policy: both config
-	// loaders bake defaults.approval into every agent before this point. They all
-	// share the one renderer built above.
 	var approvers map[string]agentruntime.Approver
 	acpPermissionAskers := make(map[string]agent.PermissionAsker, len(cfg.Agents))
 	if cfg.Chat.Enabled {
 		// Renders claude_code background completions (subagents finishing after a
 		// turn ends) into their thread; shared across agents, bound to the chat
-		// handler's renderer below. Its window is the background counterpart of the
-		// handler's request_timeout: no turn loop is watching a background stretch,
-		// so this is the only thing that can close its message.
 		bgRouter = newBackgroundEventsRouter(logger, cfg.Defaults.EffectiveBackgroundIdleTimeout())
 		if broker != nil {
 			approvers = make(map[string]agentruntime.Approver, len(cfg.Agents))
 			for name, profile := range cfg.Agents {
 				keepResolved := profile.Approval.KeepsResolved()
 				// One always-allow set per agent, shared by both of that agent's
-				// approval paths: the gate records a grant, and the permission gate
-				// honours it rather than re-asking about a call the user has already
-				// allowed through Murtaugh's own tools.
 				grants := askbroker.NewGrants()
 				approvers[name] = askbroker.NewApprover(broker, approvalCards, keepResolved, grants)
 				// ACP agents' permission requests are resolved through the same broker:
@@ -492,13 +463,6 @@ func New(cfg config.Config, logger *slog.Logger, recorder journal.Recorder, brok
 		}
 	}
 
-	// Everything that can actually run an agent is built out there, not here.
-	// The gateway contributes the two things only a Slack-facing process can
-	// supply — the approval gates and the background-event sink — and receives
-	// session managers, a delegation runner and a tool surface it can start. A
-	// nil builder is a gateway that cannot run an agent at all, which is where
-	// #170 is going; every consumer below already handles the empty runtime,
-	// because it is also what a deployment with no agents configured produces.
 	cards := display.New(broker, askFlow).WithSignIns(authFlow, logger)
 	var built atomic.Pointer[Gateway]
 	var runtime agentruntime.Runtime
@@ -521,9 +485,6 @@ func New(cfg config.Config, logger *slog.Logger, recorder journal.Recorder, brok
 		runtime = buildRuntime(hooks)
 	}
 	credRepair := localCredentialRepair(authFlow, cfg.Agents, runtime, logger)
-	// agentToolProblems records the tool groups dropped while building each agent
-	// (a degraded feature, not a failed agent) so the startup summary can surface
-	// them in logs and the journal.
 	agentToolProblems := runtime.ToolProblems
 	if cfg.Chat.Enabled {
 		sessions = make(map[string]ChatSessionManager, len(runtime.Sessions))
@@ -614,11 +575,6 @@ func New(cfg config.Config, logger *slog.Logger, recorder journal.Recorder, brok
 		// so a background reply looks exactly like a foreground one.
 		bgRouter.bind(chat.newChatRenderer)
 	}
-	// The runtime's one shared runner backs every delegate-to-agent surface
-	// (jobs, workflow triggers, unfurls). Each surface takes it through its own
-	// narrower interface, so the typed-nil trap is avoided by branching once
-	// here: an empty runtime leaves all three unset and each reports delegation
-	// as unavailable rather than dereferencing nothing.
 	var unfurlDelegator UnfurlDelegator
 	var workflowDelegator workflow.AgentDelegator
 	delegator := runtime.Delegator
@@ -868,24 +824,10 @@ func (a *Gateway) closeChatSessions() {
 	}
 }
 
-// Delegator returns the runtime's shared one-shot agent runner, already
-// carrying this gateway's build context and MCP aggregator, or nil when no
-// agent is configured. The composition root wires it into the scheduled-job
-// executor so a cron-fired agent job gets the same tools as every other
-// delegation; callers must nil-check before storing it in an interface.
+// Delegator exists so a cron-fired agent job gets the same tools as every other
+// delegation. It is nil when no agent is configured.
 func (a *Gateway) Delegator() agentruntime.Delegator { return a.delegator }
 
-// startBridge binds the agent runtime's tool surface (the MCP aggregator socket)
-// and tears it down when ctx ends. It runs on EVERY promotion, so the surface
-// has to be restartable — a demoted-then-repromoted gateway that came back
-// without it would leave every acp/claude_code agent tool-less for the rest of
-// the process.
-//
-// A bind failure degrades rather than blocking startup: those agents keep their
-// own built-ins and lose Murtaugh's tools. It is recorded on the gateway journal
-// stream as well as logged, because the symptom — an agent that answers but
-// cannot post, hours later — is otherwise untraceable to a line that scrolled
-// past at promotion time.
 func (a *Gateway) startBridge(ctx context.Context) {
 	if a.serveTools == nil {
 		return
@@ -2044,13 +1986,6 @@ func (a *Gateway) dispatchTurn(parent context.Context, key agent.ConversationKey
 		a.channelCache.resolveChannelName(parent, req.ChannelID)
 		resolved := a.chat.resolver(req)
 		route.Agent = resolved.Agent
-		// The channel NAME is corrected here too, and it is the one other field
-		// safe to correct: the conversation key is built from ReplyOnThread and
-		// nothing else the resolver returns, so a name learned on this pass
-		// cannot make the key computed in startChat and the key computed in
-		// Handle disagree. It matters because a node's channel claims are
-		// mostly name globs, and a cold cache would otherwise delegate a
-		// brand-new channel as though nobody claimed it.
 		route.ChannelName = resolved.ChannelName
 		agentName = route.Agent
 	}

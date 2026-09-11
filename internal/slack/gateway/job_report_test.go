@@ -129,8 +129,6 @@ func TestAJobReportIsPostedForTheAdminsNode(t *testing.T) {
 	}
 }
 
-// A person is reached through the bot's DM with them, the same way every other
-// Slack destination in Murtaugh resolves.
 func TestAJobReportToAPersonLandsInTheirDM(t *testing.T) {
 	job := digestJob()
 	job.ReportTo = "@miere"

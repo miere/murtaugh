@@ -10,9 +10,6 @@ import (
 	"github.com/slack-go/slack"
 )
 
-// fakeBackfiller stands in for the Slack thread reader: it returns a canned
-// transcript (and optionally a canvas surface), or an error, and records that it
-// was consulted at all — which is what the warm-session case asserts.
 type fakeBackfiller struct {
 	history string
 	canvas  *CanvasContext
@@ -25,7 +22,6 @@ func (b *fakeBackfiller) BackfillWithSurface(context.Context, string, string, st
 	return b.history, b.canvas, b.err
 }
 
-// fakeCanvasInfo stands in for conversations.info.
 type fakeCanvasInfo struct {
 	fileID string
 	err    error
@@ -35,22 +31,16 @@ func (c *fakeCanvasInfo) ChannelCanvasFileID(context.Context, string) (string, e
 	return c.fileID, c.err
 }
 
-// warmSessions reports every conversation as already having a live session.
 type warmSessions struct{}
 
 func (warmSessions) Lookup(agent.ConversationKey) (string, bool) { return "sess-1", true }
 
-// foldNothing is the no-uploads case; foldFixed folds a fixed block so a test can
-// see where it lands without wiring a file fetcher.
 func foldFixed(block string) func(context.Context, []slack.File) string {
 	return func(context.Context, []slack.File) string { return block }
 }
 
-// TestRequestTranslatorBindsTheConversationAndTheReply is the routing half: the
-// session key and the place the reply is posted must be derived from ONE
-// decision, or a turn answers in a thread whose session it is not bound to. The
-// channel-reply row is the one that matters — an empty thread there is the
-// strategy (one rolling channel-wide conversation), not a missing value.
+// The session key and the reply's place must come from one decision, or a turn
+// answers in a thread its session is not bound to.
 func TestRequestTranslatorBindsTheConversationAndTheReply(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
@@ -93,8 +83,6 @@ func TestRequestTranslatorBindsTheConversationAndTheReply(t *testing.T) {
 			if got.ReplyThreadTS != tc.wantReplyTS {
 				t.Errorf("reply thread = %q, want %q", got.ReplyThreadTS, tc.wantReplyTS)
 			}
-			// The metadata must agree with the key, not with the raw request:
-			// this is the value the agent (and a node) sees as "the thread".
 			if got.Metadata.ThreadTS != got.Key.ThreadTS {
 				t.Errorf("metadata thread %q disagrees with the session key %q", got.Metadata.ThreadTS, got.Key.ThreadTS)
 			}
@@ -102,10 +90,8 @@ func TestRequestTranslatorBindsTheConversationAndTheReply(t *testing.T) {
 	}
 }
 
-// TestRequestTranslatorFoldsUploadsIntoThePrompt covers the three shapes a
-// message with files takes. The caption-less upload is the interesting one: it is
-// a valid prompt even though the person typed nothing, and rejecting it would
-// make dropping a file into a DM do nothing at all.
+// A caption-less upload is a valid prompt; rejecting it would make dropping a file
+// into a DM do nothing.
 func TestRequestTranslatorFoldsUploadsIntoThePrompt(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -128,7 +114,6 @@ func TestRequestTranslatorFoldsUploadsIntoThePrompt(t *testing.T) {
 			if got.Prompt.Text != tc.wantPrompt {
 				t.Errorf("prompt = %q, want %q", got.Prompt.Text, tc.wantPrompt)
 			}
-			// The journal records what the person wrote, not what the file said.
 			if got.UserText != tc.wantUser {
 				t.Errorf("user text = %q, want %q", got.UserText, tc.wantUser)
 			}
@@ -136,11 +121,8 @@ func TestRequestTranslatorFoldsUploadsIntoThePrompt(t *testing.T) {
 	}
 }
 
-// TestRequestTranslatorRejectsTurnsItCannotRun covers the only two failures this
-// direction has, both sentinels so a caller can tell them apart without matching
-// prose. The timestamp guard is checked against the TRIGGERING message rather
-// than the reply thread, because the reply thread is legitimately empty in
-// channel-reply mode.
+// The timestamp guard checks the triggering message, not the reply thread, because
+// the reply thread is empty in channel-reply mode.
 func TestRequestTranslatorRejectsTurnsItCannotRun(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -168,10 +150,8 @@ func TestRequestTranslatorRejectsTurnsItCannotRun(t *testing.T) {
 	}
 }
 
-// TestRequestTranslatorSeedsAColdThreadOnce: a cold threaded session gets the
-// prior conversation as history, and a warm one does not — it already holds it,
-// and re-sending would duplicate the whole thread into the model's context every
-// turn.
+// Re-sending history to a warm session would duplicate the whole thread into the
+// model's context every turn.
 func TestRequestTranslatorSeedsAColdThreadOnce(t *testing.T) {
 	req := ChatRequest{ChannelID: "C1", ThreadTS: "100.0", MessageTS: "101.0", Text: "carry on"}
 	route := ChatRoute{Agent: "default", ReplyOnThread: true}
@@ -195,9 +175,8 @@ func TestRequestTranslatorSeedsAColdThreadOnce(t *testing.T) {
 	}
 }
 
-// TestRequestTranslatorDegradesWhenTheThreadCannotBeRead: losing the backstory is
-// worse than the turn failing only if you value completeness over answering at
-// all. A failed replies fetch proceeds without history.
+// A failed replies fetch goes on without history, because answering matters more
+// than the backstory.
 func TestRequestTranslatorDegradesWhenTheThreadCannotBeRead(t *testing.T) {
 	b := &fakeBackfiller{err: errors.New("ratelimited")}
 	tr := newRequestTranslator(b, nil, nil, discardLogger())
@@ -212,9 +191,8 @@ func TestRequestTranslatorDegradesWhenTheThreadCannotBeRead(t *testing.T) {
 	}
 }
 
-// TestRequestTranslatorCanvasTurnCarriesTheDocument: a canvas comment turn must
-// tell the agent it is looking at a canvas AND which one, ahead of the transcript
-// so the model reads the framing before the content (spec 021 §9.3).
+// The canvas framing goes ahead of the transcript so the model reads it before the
+// content.
 func TestRequestTranslatorCanvasTurnCarriesTheDocument(t *testing.T) {
 	b := &fakeBackfiller{history: "U1: what does this say?", canvas: &CanvasContext{SectionRef: "100.0"}}
 	tr := newRequestTranslator(b, &fakeCanvasInfo{fileID: "F123"}, nil, discardLogger())
@@ -235,9 +213,8 @@ func TestRequestTranslatorCanvasTurnCarriesTheDocument(t *testing.T) {
 	}
 }
 
-// TestRequestTranslatorCanvasTurnSurvivesAnUnresolvedID: knowing the turn came
-// from a canvas is worth more than the id, so a conversations.info failure must
-// not cost the surface — and must not fail the turn.
+// Knowing the turn came from a canvas is worth more than its id, so a failed lookup
+// must neither drop that nor fail the turn.
 func TestRequestTranslatorCanvasTurnSurvivesAnUnresolvedID(t *testing.T) {
 	b := &fakeBackfiller{canvas: &CanvasContext{SectionRef: "100.0"}}
 	tr := newRequestTranslator(b, &fakeCanvasInfo{err: errors.New("channel_not_found")}, nil, discardLogger())

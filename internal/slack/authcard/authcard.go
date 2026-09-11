@@ -67,9 +67,7 @@ const (
 	// paste. It deliberately does not retire the bar.
 	ActionOpen Action = "open"
 	// ActionDeny refuses the request outright.
-	ActionDeny Action = "deny"
-	// ActionApprove lets a command the owner was shown start; nothing runs
-	// before it.
+	ActionDeny    Action = "deny"
 	ActionApprove Action = "approve"
 )
 
@@ -77,18 +75,16 @@ const (
 type State string
 
 const (
-	// StateApproval and StateStarting come before any link exists, while a command
-	// waits for its owner's approval and then for the link it prints.
 	StateApproval State = "approval"
 	StateStarting State = "starting"
-	StatePending  State = "pending" // posted, waiting on the admin
-	StateWorking  State = "working" // primary clicked; buttons retired, waiting on completion
+	StatePending  State = "pending"
+	StateWorking  State = "working"
 	StateSuccess  State = "success"
 	StateDenied   State = "denied"
 	StateTimeout  State = "timeout"
 	StateFailed   State = "failed"
-	// StateCancelled is a sign-in stopped by its turn ending or its node going
-	// away, which nobody declined and which did not fail.
+	// StateCancelled is kept apart from denied and failed: the turn ended or the
+	// node went away, and nobody said no.
 	StateCancelled State = "cancelled"
 )
 

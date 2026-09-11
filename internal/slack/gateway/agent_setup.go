@@ -88,9 +88,6 @@ func isAgentSetupSubmit(interaction slack.InteractionCallback) bool {
 // It runs inline rather than on a goroutine because Slack expires a trigger_id
 // within seconds, and a modal opened with an expired one fails silently.
 func (a *Gateway) handleAgentSetupOpen(ctx context.Context, interaction slack.InteractionCallback) {
-	// The administrator configures this gateway; a user with an unconfigured
-	// node waiting configures that node. Everybody else is refused. See
-	// node_setup.go for why the second case is not a relaxation of the first.
 	if _, ok := a.setupSubjectFor(interaction.User.ID); !ok {
 		a.logger.Warn("ignoring an agent setup click from a user with nothing to configure", "user", interaction.User.ID)
 		return
@@ -214,8 +211,6 @@ func (a *Gateway) updateSetupView(ctx context.Context, viewID string, build func
 // a DM: the operator is looking at the form, and a message elsewhere about a
 // box in front of them is a worse answer than marking the box.
 func (a *Gateway) applySetup(event socketmode.Event, interaction slack.InteractionCallback, draft onboarding.Draft) {
-	// Who this form configures, and therefore where the profiles go, who the
-	// tweaker is bound to and where it is rooted. See node_setup.go.
 	subject, ok := a.setupSubjectFor(interaction.User.ID)
 	if !ok {
 		a.ackViewErrors(event, map[string]string{blockTools: "You are not configuring anything right now."})
@@ -257,8 +252,6 @@ func (a *Gateway) applySetup(event socketmode.Event, interaction slack.Interacti
 			})
 			return
 		}
-		// Consumed on success only. A form that failed to apply should still be
-		// reopenable from the card that is still sitting in the DM.
 		if subject.isNode() {
 			a.pendingNodes.clear(subject.user)
 		}
@@ -272,7 +265,6 @@ func (a *Gateway) applySetup(event socketmode.Event, interaction slack.Interacti
 	}()
 }
 
-// applyProfiles routes a completed form to whichever half it configures.
 func (a *Gateway) applyProfiles(ctx context.Context, subject setupSubject, profiles onboarding.Profiles) error {
 	if subject.isNode() {
 		return a.writeNodeProfiles(ctx, subject.nodeID, profiles)
@@ -280,8 +272,6 @@ func (a *Gateway) applyProfiles(ctx context.Context, subject setupSubject, profi
 	return a.writeAgentProfiles(ctx, profiles)
 }
 
-// setupSettledSubtitle says what happens next, which differs by half: this
-// gateway reloads in place, while a node restarts and redials.
 func setupSettledSubtitle(subject setupSubject) string {
 	if subject.isNode() {
 		return "your node is restarting; say hello once it reconnects"
@@ -296,10 +286,6 @@ func setupSettledSubtitle(subject setupSubject) string {
 // reload notices already say. A failure keeps the card, because that one needs
 // a body.
 func (a *Gateway) reportSetupOutcome(ctx context.Context, subject setupSubject, spec alertcard.Spec) {
-	// Reported to whoever filled the form in, which for a node is its owner
-	// rather than the gateway administrator. Telling the admin that somebody
-	// else's laptop is now configured is both noise to them and silence to the
-	// person waiting for the answer.
 	dest, err := a.resolveSetupDestination(ctx, subject)
 	if err != nil || dest == "" {
 		a.logger.Warn("could not report the agent setup outcome", "error", err)

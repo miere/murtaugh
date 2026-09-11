@@ -11,34 +11,18 @@ import (
 )
 
 // recordingRenderer is a chatRenderer that records what it was driven with.
-// Shared by the background-events router tests and the eventTranslator tests,
-// which is why it records an ORDERED call log as well as counters: the whole
-// claim of the inbound/outbound layering (#188) is about what the renderer is
-// handed and in what order, and a counter cannot express "exactly one call, and
-// it was Finish".
-//
-// It carries no clock, deliberately: it is a chatRenderer, so the renderclock
-// guard (internal/archtest/renderclockanalyzer) covers it too.
 type recordingRenderer struct {
-	// calls names each method as it was driven, in order.
-	calls []string
-	// text accumulates every rendered chunk, so a test can assert the reply the
-	// user would have seen rather than just how many writes happened.
+	calls         []string
 	text          string
 	tasks         int
 	attachments   int
 	interjections int
 	finished      bool
-	// empty is the alert Finish was handed — the empty-reply card, or a
-	// background stretch's stall notice. nil means the turn ended with nothing
-	// extra to say.
-	empty       *alertcard.Spec
-	failed      error
-	interrupted bool
-	stopped     bool
-	// textErr, when set, makes Text report a delivery failure — Slack refusing a
-	// write, which is not the same thing as the agent failing.
-	textErr error
+	empty         *alertcard.Spec
+	failed        error
+	interrupted   bool
+	stopped       bool
+	textErr       error
 }
 
 func (r *recordingRenderer) Text(_ context.Context, text string) error {
@@ -87,17 +71,8 @@ func (r *recordingRenderer) EnsureStopped(context.Context) {
 	r.stopped = true
 }
 
-// settlingRenderer is a recordingRenderer that announces every terminal on a
-// channel. The liveness tests need it for two reasons: an expiry runs on the
-// router's watcher goroutine, so a test has to WAIT for it rather than sleep and
-// hope; and recordingRenderer keeps its ordered call log in a plain slice, so
-// receiving from the channel is also the happens-before edge that makes reading
-// that log from the test goroutine safe.
 type settlingRenderer struct {
 	*recordingRenderer
-	// settled takes one token per EnsureStopped — the call every terminal path
-	// ends with. Buffered and sent to without blocking, because the send happens
-	// while the stretch lock is held.
 	settled chan struct{}
 }
 
@@ -113,14 +88,6 @@ func (r *settlingRenderer) EnsureStopped(ctx context.Context) {
 	}
 }
 
-// awaitSettled waits for r to be finalised, failing the test rather than hanging
-// if it never is — "the message was left open" is the bug under test, so it must
-// surface as a failure and not a timeout.
-//
-// A free function, not a method: settlingRenderer is a chatRenderer, and the
-// renderclock guard forbids a clock on one. The deadline here is a test's
-// patience, not a renderer observing time — but the guard follows receivers and
-// cannot tell the difference, and keeping it blunt is the point of it.
 func awaitSettled(t *testing.T, r *settlingRenderer, why string) {
 	t.Helper()
 	select {
@@ -191,17 +158,8 @@ func TestBackgroundSinkFreshRendererPerTurn(t *testing.T) {
 	}
 }
 
-// A background stretch that emits text and then never emits a terminal event is
-// the bug #192 names: nothing else in the process can close that Slack message.
-// This asserts the whole terminal — Finish carrying the stall notice, then
-// EnsureStopped — because sealing it silently would leave the user a message
-// indistinguishable from one that completed, and failing it would tell them the
-// agent broke.
-//
-// What that notice actually RENDERS as is asserted separately, against a real
-// renderer, in TestBackgroundStallDoesNotRenderAsAnAgentError. Neither test is
-// sufficient alone: this one cannot see a card, and a recordingRenderer will
-// hold any spec at all without complaint.
+// Sealing a stalled stretch silently would look like a finished reply, and failing
+// it would say the agent broke.
 func TestBackgroundStretchThatGoesSilentEndsWithTheStallNotice(t *testing.T) {
 	sink := newBackgroundEventsRouter(nil, 30*time.Millisecond)
 	r := newSettlingRenderer()
@@ -209,7 +167,6 @@ func TestBackgroundStretchThatGoesSilentEndsWithTheStallNotice(t *testing.T) {
 	sink.Register("sess", bgTarget{channelID: "C", threadTS: "1"})
 
 	sink.Handle("sess", agent.Event{Type: agent.EventText, Text: "half a thought"})
-	// No EventComplete, no EventError — the stream simply stops.
 
 	awaitSettled(t, r, "a silent background stretch left its message open")
 	if r.failed != nil {
@@ -226,22 +183,10 @@ func TestBackgroundStretchThatGoesSilentEndsWithTheStallNotice(t *testing.T) {
 	}
 }
 
-// The claim the recording renderer above cannot make: what the user READS.
-//
-// The router is bound to a real sectionRenderer with a real alert-card renderer
-// behind it — the same pair production wires — and expire is called on this
-// goroutine rather than waited for, so the assertions below are about a card
-// that was genuinely rendered and posted.
-//
-// It exists because the previous version of this path called Fail, which routes
-// through failSpec: an `error`-level card headed "Murtaugh hit an error while
-// talking to the agent" and closing with "notify your admin user", for a stretch
-// that had merely gone quiet. Nothing caught that, because the only test looked
-// at the raw error rather than at the render.
+// A recording renderer accepts any card, so only a real renderer shows the stall
+// is not drawn as an agent error.
 func TestBackgroundStallDoesNotRenderAsAnAgentError(t *testing.T) {
 	stream, msgr, api := &fakeStreamAPI{}, &fakeStatusMessenger{}, &fakeAlertAPI{}
-	// A window long enough that the watcher goroutine cannot reach the renderer:
-	// this test drives the expiry itself, so there is no race to lose.
 	sink := newBackgroundEventsRouter(discardLogger(), time.Hour)
 	sink.bind(func(string, string, StreamWriterOptions) chatRenderer {
 		return alertRenderer(stream, msgr, api)
@@ -270,7 +215,6 @@ func TestBackgroundStallDoesNotRenderAsAnAgentError(t *testing.T) {
 	if strings.Contains(blocks, "hit an error while talking to the agent") {
 		t.Errorf("a stretch that went quiet is reported as an agent error:\n%s", blocks)
 	}
-	// Icons are how the level reaches the eye: the warn icon, not the error one.
 	if strings.Contains(blocks, "close-button-web") {
 		t.Errorf("the stall notice is wearing the error icon:\n%s", blocks)
 	}
@@ -279,10 +223,8 @@ func TestBackgroundStallDoesNotRenderAsAnAgentError(t *testing.T) {
 	}
 }
 
-// The counterpart, and the one that keeps the detector honest: a stretch that
-// keeps producing output for longer than a whole window is NOT killed. The events
-// here span more than the window with every gap far inside it, which is exactly
-// the shape "size it against idle gaps, not against runtime" has to survive.
+// The window measures idle gaps, not total runtime, so a stretch that keeps
+// talking must outlive it.
 func TestBackgroundStretchSurvivesEventsSpacedInsideTheWindow(t *testing.T) {
 	const window = 100 * time.Millisecond
 	sink := newBackgroundEventsRouter(nil, window)
@@ -314,11 +256,8 @@ func TestBackgroundStretchSurvivesEventsSpacedInsideTheWindow(t *testing.T) {
 	}
 }
 
-// Expiry has to RETIRE the stretch, not just paint it. If the entry stayed in the
-// active map, every later background event for that conversation would be handed
-// a sealed message and dropped — the leak the timer exists to prevent, made
-// permanent. The conversation's TARGET, by contrast, must survive: the thread is
-// still there.
+// A stretch left in the active map would swallow every later background event
+// for that conversation.
 func TestBackgroundExpiryRetiresTheStretch(t *testing.T) {
 	sink := newBackgroundEventsRouter(nil, 20*time.Millisecond)
 	var made []*settlingRenderer
@@ -332,8 +271,6 @@ func TestBackgroundExpiryRetiresTheStretch(t *testing.T) {
 	sink.Handle("sess", agent.Event{Type: agent.EventText, Text: "a"})
 	awaitSettled(t, made[0], "the stretch never expired")
 
-	// The next background event for the same conversation, with no terminal in
-	// between: it must open a fresh message in the same thread.
 	sink.Handle("sess", agent.Event{Type: agent.EventText, Text: "b"})
 	if len(made) != 2 {
 		t.Fatalf("expected a fresh renderer after an expiry, got %d — the expired stretch is still the session's", len(made))
@@ -346,12 +283,8 @@ func TestBackgroundExpiryRetiresTheStretch(t *testing.T) {
 	}
 }
 
-// The expiry and a terminal event can reach the same stretch at once — the
-// watcher wakes up as the completion arrives — and chatRenderer is not safe to
-// drive twice or concurrently. This pins the guard that decides the race:
-// whichever gets there first settles the message, the other is told it lost and
-// does not touch the renderer at all. Driven directly rather than through a real race,
-// because a test that has to lose a race to fail is a test that passes by luck.
+// chatRenderer is not safe to drive twice, and expiry can race a terminal event.
+// The race is driven directly because a test that must lose a race passes by luck.
 func TestBackgroundStretchSettlesExactlyOnce(t *testing.T) {
 	r := &recordingRenderer{}
 	s := &bgStretch{renderer: r, window: time.Minute, idle: time.NewTimer(time.Minute), done: make(chan struct{})}
@@ -384,8 +317,6 @@ func TestBackgroundRouterArmsEachStretchWithTheConfiguredWindow(t *testing.T) {
 		t.Errorf("configured window = %s, want 42s", got)
 	}
 
-	// And the configured window is what a stretch is actually armed with — a knob
-	// the constructor keeps to itself would be no knob at all.
 	sink := newBackgroundEventsRouter(nil, 42*time.Second)
 	sink.bind(func(string, string, StreamWriterOptions) chatRenderer {
 		return &recordingRenderer{}
@@ -399,6 +330,5 @@ func TestBackgroundRouterArmsEachStretchWithTheConfiguredWindow(t *testing.T) {
 	if s.window != 42*time.Second {
 		t.Errorf("stretch window = %s, want 42s", s.window)
 	}
-	// take alone does not release the watcher; end does.
 	s.end(func(chatRenderer) {})
 }
