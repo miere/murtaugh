@@ -2,6 +2,7 @@ package nodehost
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 
 	"github.com/miere/murtaugh/internal/agent"
@@ -27,8 +28,13 @@ func Runtime(host *Host) func(config.Config, *slog.Logger) agentruntime.Builder 
 			// than captured when the connection was made.
 			host.setBackground(hooks.BackgroundEvents)
 			host.setSignIns(hooks.SignIn)
+			host.setCredentialHealth(hooks.CredentialHealth)
 
 			rt := agentruntime.Runtime{
+				CredentialReports: host.credentialReports,
+				PinnedNode:        host.pinnedNode,
+				ConnectedNodes:    host.connectedNodes,
+				RenewCredential:   host.renewCredential,
 				// Headless dispatch (#199): jobs, workflow triggers and unfurls
 				// on the MAIN node. It is set here, ABOVE the chat check below,
 				// and that placement is load-bearing — agentruntime.Hooks says
@@ -210,3 +216,43 @@ var (
 	_ interface{ CloseSession(string) }                 = (*nodeClient)(nil)
 	_ interface{ SupportsCancel(context.Context) bool } = (*nodeClient)(nil)
 )
+
+func (h *Host) pinnedNode(ctx context.Context, conversation agent.ConversationKey) (agentruntime.NodeRef, error) {
+	ref := config.ConversationRef{TeamID: conversation.TeamID, ChannelID: conversation.ChannelID, ThreadTS: conversation.ThreadTS, DM: conversation.DM}
+	if h.pins == nil || !ref.Valid() {
+		return agentruntime.NodeRef{}, agentruntime.ErrNotPinned
+	}
+	pin, found, err := h.pins.Get(ctx, ref)
+	if err != nil {
+		return agentruntime.NodeRef{}, fmt.Errorf("read this conversation's node pin: %w", err)
+	}
+	if !found {
+		return agentruntime.NodeRef{}, agentruntime.ErrNotPinned
+	}
+	node := pickByID(h.connected(), pin.NodeID)
+	if node == nil {
+		return agentruntime.NodeRef{NodeID: pin.NodeID}, fmt.Errorf("node %s, which this conversation runs on, is not connected", pin.NodeID)
+	}
+	return agentruntime.NodeRef{NodeID: node.nodeID, Owner: node.userID}, nil
+}
+
+func (h *Host) connectedNodes() []agentruntime.NodeRef {
+	nodes := h.connected()
+	out := make([]agentruntime.NodeRef, 0, len(nodes))
+	for _, node := range nodes {
+		out = append(out, agentruntime.NodeRef{NodeID: node.nodeID, Owner: node.userID})
+	}
+	return out
+}
+
+func (h *Host) renewCredential(ctx context.Context, nodeID string) (agentruntime.RenewalStatus, error) {
+	node := pickByID(h.connected(), nodeID)
+	if node == nil {
+		return "", fmt.Errorf("node %s is not connected", nodeID)
+	}
+	renewal, err := node.client.RenewCredential(ctx)
+	if err != nil {
+		return "", err
+	}
+	return agentruntime.RenewalStatus(renewal.Status), nil
+}

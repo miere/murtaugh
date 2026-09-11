@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/miere/murtaugh/assets"
+	"github.com/miere/murtaugh/internal/agentruntime"
+	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/credwarden"
 	"github.com/miere/murtaugh/internal/slack/alertcard"
 	slackclient "github.com/miere/murtaugh/internal/slack/client"
@@ -187,5 +189,78 @@ func TestRelativeExpirySaysWhenItHasLapsed(t *testing.T) {
 	}
 	if got := relativeExpiry(now.Add(90*time.Minute), now); !strings.HasPrefix(got, "in ") {
 		t.Errorf("relativeExpiry = %q, want a distance from now", got)
+	}
+}
+
+func nodeReport(degraded bool) agentruntime.CredentialHealth {
+	h := agentruntime.CredentialHealth{
+		NodeID: "node-1", Owner: "UOWNER", Credential: "/usr/local/bin/claude",
+		Degraded: degraded, Since: time.Now().Add(-2 * time.Minute), ExpiresAt: time.Now().Add(3 * time.Minute),
+	}
+	if degraded {
+		h.Reason = "read expiry: keychain: credential carries no expiresAt"
+	}
+	return h
+}
+
+func gatewayWithAlerts(sink *cardSink, t *testing.T) *Gateway {
+	return &Gateway{
+		credAlerts: testAlerter(t, sink, "UADMIN"),
+		cfg:        config.AccessConfig{AdminUser: "UADMIN", AllowedUsers: []string{"UOWNER"}},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+}
+
+func TestANodesFailingCredentialIsToldToItsOwner(t *testing.T) {
+	sink := &cardSink{}
+	g := gatewayWithAlerts(sink, t)
+
+	g.alertNodeCredential(nodeReport(true))
+	g.alertNodeCredential(nodeReport(true))
+	posts, _ := sink.snapshot()
+	if len(posts) != 1 {
+		t.Fatalf("got %d posts, want one card for one outage", len(posts))
+	}
+	if posts[0].ChannelID != "D-UOWNER" {
+		t.Fatalf("posted to %q, want the node owner's DM", posts[0].ChannelID)
+	}
+	if body := string(posts[0].Blocks); !strings.Contains(body, "node-1") || !strings.Contains(body, "no expiresAt") {
+		t.Errorf("card does not say which node or why:\n%s", body)
+	}
+
+	g.alertNodeCredential(nodeReport(false))
+	_, updates := sink.snapshot()
+	if len(updates) != 1 || updates[0].ChannelID != "D-UOWNER" || updates[0].TS != "ts-1" {
+		t.Fatalf("recovery edited %+v, want the owner's card edited in place", updates)
+	}
+	if body := string(updates[0].Blocks); !strings.Contains(body, "recovered") {
+		t.Errorf("recovery card does not say so:\n%s", body)
+	}
+}
+
+func TestANodeOwnerWhoMayNotUseTheGatewayIsNotTold(t *testing.T) {
+	sink := &cardSink{}
+	g := gatewayWithAlerts(sink, t)
+	report := nodeReport(true)
+	report.Owner = "USTRANGER"
+	g.alertNodeCredential(report)
+	if posts, _ := sink.snapshot(); len(posts) != 0 {
+		t.Fatalf("posted %d cards to an owner who may not use the gateway", len(posts))
+	}
+}
+
+func TestACredentialThatFailsAgainSoonAfterRecoveringEditsItsCardBack(t *testing.T) {
+	sink := &cardSink{}
+	g := gatewayWithAlerts(sink, t)
+	g.alertNodeCredential(nodeReport(true))
+	g.alertNodeCredential(nodeReport(false))
+	g.alertNodeCredential(nodeReport(true))
+
+	posts, updates := sink.snapshot()
+	if len(posts) != 1 {
+		t.Fatalf("got %d posts for a credential that flipped back to failing, want the one card", len(posts))
+	}
+	if len(updates) != 2 || !strings.Contains(string(updates[1].Blocks), "is failing") {
+		t.Fatalf("got %d edits; the card was not turned back to failing", len(updates))
 	}
 }

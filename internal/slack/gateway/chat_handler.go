@@ -197,6 +197,10 @@ var errCredentialBlocked = errors.New(
 	"Claude Code's credentials were rejected, so this turn could not run. " +
 		"I've asked your admin to re-authenticate — try again once they have.")
 
+var errOwnerSigningIn = errors.New(
+	"Claude Code's credentials were rejected on the machine this agent runs on, so this turn could not run. " +
+		"Its owner has been sent a sign-in by direct message — try again once they have finished it.")
+
 // failedOnCredential reports the turn as blocked-on-credentials and starts a
 // repair, or returns false when this is an ordinary failure the caller should
 // report as-is.
@@ -651,6 +655,12 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest, route ChatRou
 	events, err := sessions.Prompt(promptCtx, key, metadata, agent.PromptRequest{Text: promptForAgent, History: history})
 	if err != nil {
 		turnErr = err
+		if errors.Is(err, agent.ErrCredentialRejected) {
+			discardSession(sessions, key)
+			h.logger.Warn("a node's claude_code credential was rejected on session start; the node asked its owner to sign in",
+				"agent", route.Agent, "channel", req.ChannelID)
+			return renderer.Fail(ctx, errOwnerSigningIn)
+		}
 		// A rejected credential surfaces here rather than as an event: Prompt opens
 		// the session, and the launch handshake is where a bad credential is caught.
 		// Drop the binding so the retry after re-authentication starts a fresh
@@ -844,6 +854,12 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest, route ChatRou
 			// a tool red. Real agent errors are surfaced on the reply surface.
 			if errors.Is(event.Error, context.Canceled) || errors.Is(context.Cause(ctx), context.Canceled) {
 				return event.Error
+			}
+			if errors.Is(event.Error, agent.ErrCredentialRejected) {
+				discardSession(sessions, key)
+				h.logger.Warn("a node's claude_code credential was rejected mid-turn; the node asked its owner to sign in",
+					"agent", route.Agent, "channel", req.ChannelID, "session_id", sessionID)
+				return renderer.Fail(ctx, errOwnerSigningIn)
 			}
 			// A credential rejected mid-turn is the admin's to repair, not the
 			// user's. Drop the session so the retry re-launches rather than

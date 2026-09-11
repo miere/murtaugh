@@ -90,6 +90,8 @@ func (c *Client) serveRequest(msg agentwire.Message) {
 		c.serveSignIn(msg)
 	case agentwire.MethodSignInSettled:
 		c.serveSignInSettled(msg)
+	case agentwire.MethodCredentialHealth:
+		c.serveCredentialHealth(msg)
 	default:
 		c.rejectRequest(msg)
 	}
@@ -112,4 +114,16 @@ func (c *Client) answer(id string, body any, failure error) {
 	if err := c.send(ctx, msg); err != nil && !errors.Is(err, nodelink.ErrLinkClosed) {
 		c.log.Warn("remote: deliver answer to the node", "error", err, "id", id)
 	}
+}
+
+func (c *Client) serveCredentialHealth(msg agentwire.Message) {
+	var report agentwire.CredentialHealth
+	if err := msg.Into(&report); err != nil {
+		c.answer(msg.ID, nil, err)
+		return
+	}
+	if c.credentials != nil {
+		c.credentials(report)
+	}
+	c.answer(msg.ID, agentwire.Empty{}, nil)
 }

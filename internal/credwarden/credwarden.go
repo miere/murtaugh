@@ -339,6 +339,26 @@ func (w *Warden) States() []State {
 	return out
 }
 
+// Healths exists for a gateway that attaches after a credential changed and
+// so never heard the change.
+func (w *Warden) Healths() []Health {
+	if w == nil {
+		return nil
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := make([]Health, 0, len(w.identities))
+	for _, id := range w.identities {
+		s := w.state[id]
+		h := Health{Identity: id, ExpiresAt: s.ExpiresAt}
+		if s.degraded {
+			h.Degraded, h.Reason, h.Since = true, s.LastError, s.degradedSince
+		}
+		out = append(out, h)
+	}
+	return out
+}
+
 // Run drives the warden until ctx ends.
 //
 // It does not tick. It AIMS: each pass reads the credential's real expiry and

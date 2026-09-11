@@ -1,12 +1,17 @@
 package gateway
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/miere/murtaugh/internal/agent"
+	"github.com/miere/murtaugh/internal/agentruntime"
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/slack/authcard"
 )
@@ -248,5 +253,57 @@ func TestRepairStatusIsLegible(t *testing.T) {
 		if got := status.String(); got != want {
 			t.Errorf("String() = %q, want %q", got, want)
 		}
+	}
+}
+
+type rejectedOnNode struct{ onStart bool }
+
+func (s rejectedOnNode) Prompt(context.Context, agent.ConversationKey, agent.SessionMetadata, agent.PromptRequest) (<-chan agent.Event, error) {
+	rejected := fmt.Errorf("%w: %w", agent.ErrCredentialRejected, authErr)
+	if s.onStart {
+		return nil, rejected
+	}
+	ch := make(chan agent.Event, 1)
+	ch <- agent.Event{Type: agent.EventError, Error: rejected}
+	close(ch)
+	return ch, nil
+}
+func (rejectedOnNode) Lookup(agent.ConversationKey) (string, bool) { return "", false }
+func (rejectedOnNode) Cancel(context.Context, string) error        { return nil }
+
+func TestACredentialFailureANodeIsRepairingStartsNothingOnTheGateway(t *testing.T) {
+	for name, onStart := range map[string]bool{"mid-turn": false, "on session start": true} {
+		t.Run(name, func(t *testing.T) {
+			api := &fakeStreamAPI{}
+			repair := liveRepair()
+			handler := NewChatHandler(api, map[string]ChatSessionManager{"claude": rejectedOnNode{onStart: onStart}},
+				func(ChatRequest) ChatRoute { return ChatRoute{Agent: "claude", ReplyOnThread: true} }, time.Hour, 1, nil).
+				WithCredentialRepair(repair)
+			_ = handler.handleResolving(context.Background(), ChatRequest{TeamID: "T1", ChannelID: "C1", UserID: "U1", MessageTS: "1.1", Text: "hi", Source: "test"})
+
+			if _, running := repair.InFlightFor(); running {
+				t.Fatal("the gateway started a sign-in of its own for a credential the node is already repairing")
+			}
+			said := strings.Join(api.messageTexts(), " ")
+			if !strings.Contains(said, "owner has been sent a sign-in") || strings.Contains(said, "/login") {
+				t.Fatalf("the user was told %q", said)
+			}
+		})
+	}
+}
+
+func TestOnlyAGatewayRunningItsOwnAgentsRepairsCredentials(t *testing.T) {
+	build := func(runtime agentruntime.Runtime) *Gateway {
+		return New(config.Config{
+			OAuth:  config.OAuthConfig{AppToken: "xapp-test", BotToken: "xoxb-test"},
+			Agents: claudeAgents,
+		}, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, nil, &authcard.Flow{}, nil,
+			func(agentruntime.Hooks) agentruntime.Runtime { return runtime })
+	}
+	if g := build(agentruntime.Runtime{}); g.credRepair != nil {
+		t.Fatal("a gateway whose agents run on nodes would start a sign-in on its own machine")
+	}
+	if g := build(agentruntime.Runtime{InProcess: true}); g.credRepair == nil {
+		t.Fatal("a gateway running its own claude_code agents cannot repair their credential")
 	}
 }

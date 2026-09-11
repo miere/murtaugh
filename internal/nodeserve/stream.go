@@ -43,6 +43,9 @@ func (s *Server) pump(ctx context.Context, stream string, events <-chan agent.Ev
 // forward puts one event on the wire, with its bytes ahead of it when it has
 // any.
 func (s *Server) forward(ctx context.Context, stream string, ev agent.Event) error {
+	if ev.Type == agent.EventError {
+		ev.Error = s.turnFailed(ev.Error)
+	}
 	wire, transfer, err := s.enc.Encode(ev)
 	if err != nil {
 		// An event this build cannot serialise is reported ON the turn. Dropping

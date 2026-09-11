@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/miere/murtaugh/internal/agentruntime"
 	"github.com/miere/murtaugh/internal/credwarden"
 	"github.com/miere/murtaugh/internal/slack/alertcard"
 )
@@ -16,19 +17,6 @@ import (
 // goroutine, so an unbounded Slack call would hold up the next credential pass.
 const credAlertTimeout = 10 * time.Second
 
-// credentialAlerter turns the credential warden's health transitions into a
-// single card in the admin's DM.
-//
-// It exists because on 2026-09-07 the warden logged `credential warden could not
-// read expiry` every thirty seconds for thirty-eight minutes and told nobody.
-// There was a way to PULL the state — the `auth status` verb — and no way for it
-// to be PUSHED, so the first symptom the admin got was an agent that would not
-// answer. The card carries what the status verb would have shown, unprompted.
-//
-// One card per outage, not one per failed pass: the degraded transition posts,
-// the recovery edits that same message into a resolved notice. That is what
-// keeps an alert from becoming the seventy-six DMs a level-triggered version
-// would have sent.
 type credentialAlerter struct {
 	cards  *alertcard.Renderer
 	poster alertMessagePoster
@@ -37,13 +25,25 @@ type credentialAlerter struct {
 	admin  func() string
 	logger *slog.Logger
 
-	// mu serialises the post/edit pair. The warden calls the observer from one
-	// goroutine, but a configuration reload can replace the gateway underneath
-	// it, and two writers racing on the same TS would leave the card showing
-	// whichever landed last rather than whichever happened last.
-	mu      sync.Mutex
-	channel string
-	ts      string
+	mu   sync.Mutex
+	open map[string]postedAlert
+}
+
+type postedAlert struct {
+	channel     string
+	ts          string
+	recoveredAt time.Time
+}
+
+var credentialFlipWindow = time.Hour
+
+type credentialAlert struct {
+	subtitle  string
+	degraded  bool
+	reason    string
+	since     time.Time
+	expiresAt time.Time
+	nextSteps string
 }
 
 // newCredentialAlerter returns nil when anything it needs is missing — no
@@ -66,6 +66,7 @@ func newCredentialAlerter(
 	return &credentialAlerter{
 		cards: cards, poster: poster, editor: editor,
 		dm: dm, admin: admin, logger: logger,
+		open: make(map[string]postedAlert),
 	}
 }
 
@@ -77,92 +78,112 @@ func (c *credentialAlerter) Observe(h credwarden.Health) {
 	}
 	admin := strings.TrimSpace(c.admin())
 	if admin == "" {
-		// Nobody owns the credential in this configuration, so there is nobody
-		// to tell. The warden's log line is the whole record.
 		return
 	}
+	c.alert(admin, h.Identity.String(), credentialAlert{
+		subtitle:  h.Identity.String(),
+		degraded:  h.Degraded,
+		reason:    h.Reason,
+		since:     h.Since,
+		expiresAt: h.ExpiresAt,
+		nextSteps: "Run `/murtaugh auth login` to re-authenticate. " +
+			"`/murtaugh auth status` shows what the warden currently sees.",
+	})
+}
 
+func (c *credentialAlerter) alertNode(h agentruntime.CredentialHealth) {
+	if c == nil {
+		return
+	}
+	c.alert(h.Owner, h.NodeID+"\x00"+h.Credential, credentialAlert{
+		subtitle:  "node " + h.NodeID + ": " + h.Credential,
+		degraded:  h.Degraded,
+		reason:    h.Reason,
+		since:     h.Since,
+		expiresAt: h.ExpiresAt,
+		nextSteps: "The node asks you to sign in again by DM when one of its agents is refused. To do it now, run " +
+			"`/murtaugh auth login " + h.NodeID + "`, or `claude auth login` on the machine.",
+	})
+}
+
+func (c *credentialAlerter) alert(recipient, key string, a credentialAlert) {
 	ctx, cancel := context.WithTimeout(context.Background(), credAlertTimeout)
 	defer cancel()
-
-	channel, err := c.dm(ctx, admin)
-	if err != nil {
-		c.logger.Warn("could not open the admin DM for a credential alert", "error", err)
-		return
-	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if !h.Degraded {
-		c.resolve(ctx, h)
+	for k, p := range c.open {
+		if !p.recoveredAt.IsZero() && time.Since(p.recoveredAt) >= credentialFlipWindow {
+			delete(c.open, k)
+		}
+	}
+	posted, known := c.open[key]
+	failing := known && posted.recoveredAt.IsZero()
+	if !a.degraded {
+		if !failing || c.editor == nil {
+			return
+		}
+		if err := updateAlertCard(ctx, c.editor, c.cards, posted.channel, posted.ts, recoveredCredentialSpec(a)); err != nil {
+			c.logger.Warn("could not update the credential alert", "error", err)
+			return
+		}
+		posted.recoveredAt = time.Now()
+		c.open[key] = posted
 		return
 	}
-	res, err := postAlertCard(ctx, c.poster, c.cards, channel, "", degradedCredentialSpec(h))
+	if failing {
+		return
+	}
+	if known && c.editor != nil {
+		if err := updateAlertCard(ctx, c.editor, c.cards, posted.channel, posted.ts, degradedCredentialSpec(a)); err != nil {
+			c.logger.Warn("could not update the credential alert", "error", err)
+			return
+		}
+		posted.recoveredAt = time.Time{}
+		c.open[key] = posted
+		return
+	}
+	channel, err := c.dm(ctx, recipient)
+	if err != nil {
+		c.logger.Warn("could not open a DM for a credential alert", "user", recipient, "error", err)
+		return
+	}
+	res, err := postAlertCard(ctx, c.poster, c.cards, channel, "", degradedCredentialSpec(a))
 	if err != nil {
 		c.logger.Warn("could not post the credential alert", "error", err)
 		return
 	}
-	c.channel, c.ts = res.Channel, res.TS
+	c.open[key] = postedAlert{channel: res.Channel, ts: res.TS}
 }
 
-// resolve edits the outage card into its recovered form.
-//
-// Editing rather than posting is deliberate: a second message would mean the
-// admin's DM accumulates a pair per outage, and the useful artefact is one card
-// whose current state is the credential's current state.
-func (c *credentialAlerter) resolve(ctx context.Context, h credwarden.Health) {
-	if c.editor == nil || c.channel == "" || c.ts == "" {
-		// Nothing was posted — the outage started before this gateway did, or the
-		// post failed. Recovery is good news, so there is nothing to announce on
-		// its own.
-		return
-	}
-	if err := updateAlertCard(ctx, c.editor, c.cards, c.channel, c.ts, recoveredCredentialSpec(h)); err != nil {
-		c.logger.Warn("could not update the credential alert", "error", err)
-		return
-	}
-	c.channel, c.ts = "", ""
-}
-
-// degradedCredentialSpec renders the outage.
-//
-// NextSteps names the verb rather than offering a button because alertcard is a
-// text surface with no actions; a one-line instruction the admin can act on
-// beats growing an interactive surface for it.
-func degradedCredentialSpec(h credwarden.Health) alertcard.Spec {
+func degradedCredentialSpec(a credentialAlert) alertcard.Spec {
 	spec := alertcard.Spec{
-		Level:    alertcard.LevelError,
-		Title:    "Claude Code credential is failing",
-		Subtitle: h.Identity.String(),
-		Reason:   h.Reason,
-		NextSteps: "Run `/murtaugh auth login` to re-authenticate. " +
-			"`/murtaugh auth status` shows what the warden currently sees.",
+		Level:     alertcard.LevelError,
+		Title:     "Claude Code credential is failing",
+		Subtitle:  a.subtitle,
+		Reason:    a.reason,
+		NextSteps: a.nextSteps,
 	}
-	if !h.ExpiresAt.IsZero() {
-		spec.Text = fmt.Sprintf("Last observed expiry: %s.", relativeExpiry(h.ExpiresAt, time.Now()))
+	if !a.expiresAt.IsZero() {
+		spec.Text = fmt.Sprintf("Last observed expiry: %s.", relativeExpiry(a.expiresAt, time.Now()))
 	} else {
-		// A credential the warden has never managed to read is a different
-		// problem from one that is merely lapsing, and the admin should not have
-		// to infer which from a missing line.
 		spec.Text = "The warden has never been able to read this credential's expiry."
 	}
 	return spec
 }
 
-// recoveredCredentialSpec renders the same card once the credential is working
-// again, carrying how long the outage lasted.
-func recoveredCredentialSpec(h credwarden.Health) alertcard.Spec {
+func recoveredCredentialSpec(a credentialAlert) alertcard.Spec {
 	spec := alertcard.Spec{
 		Level:    alertcard.LevelNotice,
 		Title:    "Claude Code credential recovered",
-		Subtitle: h.Identity.String(),
+		Subtitle: a.subtitle,
 	}
-	if !h.Since.IsZero() {
-		spec.Text = fmt.Sprintf("It was failing for %s.", time.Since(h.Since).Round(time.Second))
+	if !a.since.IsZero() {
+		spec.Text = fmt.Sprintf("It was failing for %s.", time.Since(a.since).Round(time.Second))
 	}
-	if !h.ExpiresAt.IsZero() {
-		spec.NextSteps = fmt.Sprintf("Expiry: %s.", relativeExpiry(h.ExpiresAt, time.Now()))
+	if !a.expiresAt.IsZero() {
+		spec.NextSteps = fmt.Sprintf("Expiry: %s.", relativeExpiry(a.expiresAt, time.Now()))
 	}
 	return spec
 }

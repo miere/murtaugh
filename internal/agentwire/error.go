@@ -30,13 +30,8 @@ import (
 //     not merely branch: it reads five structured fields off the failure to
 //     build the user-facing card → ErrorProvider.
 //   - acp.IsMethodNotFound-shaped reads of a JSON-RPC code → ErrorRPC.
-//   - claudeauth.IsAuthFailure(err) — gateway/credrepair.go. This one matches on
-//     PROSE, not identity, which is why Message is the full original text
-//     verbatim rather than a summary, and why it needs no discriminant of its
-//     own. (It must not have one: credrepair deliberately also checks the
-//     agent's configured kind, and that config lives on the gateway. A node
-//     asserting "this was a credential failure" would move that policy to the
-//     wrong end.)
+//   - errors.Is(err, agent.ErrCredentialRejected) — set by a node whose owner
+//     has a sign-in open → ErrorCredential.
 //
 // The vocabulary is closed and small on purpose. An unrecognised Kind degrades
 // to exactly today's generic behaviour — the full text, no sentinel — rather
@@ -59,15 +54,13 @@ const (
 	ErrorProvider ErrorKind = "provider"
 	// ErrorRPC — a JSON-RPC fault from an external agent process. Carries RPC.
 	ErrorRPC ErrorKind = "rpc"
+	// ErrorCredential lets the gateway tell the user the owner already has a
+	// sign-in in front of them, instead of starting one itself.
+	ErrorCredential ErrorKind = "credential"
 )
 
-// Error is the serialisable form of agent.Event's error.
-//
-// Message is the producing error's full text, unabridged and verbatim. That is
-// not belt-and-braces: it is what the alert card puts in Detail, what the
-// session journal records as errText, and what credrepair substring-matches to
-// decide whether the admin is asked to re-authenticate. A discriminant without
-// the text would keep the branch and lose the diagnosis.
+// Error keeps the producer's full text beside its Kind, because a discriminant
+// without the text would keep the branch and lose the diagnosis.
 type Error struct {
 	Kind     ErrorKind        `json:"kind"`
 	Message  string           `json:"message"`
@@ -130,6 +123,9 @@ func encodeError(err error) *Error {
 	case errors.Is(err, agent.ErrToolCeiling):
 		w.Kind = ErrorToolCeiling
 		return w
+	case errors.Is(err, agent.ErrCredentialRejected):
+		w.Kind = ErrorCredential
+		return w
 	}
 
 	if failure, ok := providerfail.Classify(err); ok {
@@ -167,6 +163,8 @@ func decodeError(w *Error) error {
 		return &wireError{msg: w.Message, sentinel: context.Canceled}
 	case ErrorToolCeiling:
 		return &wireError{msg: w.Message, sentinel: agent.ErrToolCeiling}
+	case ErrorCredential:
+		return &wireError{msg: w.Message, sentinel: agent.ErrCredentialRejected}
 	case ErrorProvider:
 		if w.Provider != nil {
 			return providerfail.New(providerfail.Failure{

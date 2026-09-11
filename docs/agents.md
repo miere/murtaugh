@@ -162,9 +162,12 @@ credential every `claude_code` agent runs on — by driving
 
 An agent can ask for it like any other profile, but usually will not have to: a
 `claude_code` agent whose credential has been rejected cannot run at all, so
-there is no turn left from which to call `auth.request`. The gateway detects that
-case and posts the card on the agent's behalf, and the admin can trigger one
-pre-emptively with `/murtaugh auth`. See
+there is no turn left from which to call `auth.request`. The machine the agent
+runs on detects that case and starts the sign-in on the agent's behalf: a
+runtime node sends the card to its owner, a gateway running its own agents to
+the admin, and the user is told their turn is waiting on it. `/murtaugh auth
+login` starts one pre-emptively on the node the conversation is pinned to, or
+on a node you name where none is. See
 [Operations → Claude Code credentials](operations.md#claude-code-credentials),
 which also covers how Murtaugh keeps that credential from lapsing in the first
 place.

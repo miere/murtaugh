@@ -17,6 +17,8 @@ package agentruntime
 
 import (
 	"context"
+	"errors"
+	"time"
 
 	"github.com/miere/murtaugh/internal/agent"
 	"github.com/miere/murtaugh/internal/toolset"
@@ -87,6 +89,21 @@ type Hooks struct {
 	BackgroundEvents func(sessionID string, ev agent.Event)
 
 	SignIn func(ctx context.Context, prompt *agent.SignInPrompt, settled <-chan agent.SignInSettled, shown func(error))
+
+	CredentialHealth func(CredentialHealth)
+}
+
+// CredentialHealth is one node's word on one of its credentials; the node and
+// owner come from the connection, so a node cannot speak for anyone else.
+type CredentialHealth struct {
+	NodeID     string
+	Owner      string
+	Credential string
+	Degraded   bool
+	Reason     string
+	Since      time.Time
+	ExpiresAt  time.Time
+	ReportedAt time.Time
 }
 
 // Runtime is one built set of agents plus the shared surfaces they need. It is a
@@ -122,7 +139,35 @@ type Runtime struct {
 	// every leader promotion and must therefore be restartable. nil means there
 	// is nothing to serve.
 	ServeTools func(ctx context.Context) error
+
+	InProcess         bool
+	CredentialReports func() []CredentialHealth
+
+	PinnedNode      func(ctx context.Context, conversation agent.ConversationKey) (NodeRef, error)
+	ConnectedNodes  func() []NodeRef
+	RenewCredential func(ctx context.Context, nodeID string) (RenewalStatus, error)
 }
+
+// ErrNotPinned is refused rather than answered with some other node, because
+// signing in a machine the conversation does not run on fixes nothing.
+var ErrNotPinned = errors.New("this conversation is not running on any runtime node yet")
+
+// NodeRef carries the owner with the node, because only they or the admin may
+// have a sign-in run on it.
+type NodeRef struct {
+	NodeID string
+	Owner  string
+}
+
+// RenewalStatus is reported back as it is, so nobody is told a sign-in is on its
+// way when one was already open or there was nothing to sign in.
+type RenewalStatus string
+
+const (
+	RenewalStarted        RenewalStatus = "started"
+	RenewalAlreadyRunning RenewalStatus = "already_running"
+	RenewalNothingToRenew RenewalStatus = "none"
+)
 
 // Builder constructs a Runtime from the hooks its host supplies. The
 // configuration, tool registry and logger are the builder's own business: it is
