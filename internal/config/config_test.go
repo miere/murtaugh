@@ -488,6 +488,36 @@ func TestJobValidationAcceptsAgentPrompt(t *testing.T) {
 	}
 }
 
+func TestJobValidationAcceptsReportToOnAnAgentJob(t *testing.T) {
+	cfg, err := Parse(testConfig(""))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	cfg.Agents = map[string]AgentProfile{"default": {ACP: &ACPProfile{Command: "/bin/agent"}}}
+	cfg.Jobs = map[string]JobProfile{
+		"digest": {Agent: "default", Prompt: "summarise yesterday", ReportTo: "#ops"},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate returned error: %v", err)
+	}
+}
+
+// A command job has no reply, so a report_to on one would never post anything
+// and the admin would wait for a report that cannot come.
+func TestJobValidationRejectsReportToOnACommandJob(t *testing.T) {
+	cfg, err := Parse(testConfig(""))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	cfg.Jobs = map[string]JobProfile{
+		"backup": {Command: "/bin/echo", ReportTo: "#ops"},
+	}
+	err = cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "jobs[backup].report_to needs an agent job") {
+		t.Fatalf("expected report_to-on-command error, got: %v", err)
+	}
+}
+
 func TestJobValidationRejectsCommandAndAgentTogether(t *testing.T) {
 	cfg, err := Parse(testConfig(""))
 	if err != nil {

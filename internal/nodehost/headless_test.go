@@ -12,6 +12,7 @@ import (
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/journal"
 	"github.com/miere/murtaugh/internal/nodehost"
+	"github.com/miere/murtaugh/internal/tools/jobs/run"
 )
 
 // HEADLESS DISPATCH (#199). Everything below is about work with no user behind
@@ -96,6 +97,26 @@ func TestAJobAWorkflowTriggerAndAnUnfurlAllRunOnTheMainNode(t *testing.T) {
 
 	if n := script.prompts(); n != 3 {
 		t.Fatalf("the main node served %d of the three headless turns", n)
+	}
+}
+
+// The gateway can only judge a reply by whose machine wrote it, and a node is
+// never trusted to say, so the owner must come from its credential.
+func TestAHeadlessJobHandsBackItsReplyAndTheNodeThatRanIt(t *testing.T) {
+	rig := dialLoopback(t, newScriptedAgent(answering("backups are green")))
+	delegator := delegatorFor(t, rig, config.AccessConfig{MainNode: "node-1"}, true)
+
+	replying, ok := delegator.(run.ReplyingDelegator)
+	if !ok {
+		t.Fatal("the headless delegator cannot hand a reply back, so no scheduled job on a node can ever be reported")
+	}
+	reply, err := replying.RunForReply(context.Background(), "default", "check the backups")
+	if err != nil {
+		t.Fatalf("the job did not run: %v", err)
+	}
+	want := agentruntime.Reply{Text: "backups are green", NodeID: "node-1", NodeOwner: nodeOwner}
+	if reply != want {
+		t.Fatalf("reply = %+v, want %+v", reply, want)
 	}
 }
 

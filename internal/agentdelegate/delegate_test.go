@@ -9,8 +9,10 @@ import (
 	"time"
 
 	"github.com/miere/murtaugh/internal/agent"
+	"github.com/miere/murtaugh/internal/agentruntime"
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/mcpbridge"
+	"github.com/miere/murtaugh/internal/tools/jobs/run"
 )
 
 // fakeClient is a scripted agent.Client. It replays a fixed sequence of events on
@@ -274,6 +276,22 @@ func TestRunAndForgetDiscardsOutput(t *testing.T) {
 	}
 	if !client.closed {
 		t.Fatal("client was not closed")
+	}
+}
+
+// An in-process run has no node behind it: the gateway's own process wrote the
+// reply, so it is marked as such rather than left looking like an unowned node.
+func TestRunForReplyIsMarkedInProcess(t *testing.T) {
+	client := &fakeClient{events: []agent.Event{textEvent("all green"), {Type: agent.EventComplete}}}
+	r := newTestRunner(t, client, "1m")
+
+	var replying run.ReplyingDelegator = r
+	reply, err := replying.RunForReply(context.Background(), "default", "hi")
+	if err != nil {
+		t.Fatalf("RunForReply returned error: %v", err)
+	}
+	if want := (agentruntime.Reply{Text: "all green", InProcess: true}); reply != want {
+		t.Fatalf("reply = %+v, want %+v", reply, want)
 	}
 }
 

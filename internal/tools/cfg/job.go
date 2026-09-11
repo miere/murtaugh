@@ -8,6 +8,7 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 
 	"github.com/miere/murtaugh/internal/config"
+	slackclient "github.com/miere/murtaugh/internal/slack/client"
 	"github.com/miere/murtaugh/internal/tools"
 )
 
@@ -28,13 +29,15 @@ func (t *jobSetTool) InputSchema() *jsonschema.Schema {
 	return &jsonschema.Schema{
 		Type: "object",
 		Properties: map[string]*jsonschema.Schema{
-			"name":     {Type: "string", Description: "job name (the key it is stored under)"},
-			"command":  {Type: "string", Description: "command to run (mutually exclusive with agent/prompt)"},
-			"arg":      {Type: "array", Items: &jsonschema.Schema{Type: "string"}, Description: "command argument (repeatable)"},
-			"workdir":  {Type: "string", Description: "working directory for the command"},
-			"timeout":  {Type: "string", Description: "run timeout as a Go duration (e.g. 30m)"},
-			"agent":    {Type: "string", Description: "delegate to this agent instead of running a command"},
-			"prompt":   {Type: "string", Description: "prompt sent to the delegated agent (supports {{ 1 }} placeholders)"},
+			"name":    {Type: "string", Description: "job name (the key it is stored under)"},
+			"command": {Type: "string", Description: "command to run (mutually exclusive with agent/prompt)"},
+			"arg":     {Type: "array", Items: &jsonschema.Schema{Type: "string"}, Description: "command argument (repeatable)"},
+			"workdir": {Type: "string", Description: "working directory for the command"},
+			"timeout": {Type: "string", Description: "run timeout as a Go duration (e.g. 30m)"},
+			"agent":   {Type: "string", Description: "delegate to this agent instead of running a command"},
+			"prompt":  {Type: "string", Description: "prompt sent to the delegated agent (supports {{ 1 }} placeholders)"},
+			"report_to": {Type: "string", Description: "agent jobs only: where the gateway posts the agent's final reply after a scheduled run — " + slackclient.ConversationRefHelp +
+				" Posted only when the node that ran the job belongs to the gateway admin; otherwise, and when omitted, the reply is only journalled. Pass an empty string to clear it."},
 			"schedule": {Type: "string", Description: "cron schedule, 5-field (mutually exclusive with every)"},
 			"every":    {Type: "string", Description: "fixed interval as a Go duration (mutually exclusive with schedule)"},
 		},
@@ -75,6 +78,9 @@ func (t *jobSetTool) Invoke(ctx context.Context, args map[string]any) (any, erro
 	}
 	if v, ok := stringArg(args, "prompt"); ok {
 		job.Prompt = v
+	}
+	if v, ok := stringArg(args, "report_to"); ok {
+		job.ReportTo = v
 	}
 	if v, ok := stringArg(args, "schedule"); ok {
 		job.Schedule = v

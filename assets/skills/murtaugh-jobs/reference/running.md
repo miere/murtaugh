@@ -27,9 +27,11 @@ command jobs.
   stdout/stderr to the caller (your terminal on the CLI; captured into the JSON
   result over MCP) and reports the **exit code**.
 - **Agent job:** renders the prompt (positional `{{ N }}` from `--args`, falling
-  back to the job's `args`) and runs the agent fire-and-forget — its text output
-  is discarded; the agent acts through its own tools. The result reports the
-  `agent` it ran instead of an exit code.
+  back to the job's `args`) and runs the agent; the agent acts through its own
+  tools. The result reports the `agent` it ran instead of an exit code, plus its
+  final `reply`. `jobs_run` journals none of the reply, and a run by hand never
+  posts to the job's `report_to` — only a scheduled run on the gateway reports or
+  keeps a reply, and only for the admin's own nodes (see `configuring.md`).
 
 A non-zero exit is returned as the result's `exit_code` (it is not, by itself, a
 tool error). A failure to *start* the process (missing binary, etc.) is an error.

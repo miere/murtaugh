@@ -49,6 +49,17 @@ type Delegator interface {
 	RunAndForget(ctx context.Context, agent, prompt string) error
 }
 
+// Reply exists because whether the gateway may repeat a delegation's answer
+// depends on whose machine produced it.
+type Reply struct {
+	Text string `json:"text"`
+	// A zero Reply must never pass for the gateway's own run, so only an
+	// in-process runner sets this.
+	InProcess bool   `json:"in_process,omitempty"`
+	NodeID    string `json:"node_id,omitempty"`
+	NodeOwner string `json:"node_owner,omitempty"`
+}
+
 // Hooks are what the gateway contributes to the runtime: the collaborators only
 // a Slack-facing process can supply. They are passed to a Builder rather than
 // set afterwards because the runtime hands them to each backend at construction.
