@@ -66,17 +66,6 @@ type Option struct {
 	Description string
 }
 
-// Question is one prompt of a multi-question ask. It is declared here because
-// the `ask` tool parses into it before choosing a transport; the card package
-// converts it to its own type.
-type Question struct {
-	Key         string   // stable identifier; answers are keyed by it
-	Header      string   // short category label shown ahead of the question
-	Label       string   // the question text
-	Options     []Option // choices offered for it
-	MultiSelect bool     // render checkboxes instead of radio buttons
-}
-
 // PromptSpec describes a single-question prompt.
 // and free-text answers are a later, modal-based extension; v1 is one question
 // with a single pick.

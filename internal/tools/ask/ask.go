@@ -1,44 +1,30 @@
-// Package ask implements the `ask` tool: the agent's way to put a question with
-// a few options in front of the user as clickable Slack buttons and WAIT for the
-// answer, instead of assuming one. It is the model-driven consumer of the shared
-// interaction broker (internal/slack/interaction).
-//
-// It only works inside a Slack conversation: the turn's location is read from the
-// context the native client stashes per turn, so the question is asked in the
-// same thread the agent is talking in — not the admin DM, and not wherever the
-// model guesses. Outside a chat turn (CLI/MCP) it returns an error rather than
-// blocking.
+// Package ask holds the `ask` tool's contract and none of its drawing, so the
+// same tool runs on a node that cannot reach Slack.
 package ask
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
 
 	"github.com/miere/murtaugh/internal/agent"
-	"github.com/miere/murtaugh/internal/slack/askcard"
-	"github.com/miere/murtaugh/internal/slack/interaction"
 )
 
-// Tool is the `ask` capability.
-//
-// It has two transports. A single quick choice rides the interaction broker's
-// button prompt; anything richer — several questions, or a multi-select — goes
-// to the askcard Flow, which posts one card carrying every question as an inline
-// input. Both are inert when nil, which is the right behaviour in CLI/MCP
-// processes that have no gateway to route a click back.
-type Tool struct {
-	broker *interaction.Broker
-	cards  *askcard.Flow
+// Display may ignore loc: on a node the gateway binds the question to the
+// conversation it came from, never to where the node says.
+type Display interface {
+	Question(ctx context.Context, loc agent.TurnLocation, req agent.QuestionRequest) (agent.DisplayAnswer, error)
 }
 
-// New constructs an ask Tool against the shared interaction broker and ask card
-// flow.
-func New(broker *interaction.Broker, cards *askcard.Flow) *Tool {
-	return &Tool{broker: broker, cards: cards}
+// Tool is the `ask` capability.
+type Tool struct {
+	display Display
 }
+
+func New(display Display) *Tool { return &Tool{display: display} }
 
 // Name returns the registry key.
 func (t *Tool) Name() string { return "ask" }
@@ -176,126 +162,111 @@ func (r Result) String() string {
 	return "The user did not answer."
 }
 
-// Invoke posts the question(s) to the current Slack thread and blocks until the
-// user answers (or the wait times out / is cancelled). It routes to the modal
-// form when a `questions` array is supplied and demands it (more than one
-// question, or any multi-select / free-text question); otherwise it uses the
-// single-question button path unchanged.
 func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
-	if t.broker == nil {
-		return nil, fmt.Errorf("Error: interactive questions are not available in this context")
+	if t.display == nil {
+		return nil, errUnavailable()
 	}
 	loc, ok := agent.TurnLocationFromContext(ctx)
 	if !ok {
-		return nil, fmt.Errorf("Error: the ask tool only works inside a Slack conversation")
+		return nil, errNoConversation()
 	}
-	dest := interaction.Destination{ChannelID: loc.ChannelID, ThreadTS: loc.ThreadTS}
-	title := strings.TrimSpace(stringArg(args, "title"))
+	req, err := parseRequest(args)
+	if err != nil {
+		return nil, err
+	}
+	answer, err := t.display.Question(ctx, loc, req)
+	if err != nil {
+		return nil, err
+	}
+	return resultFor(req, answer)
+}
 
-	if questions := parseQuestions(args["questions"]); len(questions) > 0 {
-		if needsForm(questions) {
-			return t.invokeForm(ctx, dest, title, questions)
+func errUnavailable() error {
+	return fmt.Errorf("Error: interactive questions are not available in this context")
+}
+
+func errNoConversation() error {
+	return fmt.Errorf("Error: the ask tool only works inside a Slack conversation")
+}
+
+const timeoutNote = "The user did not respond in time. Do not assume an answer — ask again or stop and wait."
+
+func resultFor(req agent.QuestionRequest, answer agent.DisplayAnswer) (any, error) {
+	plain := req.Plain()
+	switch answer.Outcome {
+	case agent.DisplayAnswered:
+		if plain {
+			choice := ""
+			if picked := answer.Answers[req.Questions[0].Key]; len(picked) > 0 {
+				choice = picked[0]
+			}
+			return Result{Answered: true, Choice: choice}, nil
 		}
-		// A single plain single-select question expressed via `questions` still
-		// works fine as a button prompt; fold it into the simple path.
-		if len(questions) == 1 && strings.TrimSpace(stringArg(args, "question")) == "" {
+		answers := make([]FormAnswer, 0, len(req.Questions))
+		for _, q := range req.Questions {
+			answers = append(answers, FormAnswer{Question: q.Question, Choices: answer.Answers[q.Key]})
+		}
+		return Result{Answered: true, Answers: answers, UserID: answer.UserID}, nil
+	case agent.DisplayTimedOut:
+		return Result{Answered: false, Note: timeoutNote}, nil
+	case agent.DisplayDismissed:
+		if plain {
+			return Result{Answered: false, Note: "The question was dismissed before the user answered."}, nil
+		}
+		return Result{Answered: false, Note: "The questions were dismissed before the user answered."}, nil
+	case agent.DisplayChat:
+		return Result{Answered: false, Note: chatNote(req.Questions)}, nil
+	case agent.DisplayNoConversation:
+		return nil, errNoConversation()
+	default:
+		if answer.Note != "" {
+			return nil, errors.New(answer.Note)
+		}
+		return nil, errUnavailable()
+	}
+}
+
+func parseRequest(args map[string]any) (agent.QuestionRequest, error) {
+	title := strings.TrimSpace(stringArg(args, "title"))
+	if questions := parseQuestions(args["questions"]); len(questions) > 0 {
+		req := agent.QuestionRequest{Title: title, Questions: questions}
+		if !req.Plain() {
+			return req, nil
+		}
+		if strings.TrimSpace(stringArg(args, "question")) == "" {
 			args = map[string]any{
-				"question": questions[0].Label,
+				"question": questions[0].Question,
 				"options":  optionLabelsAny(questions[0].Options),
-				"title":    title,
 			}
 		}
 	}
 
 	question := strings.TrimSpace(stringArg(args, "question"))
 	if question == "" {
-		return nil, fmt.Errorf("Error: a question is required")
+		return agent.QuestionRequest{}, fmt.Errorf("Error: a question is required")
 	}
 	options := parseOptions(args["options"])
 	if len(options) < 2 {
-		return nil, fmt.Errorf("Error: provide at least two options")
+		return agent.QuestionRequest{}, fmt.Errorf("Error: provide at least two options")
 	}
-
-	decision, err := t.broker.Ask(ctx, dest, interaction.PromptSpec{
-		Title:    title,
-		Question: question,
-		Options:  options,
-	})
-	if err != nil {
-		return nil, err
+	for i := range options {
+		options[i].Description = ""
 	}
-	switch {
-	case decision.TimedOut:
-		return Result{Answered: false, Note: "The user did not respond in time. Do not assume an answer — ask again or stop and wait."}, nil
-	case decision.Cancelled:
-		return Result{Answered: false, Note: "The question was dismissed before the user answered."}, nil
-	default:
-		return Result{Answered: true, Choice: decision.Label}, nil
-	}
+	return agent.QuestionRequest{
+		Title:     title,
+		Questions: []agent.Question{{Key: "q0", Question: question, Options: options}},
+	}, nil
 }
 
-// invokeForm runs the card path: build a Spec, block on the flow, and shape the
-// outcome into a Result listing each question's answer(s).
-func (t *Tool) invokeForm(ctx context.Context, dest interaction.Destination, title string, questions []interaction.Question) (any, error) {
-	if t.cards == nil {
-		return nil, fmt.Errorf("Error: interactive questions are not available in this context")
-	}
-	spec := askcard.Spec{Title: title, Questions: cardQuestions(questions)}
-	resp, err := t.cards.Ask(ctx, askcard.Destination{ChannelID: dest.ChannelID, ThreadTS: dest.ThreadTS}, spec)
-	if err != nil {
-		return nil, err
-	}
-	switch {
-	case resp.TimedOut:
-		return Result{Answered: false, Note: "The user did not respond in time. Do not assume an answer — ask again or stop and wait."}, nil
-	case resp.Cancelled:
-		return Result{Answered: false, Note: "The questions were dismissed before the user answered."}, nil
-	case resp.Chat:
-		// The escape hatch. This is NOT a refusal, and must not read like one: the
-		// user is declining the offered options and asking to talk it through, so
-		// the note is phrased as their question back to the model.
-		return Result{Answered: false, Note: chatNote(questions)}, nil
-	}
-	answers := make([]FormAnswer, 0, len(questions))
-	for _, q := range questions {
-		answers = append(answers, FormAnswer{Question: q.Label, Choices: resp.Answers[q.Key]})
-	}
-	return Result{Answered: true, Answers: answers, UserID: resp.UserID}, nil
-}
-
-// chatNote is what the model reads when the user presses "Chat About This". It
-// restates the questions so the model can open the discussion without having to
-// scroll its own transcript for what it asked.
-func chatNote(questions []interaction.Question) string {
+func chatNote(questions []agent.Question) string {
 	var b strings.Builder
 	b.WriteString("The user would rather talk this through than pick from the options. They asked: ")
 	b.WriteString("\"Can we chat about this?\"\n\nDiscuss these with them before deciding:")
 	for _, q := range questions {
 		b.WriteString("\n- ")
-		b.WriteString(q.Label)
+		b.WriteString(q.Question)
 	}
 	return b.String()
-}
-
-// cardQuestions maps the tool's parsed questions onto the card's own types. The
-// card package deliberately does not share types with the interaction broker:
-// they answer different shapes (a card of inputs vs a row of buttons).
-func cardQuestions(questions []interaction.Question) []askcard.Question {
-	out := make([]askcard.Question, 0, len(questions))
-	for _, q := range questions {
-		opts := make([]askcard.Option, 0, len(q.Options))
-		for _, o := range q.Options {
-			opts = append(opts, askcard.Option{Label: o.Label, Description: o.Description})
-		}
-		out = append(out, askcard.Question{
-			Key:         q.Key,
-			Header:      q.Header,
-			Question:    q.Label,
-			Options:     opts,
-			MultiSelect: q.MultiSelect,
-		})
-	}
-	return out
 }
 
 func stringArg(args map[string]any, key string) string {
@@ -303,55 +274,28 @@ func stringArg(args map[string]any, key string) string {
 	return s
 }
 
-// needsForm reports whether the questions require the card: more than one
-// question, any multi-select, or any option carrying a description (which a
-// button has nowhere to show). A lone plain single-select question can still ride
-// the simpler button path.
-func needsForm(questions []interaction.Question) bool {
-	if len(questions) > 1 {
-		return true
-	}
-	for _, q := range questions {
-		if q.MultiSelect || q.Header != "" {
-			return true
-		}
-		for _, o := range q.Options {
-			if o.Description != "" {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// parseQuestions reads the `questions` array into interaction.Question values.
-// Each gets a stable key (q0, q1, …) so answers round-trip through the card.
-//
-// The question text is read from `question` (Claude's field) or `label` (the
-// older Murtaugh one). Accepting both is what lets the advertised schema be
-// exactly Claude's without breaking prompts already written against `label`.
-func parseQuestions(raw any) []interaction.Question {
+func parseQuestions(raw any) []agent.Question {
 	list, ok := raw.([]any)
 	if !ok {
 		return nil
 	}
-	out := make([]interaction.Question, 0, len(list))
+	out := make([]agent.Question, 0, len(list))
 	for i, v := range list {
 		m, ok := v.(map[string]any)
 		if !ok {
 			continue
 		}
-		label := strings.TrimSpace(stringArg(m, "question"))
-		if label == "" {
-			label = strings.TrimSpace(stringArg(m, "label"))
+		text := strings.TrimSpace(stringArg(m, "question"))
+		if text == "" {
+			text = strings.TrimSpace(stringArg(m, "label"))
 		}
-		if label == "" {
+		if text == "" {
 			continue
 		}
-		out = append(out, interaction.Question{
+		out = append(out, agent.Question{
 			Key:         fmt.Sprintf("q%d", i),
 			Header:      strings.TrimSpace(stringArg(m, "header")),
-			Label:       label,
+			Question:    text,
 			Options:     parseOptions(m["options"]),
 			MultiSelect: boolArg(m, "multiSelect"),
 		})
@@ -364,9 +308,7 @@ func boolArg(args map[string]any, key string) bool {
 	return b
 }
 
-// optionLabelsAny re-expands parsed options into the []any of strings the simple
-// button path's parseOptions expects.
-func optionLabelsAny(opts []interaction.Option) []any {
+func optionLabelsAny(opts []agent.QuestionOption) []any {
 	out := make([]any, 0, len(opts))
 	for _, o := range opts {
 		out = append(out, o.Label)
@@ -374,28 +316,24 @@ func optionLabelsAny(opts []interaction.Option) []any {
 	return out
 }
 
-// parseOptions reads an options array in either shape: Claude's objects
-// ({label, description}) or the older bare strings. An object without a usable
-// label is dropped rather than rendering a blank, unpickable choice.
-func parseOptions(raw any) []interaction.Option {
+func parseOptions(raw any) []agent.QuestionOption {
 	list, ok := raw.([]any)
 	if !ok {
 		return nil
 	}
-	out := make([]interaction.Option, 0, len(list))
+	out := make([]agent.QuestionOption, 0, len(list))
 	for _, v := range list {
 		switch opt := v.(type) {
 		case string:
 			if s := strings.TrimSpace(opt); s != "" {
-				out = append(out, interaction.Option{ID: s, Label: s})
+				out = append(out, agent.QuestionOption{Label: s})
 			}
 		case map[string]any:
 			label := strings.TrimSpace(stringArg(opt, "label"))
 			if label == "" {
 				continue
 			}
-			out = append(out, interaction.Option{
-				ID:          label,
+			out = append(out, agent.QuestionOption{
 				Label:       label,
 				Description: strings.TrimSpace(stringArg(opt, "description")),
 			})
