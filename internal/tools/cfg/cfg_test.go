@@ -239,6 +239,31 @@ func readJob(t *testing.T, p Provider, name string) config.JobProfile {
 	return job
 }
 
+func TestCfgJobSetStoresReportTo(t *testing.T) {
+	p := testProvider(t)
+	if _, err := invoke(t, find(t, AgentTools(p), "cfg.agent.create"), map[string]any{
+		"name": "default", "type": "native", "provider": "gemini", "model": "gemini-2.5-pro", "api_key_env": "K",
+	}); err != nil {
+		t.Fatalf("agent create: %v", err)
+	}
+	set := find(t, JobTools(p), "cfg.job.set")
+
+	if _, err := invoke(t, set, map[string]any{
+		"name": "digest", "agent": "default", "prompt": "summarise yesterday", "report_to": "#ops",
+	}); err != nil {
+		t.Fatalf("job set: %v", err)
+	}
+	if got := readJob(t, p, "digest").ReportTo; got != "#ops" {
+		t.Fatalf("stored report_to = %q, want #ops", got)
+	}
+
+	if _, err := invoke(t, set, map[string]any{
+		"name": "backup", "command": "/bin/echo", "report_to": "#ops",
+	}); err == nil {
+		t.Fatal("a command job with report_to was accepted; it has no reply to report")
+	}
+}
+
 // A job's first-run approval is granted against a specific command and
 // schedule, so every write through cfg.job.set — create or update, and however
 // small the edit — must re-arm the gate rather than inherit the old approval.
