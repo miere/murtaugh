@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
+	"slices"
 	"testing"
 	"time"
 
@@ -556,37 +556,18 @@ func appendedSystemPrompt(t *testing.T, args []string) string {
 	return values[0]
 }
 
-// A claude_code session never reads assets/system-prompt.md, so this flag is
-// the only channel Murtaugh has for the Slack dialect rules. Without it the
-// model falls back to the CLI's own "GitHub-flavored markdown for a terminal"
-// instruction and mrkdwn surfaces show raw metacharacters.
-func TestDefaultArgsAppendTheSlackFormattingRules(t *testing.T) {
-	value := appendedSystemPrompt(t, defaultArgs(""))
-	for _, want := range []string{"standard Markdown", "mrkdwn"} {
-		if !strings.Contains(value, want) {
-			t.Fatalf("appended prompt does not mention %q:\n%s", want, value)
-		}
-	}
-	if strings.Contains(value, "<persona>") {
-		t.Fatalf("an empty persona must not produce a persona block:\n%s", value)
+// With no persona Murtaugh has nothing to add to the CLI's own system prompt,
+// and an empty --append-system-prompt would only be noise on the command line.
+func TestDefaultArgsWithoutAPersonaAppendNothing(t *testing.T) {
+	if slices.Contains(defaultArgs(""), "--append-system-prompt") {
+		t.Fatalf("defaultArgs appended a system prompt with no persona to carry: %v", defaultArgs(""))
 	}
 }
 
-// The persona and the formatting rules share ONE flag, because the CLI does not
-// accumulate repeated --append-system-prompt values. Two flags would ship a
-// voice with no formatting rules (or the reverse) with nothing to catch it.
-func TestDefaultArgsMergePersonaAndFormattingIntoOneFlag(t *testing.T) {
-	value := appendedSystemPrompt(t, defaultArgs("I am Murtaugh."))
-	persona := strings.Index(value, "<persona>\nI am Murtaugh.\n</persona>")
-	rules := strings.Index(value, "Formatting for Slack")
-	if persona < 0 {
-		t.Fatalf("persona block missing:\n%s", value)
-	}
-	if rules < 0 {
-		t.Fatalf("Slack formatting rules missing:\n%s", value)
-	}
-	// Same order native assembles: persona, then transport.
-	if persona > rules {
-		t.Fatalf("persona must precede the formatting rules:\n%s", value)
+// The gateway translates the agent's Markdown for Slack, so the persona is all
+// Murtaugh appends; any formatting rule here would teach the model a dead job.
+func TestDefaultArgsAppendOnlyThePersona(t *testing.T) {
+	if value := appendedSystemPrompt(t, defaultArgs("I am Murtaugh.")); value != "<persona>\nI am Murtaugh.\n</persona>" {
+		t.Fatalf("appended system prompt = %q, want the persona block alone", value)
 	}
 }

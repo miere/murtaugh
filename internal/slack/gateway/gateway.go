@@ -592,7 +592,7 @@ func New(cfg config.Config, logger *slog.Logger, recorder journal.Recorder, brok
 			cfg.Defaults.EffectiveStreamMinChunkChars(),
 			logger,
 		).WithIdleTimeout(cfg.Defaults.EffectiveRequestTimeout()).WithSessionLogger(sessionLog).
-			WithProgressDisplay(cfg.EffectiveProgressDisplay).WithStatusMessenger(api).
+			WithStatusMessenger(api).
 			WithBackfiller(NewThreadBackfiller(api, selfUserID, logger)).
 			WithCanvasInfo(slackCanvasInfo{api: api}).
 			WithFileFetcher(api).

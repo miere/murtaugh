@@ -12,10 +12,6 @@
 // one path and showed raw metacharacters on the other, depending only on which
 // transport the surface happened to use.
 //
-// Wrapping the buffered reply in a `markdown` block settles that: both paths
-// now take standard Markdown, so the agent has one dialect to write and the
-// prompt has one rule to state.
-//
 // # The mention trade-off
 //
 // A `markdown` block does NOT resolve `<@U…>` into a real mention — it renders

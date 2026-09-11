@@ -21,12 +21,6 @@ import (
 // the downgrade is invisible above this seam and the canvas reply lands instead of
 // erroring the whole turn.
 //
-// This is the handle-oriented, text-only form. The opaque-MessageRef / two-verb
-// (text + task-card) generalisation lives in spec 021 §4 (AgentSlackSession);
-// today only the reply-text path routes through this seam, which fixes the canvas
-// bug for the default (simplified) progress mode. Tasks-mode tool cards still
-// stream — that is the next slice (buffered PlanBlock cards).
-//
 // A sink has no Fail verb. A turn's failure is an alert card posted below the
 // sealed reply (see sectionRenderer.postAlert), not text painted into it, so the
 // sink only ever carries the agent's own words.

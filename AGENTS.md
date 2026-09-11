@@ -188,6 +188,6 @@ their signatures and its fields — and reports itself if the interface is ever
 renamed out from under it. It follows **receivers, not call graphs**, so anything
 the renderer reaches a clock *through* is out of reach: a free function, and
 equally a collaborator struct it holds and delegates the question to. It also
-deliberately leaves the sinks below the renderer alone: `StatusLineWriter`
-throttles its Slack edits on a wall clock, which is rate limiting, not liveness.
+deliberately leaves the sinks below the renderer alone: `TaskCardWriter`
+throttles its card updates on a wall clock, which is rate limiting, not liveness.
 

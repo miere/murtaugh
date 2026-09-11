@@ -56,7 +56,7 @@ murtaugh cfg chat set --enabled true --default-agent default
 > The runtime tuning **`defaults` block** (grouped by `session`, `rendering`,
 > `acp`, `approval`) governs native, claude_code, and ACP agents alike. It's
 > stored config — inspect it with `cfg defaults show`; per-agent overrides are
-> `cfg agent` flags (`--progress-display`, `--approval-terminal`, …). →
+> `cfg agent` flags (`--approval-terminal`, …). →
 > `reference/agents-yaml.md`
 
 ## The flow (mental model)

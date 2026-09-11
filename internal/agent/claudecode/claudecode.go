@@ -15,7 +15,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/miere/murtaugh/assets"
 	"github.com/miere/murtaugh/internal/agent"
 )
 
@@ -41,17 +40,6 @@ func disallowedBuiltins() string {
 // the CLI to ask the controlling process for tool permission via a can_use_tool
 // control_request instead of auto-denying. Verified against 2.1.216 — without it
 // a headless turn silently denies every gated tool (spec 019 §6).
-//
-// `--append-system-prompt` carries everything Murtaugh contributes to the
-// session's system prompt: the agent's persona and the Slack formatting rules.
-// A claude_code session deliberately never sees assets/system-prompt.md — the
-// CLI owns its own system prompt, and respecting that battle-tested harness is
-// most of the reason to run this backend at all. But voice and transport are
-// Murtaugh's, not the CLI's: without this flag the only formatting guidance the
-// model gets is whatever CLAUDE.md happens to sit in its workdir tree, competing
-// with the CLI's own "output GitHub-flavored markdown for a terminal"
-// instruction. Which one won decided the dialect per turn, which is exactly how
-// the same agent produced correct bold in one reply and raw `**` in the next.
 func defaultArgs(persona string) []string {
 	args := []string{
 		"-p",
@@ -67,31 +55,16 @@ func defaultArgs(persona string) []string {
 	return args
 }
 
-// appendSystemPrompt merges the persona and the Slack formatting rules into ONE
-// value, because the CLI does NOT accumulate repeated --append-system-prompt
-// flags: the last occurrence silently wins and every earlier one is dropped
-// (verified empirically against 2.1.x — two flags in, only the second's rule was
-// obeyed). Passing them as two flags would therefore ship an agent with a voice
-// and no formatting rules, or the reverse, with nothing to catch it.
-//
-// Order mirrors native's assembly — persona, then transport — so the two
-// backends present the model with the same text in the same sequence.
 func appendSystemPrompt(persona string) string {
-	var parts []string
-	if p := strings.TrimSpace(persona); p != "" {
-		parts = append(parts, "<persona>\n"+p+"\n</persona>")
+	p := strings.TrimSpace(persona)
+	if p == "" {
+		return ""
 	}
-	if rules := strings.TrimSpace(assets.SlackFormat()); rules != "" {
-		parts = append(parts, rules)
-	}
-	return strings.Join(parts, "\n\n")
+	return "<persona>\n" + p + "\n</persona>"
 }
 
-// Options configures a Client. Command is required. Args defaults to
-// defaultArgs(Persona) (the stream-json launch) when nil; tests inject a fake
-// process via Command/Args. Setting Args replaces the defaults wholesale, which
-// also drops the persona and formatting rules — an operator override is taken at
-// its word.
+// Setting Args replaces the defaults wholesale, persona included, because an
+// operator's override is taken at its word.
 type Options struct {
 	Command string
 	Args    []string
