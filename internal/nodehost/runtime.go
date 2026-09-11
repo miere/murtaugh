@@ -7,26 +7,12 @@ import (
 	"github.com/miere/murtaugh/internal/agent"
 	"github.com/miere/murtaugh/internal/agentruntime"
 	"github.com/miere/murtaugh/internal/config"
-	"github.com/miere/murtaugh/internal/tools"
 )
 
-// Runtime is the agentruntime.Builder a broker gateway uses: session managers
-// whose agent.Client is whichever node is attached.
-//
-// It builds one manager per agent name the gateway knows about, all over the
-// same node, because the protocol carries no agent identity yet — see the
-// package doc. A gateway with no agent profiles of its own still gets the
-// default chat agent, so a node can serve a gateway that holds nothing but
-// routing.
-//
-// It contributes nothing that can run a model, which is the point: this is the
-// builder cmd/murtaugh-gateway may link, and CI checks that its dependency
-// closure stays clear of the backend packages. The REGISTRY it is handed is not
-// a backend and never was — it is the tool surface a node's agent reaches over
-// the tool channel (#194), and until item 8 this builder threw it away, which is
-// why a node's agent had no Murtaugh tools at all.
-func Runtime(host *Host) func(config.Config, *tools.Registry, *slog.Logger) agentruntime.Builder {
-	return func(cfg config.Config, registry *tools.Registry, logger *slog.Logger) agentruntime.Builder {
+// Runtime is the builder cmd/murtaugh-gateway may link, so it contributes
+// nothing that can run a model; CI checks its dependency closure for that.
+func Runtime(host *Host) func(config.Config, *slog.Logger) agentruntime.Builder {
+	return func(cfg config.Config, logger *slog.Logger) agentruntime.Builder {
 		if logger == nil {
 			logger = slog.Default()
 		}
@@ -36,12 +22,6 @@ func Runtime(host *Host) func(config.Config, *tools.Registry, *slog.Logger) agen
 			// reads, and a reload is the only way one is ever added, so it is
 			// re-bound here rather than captured when the Host was built.
 			host.setAccess(cfg.Access)
-			// Bound here because this is where the gateway hands its registry
-			// over, and a reload runs this builder again while the node
-			// connection survives. It re-binds the same pointer: the registry is
-			// built once, in app.New. See SetTools for the staleness that
-			// actually follows from that, which is not this one.
-			host.SetTools(registry)
 			// Background events belong to the gateway that is currently serving,
 			// and a reload replaces it, so the sink is refreshed here rather
 			// than captured when the connection was made.

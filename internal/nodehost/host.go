@@ -19,7 +19,6 @@ import (
 	"github.com/miere/murtaugh/internal/journal"
 	"github.com/miere/murtaugh/internal/nodesocket"
 	"github.com/miere/murtaugh/internal/nodetoken"
-	"github.com/miere/murtaugh/internal/tools"
 )
 
 // ErrNoNode is what every call made while no node is attached returns. It is a
@@ -155,11 +154,6 @@ type Host struct {
 	access     config.AccessConfig
 	approve    func(ctx context.Context, toolName, summary string) (bool, string)
 	background func(sessionID string, ev agent.Event)
-	// tools is the gateway's registry, from which a node is served the
-	// node-reachable slice. Live rather than captured, for the reason the
-	// approver is: a configuration reload rebuilds it under a surviving node
-	// connection.
-	tools *tools.Registry
 }
 
 // New builds a Host. It listens for nothing until Listen or Handler is used.
@@ -306,12 +300,6 @@ func (h *Host) serveLink(w http.ResponseWriter, r *http.Request) {
 	}
 	log := h.log.With("node_id", record.NodeID)
 
-	// The registry entry is built BEFORE the client, not after, and the order
-	// is load-bearing. Two things the node does during the handshake have to
-	// reach a specific connection rather than "the node": its opening claim,
-	// which arrives from inside Initialize, and its tool calls, whose turn is
-	// looked up on the client that made them. Building the entry afterwards
-	// would leave both with nothing to name.
 	node := &attached{
 		connID:     strconv.FormatInt(h.conns.Add(1), 10),
 		selector:   record.Selector,
@@ -324,9 +312,6 @@ func (h *Host) serveLink(w http.ResponseWriter, r *http.Request) {
 		Logger:     log,
 		Background: h.deliverBackground,
 		Approve:    h.askApproval,
-		// Murtaugh's own tools, served back down the connection the node
-		// dialled — never a second one. The gateway still never dials a node.
-		Tools: &toolServer{host: h, node: node, log: log},
 		// What this node says it can serve. Bound per connection because that
 		// is what the claim belongs to: a node holding two live credentials
 		// through a rotation advertises on each of them.
