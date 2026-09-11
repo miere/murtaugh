@@ -343,7 +343,6 @@ func Build(d Draft, configDir, adminUser string) (Profiles, error) {
 	// ACP agent's own permission requests by asking too, and is confined to the
 	// workspace the operator named.
 	general.WorkDir = workDir
-	general.ProgressDisplay = string(config.ProgressDisplayTasks)
 	general.Approval = config.ApprovalConfig{Terminal: "prompt", Requests: "ask"}
 	// The allowlist is what decides whether the agent has any tools at all.
 	// Left empty, toolset.Resolve selects nothing and the profile comes up
@@ -368,7 +367,6 @@ func Build(d Draft, configDir, adminUser string) (Profiles, error) {
 	// the operator approving their own request. It is reachable only from the
 	// admin's DMs (see the routing below), which is what makes that safe.
 	tweaker.WorkDir = configDir
-	tweaker.ProgressDisplay = string(config.ProgressDisplayTasks)
 	tweaker.Approval = config.ApprovalConfig{Terminal: "off", Requests: "auto-allow"}
 	tweaker.Sandbox = config.SandboxConfig{Mode: config.SandboxModeOff}
 	// Every tool family, for the same reason the gates are off: this profile

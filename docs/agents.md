@@ -88,17 +88,12 @@ How it reaches the model differs by backend, because their system prompts do:
 | Backend | Persona delivery |
 |---|---|
 | `native` | A `<persona>` block appended after the base system prompt, inside the cacheable static prefix. |
-| `claude_code` | Merged with the Slack formatting rules into a single `--append-system-prompt`. The CLI owns the rest of its system prompt; `system-prompt.md` is deliberately not passed. |
+| `claude_code` | A `<persona>` block passed as `--append-system-prompt` (omitted when there is no persona). The CLI owns the rest of its system prompt; `system-prompt.md` is deliberately not passed. |
 | `acp` | None. An ACP adapter is bespoke and brings its own harness, so its voice is the admin's to configure there. |
 
 A freshly seeded `SOUL.md` is frontmatter only, which resolves to no persona at
 all — the pre-onboarding state that makes the seeded `AGENTS.md`'s "I don't have
 a name or personality yet" true rather than immediately contradicted.
-
-> The single `--append-system-prompt` is not a style choice: the `claude` CLI
-> does **not** accumulate repeated occurrences of that flag. The last one wins
-> and every earlier one is silently dropped, so passing persona and formatting
-> rules separately would ship an agent with one and not the other.
 
 Change a field later with `cfg agent update`:
 
@@ -298,9 +293,8 @@ a channel in off-thread mode is one shared rolling session (reset with `/clear`)
 **Streaming.** The reply streams into the thread using Slack's native streaming
 APIs, updated as chunks arrive — no polling. The cadence
 (`stream_append_interval`, `stream_min_chunk_chars`) comes from the runtime
-defaults (below). How tool progress renders is a per-agent choice:
-`--progress-display simplified` (the default one-line status) or `tasks` (the
-full plan cards).
+defaults (below). Tool progress always renders as task cards, in their own
+message alongside the reply, for every agent.
 
 **Pausing for you.** Mid-turn, a native agent may stop to **ask you** (`ask`),
 get **sign-off on a plan** (`present_plan`), or seek **approval to run a command**
@@ -338,7 +332,6 @@ session:
   background_idle_timeout: 15m  # same, for work that lands after the turn ended
   max_concurrent: 100
 rendering:
-  progress_display: simplified
   stream_min_chunk_chars: 96
   stream_append_interval: 750ms
 acp:                         # ACP child-process lifecycle (native ignores these)
@@ -363,23 +356,3 @@ approval:                    # global default, overridden per agent by --approva
 
 An agent's `--workdir` defaults to the workspace (`~/.config/murtaugh`) when
 unset, so it starts where the bundled skills and templates live.
-
----
-
-## Agent icons
-
-Every agent carries an **icon** — an `http(s)` image URL — so two agents are
-told apart at a glance instead of wearing the same generic bot face.
-
-You never have to set one. An agent created without `--icon` is given a random
-icon from a small built-in palette, and it is written to the config store there
-and then, so the face stays the same across restarts. Agents that predate the
-feature are backfilled on the next start.
-
-```sh
-murtaugh cfg agent update --name emily --icon https://example.com/emily.png
-murtaugh cfg agent show --name emily      # icon: …
-```
-
-Pinning your own URL opts out of the palette; Murtaugh only checks that it is an
-absolute `http(s)` URL, and never overwrites it.

@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/miere/murtaugh/internal/agent"
-	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/slack/alertcard"
 )
 
@@ -57,13 +56,9 @@ func backgroundStalledSpec() alertcard.Spec {
 	}
 }
 
-// bgTarget is where — and how — a conversation's background completions render.
-// The thread never changes for a conversation, but the progress mode / stream
-// options are captured per turn so a background reply matches the foreground one.
 type bgTarget struct {
 	channelID  string
 	threadTS   string
-	mode       config.ProgressDisplay
 	streamOpts StreamWriterOptions
 }
 
@@ -100,7 +95,7 @@ type backgroundEventsRouter struct {
 
 	// newRenderer builds a renderer for a thread — bound to ChatHandler.newChatRenderer
 	// after the handler is constructed (Handle and the client are wired earlier).
-	newRenderer func(config.ProgressDisplay, string, string, StreamWriterOptions) chatRenderer
+	newRenderer func(string, string, StreamWriterOptions) chatRenderer
 
 	mu      sync.Mutex
 	targets map[string]bgTarget   // sessionID -> where to render
@@ -143,7 +138,7 @@ func newBackgroundEventsRouter(logger *slog.Logger, window time.Duration) *backg
 
 // bind supplies the renderer factory once the ChatHandler exists. Safe to call
 // before any background event fires (which only happens once a real turn runs).
-func (b *backgroundEventsRouter) bind(newRenderer func(config.ProgressDisplay, string, string, StreamWriterOptions) chatRenderer) {
+func (b *backgroundEventsRouter) bind(newRenderer func(string, string, StreamWriterOptions) chatRenderer) {
 	b.mu.Lock()
 	b.newRenderer = newRenderer
 	b.mu.Unlock()
@@ -226,7 +221,7 @@ func (b *backgroundEventsRouter) stretchFor(sessionID string) *bgStretch {
 		return nil
 	}
 	s := &bgStretch{
-		renderer: b.newRenderer(t.mode, t.channelID, t.threadTS, t.streamOpts),
+		renderer: b.newRenderer(t.channelID, t.threadTS, t.streamOpts),
 		window:   b.window,
 		idle:     time.NewTimer(b.window),
 		done:     make(chan struct{}),

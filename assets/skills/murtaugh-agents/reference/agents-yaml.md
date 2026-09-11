@@ -23,7 +23,7 @@ create. Each profile has one of three types:
   Client Protocol). Command-based (`--command` + `--arg`).
 
 The type is set explicitly with `--type` (native/acp/claude_code). Shared knobs
-(`--workdir`, `--tools`, `--mcp-servers`, `--approval-*`, `--progress-display`,
+(`--workdir`, `--tools`, `--mcp-servers`, `--approval-*`,
 `--export-skills-to-fs`) apply to every type; the provider knobs are native-only;
 `--command`/`--arg`/`--env` are for the command-based types.
 
@@ -46,7 +46,7 @@ murtaugh cfg agent create --name default --type native \
 `session`, `rendering`, `acp`, and an optional `approval` global default. The
 knobs apply to native, claude_code, and ACP agents alike. It's **seeded** with
 tuned values at install; inspect the effective values with `cfg defaults show`.
-The per-agent `--progress-display` and `--approval-*` flags override the matching
+The per-agent `--approval-*` flags override the matching
 defaults for one agent; to retune the rest, `cfg export` the config, edit the
 `defaults` block, and `cfg import` it back.
 
@@ -58,7 +58,6 @@ defaults for one agent; to retune the rest, `cfg export` the config, edit the
 | `session.background_idle_timeout` | `15m` | Idle timeout for a background completion (a Claude Code subagent finishing after its turn ended, rendered into the thread). Reset by every event of that stretch; past it the message is sealed with a "closed this out" notice instead of being left streaming — a notice rather than an error card, because a stretch going quiet is not a failure anyone has observed. It never cancels the agent — later output opens a new message. Higher than `request_timeout` because the tool heartbeat is scoped to a turn and never reaches a background stretch. |
 | `session.long_running_tool_timeout` | `1h` | Total-duration cap on a single tool call (ACP agents). While a tool runs a heartbeat keeps the turn alive so `request_timeout` never trips; this bounds a genuinely wedged tool. Past it the turn fails naming the tool and the session is dropped. |
 | `session.max_concurrent` | `100` | Concurrent session cap per agent. At the cap an **idle** session is evicted to make room; if every slot is running a turn the new conversation is refused with a "busy" warning rather than taking a slot from live work. |
-| `rendering.progress_display` | `simplified` | How tool/step progress renders while a turn streams: `simplified` (one small context-line message — "Reading file…" — that updates in place and resolves to "✓ Done thinking" when the turn ends) or `tasks` (the full multi-card plan woven into the reply). Override per agent with `--progress-display`. |
 | `rendering.stream_min_chunk_chars` | `24` | Minimum characters before a chunk is flushed (avoids choppy edits). |
 | `rendering.stream_append_interval` | `250ms` | How often buffered chunks are flushed to Slack. |
 | `acp.startup_timeout` | `10s` | Budget for the agent warmup probe at daemon start (ACP agents). |
@@ -100,9 +99,7 @@ see the `murtaugh-setup` skill's `setup_env`).
 | `--mcp-servers` | no | Names of `cfg mcp` entries to attach — **repeat the flag**. Each contributes its remote tools. |
 | `--approval-terminal` / `--approval-allow` / `--approval-requests` | no | Human-approval gate for side-effecting tool calls (see below). Defaults to gating on (`allowlist`). |
 | `--approval-keep-resolved` | no | Keep settled approval cards in the thread instead of clearing them a few seconds after the decision. Defaults to clearing. |
-| `--progress-display` | no | Override `defaults.rendering.progress_display` for this agent (`simplified` / `tasks`). |
 | `--soul-file` | no | Pin where this agent's persona is read from, overriding the default search (`<workdir>/SOUL.md`, then `<workspace>/SOUL.md`). A relative path resolves against the config dir. The only way to give two profiles that share one workdir different voices. Ignored by `acp`, whose persona belongs to its adapter. |
-| `--icon` | no | The agent's face: an `http(s)` image URL. Omitted picks one at random from the built-in palette and stores it, so every agent has a distinct, stable icon; an agent created before this feature is backfilled on the next start. |
 
 A workspace `AGENTS.md` (in the agent's `workdir`) is auto-loaded into the system
 prompt as project guidelines — no config needed. The agent's **name and voice**
@@ -205,7 +202,7 @@ process per conversation, no ACP adapter in between. Like an ACP agent, it
 reaches Murtaugh's own tools (`slack.*`, `jobs`, `ask`, …) through the tool
 bridge, gated by the same `--approval-*` policy. The command-based knobs live on
 their own flags; the shared knobs (`--workdir`, `--tools`, `--approval-*`,
-`--progress-display`, `--export-skills-to-fs`) apply as above.
+`--export-skills-to-fs`) apply as above.
 
 | Flag | Required | Meaning |
 |---|---|---|
@@ -231,7 +228,7 @@ into its `workdir` — see that section above.
 
 Murtaugh drives an external agent process. The command-based knobs live on their
 own flags; the shared knobs (`--workdir`, `--tools`, `--approval-*`,
-`--progress-display`, `--export-skills-to-fs`) apply as above.
+`--export-skills-to-fs`) apply as above.
 
 | Flag | Required | Meaning |
 |---|---|---|

@@ -42,20 +42,15 @@
 // from a renderer method, and equally a collaborator it holds and delegates to:
 // give a helper struct a `last time.Time` and a `stale()` method, have the
 // renderer call `r.h.stale()`, and nothing here fires. That is the more
-// plausible smuggling route of the two, because it is how StatusLineWriter is
-// already shaped, and it is not covered.
+// plausible smuggling route of the two, and it is not covered.
 //
 // What IS covered is the direct, local mistake: a clock on the renderer itself,
 // in a field, in a parameter, or in a body. The rule is a guard against that,
 // not a proof.
 //
-// The sinks BELOW the renderer are deliberately out of scope. StatusLineWriter
-// throttles its in-place Slack edits on a wall clock and always has. That is rate
-// limiting — how often a write is allowed — and it is not liveness: it never
-// decides that a turn has ended. Extending this rule to the toolBlock seam would
-// flag it on day one, which is how a guard gets disabled. The line the rule draws
-// is the one that matters: the layer that decides SEGMENTATION AND TERMINALS
-// cannot look at a clock.
+// The sinks BELOW the renderer are deliberately out of scope. The line the rule
+// draws is the one that matters: the layer that decides SEGMENTATION AND
+// TERMINALS cannot look at a clock.
 //
 // # Scoping, and why the guard cannot decay silently
 //

@@ -55,7 +55,7 @@ func TestBufferedCardBlock_FinalizesRunningCards(t *testing.T) {
 	if err := b.UpdateFromEvent(ctx, &agent.TaskEvent{ID: "t1", Title: "work", Status: agent.TaskStatusInProgress}); err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	if err := b.FinishWith(ctx, "done"); err != nil {
+	if err := b.Finish(ctx); err != nil {
 		t.Fatalf("finish: %v", err)
 	}
 	if msgr.posts != 1 || msgr.updates != 1 {
@@ -66,12 +66,10 @@ func TestBufferedCardBlock_FinalizesRunningCards(t *testing.T) {
 	}
 }
 
-// TestBufferedCardBlock_EmptyBlockPostsNothing: a tool block that never saw an
-// event posts nothing on FinishWith.
 func TestBufferedCardBlock_EmptyBlockPostsNothing(t *testing.T) {
 	msgr := &fakeStatusMessenger{}
 	b := newBufferedCardBlock(msgr, "C1", "", StreamWriterOptions{Logger: discardLogger()}, discardLogger())
-	if err := b.FinishWith(context.Background(), ""); err != nil {
+	if err := b.Finish(context.Background()); err != nil {
 		t.Fatalf("finish: %v", err)
 	}
 	if msgr.posts != 0 || msgr.updates != 0 {
@@ -98,8 +96,6 @@ func TestDefaultCardBlock_StreamsWhenSupported(t *testing.T) {
 	}
 }
 
-// TestDefaultCardBlock_DowngradesOnCanvas: a canvas rejects the card stream, so the
-// block downgrades to a buffered PlanBlock post — tasks-mode cards still render.
 func TestDefaultCardBlock_DowngradesOnCanvas(t *testing.T) {
 	api := canvasAPI()
 	msgr := &fakeStatusMessenger{}
@@ -119,7 +115,7 @@ func TestDefaultCardBlock_DowngradesOnCanvas(t *testing.T) {
 	if err := c.UpdateFromEvent(ctx, &agent.TaskEvent{ID: "t1", Status: agent.TaskStatusComplete}); err != nil {
 		t.Fatalf("update 2: %v", err)
 	}
-	if err := c.FinishWith(ctx, "done"); err != nil {
+	if err := c.Finish(ctx); err != nil {
 		t.Fatalf("finish: %v", err)
 	}
 	if msgr.posts != 1 || msgr.updates == 0 {

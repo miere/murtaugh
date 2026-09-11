@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"strings"
 
 	"github.com/miere/murtaugh/internal/agent"
 	"github.com/miere/murtaugh/internal/slack/alertcard"
@@ -23,12 +22,6 @@ import (
 // (a full snapshot) many times mid-reply. This is the coherence guarantee:
 // ordering is decided here, by event boundaries — never by the delivery layer's
 // wall-clock timers.
-//
-// The tool-block cosmetics are the only per-agent choice (the toolBlock seam): a
-// compact status line (simplified) or grouped task cards (tasks). Both ride the
-// same segmentation, so the ordering guarantee holds either way. This is
-// backend-agnostic: native and ACP feed the same agent.Event stream, so they get
-// an identical rendered surface.
 //
 // All methods are called from the single ChatHandler event loop (no concurrency).
 type chatRenderer interface {
@@ -65,27 +58,11 @@ type chatRenderer interface {
 
 // --- toolBlock: the tool-run sink (cosmetics only) -------------------------
 
-// toolBlock is one yellow run — a contiguous sequence of tool activity — rendered
-// as its own Slack message. The segmenter opens one per tool run and resolves it
-// (FinishWith) when reply text or the turn's end seals the run. Two cosmetics
-// satisfy it, chosen per-agent:
-//
-//   - StatusLineWriter — a single context-block line updated in place, resolved
-//     to a compact "✓ read · skill · write" summary (simplified mode).
-//   - cardToolBlock — grouped task cards in their own stream message (tasks mode).
-//
-// Both own a message distinct from the reply text, so a tool card can never land
-// inside an unflushed text run — the mid-paragraph interleaving that motivated
-// this design.
 type toolBlock interface {
 	UpdateFromEvent(ctx context.Context, ev *agent.TaskEvent) error
-	FinishWith(ctx context.Context, done string) error
+	Finish(ctx context.Context) error
 }
 
-// cardToolBlock renders a tool run as grouped task cards (TaskCardWriter) in its
-// OWN stream message, kept separate from the reply text. It tracks which cards
-// are still spinning so FinishWith can bring them to a terminal state before it
-// closes the message — a card is never stranded mid-spinner.
 type cardToolBlock struct {
 	stream  *StreamWriter
 	cards   *TaskCardWriter
@@ -113,8 +90,6 @@ func (b *cardToolBlock) UpdateFromEvent(ctx context.Context, ev *agent.TaskEvent
 	if err := b.cards.UpdateFromEvent(ctx, ev); err != nil {
 		return err
 	}
-	// An explicit terminal status retires a card; an update that merely refines a
-	// title (no status) keeps it tracked so FinishWith resolves it.
 	if isTerminalTaskStatus(ev.Status) {
 		delete(b.running, ev.ID)
 	} else {
@@ -123,10 +98,8 @@ func (b *cardToolBlock) UpdateFromEvent(ctx context.Context, ev *agent.TaskEvent
 	return nil
 }
 
-// FinishWith resolves every still-spinning card to complete, then closes the
-// block's own message. done is the section's tool summary; task cards carry their
-// own titles, so it is unused here (it labels the status-line cosmetic instead).
-func (b *cardToolBlock) FinishWith(ctx context.Context, _ string) error {
+// A card left mid-spinner reads as work that never ended.
+func (b *cardToolBlock) Finish(ctx context.Context) error {
 	for id := range b.running {
 		if err := b.cards.Complete(ctx, id, ""); err != nil {
 			b.logger.Debug("failed to resolve task card", "error", err, "task_id", id)
@@ -161,10 +134,9 @@ type sectionRenderer struct {
 	// surface — see postAlert.
 	alert alertPoster
 
-	mode   sectionMode
-	text   SlackSink
-	block  toolBlock
-	titles []string // distinct tool titles in the current block, for its summary
+	mode  sectionMode
+	text  SlackSink
+	block toolBlock
 
 	// seenTools records tool ids shown this turn, so a tool_call_update tick for a
 	// tool already on screen is not mistaken for a new run and made to re-seal the
@@ -238,9 +210,6 @@ func (r *sectionRenderer) Task(ctx context.Context, ev *agent.TaskEvent) error {
 		r.closeText(ctx)
 	}
 	r.ensureBlock(ctx)
-	if ev.Title != "" && !containsString(r.titles, ev.Title) {
-		r.titles = append(r.titles, ev.Title)
-	}
 	if err := r.block.UpdateFromEvent(ctx, ev); err != nil {
 		r.logger.Warn("failed to send task update", "error", err, "task_id", ev.ID)
 	}
@@ -393,21 +362,13 @@ func (r *sectionRenderer) closeText(ctx context.Context) {
 	}
 }
 
-// closeBlock resolves the open tool block to a compact summary of the tools it
-// ran (e.g. "✓ read · skill · write"), then clears it. The summary is used by the
-// status-line cosmetic; the card cosmetic carries its own per-card titles.
 func (r *sectionRenderer) closeBlock(ctx context.Context) {
 	if r.block != nil {
-		done := statusLineDoneText
-		if len(r.titles) > 0 {
-			done = "✓ " + strings.Join(r.titles, " · ")
-		}
-		if err := r.block.FinishWith(ctx, done); err != nil {
+		if err := r.block.Finish(ctx); err != nil {
 			r.logger.Debug("failed to resolve tool block", "error", err)
 		}
 	}
 	r.block = nil
-	r.titles = nil
 	if r.mode == sectionTools {
 		r.mode = sectionNone
 	}
@@ -421,14 +382,4 @@ func deliverAttachment(ctx context.Context, up attachmentUploader, channelID, th
 		return nil
 	}
 	return up.UploadAttachment(ctx, channelID, threadTS, a)
-}
-
-// containsString reports whether want is present in xs.
-func containsString(xs []string, want string) bool {
-	for _, x := range xs {
-		if x == want {
-			return true
-		}
-	}
-	return false
 }

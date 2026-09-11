@@ -13,7 +13,6 @@ defaults:
     long_running_tool_timeout: 1h  # total cap on a single tool call (ACP)
     max_concurrent: 100
   rendering:
-    progress_display: simplified
     stream_min_chunk_chars: 96
     stream_append_interval: 750ms
   acp:                          # ACP child-process lifecycle (native ignores these)
