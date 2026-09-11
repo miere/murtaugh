@@ -72,6 +72,11 @@ type Options struct {
 	// failing its push would make the node's own logs blame it for the
 	// gateway's shape.
 	Advertise Advertiser
+	// Owner is the Slack user this node's credential was minted for. Every
+	// sign-in the node raises is drawn for them, whatever the node says.
+	Owner string
+
+	SignIns func(ctx context.Context, prompt *agent.SignInPrompt, settled <-chan agent.SignInSettled, shown func(error))
 	// EventBuffer is a turn's channel depth. Zero takes defaultEventBuffer.
 	EventBuffer int
 	// WindowBytes, AckThreshold, AckInterval and Epoch are passed through to
@@ -92,6 +97,8 @@ type Client struct {
 	background func(sessionID string, ev agent.Event)
 	approve    func(ctx context.Context, toolName, summary string) (bool, string)
 	advertiser Advertiser
+	owner      string
+	signIn     func(ctx context.Context, prompt *agent.SignInPrompt, settled <-chan agent.SignInSettled, shown func(error))
 	transfers  *transfers
 	buffer     int
 
@@ -103,6 +110,8 @@ type Client struct {
 	pending       map[string]chan agentwire.Message
 	streams       map[string]*stream
 	answers       map[string]*agentwire.PendingDecision
+	signIns       map[string]chan struct{}
+	headless      map[string]*headlessSignIn
 	interruptible *bool
 	resolved      bool
 	// advertisedOnce is set by the first claim to land, whichever path it came
@@ -132,12 +141,16 @@ func New(conn nodelink.Conn, opts Options) *Client {
 		background: opts.Background,
 		approve:    opts.Approve,
 		advertiser: opts.Advertise,
+		owner:      opts.Owner,
+		signIn:     opts.SignIns,
 		transfers:  incoming,
 		buffer:     buffer,
 		closes:     make(chan string, closeQueueDepth),
 		pending:    make(map[string]chan agentwire.Message),
 		streams:    make(map[string]*stream),
 		answers:    make(map[string]*agentwire.PendingDecision),
+		signIns:    make(map[string]chan struct{}),
+		headless:   make(map[string]*headlessSignIn),
 	}
 	c.link = nodelink.New(conn, nodelink.Options{
 		Handler:      c.consume,
@@ -465,6 +478,8 @@ func (c *Client) dismissOrphanDisplay(msg agentwire.Message) {
 		id = wire.Question.ID
 	case wire.Plan != nil:
 		id = wire.Plan.ID
+	case wire.SignIn != nil:
+		id = wire.SignIn.ID
 	default:
 		return
 	}
@@ -482,11 +497,39 @@ func (c *Client) decode(msg agentwire.Message, s *stream) (agent.Event, bool, er
 	if err := msg.Into(&wire); err != nil {
 		return agent.Event{}, false, err
 	}
+	if settled := wire.SignInSettled; settled != nil && (s == nil || !c.decoder.SignInOpen(settled.ID)) {
+		c.log.Debug("remote: a sign-in settled that nothing here is drawing", "id", settled.ID, "state", settled.State)
+		return agent.Event{}, true, nil
+	}
 	ev, pending, err := c.decoder.Decode(context.Background(), wire)
 	if err != nil {
 		return agent.Event{}, false, err
 	}
+	if ev.SignInSettled != nil && ev.SignInSettled.State.Terminal() {
+		c.settleSignIn(wire.SignInSettled.ID)
+	}
 	if pending == nil {
+		return ev, false, nil
+	}
+	if ev.SignIn != nil {
+		if c.owner == "" {
+			c.decoder.ForgetSignIn(pending.ID)
+			c.log.Warn("remote: refusing a sign-in from a node whose token names no owner", "id", pending.ID)
+			go c.sendDisplayAnswer(agentwire.DisplayAnswer{ID: pending.ID, Outcome: string(agent.DisplayUnavailable),
+				Note: "this machine's token names no owner, so nobody can be asked to sign in"})
+			return agent.Event{}, true, nil
+		}
+		if s == nil || s.location.ChannelID == "" {
+			c.decoder.ForgetSignIn(pending.ID)
+			go c.sendDisplayAnswer(agentwire.DisplayAnswer{ID: pending.ID, Outcome: string(agent.DisplayNoConversation)})
+			return agent.Event{}, true, nil
+		}
+		ev.SignIn.Owner = c.owner
+		settled := make(chan struct{})
+		c.mu.Lock()
+		c.signIns[pending.ID] = settled
+		c.mu.Unlock()
+		go c.relaySignIn(pending.ID, ev.SignIn, s, settled)
 		return ev, false, nil
 	}
 	if answers := displayAnswers(ev); answers != nil {
@@ -601,6 +644,47 @@ func (c *Client) answerDisplay(id string, answers <-chan agent.DisplayAnswer, s 
 		}
 	case <-c.link.Done():
 	}
+}
+
+func (c *Client) relaySignIn(id string, prompt *agent.SignInPrompt, s *stream, settled <-chan struct{}) {
+	defer c.dropSignIn(id)
+	for {
+		select {
+		case answer := <-prompt.Answer:
+			c.sendDisplayAnswer(agentwire.EncodeDisplayAnswer(id, answer))
+			if answer.Outcome != agent.DisplayAnswered && answer.Outcome != agent.DisplayApproved {
+				return
+			}
+		case <-settled:
+			return
+		case <-s.quit:
+			select {
+			case <-settled:
+			default:
+				c.sendDisplayAnswer(agentwire.DisplayAnswer{ID: id, Outcome: string(agent.DisplayDismissed)})
+			}
+			return
+		case <-c.link.Done():
+			return
+		}
+	}
+}
+
+func (c *Client) settleSignIn(id string) {
+	c.mu.Lock()
+	settled := c.signIns[id]
+	delete(c.signIns, id)
+	c.mu.Unlock()
+	if settled != nil {
+		close(settled)
+	}
+}
+
+func (c *Client) dropSignIn(id string) {
+	c.mu.Lock()
+	delete(c.signIns, id)
+	c.mu.Unlock()
+	c.decoder.ForgetSignIn(id)
 }
 
 func (c *Client) sendDisplayAnswer(answer agentwire.DisplayAnswer) {

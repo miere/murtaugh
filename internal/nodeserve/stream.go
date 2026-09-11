@@ -66,6 +66,10 @@ func (s *Server) forward(ctx context.Context, stream string, ev agent.Event) err
 		s.registerDisplay(wire.Question.ID, stream)
 	case wire.Plan != nil:
 		s.registerDisplay(wire.Plan.ID, stream)
+	case wire.SignIn != nil:
+		s.registerSignIn(wire.SignIn.ID, stream)
+	case wire.SignInSettled != nil && agent.SignInState(wire.SignInSettled.State).Terminal():
+		s.forget(wire.SignInSettled.ID)
 	}
 	msg, err := agentwire.StreamEvent(stream, wire)
 	if err != nil {

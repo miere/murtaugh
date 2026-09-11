@@ -154,6 +154,7 @@ type Host struct {
 	access     config.AccessConfig
 	approve    func(ctx context.Context, toolName, summary string) (bool, string)
 	background func(sessionID string, ev agent.Event)
+	signIns    func(ctx context.Context, prompt *agent.SignInPrompt, settled <-chan agent.SignInSettled, shown func(error))
 }
 
 // New builds a Host. It listens for nothing until Listen or Handler is used.
@@ -316,6 +317,8 @@ func (h *Host) serveLink(w http.ResponseWriter, r *http.Request) {
 		// is what the claim belongs to: a node holding two live credentials
 		// through a rotation advertises on each of them.
 		Advertise:   remote.AdvertiserFunc(func(ad agentwire.Advertisement) { h.advertise(node, ad) }),
+		Owner:       record.UserID,
+		SignIns:     h.drawSignIn,
 		WindowBytes: window,
 		AckInterval: h.opts.AckInterval,
 	})
@@ -369,6 +372,9 @@ func (h *Host) attach(node *attached) {
 	h.log.Info("runtime node attached", "node_id", node.nodeID, "user_id", node.userID, "selector", node.selector,
 		"profiles", len(ad.Profiles), "claims", len(ad.Claims), "connected", count)
 	h.record(journal.LevelInfo, "attached", "A runtime node attached", node, ad)
+	if !config.IsSlackUserID(node.userID) {
+		h.flagOwner(node)
+	}
 	// After the entry is published, never before: the fleet-scoped check below
 	// reads the registry, and a node reviewing its own arrival before it is in
 	// there would be told its own profiles are not served.
@@ -438,6 +444,20 @@ func (h *Host) record(level journal.Level, state, summary string, node *attached
 		Summary: summary,
 		Keys:    journal.Keys{UserID: node.userID},
 		Payload: payload,
+	})
+}
+
+func (h *Host) flagOwner(node *attached) {
+	const fix = "re-mint this node's token with --user U… (the owner's Slack user ID)"
+	h.log.Warn("a runtime node's token names an owner that is not a Slack user ID, so its sign-ins can reach nobody; "+fix,
+		"node_id", node.nodeID, "user_id", node.userID, "selector", node.selector)
+	h.rec.Record(context.Background(), journal.Event{
+		Stream:  journal.StreamGateway,
+		Kind:    "node",
+		Level:   journal.LevelWarn,
+		Summary: "A runtime node's token names an owner that is not a Slack user ID",
+		Keys:    journal.Keys{UserID: node.userID},
+		Payload: map[string]any{"state": "owner_not_a_slack_user", "node_id": node.nodeID, "selector": node.selector, "fix": fix},
 	})
 }
 
@@ -584,6 +604,23 @@ func (h *Host) deliverBackground(from *attached, sessionID string, ev agent.Even
 		return
 	}
 	sink(sessionID, ev)
+}
+
+func (h *Host) setSignIns(draw func(ctx context.Context, prompt *agent.SignInPrompt, settled <-chan agent.SignInSettled, shown func(error))) {
+	h.mu.Lock()
+	h.signIns = draw
+	h.mu.Unlock()
+}
+
+func (h *Host) drawSignIn(ctx context.Context, prompt *agent.SignInPrompt, settled <-chan agent.SignInSettled, shown func(error)) {
+	h.mu.Lock()
+	draw := h.signIns
+	h.mu.Unlock()
+	if draw == nil {
+		shown(errors.New("this gateway cannot show a sign-in outside a conversation"))
+		return
+	}
+	draw(ctx, prompt, settled, shown)
 }
 
 func (h *Host) askApproval(ctx context.Context, toolName, summary string) (bool, string) {

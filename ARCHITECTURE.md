@@ -600,8 +600,8 @@ without it a scheduled agent job starts happily and then cannot post its own
 result. Two deps are withheld on purpose, both because no human is in a thread:
 the `Approver` (an approval card nobody can answer would hang the turn until the
 idle watchdog kills it — the agent's own `approval` policy is the only gate) and
-the background-events sink. `ask`/`present_plan` fail for the same reason, by
-design. The aggregator lives in the daemon, so a delegation fired straight from
+the background-events sink. `ask`/`present_plan`/`auth.request` fail for the
+same reason, by design. The aggregator lives in the daemon, so a delegation fired straight from
 the CLI still runs on the backend's own built-ins.
 
 ## Slack gateway (`internal/slack/gateway`)
@@ -1133,8 +1133,8 @@ builds every agent with its gate long before it knows which turns have a thread.
 It cannot be inferred on the far side either: "no `TurnLocation` on the context"
 is the in-process test and is false over the link, where the location is set from
 the prompt's channel on every turn. `nodeserve` serves a headless turn with **no
-stream on its context**, so `ToolGate.Approve` runs ungated, and `ask` and
-`present_plan` refuse because the turn has no location. Without it a 03:00 job
+stream on its context**, so `ToolGate.Approve` runs ungated, and `ask`,
+`present_plan` and `auth.request` refuse because the turn has no location. Without it a 03:00 job
 raises a card nobody can answer and blocks until its timeout burns. The gateway
 half of the same rule: `remote.Client` records a stream's location only when the
 prompt names a channel, so a headless turn's location is the zero value, and a
@@ -1187,7 +1187,10 @@ so a node can never make the bot post somewhere else.
 before anything is sent, with the same words it used on the gateway, and the
 gateway answers `no_conversation` itself for a turn it holds no location for,
 because nothing consumes a headless turn's cards and the tool would otherwise
-wait for its turn to be torn down.
+wait for its turn to be torn down. A sign-in is the exception: with no
+conversation, the node sends it outside any turn (`node.sign_in`), and the
+gateway draws it in the owner's DM alone, under the same owner, access and
+approval rules.
 
 **All three backends reach it the same way.** `ask` and `present_plan` are a
 contract with no Slack in it plus a display: in process the display is

@@ -28,6 +28,10 @@ const (
 	EventPermission EventType = "permission"
 	EventQuestion   EventType = "question"
 	EventPlan       EventType = "plan"
+	EventSignIn     EventType = "sign_in"
+	// EventSignInSettled travels node to gateway on the turn's stream, in order,
+	// so the cards settle before the turn that raised the sign-in completes.
+	EventSignInSettled EventType = "sign_in_settled"
 )
 
 // Event is the serialisable form of agent.Event: one item on the ordered stream
@@ -51,9 +55,11 @@ type Event struct {
 	// Permission is the request half of the request/response pair that replaces
 	// agent.PermissionPrompt's channel. The answer is not an Event at all; it
 	// comes back as its own PermissionResponse frame.
-	Permission *PermissionRequest `json:"permission,omitempty"`
-	Question   *QuestionRequest   `json:"question,omitempty"`
-	Plan       *PlanRequest       `json:"plan,omitempty"`
+	Permission    *PermissionRequest `json:"permission,omitempty"`
+	Question      *QuestionRequest   `json:"question,omitempty"`
+	Plan          *PlanRequest       `json:"plan,omitempty"`
+	SignIn        *SignInRequest     `json:"sign_in,omitempty"`
+	SignInSettled *SignInSettled     `json:"sign_in_settled,omitempty"`
 }
 
 // TaskStatus mirrors agent.TaskStatus.
@@ -139,6 +145,31 @@ type DisplayAnswer struct {
 	Choice  string              `json:"choice,omitempty"`
 	UserID  string              `json:"user_id,omitempty"`
 	Note    string              `json:"note,omitempty"`
+	// Code is what the node's owner typed into the sign-in card, for the node's
+	// own sign-in process; nothing the gateway holds rides with it.
+	Code string `json:"code,omitempty"`
+}
+
+// SignInRequest has no destination and no environment: the node signs in with
+// its own environment, and the gateway decides where the cards go.
+type SignInRequest struct {
+	ID        string `json:"id"`
+	Tool      string `json:"tool"`
+	Profile   string `json:"profile"`
+	URL       string `json:"url"`
+	NeedsCode bool   `json:"needs_code,omitempty"`
+	// Command is what the owner is asked to approve before it runs, which is
+	// why a request carrying one has no URL yet.
+	Command string `json:"command,omitempty"`
+}
+
+// SignInSettled expects no answer, because the node's own sign-in process is
+// what decides how a sign-in ends.
+type SignInSettled struct {
+	ID     string `json:"id"`
+	State  string `json:"state"`
+	Reason string `json:"reason,omitempty"`
+	URL    string `json:"url,omitempty"`
 }
 
 func AnswerDisplay(a DisplayAnswer) (Message, error) {
@@ -157,6 +188,7 @@ func EncodeDisplayAnswer(id string, a agent.DisplayAnswer) DisplayAnswer {
 		Choice:  a.Choice,
 		UserID:  a.UserID,
 		Note:    a.Note,
+		Code:    a.Code,
 	}
 }
 
@@ -167,6 +199,7 @@ func (a DisplayAnswer) Decode() agent.DisplayAnswer {
 		Choice:  a.Choice,
 		UserID:  a.UserID,
 		Note:    a.Note,
+		Code:    a.Code,
 	}
 }
 

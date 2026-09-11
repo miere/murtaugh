@@ -65,6 +65,7 @@ func baseData(state State) cardData {
 		URL:             "https://accounts.google.com/o/oauth2/auth?a=1",
 		NeedsCode:       true,
 		RequesterUserID: "U123",
+		RecipientUserID: "UOWNER",
 		AttemptAt:       "May 14, 2026 at 3:42 PM",
 		State:           string(state),
 		ShowRequester:   true,
@@ -119,7 +120,7 @@ func hasChildBlock(c card, blockID string) bool {
 // Every state must produce valid JSON. A template that only parses in the happy
 // case would fail exactly when it is reporting a failure.
 func TestAllStatesRenderValidJSON(t *testing.T) {
-	states := []State{StatePending, StateWorking, StateSuccess, StateDenied, StateTimeout, StateFailed}
+	states := []State{StateApproval, StateStarting, StatePending, StateWorking, StateSuccess, StateDenied, StateTimeout, StateFailed, StateCancelled}
 	for _, state := range states {
 		for _, needsCode := range []bool{true, false} {
 			for _, showActions := range []bool{true, false} {
@@ -129,6 +130,7 @@ func TestAllStatesRenderValidJSON(t *testing.T) {
 					d.ShowActions = showActions
 					d.ShowFooter = showFooter
 					d.Reason = "something went wrong"
+					d.Command = `vendor-cli login "quoted"`
 					render(t, AdminTemplate, d)
 					render(t, RequesterTemplate, d)
 				}
@@ -368,14 +370,28 @@ func TestCodeModalCarriesCorrelation(t *testing.T) {
 }
 
 func TestStateTerminal(t *testing.T) {
-	for _, s := range []State{StateSuccess, StateDenied, StateTimeout, StateFailed} {
+	for _, s := range []State{StateSuccess, StateDenied, StateTimeout, StateFailed, StateCancelled} {
 		if !s.Terminal() {
 			t.Fatalf("%s should be terminal", s)
 		}
 	}
-	for _, s := range []State{StatePending, StateWorking} {
+	for _, s := range []State{StateApproval, StateStarting, StatePending, StateWorking} {
 		if s.Terminal() {
 			t.Fatalf("%s should not be terminal", s)
+		}
+	}
+}
+
+// The notice in the thread names whoever the card went to, because on a node
+// that is its owner and not the gateway admin.
+func TestRequesterNoticeNamesTheRecipient(t *testing.T) {
+	for _, state := range []State{StatePending, StateSuccess, StateDenied} {
+		_, raw := render(t, RequesterTemplate, baseData(state))
+		if !strings.Contains(string(raw), `"user_id": "UOWNER"`) {
+			t.Fatalf("the %s notice does not name the recipient:\n%s", state, raw)
+		}
+		if strings.Contains(strings.ToLower(string(raw)), "admin") {
+			t.Fatalf("the %s notice still speaks of an admin:\n%s", state, raw)
 		}
 	}
 }

@@ -2,22 +2,136 @@ package display
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/miere/murtaugh/internal/agent"
 	"github.com/miere/murtaugh/internal/slack/askcard"
+	"github.com/miere/murtaugh/internal/slack/authcard"
 	"github.com/miere/murtaugh/internal/slack/interaction"
 )
 
 // Slack draws questions and plans for agents in this process and for agents on
 // nodes alike, so a card looks the same wherever the tool ran.
 type Slack struct {
-	broker *interaction.Broker
-	cards  *askcard.Flow
+	broker  *interaction.Broker
+	cards   *askcard.Flow
+	signIns *authcard.Flow
+	log     *slog.Logger
 }
 
 func New(broker *interaction.Broker, cards *askcard.Flow) *Slack {
 	return &Slack{broker: broker, cards: cards}
+}
+
+func (s *Slack) WithSignIns(flow *authcard.Flow, log *slog.Logger) *Slack {
+	if log == nil {
+		log = slog.Default()
+	}
+	s.signIns, s.log = flow, log
+	return s
+}
+
+// SignIn answers the prompt when ctx ends, because the process running the
+// sign-in stops only when it is told to.
+func (s *Slack) SignIn(ctx context.Context, loc agent.TurnLocation, prompt *agent.SignInPrompt, settled <-chan agent.SignInSettled) {
+	s.ShowSignIn(ctx, loc, prompt, settled, nil)
+}
+
+// ShowSignIn reports whether the card was drawn before any answer can arrive,
+// so a node never claims its owner was asked when nobody was.
+func (s *Slack) ShowSignIn(ctx context.Context, loc agent.TurnLocation, prompt *agent.SignInPrompt, settled <-chan agent.SignInSettled, shown func(error)) {
+	if shown == nil {
+		shown = func(error) {}
+	}
+	answer := func(a agent.DisplayAnswer) {
+		select {
+		case prompt.Answer <- a:
+		default:
+		}
+	}
+	if s == nil || s.signIns == nil {
+		shown(errors.New("sign-ins are not available in this context"))
+		answer(agent.DisplayAnswer{Outcome: agent.DisplayUnavailable, Note: "Error: sign-ins are not available in this context"})
+		return
+	}
+	req := prompt.Request
+	card, err := s.signIns.Show(ctx, authcard.Showing{
+		ToolName:        req.Tool,
+		ProfileName:     req.Profile,
+		URL:             req.URL,
+		NeedsCode:       req.NeedsCode,
+		Requester:       authcard.Destination{ChannelID: loc.ChannelID, ThreadTS: loc.ThreadTS},
+		RequesterUserID: loc.UserID,
+		Recipient:       prompt.Owner,
+		Command:         req.Command,
+	})
+	if err != nil {
+		s.log.Warn("could not show a sign-in", "tool", req.Tool, "owner", prompt.Owner, "error", err)
+		note := "the sign-in could not be shown in Slack"
+		if errors.Is(err, authcard.ErrNotAllowed) {
+			note = "the owner of this machine may not use this gateway, so nobody was asked to sign in"
+		}
+		shown(errors.New(note))
+		answer(agent.DisplayAnswer{Outcome: agent.DisplayUnavailable, Note: note})
+		return
+	}
+	shown(nil)
+	for {
+		select {
+		case reply := <-card.Replies():
+			switch reply.Kind {
+			case authcard.ReplyApproved:
+				answer(agent.DisplayAnswer{Outcome: agent.DisplayApproved, UserID: reply.UserID})
+				continue
+			case authcard.ReplyCode:
+				answer(agent.DisplayAnswer{Outcome: agent.DisplayAnswered, Code: reply.Code, UserID: reply.UserID})
+				continue
+			case authcard.ReplyDenied:
+				answer(agent.DisplayAnswer{Outcome: agent.DisplayDenied, UserID: reply.UserID})
+				card.Settle(authcard.StateDenied, "")
+			default:
+				answer(agent.DisplayAnswer{Outcome: agent.DisplayUnavailable, Note: authcard.RefusedReason})
+				card.Settle(authcard.StateFailed, authcard.RefusedReason)
+			}
+			return
+		case update := <-settled:
+			switch {
+			case update.State == agent.SignInReady:
+				card.Link(ctx, update.URL)
+			case update.State == agent.SignInConfirming:
+				if card.Allowed() {
+					answer(agent.DisplayAnswer{Outcome: agent.DisplayApproved, UserID: prompt.Owner})
+					continue
+				}
+				answer(agent.DisplayAnswer{Outcome: agent.DisplayUnavailable, Note: authcard.RefusedReason})
+				card.Settle(authcard.StateFailed, authcard.RefusedReason)
+				return
+			case !update.State.Terminal():
+				card.Working(ctx)
+			default:
+				card.Settle(cardState(update.State), update.Reason)
+				return
+			}
+		case <-ctx.Done():
+			answer(agent.DisplayAnswer{Outcome: agent.DisplayDismissed})
+			card.Settle(authcard.StateCancelled, "")
+			return
+		}
+	}
+}
+
+func cardState(s agent.SignInState) authcard.State {
+	switch s {
+	case agent.SignInSuccess:
+		return authcard.StateSuccess
+	case agent.SignInTimedOut:
+		return authcard.StateTimeout
+	case agent.SignInCancelled:
+		return authcard.StateCancelled
+	}
+	return authcard.StateFailed
 }
 
 func (s *Slack) Question(ctx context.Context, loc agent.TurnLocation, req agent.QuestionRequest) (agent.DisplayAnswer, error) {

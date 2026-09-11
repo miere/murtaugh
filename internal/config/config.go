@@ -1440,7 +1440,7 @@ func (c AccessConfig) IsAllowedUser(userID string) bool {
 		return false
 	}
 	admin := strings.TrimPrefix(strings.TrimSpace(c.AdminUser), "@")
-	if looksLikeSlackUserID(admin) && admin == userID {
+	if IsSlackUserID(admin) && admin == userID {
 		return true
 	}
 	for _, allowed := range c.AllowedUsers {
@@ -1462,10 +1462,12 @@ func (c AccessConfig) IsAdminUser(userID string) bool {
 		return false
 	}
 	admin := strings.TrimPrefix(strings.TrimSpace(c.AdminUser), "@")
-	return looksLikeSlackUserID(admin) && admin == userID
+	return IsSlackUserID(admin) && admin == userID
 }
 
-func looksLikeSlackUserID(value string) bool {
+// IsSlackUserID is the one shape an identity must have to match the admin
+// check, so anything that is later authorised against it must be minted in it.
+func IsSlackUserID(value string) bool {
 	if len(value) < 4 {
 		return false
 	}

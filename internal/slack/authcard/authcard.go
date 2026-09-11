@@ -1,11 +1,7 @@
 // Package authcard renders and routes the two-party authentication card.
 //
-// An auth request involves two people. The agent's turn is running for whoever
-// asked it to do something, but the credentials belong to the admin — so the
-// requester gets a partial notice in their thread ("your admin has been
-// notified") and the admin gets the card that actually does the work, in their
-// DM. One lifecycle drives both: whatever the admin does, or fails to do,
-// updates the requester's card and decides the tool's result.
+// The credentials belong to whoever owns the machine signing in, so they get the
+// working card by DM while the requester's thread only hears that it was sent.
 //
 // The cards are Block Kit JSON templates under assets/templates/auth, rendered
 // through internal/jsontemplate and posted verbatim via the client's raw-blocks
@@ -72,25 +68,35 @@ const (
 	ActionOpen Action = "open"
 	// ActionDeny refuses the request outright.
 	ActionDeny Action = "deny"
+	// ActionApprove lets a command the owner was shown start; nothing runs
+	// before it.
+	ActionApprove Action = "approve"
 )
 
 // State is what the pair of cards is currently showing.
 type State string
 
 const (
-	StatePending State = "pending" // posted, waiting on the admin
-	StateWorking State = "working" // primary clicked; buttons retired, waiting on completion
-	StateSuccess State = "success"
-	StateDenied  State = "denied"
-	StateTimeout State = "timeout"
-	StateFailed  State = "failed"
+	// StateApproval and StateStarting come before any link exists, while a command
+	// waits for its owner's approval and then for the link it prints.
+	StateApproval State = "approval"
+	StateStarting State = "starting"
+	StatePending  State = "pending" // posted, waiting on the admin
+	StateWorking  State = "working" // primary clicked; buttons retired, waiting on completion
+	StateSuccess  State = "success"
+	StateDenied   State = "denied"
+	StateTimeout  State = "timeout"
+	StateFailed   State = "failed"
+	// StateCancelled is a sign-in stopped by its turn ending or its node going
+	// away, which nobody declined and which did not fail.
+	StateCancelled State = "cancelled"
 )
 
 // Terminal reports whether s is an end state, after which neither card changes
 // again.
 func (s State) Terminal() bool {
 	switch s {
-	case StateSuccess, StateDenied, StateTimeout, StateFailed:
+	case StateSuccess, StateDenied, StateTimeout, StateFailed, StateCancelled:
 		return true
 	default:
 		return false
@@ -200,6 +206,7 @@ type cardData struct {
 	URL             string
 	NeedsCode       bool
 	RequesterUserID string
+	RecipientUserID string
 	AttemptAt       string
 	State           string
 	Reason          string
@@ -207,10 +214,13 @@ type cardData struct {
 	ShowActions   bool
 	ShowFooter    bool
 	ShowRequester bool
+	ShowApproval  bool
+	Command       string
 
 	ActionPrimary string
 	ActionOpen    string
 	ActionDeny    string
+	ActionApprove string
 }
 
 // Renderer turns the card templates into the raw Block Kit JSON the Slack

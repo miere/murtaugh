@@ -1040,6 +1040,9 @@ func (d *fakeDisplayer) Question(_ context.Context, loc agent.TurnLocation, req 
 	return agent.DisplayAnswer{Outcome: agent.DisplayAnswered, Answers: map[string][]string{"q0": {"Yes"}}, UserID: "U1"}, nil
 }
 
+func (d *fakeDisplayer) SignIn(context.Context, agent.TurnLocation, *agent.SignInPrompt, <-chan agent.SignInSettled) {
+}
+
 func (d *fakeDisplayer) Plan(_ context.Context, loc agent.TurnLocation, req agent.PlanRequest) (agent.DisplayAnswer, error) {
 	d.planLoc, d.plan = loc, req
 	return agent.DisplayAnswer{Outcome: agent.DisplayAnswered, Choice: agent.PlanProceed, UserID: "U1"}, nil
@@ -1127,6 +1130,11 @@ func (d *blockingDisplayer) Question(ctx context.Context, _ agent.TurnLocation, 
 	return agent.DisplayAnswer{Outcome: agent.DisplayDismissed}, nil
 }
 
+func (d *blockingDisplayer) SignIn(ctx context.Context, _ agent.TurnLocation, _ *agent.SignInPrompt, _ <-chan agent.SignInSettled) {
+	<-ctx.Done()
+	close(d.withdrawn)
+}
+
 func (d *blockingDisplayer) Plan(ctx context.Context, _ agent.TurnLocation, _ agent.PlanRequest) (agent.DisplayAnswer, error) {
 	<-ctx.Done()
 	close(d.withdrawn)
@@ -1171,5 +1179,178 @@ func TestChatHandlerWithdrawsACardWhenItsTurnDies(t *testing.T) {
 	case <-drawn.withdrawn:
 	default:
 		t.Fatal("the turn ended but its card was never withdrawn")
+	}
+}
+
+type fakeChatSessionsWithASignIn struct {
+	answers chan agent.DisplayAnswer
+}
+
+func (f *fakeChatSessionsWithASignIn) Prompt(_ context.Context, _ agent.ConversationKey, _ agent.SessionMetadata, _ agent.PromptRequest) (<-chan agent.Event, error) {
+	ch := make(chan agent.Event)
+	go func() {
+		defer close(ch)
+		prompt := &agent.SignInPrompt{
+			Request: agent.SignInRequest{Tool: "gcp-mcp", Profile: "gcloud", URL: "https://accounts.example.com/o/oauth2", NeedsCode: true},
+			Answer:  make(chan agent.DisplayAnswer, 2),
+		}
+		ch <- agent.Event{Type: agent.EventSignIn, SignIn: prompt}
+		f.answers <- <-prompt.Answer
+		ch <- agent.Event{Type: agent.EventSignInSettled, SignInSettled: &agent.SignInSettled{Prompt: prompt, State: agent.SignInCancelled}}
+		ch <- agent.Event{Type: agent.EventText, Text: "I could not sign in."}
+		ch <- agent.Event{Type: agent.EventComplete}
+	}()
+	return ch, nil
+}
+
+func (f *fakeChatSessionsWithASignIn) Lookup(agent.ConversationKey) (string, bool) { return "", false }
+func (f *fakeChatSessionsWithASignIn) Cancel(context.Context, string) error        { return nil }
+
+// A sign-in nobody can draw is still answered, so the node stops its sign-in
+// process instead of holding it open until the turn is torn down.
+func TestChatHandlerWithNothingToDrawASignInAnswersUnavailable(t *testing.T) {
+	f := &fakeChatSessionsWithASignIn{answers: make(chan agent.DisplayAnswer, 1)}
+	handler := NewChatHandler(&fakeStreamAPI{}, map[string]ChatSessionManager{"default": f}, func(ChatRequest) ChatRoute { return ChatRoute{Agent: "default", ReplyOnThread: true} }, time.Hour, 5, nil)
+	done := make(chan error, 1)
+	go func() {
+		done <- handler.handleResolving(context.Background(), ChatRequest{TeamID: "T1", ChannelID: "C1", UserID: "U1", MessageTS: "123.4", Text: "hi", Source: "test"})
+	}()
+	select {
+	case got := <-f.answers:
+		if got.Outcome != agent.DisplayUnavailable {
+			t.Fatalf("answered %+v with nothing to draw it", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a sign-in nobody can draw was never answered")
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Handle returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the turn did not finish after its sign-in settled")
+	}
+}
+
+type signInDisplayer struct {
+	loc     agent.TurnLocation
+	owner   string
+	updates []agent.SignInState
+	done    chan struct{}
+}
+
+func (d *signInDisplayer) Question(context.Context, agent.TurnLocation, agent.QuestionRequest) (agent.DisplayAnswer, error) {
+	return agent.DisplayAnswer{Outcome: agent.DisplayUnavailable}, nil
+}
+
+func (d *signInDisplayer) Plan(context.Context, agent.TurnLocation, agent.PlanRequest) (agent.DisplayAnswer, error) {
+	return agent.DisplayAnswer{Outcome: agent.DisplayUnavailable}, nil
+}
+
+func (d *signInDisplayer) SignIn(ctx context.Context, loc agent.TurnLocation, prompt *agent.SignInPrompt, settled <-chan agent.SignInSettled) {
+	defer close(d.done)
+	d.loc, d.owner = loc, prompt.Owner
+	prompt.Answer <- agent.DisplayAnswer{Outcome: agent.DisplayAnswered, Code: "4/0Ab-code", UserID: prompt.Owner}
+	for {
+		select {
+		case update := <-settled:
+			d.updates = append(d.updates, update.State)
+			if update.State.Terminal() {
+				return
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+type fakeChatSessionsSigningIn struct {
+	owner   string
+	answers chan agent.DisplayAnswer
+}
+
+func (f *fakeChatSessionsSigningIn) Prompt(_ context.Context, _ agent.ConversationKey, _ agent.SessionMetadata, _ agent.PromptRequest) (<-chan agent.Event, error) {
+	ch := make(chan agent.Event)
+	go func() {
+		defer close(ch)
+		prompt := &agent.SignInPrompt{
+			Request: agent.SignInRequest{Tool: "gcp-mcp", Profile: "gcloud", URL: "https://accounts.example.com/o/oauth2", NeedsCode: true},
+			Owner:   f.owner,
+			Answer:  make(chan agent.DisplayAnswer, 2),
+		}
+		ch <- agent.Event{Type: agent.EventSignIn, SignIn: prompt}
+		f.answers <- <-prompt.Answer
+		ch <- agent.Event{Type: agent.EventSignInSettled, SignInSettled: &agent.SignInSettled{Prompt: prompt, State: agent.SignInWorking}}
+		ch <- agent.Event{Type: agent.EventSignInSettled, SignInSettled: &agent.SignInSettled{Prompt: prompt, State: agent.SignInSuccess}}
+		ch <- agent.Event{Type: agent.EventText, Text: "Signed in."}
+		ch <- agent.Event{Type: agent.EventComplete}
+	}()
+	return ch, nil
+}
+
+func (f *fakeChatSessionsSigningIn) Lookup(agent.ConversationKey) (string, bool) { return "", false }
+func (f *fakeChatSessionsSigningIn) Cancel(context.Context, string) error        { return nil }
+
+// A sign-in is drawn against the turn's conversation for the owner it carries,
+// and the node's progress reaches the drawing before the reply that follows it.
+func TestChatHandlerDrawsASignInForItsOwnerAndSettlesIt(t *testing.T) {
+	drawn := &signInDisplayer{done: make(chan struct{})}
+	f := &fakeChatSessionsSigningIn{owner: "UOWNER", answers: make(chan agent.DisplayAnswer, 1)}
+	handler := NewChatHandler(&fakeStreamAPI{}, map[string]ChatSessionManager{"default": f}, func(ChatRequest) ChatRoute { return ChatRoute{Agent: "default", ReplyOnThread: true} }, time.Hour, 5, nil).
+		WithDisplay(drawn)
+	if err := handler.handleResolving(context.Background(), ChatRequest{TeamID: "T1", ChannelID: "C1", UserID: "U1", MessageTS: "123.4", Text: "hi", Source: "test"}); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	<-drawn.done
+	if want := (agent.TurnLocation{ChannelID: "C1", ThreadTS: "123.4", UserID: "U1"}); drawn.loc != want || drawn.owner != "UOWNER" {
+		t.Fatalf("drawn at %+v for %q, want %+v for UOWNER", drawn.loc, drawn.owner, want)
+	}
+	if got := <-f.answers; got.Code != "4/0Ab-code" {
+		t.Fatalf("the code came back as %+v", got)
+	}
+	if len(drawn.updates) != 2 || drawn.updates[0] != agent.SignInWorking || drawn.updates[1] != agent.SignInSuccess {
+		t.Fatalf("the drawing saw %v, want working then success", drawn.updates)
+	}
+}
+
+type fakeChatSessionsDyingUnderASignIn struct{}
+
+func (f *fakeChatSessionsDyingUnderASignIn) Prompt(_ context.Context, _ agent.ConversationKey, _ agent.SessionMetadata, _ agent.PromptRequest) (<-chan agent.Event, error) {
+	ch := make(chan agent.Event, 2)
+	ch <- agent.Event{Type: agent.EventSignIn, SignIn: &agent.SignInPrompt{
+		Request: agent.SignInRequest{Tool: "gcp-mcp", Profile: "gcloud", URL: "https://accounts.example.com"},
+		Answer:  make(chan agent.DisplayAnswer, 2),
+	}}
+	ch <- agent.Event{Type: agent.EventError, Error: fmt.Errorf("remote: connection to the node failed")}
+	close(ch)
+	return ch, nil
+}
+
+func (f *fakeChatSessionsDyingUnderASignIn) Lookup(agent.ConversationKey) (string, bool) {
+	return "", false
+}
+func (f *fakeChatSessionsDyingUnderASignIn) Cancel(context.Context, string) error { return nil }
+
+// A node that goes away mid-sign-in cannot settle it, so the gateway withdraws
+// the cards itself instead of leaving them live.
+func TestChatHandlerWithdrawsASignInWhenItsTurnDies(t *testing.T) {
+	drawn := &blockingDisplayer{withdrawn: make(chan struct{})}
+	handler := NewChatHandler(&fakeStreamAPI{}, map[string]ChatSessionManager{"default": &fakeChatSessionsDyingUnderASignIn{}}, func(ChatRequest) ChatRoute { return ChatRoute{Agent: "default", ReplyOnThread: true} }, time.Hour, 5, nil).
+		WithDisplay(drawn)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = handler.handleResolving(context.Background(), ChatRequest{TeamID: "T1", ChannelID: "C1", UserID: "U1", MessageTS: "123.4", Text: "hi", Source: "test"})
+	}()
+	select {
+	case <-drawn.withdrawn:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the sign-in was not withdrawn when its turn died")
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the turn did not finish after its sign-in was withdrawn")
 	}
 }

@@ -1,36 +1,48 @@
-// Package request implements the `auth.request` tool: the agent's way to ask
-// for credentials it does not have, and WAIT until an admin has granted them.
-//
-// The tool never authenticates anything by itself. It posts a card to the
-// configured admin — the only person who can approve — and blocks until the
-// admin completes the sign-in, denies it, or the request expires. The requester
-// sees a partial notice in their own thread and nothing more.
-//
-// It fails closed: anything other than a completed authentication returns an
-// error, so a model cannot read a denial or a timeout as permission to carry on.
+// Package request implements `auth.request`, which runs a sign-in where the
+// agent runs, because that machine's credentials are the ones missing.
 package request
 
 import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
 
 	"github.com/miere/murtaugh/internal/agent"
 	"github.com/miere/murtaugh/internal/auth"
-	"github.com/miere/murtaugh/internal/slack/authcard"
 )
+
+// Display is how the tool reaches whoever draws the turn; it names no Slack
+// destination, so a node can never aim a sign-in card anywhere.
+type Display interface {
+	SignIn(ctx context.Context, req agent.SignInRequest) (*agent.SignInPrompt, bool)
+	SettleSignIn(ctx context.Context, update agent.SignInSettled)
+}
 
 // Tool is the `auth.request` capability.
 type Tool struct {
-	flow *authcard.Flow
+	display  Display
+	headless Display
+	timeout  time.Duration
+	urlWait  time.Duration
 }
 
-// New constructs the tool against the shared auth flow. A nil flow leaves the
-// tool registered but inert — the right behaviour where there is no gateway to
-// route the admin's click back from.
-func New(flow *authcard.Flow) *Tool { return &Tool{flow: flow} }
+const confirmTimeout = 30 * time.Second
+
+// New leaves the tool registered but inert with a nil display, which is right
+// wherever nothing can draw a card.
+func New(display Display) *Tool {
+	return &Tool{display: display, timeout: auth.DefaultTimeout, urlWait: auth.DefaultURLWait}
+}
+
+// WithoutConversation exists because a machine's owner can be reached by DM
+// even from work nobody is chatting in, such as a scheduled job.
+func (t *Tool) WithoutConversation(display Display) *Tool {
+	t.headless = display
+	return t
+}
 
 // Name returns the registry key.
 func (t *Tool) Name() string { return "auth.request" }
@@ -43,15 +55,17 @@ func (t *Tool) Name() string { return "auth.request" }
 // authentication" tells an admin nothing about which request they are
 // approving; "the tool 'gcp-mcp' requires authentication" does.
 func (t *Tool) Description() string {
-	return "Request credentials you do not have and WAIT until an admin grants them. Use this " +
+	return "Request credentials you do not have and WAIT until they are granted. Use this " +
 		"when a tool call has failed because of missing or expired authentication — never " +
 		"guess, retry blindly, or ask the user to run auth commands themselves. " +
 		"Pass `tool` as the capability that is DIRECTLY affected — the MCP server or tool the " +
 		"user recognises (e.g. `gcp-mcp`, `postgres-mcp`), NOT the helper binary it shells out " +
 		"to underneath (e.g. `gcloud`). Name the helper only when you are invoking it yourself. " +
-		"The request goes to the configured admin, not to whoever you are talking to. Returns " +
-		"an error if the admin denies it, it times out, or authentication fails — treat any " +
-		"error as a hard stop and do not retry the original call."
+		"The sign-in runs on the machine you run on, and that machine's owner is sent a direct " +
+		"message to complete it — not whoever you are talking to. Returns an error if the owner " +
+		"declines it, it times out, or authentication fails — treat any error as a hard stop and " +
+		"do not retry the original call. Outside a Slack conversation it only works on a runtime " +
+		"node, where the owner is always reached by direct message."
 }
 
 // InputSchema declares the profile selector plus the two custom-only arguments.
@@ -108,75 +122,182 @@ type Result struct {
 
 // String renders the line fed back to the model / shown in the CLI.
 func (r Result) String() string {
-	return fmt.Sprintf("Authentication for %s completed by the admin (profile: %s). Retry the call that failed.", r.Tool, r.Profile)
+	return fmt.Sprintf("Signed in for %s (profile: %s). Retry the call that failed.", r.Tool, r.Profile)
 }
 
-// Invoke posts the request and blocks until it reaches a terminal state.
+// Invoke refuses before starting anything when there is no conversation and no
+// owner to message, because a sign-in nobody can be shown would run until it timed out.
 func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
-	if t.flow == nil {
+	if t.display == nil {
 		return nil, fmt.Errorf("Error: authentication requests are not available in this context")
 	}
 	toolName := strings.TrimSpace(stringArg(args, "tool"))
 	if toolName == "" {
 		return nil, fmt.Errorf("Error: `tool` is required — name the capability that needs authentication")
 	}
-
-	profile, err := auth.Resolve(
-		stringArg(args, "profile"),
-		stringArg(args, "command"),
-		boolArg(args, "needs_code"),
-	)
+	profile, err := auth.Resolve(stringArg(args, "profile"), stringArg(args, "command"), boolArg(args, "needs_code"))
 	if err != nil {
 		return nil, fmt.Errorf("Error: %s", err.Error())
 	}
-
-	outcome, err := t.flow.Run(ctx, newRequest(ctx, toolName, profile))
-	if err != nil {
-		return nil, fmt.Errorf("Error: %s", err.Error())
+	display := t.display
+	if _, ok := agent.TurnLocationFromContext(ctx); !ok {
+		if t.headless == nil {
+			return nil, errNoConversation()
+		}
+		display = t.headless
 	}
 
-	switch {
-	case outcome.Authenticated:
-		return Result{Authenticated: true, Tool: toolName, Profile: profile.Name}, nil
-	case outcome.Denied:
-		return nil, fmt.Errorf("Error: the admin denied the authentication request for %s. Stop and tell the user; do not retry", toolName)
-	case outcome.TimedOut:
-		return nil, fmt.Errorf("Error: the authentication request for %s expired before the admin completed it. Stop and tell the user; do not retry", toolName)
-	case outcome.Cancelled:
-		return nil, fmt.Errorf("Error: the authentication request for %s was cancelled", toolName)
-	default:
-		return nil, fmt.Errorf("Error: authentication for %s failed: %s", toolName, fallback(outcome.Reason, "no further detail was reported"))
+	timer := time.NewTimer(t.timeout)
+	defer timer.Stop()
+	req := agent.SignInRequest{Tool: toolName, Profile: profile.Name, NeedsCode: profile.NeedsCode, Command: profile.ApprovalCommand()}
+	var prompt *agent.SignInPrompt
+	settle := func(state agent.SignInState, reason string) {
+		display.SettleSignIn(context.WithoutCancel(ctx), agent.SignInSettled{Prompt: prompt, State: state, Reason: reason})
+	}
+	start := func() (*auth.Login, string, error) {
+		login, url, err := auth.StartLogin(ctx, profile, agent.TurnEnvFromContext(ctx), t.urlWait)
+		if err != nil {
+			return nil, "", fmt.Errorf("Error: authentication for %s failed: %s", toolName, err.Error())
+		}
+		return login, url, nil
+	}
+
+	var login *auth.Login
+	if req.Command != "" {
+		var ok bool
+		if prompt, ok = display.SignIn(ctx, req); !ok {
+			return nil, fmt.Errorf("Error: the sign-in for %s could not be shown to anyone, so its command was not run", toolName)
+		}
+		if err := t.awaitApproval(ctx, prompt, timer, settle, toolName); err != nil {
+			return nil, err
+		}
+		l, url, err := start()
+		if err != nil {
+			settle(agent.SignInFailed, err.Error())
+			return nil, err
+		}
+		login = l
+		display.SettleSignIn(context.WithoutCancel(ctx), agent.SignInSettled{Prompt: prompt, State: agent.SignInReady, URL: url})
+	} else {
+		l, url, err := start()
+		if err != nil {
+			return nil, err
+		}
+		login = l
+		req.URL = url
+		var ok bool
+		if prompt, ok = display.SignIn(ctx, req); !ok {
+			login.Stop()
+			return nil, fmt.Errorf("Error: the sign-in for %s could not be shown to anyone, so it was stopped", toolName)
+		}
+	}
+	defer login.Stop()
+
+	for {
+		select {
+		case answer := <-prompt.Answer:
+			if answer.Outcome == agent.DisplayAnswered {
+				if answer.Code == "" {
+					continue
+				}
+				if err := login.SendCode(answer.Code); err != nil {
+					reason := "could not hand the verification code to the authentication command: " + err.Error()
+					settle(agent.SignInFailed, reason)
+					return nil, fmt.Errorf("Error: authentication for %s failed: %s", toolName, reason)
+				}
+				settle(agent.SignInWorking, "")
+				continue
+			}
+			if answer.Outcome == agent.DisplayApproved {
+				continue
+			}
+			settle(agent.SignInCancelled, "")
+			return nil, stopped(toolName, answer)
+
+		case <-login.Exited():
+			ok, detail := login.Result()
+			if ok {
+				return t.confirm(ctx, prompt, settle, toolName, profile.Name)
+			}
+			settle(agent.SignInFailed, detail)
+			return nil, fmt.Errorf("Error: authentication for %s failed: %s", toolName, detail)
+
+		case <-timer.C:
+			settle(agent.SignInTimedOut, "the sign-in expired before it was completed")
+			return nil, fmt.Errorf("Error: the sign-in for %s expired before it was completed. Stop and tell the user; do not retry", toolName)
+
+		case <-ctx.Done():
+			settle(agent.SignInCancelled, "")
+			return nil, fmt.Errorf("Error: the sign-in for %s was cancelled", toolName)
+		}
 	}
 }
 
-// newRequest assembles what the flow needs from the turn context.
-//
-// Both reads are of the CALLER, not of the arguments, and neither can be
-// supplied by the model: the location decides which thread hears about the
-// request, and the environment decides where the credential is written. A model
-// that could name either could redirect somebody else's sign-in.
-func newRequest(ctx context.Context, toolName string, profile auth.Profile) authcard.Request {
-	req := authcard.Request{
-		ToolName: toolName,
-		Profile:  profile,
-		// The sign-in has to run in the same environment as the agent that asked
-		// for it, or the credential lands where the agent will not look for it.
-		Env: agent.TurnEnvFromContext(ctx),
+func (t *Tool) confirm(ctx context.Context, prompt *agent.SignInPrompt, settle func(agent.SignInState, string), toolName, profileName string) (any, error) {
+	settle(agent.SignInConfirming, "")
+	timer := time.NewTimer(confirmTimeout)
+	defer timer.Stop()
+	for {
+		select {
+		case answer := <-prompt.Answer:
+			switch answer.Outcome {
+			case agent.DisplayApproved:
+				settle(agent.SignInSuccess, "")
+				return Result{Authenticated: true, Tool: toolName, Profile: profileName}, nil
+			case agent.DisplayAnswered:
+				continue
+			}
+			settle(agent.SignInFailed, "the owner of this machine lost access before the sign-in finished")
+			return nil, fmt.Errorf("Error: the owner of this machine lost access before the sign-in for %s finished, so it counts as declined. Stop and tell the user; do not retry", toolName)
+		case <-timer.C:
+			settle(agent.SignInFailed, "nobody confirmed the owner could still use the gateway")
+			return nil, fmt.Errorf("Error: the sign-in for %s finished, but nobody could confirm its owner may still use the gateway, so it counts as declined. Stop and tell the user; do not retry", toolName)
+		case <-ctx.Done():
+			settle(agent.SignInCancelled, "")
+			return nil, fmt.Errorf("Error: the sign-in for %s was cancelled", toolName)
+		}
 	}
-	// Outside a Slack turn (CLI/MCP) there is no requester to notify, and the
-	// flow collapses to the admin card alone.
-	if loc, ok := agent.TurnLocationFromContext(ctx); ok {
-		req.Requester = authcard.Destination{ChannelID: loc.ChannelID, ThreadTS: loc.ThreadTS}
-		req.RequesterUserID = loc.UserID
-	}
-	return req
 }
 
-func fallback(s, alt string) string {
-	if strings.TrimSpace(s) == "" {
-		return alt
+func (t *Tool) awaitApproval(ctx context.Context, prompt *agent.SignInPrompt, timer *time.Timer, settle func(agent.SignInState, string), toolName string) error {
+	for {
+		select {
+		case answer := <-prompt.Answer:
+			switch answer.Outcome {
+			case agent.DisplayApproved:
+				return nil
+			case agent.DisplayAnswered:
+				continue
+			}
+			settle(agent.SignInCancelled, "")
+			return stopped(toolName, answer)
+		case <-timer.C:
+			settle(agent.SignInTimedOut, "nobody approved the command before the sign-in expired")
+			return fmt.Errorf("Error: nobody approved the sign-in for %s before it expired, so its command was not run. Stop and tell the user; do not retry", toolName)
+		case <-ctx.Done():
+			settle(agent.SignInCancelled, "")
+			return fmt.Errorf("Error: the sign-in for %s was cancelled before its command was approved", toolName)
+		}
 	}
-	return s
+}
+
+func stopped(toolName string, answer agent.DisplayAnswer) error {
+	switch answer.Outcome {
+	case agent.DisplayDenied:
+		return fmt.Errorf("Error: the owner of this machine declined the sign-in for %s. Stop and tell the user; do not retry", toolName)
+	case agent.DisplayDismissed:
+		return fmt.Errorf("Error: the sign-in for %s was cancelled", toolName)
+	case agent.DisplayNoConversation:
+		return errNoConversation()
+	}
+	if answer.Note != "" {
+		return fmt.Errorf("Error: the sign-in for %s was stopped: %s", toolName, answer.Note)
+	}
+	return fmt.Errorf("Error: sign-ins are not available in this context")
+}
+
+func errNoConversation() error {
+	return fmt.Errorf("Error: the auth.request tool only works inside a Slack conversation")
 }
 
 func stringArg(args map[string]any, key string) string {

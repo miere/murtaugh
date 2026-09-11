@@ -48,6 +48,8 @@ type Options struct {
 	// indistinguishable to the gateway from a node that has never been
 	// configured.
 	Advertise *Advertiser
+
+	SignIns *SignIns
 	// Configure applies the agent profiles a Slack onboarding form produced for
 	// this node's owner, into this node's OWN store.
 	//
@@ -119,6 +121,7 @@ type ask struct {
 	stream  string
 	answer  chan agentwire.PermissionResponse
 	display bool
+	open    bool
 }
 
 // Serve runs one connection to completion and returns why it ended.
@@ -175,6 +178,10 @@ func Serve(ctx context.Context, conn nodelink.Conn, client agent.Client, opts Op
 	if opts.Advertise != nil {
 		opts.Advertise.bind(s)
 		defer opts.Advertise.unbind(s)
+	}
+	if opts.SignIns != nil {
+		opts.SignIns.bind(s)
+		defer opts.SignIns.unbind(s)
 	}
 
 	select {
@@ -515,7 +522,9 @@ func (s *Server) answerDisplay(msg agentwire.Message) {
 func (s *Server) deliverDisplay(answer agentwire.DisplayAnswer) {
 	s.mu.Lock()
 	pending := s.asks[answer.ID]
-	delete(s.asks, answer.ID)
+	if pending != nil && !pending.open {
+		delete(s.asks, answer.ID)
+	}
 	s.mu.Unlock()
 	if pending == nil {
 		s.log.Debug("nodeserve: display answer for an unknown request", "id", answer.ID)
@@ -548,6 +557,12 @@ func (s *Server) registerDisplay(id, stream string) {
 	s.mu.Unlock()
 }
 
+func (s *Server) registerSignIn(id, stream string) {
+	s.mu.Lock()
+	s.asks[id] = &ask{stream: stream, display: true, open: true}
+	s.mu.Unlock()
+}
+
 func (s *Server) forget(id string) {
 	s.mu.Lock()
 	delete(s.asks, id)
@@ -565,12 +580,16 @@ func (s *Server) dismissTurnAsks(stream string) {
 	s.mu.Lock()
 	dismissals := make([]agentwire.PermissionResponse, 0, len(s.asks))
 	var displays []agentwire.DisplayAnswer
+	var signIns []string
 	for id, pending := range s.asks {
 		if pending.stream != stream {
 			continue
 		}
 		if pending.display {
 			displays = append(displays, agentwire.DisplayAnswer{ID: id, Outcome: string(agent.DisplayDismissed)})
+			if pending.open {
+				signIns = append(signIns, id)
+			}
 			continue
 		}
 		resp := agentwire.PermissionResponse{ID: id}
@@ -588,6 +607,10 @@ func (s *Server) dismissTurnAsks(stream string) {
 	}
 	for _, answer := range displays {
 		s.deliverDisplay(answer)
+	}
+	for _, id := range signIns {
+		s.forget(id)
+		s.enc.Abandon(id)
 	}
 }
 
@@ -620,6 +643,7 @@ func (s *Server) shutdown() {
 		// down. The gateway's own failAll is what tells the user.
 		s.endTurn(id, false)
 	}
+	s.dismissTurnAsks("")
 	s.failCalls()
 	s.cancel()
 }

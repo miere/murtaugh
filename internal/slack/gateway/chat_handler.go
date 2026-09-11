@@ -317,6 +317,7 @@ func (h *ChatHandler) WithPermissionAskers(askers map[string]agent.PermissionAsk
 type displayer interface {
 	Question(ctx context.Context, loc agent.TurnLocation, req agent.QuestionRequest) (agent.DisplayAnswer, error)
 	Plan(ctx context.Context, loc agent.TurnLocation, req agent.PlanRequest) (agent.DisplayAnswer, error)
+	SignIn(ctx context.Context, loc agent.TurnLocation, prompt *agent.SignInPrompt, settled <-chan agent.SignInSettled)
 }
 
 func (h *ChatHandler) WithDisplay(d displayer) *ChatHandler {
@@ -826,6 +827,12 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest, route ChatRou
 				event.Plan.Answer <- answer
 			}
 			resetIdleTimer(idle, h.effectiveIdleTimeout())
+		case agent.EventSignIn:
+			if event.SignIn == nil {
+				continue
+			}
+			held = append(held, h.drawSignIn(ctx, renderer, events, event.SignIn, req, streamThreadTS)...)
+			resetIdleTimer(idle, h.effectiveIdleTimeout())
 		case agent.EventError:
 			// Recorded first so every exit below reports the same cause — including
 			// the cancellation path, which the session log reads as an interrupt
@@ -927,6 +934,50 @@ func (h *ChatHandler) draw(ctx context.Context, renderer chatRenderer, events <-
 			return agent.DisplayAnswer{Outcome: agent.DisplayUnavailable, Note: result.err.Error()}, held
 		}
 		return result.answer, held
+	}
+}
+
+func (h *ChatHandler) drawSignIn(ctx context.Context, renderer chatRenderer, events <-chan agent.Event, prompt *agent.SignInPrompt, req ChatRequest, threadTS string) []heldEvent {
+	renderer.BeginInterjection(ctx)
+	if h.display == nil {
+		h.logger.Warn("agent raised a sign-in but nothing can draw it", "channel", req.ChannelID, "tool", prompt.Request.Tool)
+		select {
+		case prompt.Answer <- agent.DisplayAnswer{Outcome: agent.DisplayUnavailable}:
+		default:
+		}
+		return nil
+	}
+	cardCtx, withdraw := context.WithCancel(ctx)
+	defer withdraw()
+	settled := make(chan agent.SignInSettled)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.display.SignIn(cardCtx, agent.TurnLocation{ChannelID: req.ChannelID, ThreadTS: threadTS, UserID: req.UserID}, prompt, settled)
+	}()
+
+	var held []heldEvent
+	for {
+		select {
+		case <-done:
+			return held
+		case ev, ok := <-events:
+			if ok && ev.SignInSettled != nil && ev.SignInSettled.Prompt == prompt {
+				select {
+				case settled <- *ev.SignInSettled:
+				case <-done:
+					return held
+				}
+				continue
+			}
+			held = append(held, heldEvent{event: ev, ok: ok})
+			if ok && ev.Type != agent.EventError && ev.Type != agent.EventComplete {
+				continue
+			}
+			withdraw()
+			<-done
+			return held
+		}
 	}
 }
 

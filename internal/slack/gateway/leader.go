@@ -98,6 +98,7 @@ func (a *Gateway) StartServing(ctx context.Context) error {
 	}
 	if a.auth != nil {
 		a.auth.SetAdmin(a.access().AdminUser, a.access().IsAdminUser)
+		a.auth.SetAuthorised(func(userID string) bool { return a.access().IsAllowedUser(userID) })
 	}
 
 	// Child of the caller's context so daemon shutdown stops serving too; the

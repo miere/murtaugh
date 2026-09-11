@@ -47,8 +47,8 @@ type NodeToken struct {
 	// NodeID is the node this credential identifies. The gateway resolves it
 	// FROM the token; a node never asserts it.
 	NodeID string
-	// UserID is the Murtaugh user the node acts for, resolved the same way and
-	// for the same reason.
+	// UserID is the Slack user who owns the node, resolved from the token for the
+	// same reason; sign-ins and access checks can only match a Slack user ID.
 	UserID string
 	// Label is the operator's note about where this credential lives ("mac
 	// mini", "rotation 2026-09"). Free text, no meaning to the code.

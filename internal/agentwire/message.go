@@ -67,6 +67,10 @@ const (
 	// reconfigure a running one. See configure.go for why that guarantee lives
 	// on the node rather than in this constant.
 	MethodConfigure Method = "node.configure"
+	MethodSignIn    Method = "node.sign_in"
+	// MethodSignInSettled is answered so the node sends the next update only
+	// once the gateway holds the last, which keeps the card's states in order.
+	MethodSignInSettled Method = "node.sign_in.settled"
 )
 
 // Message is one payload: what the envelope wraps.

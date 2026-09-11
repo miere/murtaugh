@@ -75,7 +75,7 @@ func (t *mintTool) InputSchema() *jsonschema.Schema {
 		Type: "object",
 		Properties: map[string]*jsonschema.Schema{
 			"node":       {Type: "string", Description: "node id this credential identifies (required)"},
-			"user":       {Type: "string", Description: "Murtaugh user the node acts for (required)"},
+			"user":       {Type: "string", Description: "Slack user ID (U… or W…) of the node's owner, who receives its sign-in requests; a handle or name is refused (required)"},
 			"label":      {Type: "string", Description: "free-text note about where this credential lives"},
 			"expires_in": {Type: "string", Description: "lifetime as a Go duration (e.g. 720h); omitted means it lasts until revoked"},
 			"token_file": {Type: "string", Description: "write the token to this file (mode 0600) instead of returning it"},
@@ -91,6 +91,9 @@ func (t *mintTool) Invoke(ctx context.Context, args map[string]any) (any, error)
 	userID, err := requireString(args, "user")
 	if err != nil {
 		return nil, err
+	}
+	if !config.IsSlackUserID(userID) {
+		return nil, fmt.Errorf("--user must be the Slack user ID of the node's owner (like U012ABCDEF or W012ABCDEF), not %q", userID)
 	}
 	label, _ := stringArg(args, "label")
 
