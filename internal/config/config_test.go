@@ -509,6 +509,23 @@ func TestALeftoverProgressDisplayIsIgnored(t *testing.T) {
 	}
 }
 
+// Agents stored while icons existed still carry one, and must keep loading
+// whatever it holds.
+func TestALeftoverAgentIconIsIgnored(t *testing.T) {
+	cfg, err := Parse(testConfig(""))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	var profile AgentProfile
+	if err := json.Unmarshal([]byte(`{"acp":{"command":"/bin/agent"},"icon":"robot.png"}`), &profile); err != nil {
+		t.Fatalf("decode stored agent: %v", err)
+	}
+	cfg.Agents = map[string]AgentProfile{"coder": profile}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("a stored icon stopped the configuration loading: %v", err)
+	}
+}
+
 func TestJobValidationAcceptsReportToOnAnAgentJob(t *testing.T) {
 	cfg, err := Parse(testConfig(""))
 	if err != nil {
