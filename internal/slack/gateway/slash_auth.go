@@ -8,6 +8,7 @@ import (
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/socketmode"
 
+	"github.com/miere/murtaugh/internal/agentruntime"
 	"github.com/miere/murtaugh/internal/slack/alertcard"
 )
 
@@ -90,6 +91,9 @@ func authSlashWantsStatus(text string) bool {
 // what makes it safe to render into an ephemeral Slack message and, by the same
 // token, into the diagnostics bundle.
 func (a *Gateway) credentialStatusText() string {
+	if a.credReports != nil {
+		return nodeCredentialStatusText(a.credReports(), time.Now())
+	}
 	if a.credWarden == nil {
 		return "No `claude_code` agent is configured, so no Claude Code credential is being watched."
 	}
@@ -133,6 +137,33 @@ func (a *Gateway) credentialStatusText() string {
 		if s.LastError != "" {
 			fmt.Fprintf(&b, "    :warning: %s\n", s.LastError)
 		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func nodeCredentialStatusText(reports []agentruntime.CredentialHealth, now time.Time) string {
+	if len(reports) == 0 {
+		return "No connected runtime node has reported a Claude Code credential. " +
+			"A node reports each one it watches when it connects, and again whenever one starts or stops failing."
+	}
+	var b strings.Builder
+	b.WriteString("*Claude Code credentials on runtime nodes*\n")
+	for _, r := range reports {
+		fmt.Fprintf(&b, "• node `%s` (<@%s>): `%s`\n", r.NodeID, r.Owner, r.Credential)
+		if r.Degraded {
+			fmt.Fprintf(&b, "    *failing* since %s ago\n", now.Sub(r.Since).Round(time.Minute).String())
+		} else {
+			b.WriteString("    working\n")
+		}
+		if r.ExpiresAt.IsZero() {
+			b.WriteString("    expiry: _not yet read_\n")
+		} else {
+			fmt.Fprintf(&b, "    expiry: %s\n", relativeExpiry(r.ExpiresAt, now))
+		}
+		if r.Reason != "" {
+			fmt.Fprintf(&b, "    :warning: %s\n", r.Reason)
+		}
+		fmt.Fprintf(&b, "    reported %s ago\n", now.Sub(r.ReportedAt).Round(time.Second).String())
 	}
 	return strings.TrimRight(b.String(), "\n")
 }

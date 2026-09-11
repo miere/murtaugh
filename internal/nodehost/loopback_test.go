@@ -53,9 +53,11 @@ type loopback struct {
 	gate     *nodeserve.ToolGate
 	// background is the NODE's sink — what a backend on the node calls when it
 	// emits outside a turn.
-	background *nodeserve.BackgroundSink
-	signIns    *nodeserve.SignIns
-	approved   chan approval
+	background  *nodeserve.BackgroundSink
+	signIns     *nodeserve.SignIns
+	credentials *nodeserve.Credentials
+	reports     func() []agentruntime.CredentialHealth
+	approved    chan approval
 	// notices is what the GATEWAY's background hook received. It is the far end
 	// of the same path.
 	notices chan notice
@@ -116,8 +118,10 @@ type rigConfig struct {
 	// restart is what the NODE does after applying a configuration whose answer
 	// said it would restart. nil is a node that applies and keeps running, which
 	// is only useful to a test.
-	restart    func()
-	drawSignIn func(context.Context, *agent.SignInPrompt, <-chan agent.SignInSettled, func(error))
+	restart          func()
+	drawSignIn       func(context.Context, *agent.SignInPrompt, <-chan agent.SignInSettled, func(error))
+	credentialsNow   func() []agentwire.CredentialHealth
+	credentialHealth func(agentruntime.CredentialHealth)
 	// logs, when set, is where the GATEWAY's own logger writes. Some of what
 	// this Host does is only observable there — a WARN about a turn it does not
 	// recognise has no other output — and a warning nothing asserts is a warning
@@ -173,6 +177,10 @@ func restarting(restart func()) rigOption {
 
 func drawingSignIns(draw func(context.Context, *agent.SignInPrompt, <-chan agent.SignInSettled, func(error))) rigOption {
 	return func(c *rigConfig) { c.drawSignIn = draw }
+}
+
+func reportingCredentials(now func() []agentwire.CredentialHealth, heard func(agentruntime.CredentialHealth)) rigOption {
+	return func(c *rigConfig) { c.credentialsNow, c.credentialHealth = now, heard }
 }
 
 // logging captures what the GATEWAY logs, at WARN and above.
@@ -257,12 +265,14 @@ func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *lo
 		BackgroundEvents: func(sessionID string, ev agent.Event) {
 			notices <- notice{sessionID: sessionID, event: ev}
 		},
-		SignIn: cfg.drawSignIn,
+		SignIn:           cfg.drawSignIn,
+		CredentialHealth: cfg.credentialHealth,
 	})
 
 	gate := nodeserve.NewToolGate(testLogger())
 	background := nodeserve.NewBackgroundSink(testLogger())
 	signIns := nodeserve.NewSignIns(testLogger())
+	credentials := nodeserve.NewCredentials(testLogger(), cfg.credentialsNow)
 	claim := nodeserve.NewAdvertiser(testLogger())
 	// Set while unbound, exactly as cmd/murtaugh-runtime sets it before its
 	// first dial: the value is held and the handshake answer carries it.
@@ -282,6 +292,7 @@ func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *lo
 			Gate:        gate,
 			Background:  background,
 			SignIns:     signIns,
+			Credentials: credentials,
 			Advertise:   claim,
 			Configure:   cfg.configure,
 			Restart:     cfg.restart,
@@ -317,6 +328,8 @@ func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *lo
 		claim:      claim,
 
 		nodeStopped: nodeStopped,
+		credentials: credentials,
+		reports:     runtime.CredentialReports,
 	}
 }
 

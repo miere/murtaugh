@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/miere/murtaugh/internal/agent"
 	"github.com/miere/murtaugh/internal/agent/remote"
+	"github.com/miere/murtaugh/internal/agentruntime"
 	"github.com/miere/murtaugh/internal/agentwire"
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/journal"
@@ -155,6 +157,7 @@ type Host struct {
 	approve    func(ctx context.Context, toolName, summary string) (bool, string)
 	background func(sessionID string, ev agent.Event)
 	signIns    func(ctx context.Context, prompt *agent.SignInPrompt, settled <-chan agent.SignInSettled, shown func(error))
+	health     func(agentruntime.CredentialHealth)
 }
 
 // New builds a Host. It listens for nothing until Listen or Handler is used.
@@ -319,6 +322,7 @@ func (h *Host) serveLink(w http.ResponseWriter, r *http.Request) {
 		Advertise:   remote.AdvertiserFunc(func(ad agentwire.Advertisement) { h.advertise(node, ad) }),
 		Owner:       record.UserID,
 		SignIns:     h.drawSignIn,
+		Credentials: func(report agentwire.CredentialHealth) { h.reportCredential(node, report) },
 		WindowBytes: window,
 		AckInterval: h.opts.AckInterval,
 	})
@@ -621,6 +625,66 @@ func (h *Host) drawSignIn(ctx context.Context, prompt *agent.SignInPrompt, settl
 		return
 	}
 	draw(ctx, prompt, settled, shown)
+}
+
+func (h *Host) setCredentialHealth(sink func(agentruntime.CredentialHealth)) {
+	h.mu.Lock()
+	h.health = sink
+	h.mu.Unlock()
+}
+
+const maxCredentialsPerNode = 4
+
+func (h *Host) reportCredential(node *attached, report agentwire.CredentialHealth) {
+	health := agentruntime.CredentialHealth{
+		NodeID:     node.nodeID,
+		Owner:      node.userID,
+		Credential: report.Credential,
+		Degraded:   report.Degraded,
+		Reason:     report.Reason,
+		Since:      report.Since,
+		ExpiresAt:  report.ExpiresAt,
+		ReportedAt: h.now(),
+	}
+	h.mu.Lock()
+	if node.credentials == nil {
+		node.credentials = make(map[string]agentruntime.CredentialHealth)
+	}
+	_, known := node.credentials[report.Credential]
+	full := !known && len(node.credentials) >= maxCredentialsPerNode
+	if !full {
+		node.credentials[report.Credential] = health
+	}
+	sink := h.health
+	h.mu.Unlock()
+	if full {
+		h.log.Warn("ignored a report on one credential too many from a runtime node", "node_id", node.nodeID, "credential", report.Credential, "limit", maxCredentialsPerNode)
+		return
+	}
+	if health.Degraded {
+		h.log.Warn("a runtime node reports a failing credential", "node_id", node.nodeID, "credential", report.Credential, "reason", report.Reason)
+	}
+	if sink != nil {
+		sink(health)
+	}
+}
+
+func (h *Host) credentialReports() []agentruntime.CredentialHealth {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var out []agentruntime.CredentialHealth
+	for _, node := range h.collapsedLocked() {
+		for _, report := range node.credentials {
+			out = append(out, report)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].NodeID != out[j].NodeID {
+			return out[i].NodeID < out[j].NodeID
+		}
+		return out[i].Credential < out[j].Credential
+	})
+	return out
 }
 
 func (h *Host) askApproval(ctx context.Context, toolName, summary string) (bool, string) {

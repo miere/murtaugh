@@ -3,6 +3,7 @@ package nodehost
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"sync"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/miere/murtaugh/internal/agent"
 	"github.com/miere/murtaugh/internal/agent/remote"
+	"github.com/miere/murtaugh/internal/agentwire"
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/nodelink"
 )
@@ -200,5 +202,22 @@ func TestRevocationAndShutdownPruneTheirSessionBindings(t *testing.T) {
 				t.Fatalf("%s left %d session bindings behind", tc.name, held)
 			}
 		})
+	}
+}
+
+func TestADepartingConnectionForgetsWhatItReportedAndAConnectionReportsOnFewCredentials(t *testing.T) {
+	host := newTestHost(t, nil, config.AccessConfig{})
+	node := attachStubs(host, nodeStub{id: "node-a", owner: "U1"})["node-a"]
+	for i := range maxCredentialsPerNode + 2 {
+		host.reportCredential(node, agentwire.CredentialHealth{Credential: fmt.Sprint("/claude-", i)})
+	}
+	if got := len(host.credentialReports()); got != maxCredentialsPerNode {
+		t.Fatalf("the gateway holds %d reports from one node, want at most %d", got, maxCredentialsPerNode)
+	}
+	host.remove(node)
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	if node.credentials != nil {
+		t.Fatalf("a departed connection still holds %d reports", len(node.credentials))
 	}
 }

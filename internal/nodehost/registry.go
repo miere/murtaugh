@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/miere/murtaugh/internal/agent/remote"
+	"github.com/miere/murtaugh/internal/agentruntime"
 	"github.com/miere/murtaugh/internal/agentwire"
 )
 
@@ -98,7 +99,8 @@ type attached struct {
 	// so there is no ordering question to get wrong. Which of two claims is the
 	// newer one is settled a layer down, in remote.Client, where the handshake
 	// answer and the pushed change converge.
-	ad agentwire.Advertisement
+	ad          agentwire.Advertisement
+	credentials map[string]agentruntime.CredentialHealth
 }
 
 // snapshot copies the entry out. Callers must hold the Host's mutex.
@@ -217,6 +219,7 @@ func (h *Host) remove(node *attached) {
 		delete(h.nodes, node.connID)
 	}
 	h.pruneSessionsLocked(node)
+	node.credentials = nil
 	h.mu.Unlock()
 }
 

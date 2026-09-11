@@ -27,8 +27,10 @@ func Runtime(host *Host) func(config.Config, *slog.Logger) agentruntime.Builder 
 			// than captured when the connection was made.
 			host.setBackground(hooks.BackgroundEvents)
 			host.setSignIns(hooks.SignIn)
+			host.setCredentialHealth(hooks.CredentialHealth)
 
 			rt := agentruntime.Runtime{
+				CredentialReports: host.credentialReports,
 				// Headless dispatch (#199): jobs, workflow triggers and unfurls
 				// on the MAIN node. It is set here, ABOVE the chat check below,
 				// and that placement is load-bearing — agentruntime.Hooks says

@@ -2,7 +2,28 @@ package gateway
 
 import (
 	"context"
+	"log/slog"
+
+	"github.com/miere/murtaugh/internal/agentruntime"
+	"github.com/miere/murtaugh/internal/config"
+	"github.com/miere/murtaugh/internal/credwarden"
 )
+
+func localCredentialWarden(agents map[string]config.AgentProfile, runtime agentruntime.Runtime, logger *slog.Logger) *credwarden.Warden {
+	if !runtime.InProcess {
+		return nil
+	}
+	return credwarden.New(credwarden.Options{Identities: credwarden.ClaudeCodeIdentities(agents), Logger: logger})
+}
+
+func (a *Gateway) alertNodeCredential(h agentruntime.CredentialHealth) {
+	if !a.access().IsAllowedUser(h.Owner) {
+		a.logger.Warn("a node reported on a credential, but its owner may not use this gateway; nobody was told",
+			"node_id", h.NodeID, "owner", h.Owner, "credential", h.Credential, "degraded", h.Degraded)
+		return
+	}
+	a.credAlerts.alertNode(h)
+}
 
 // StartBackground starts the work that must run for the DAEMON's lifetime,
 // independent of leadership.
