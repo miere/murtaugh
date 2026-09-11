@@ -33,6 +33,7 @@ import (
 	"github.com/miere/murtaugh/internal/nodetoken"
 	"github.com/miere/murtaugh/internal/tools"
 	"github.com/miere/murtaugh/internal/tools/ask"
+	authrequest "github.com/miere/murtaugh/internal/tools/auth/request"
 	"github.com/miere/murtaugh/internal/tools/helptool"
 	"github.com/miere/murtaugh/internal/tools/ping"
 	"github.com/miere/murtaugh/internal/tools/plan"
@@ -286,6 +287,7 @@ func nodeTools() *tools.Registry {
 	registry.Register(helptool.New(func() []help.Doc { return helpDocs(registry) }))
 	registry.Register(ask.New(agent.TurnDisplay{}))
 	registry.Register(plan.New(agent.TurnDisplay{}))
+	registry.Register(authrequest.New(agent.TurnDisplay{}))
 	return registry
 }
 

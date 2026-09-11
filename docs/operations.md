@@ -76,6 +76,8 @@ Some chat turns now wait on a human before continuing:
 - a native agent's `terminal` command can be **approval-gated** (see
   [Agent chat → The approval gate](agents.md#the-approval-gate));
 - `ask` and `present_plan` **block** on your Approve/Deny or your answer in Slack;
+- `auth.request` **blocks** until the owner of the machine the agent runs on
+  finishes the sign-in sent to them by DM;
 - a held job's first scheduled run blocks on admin confirmation (see
   [Jobs → Trusted vs held jobs](jobs.md#trusted-vs-held-jobs)).
 

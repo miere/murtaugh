@@ -161,7 +161,7 @@ func TestANodeServesItsOwnTools(t *testing.T) {
 		names = append(names, tool.Name())
 	}
 	sort.Strings(names)
-	want := []string{"ask", "help", "ping", "present_plan", "version"}
+	want := []string{"ask", "auth.request", "help", "ping", "present_plan", "version"}
 	if !slices.Equal(names, want) {
 		t.Fatalf("the node registers %v, want %v", names, want)
 	}
@@ -172,7 +172,7 @@ func TestANodeServesItsOwnTools(t *testing.T) {
 		t.Fatalf("help: %v", err)
 	}
 	for _, name := range want {
-		if !strings.Contains(out.(string), name) {
+		if !strings.Contains(out.(string), strings.ReplaceAll(name, ".", " ")) {
 			t.Errorf("help does not list %q:\n%s", name, out)
 		}
 	}

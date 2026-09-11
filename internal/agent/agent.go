@@ -488,6 +488,28 @@ func (TurnDisplay) Plan(ctx context.Context, _ TurnLocation, req PlanRequest) (D
 	return awaitDisplay(ctx, answer, Event{Type: EventPlan, Plan: &PlanPrompt{Request: req, Answer: answer}}), nil
 }
 
+// SignIn raises req on the turn and hands back the prompt its answers keep
+// arriving on, because a sign-in can hear a code and then a cancel.
+func (TurnDisplay) SignIn(ctx context.Context, req SignInRequest) (*SignInPrompt, bool) {
+	emit, ok := TurnEmitterFromContext(ctx)
+	if !ok {
+		return nil, false
+	}
+	prompt := &SignInPrompt{Request: req, Answer: make(chan DisplayAnswer, 2)}
+	if !emit(Event{Type: EventSignIn, SignIn: prompt}) {
+		return nil, false
+	}
+	return prompt, true
+}
+
+// SettleSignIn rides the turn's stream so the cards close before the reply
+// that follows the sign-in is drawn.
+func (TurnDisplay) SettleSignIn(ctx context.Context, update SignInSettled) {
+	if emit, ok := TurnEmitterFromContext(ctx); ok {
+		emit(Event{Type: EventSignInSettled, SignInSettled: &update})
+	}
+}
+
 func awaitDisplay(ctx context.Context, answer <-chan DisplayAnswer, ev Event) DisplayAnswer {
 	emit, ok := TurnEmitterFromContext(ctx)
 	if !ok || !emit(ev) {
