@@ -15,9 +15,6 @@ import (
 	configstore "github.com/miere/murtaugh/internal/config/store"
 )
 
-// The node side of #170 Change I's onboarding trigger: a form filled in on Slack
-// lands in THIS node's store, and only ever into a node that has nothing.
-
 func nodeStore(t *testing.T) (config.Store, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -46,7 +43,6 @@ func profileBody(t *testing.T, value any) json.RawMessage {
 	return body
 }
 
-// storedWorkDir reads one persisted profile's work_dir out of the row.
 func storedWorkDir(t *testing.T, store config.Store, name string) string {
 	t.Helper()
 	body, ok, err := store.GetItem(context.Background(), config.SectionAgent, name)
@@ -61,9 +57,6 @@ func storedWorkDir(t *testing.T, store config.Store, name string) string {
 	return dir
 }
 
-// The happy path, end to end on this side: profiles land as rows, the chat block
-// lands as a singleton, the credential lands in the node's own .env, and the
-// node asks to be restarted.
 func TestApplyingAGatewaySuppliedConfigurationWritesThisNodesStore(t *testing.T) {
 	store, dir := nodeStore(t)
 	c := &configurer{store: store, baseDir: dir, logger: quiet(), restarts: true}
@@ -72,8 +65,6 @@ func TestApplyingAGatewaySuppliedConfigurationWritesThisNodesStore(t *testing.T)
 		Native:  &config.NativeProfile{Provider: "anthropic", Model: "claude", APIKeyEnv: "ANTHROPIC_API_KEY"},
 		WorkDir: "/home/dev/work",
 	}
-	// The tweaker's work_dir is EMPTY as the gateway built it: it is rooted where
-	// the configuration lives, and only this side knows that path.
 	tweaker := config.AgentProfile{
 		Native: &config.NativeProfile{Provider: "anthropic", Model: "claude", APIKeyEnv: "ANTHROPIC_API_KEY"},
 	}
@@ -95,8 +86,6 @@ func TestApplyingAGatewaySuppliedConfigurationWritesThisNodesStore(t *testing.T)
 		t.Errorf("node reported %+v, want 2 applied and a restart", result)
 	}
 
-	// The store loads under the node's own role — no Slack credentials, and the
-	// agent names it references resolved locally, because a node holds bodies.
 	cfg, err := store.Load(context.Background(), config.Config{Role: config.RoleNode, BaseDir: dir})
 	if err != nil {
 		t.Fatalf("the node's own configuration does not load after being configured: %v", err)
@@ -107,10 +96,6 @@ func TestApplyingAGatewaySuppliedConfigurationWritesThisNodesStore(t *testing.T)
 	if cfg.Chat.Defaults.Agent != "code" {
 		t.Errorf("chat default is %q, want code", cfg.Chat.Defaults.Agent)
 	}
-	// The work_dir the gateway could not fill in. Read back off the stored ROW
-	// rather than the typed field: the workdir guard forbids a downstream read
-	// of config.AgentProfile.WorkDir, and what this is checking is what was
-	// persisted anyway.
 	if got := storedWorkDir(t, store, "tweaker"); got != dir {
 		t.Errorf("the tweaker is rooted at %q, want this node's config dir %q", got, dir)
 	}
@@ -127,10 +112,8 @@ func TestApplyingAGatewaySuppliedConfigurationWritesThisNodesStore(t *testing.T)
 	}
 }
 
-// The guarantee that keeps "node admins own their node" true after adding a
-// method a gateway can write with. It is enforced HERE, against the store as it
-// is right now, so a node its owner configured from a terminal five minutes ago
-// is not overwritten by a form somebody left open.
+// Node admins own their node: a form left open on the gateway must not overwrite
+// what the owner set from a terminal minutes ago.
 func TestAConfiguredNodeRefusesToBeReconfiguredByItsGateway(t *testing.T) {
 	store, dir := nodeStore(t)
 	existing := config.AgentProfile{Native: &config.NativeProfile{Provider: "anthropic", Model: "claude", APIKeyEnv: "K"}}
@@ -148,7 +131,6 @@ func TestAConfiguredNodeRefusesToBeReconfiguredByItsGateway(t *testing.T) {
 	if !strings.Contains(err.Error(), "already") {
 		t.Errorf("the refusal does not say why: %v", err)
 	}
-	// And nothing was written.
 	rows, err := store.ListItems(context.Background(), config.SectionAgent)
 	if err != nil {
 		t.Fatalf("ListItems: %v", err)
@@ -158,9 +140,8 @@ func TestAConfiguredNodeRefusesToBeReconfiguredByItsGateway(t *testing.T) {
 	}
 }
 
-// An empty configuration is refused rather than silently succeeding: the
-// operator is watching Slack for the outcome, and "saved nothing" reported as
-// success is the failure mode where they go looking for a broken node.
+// Reporting "saved nothing" as success would send the operator, who is watching
+// Slack, off to debug a node that is fine.
 func TestAnEmptyConfigurationIsRefused(t *testing.T) {
 	store, dir := nodeStore(t)
 	c := &configurer{store: store, baseDir: dir, logger: quiet()}
@@ -169,10 +150,8 @@ func TestAnEmptyConfigurationIsRefused(t *testing.T) {
 	}
 }
 
-// A node's seed bootstrap file must carry NO oauth block. Seeding a node from
-// the gateway's skeleton would put a file advertising ${SLACK_APP_TOKEN} on
-// every laptop in the fleet — an invitation to fill it in, on the one machine
-// #170 says must never hold it.
+// A Slack token placeholder would invite people to fill it in on every node, and
+// a node must never hold that token.
 func TestANodesBootstrapFileOffersNoSlackCredentials(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
@@ -183,8 +162,6 @@ func TestANodesBootstrapFileOffersNoSlackCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	// Comments may DISCUSS oauth — the node's skeleton says in as many words why
-	// it has none — so this reads the settings rather than the text.
 	for _, line := range strings.Split(string(data), "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "#") {
 			continue
@@ -195,8 +172,6 @@ func TestANodesBootstrapFileOffersNoSlackCredentials(t *testing.T) {
 			}
 		}
 	}
-	// And it must still be a usable bootstrap file: the database block is the
-	// half a node genuinely needs.
 	boot, err := config.LoadBootstrap(path)
 	if err != nil {
 		t.Fatalf("a node's seeded bootstrap file does not parse: %v", err)

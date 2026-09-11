@@ -7,13 +7,11 @@ import (
 )
 
 // FS contains reference assets that are also used as built-in defaults: the
-// seed bootstrap files (config.yaml — oauth + database — and node-config.yaml,
-// which is the runtime node's and carries NO oauth block), the two .env
-// templates (env.example, and node-env.example which names no SLACK_* variable
-// for the same reason), the default system prompt, the Block Kit templates
-// under templates/, the bundled agent skills under skills/ (each a SKILL.md +
-// reference/ + examples/ tree), and cli-help.md (the canonical CLI/MCP command
-// reference surfaced by
+// seed bootstrap files and .env templates (the node-* ones carry no Slack
+// credentials, which a runtime node must never hold), the default system prompt,
+// the Block Kit templates under templates/, the bundled agent skills under
+// skills/ (each a SKILL.md + reference/ + examples/ tree), and cli-help.md (the
+// canonical CLI/MCP command reference surfaced by
 // `murtaugh help`). Both templates and skills are embedded recursively, as is
 // troubleshoot/ (the diagnostics-bundle instructions surfaced by
 // `troubleshoot.bundle`).

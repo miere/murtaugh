@@ -136,11 +136,6 @@ func run(rawArgs []string) error {
 	store, recorder, closeJournal := openJournal(cfg, mode, rest, logger)
 	defer closeJournal()
 
-	// The CLI keeps its local agent, and so does this binary's gateway mode: it
-	// is the one that serves today, and #170 Stage 1 removes nothing from it.
-	// Naming the implementation here rather than inside internal/app is what
-	// makes "which binaries can run an agent" answerable by reading the imports
-	// of a main package — cmd/murtaugh-gateway names none, and CI proves it.
 	agents := app.Agents{Runtime: local.Builder, Delegator: local.Delegator}
 	application := app.New(mode, rest, cfg, cfgStore, configPath, version, logger, recorder, agents).
 		WithJSONOutput(jsonOutput)
@@ -189,16 +184,6 @@ func runMCPBridge() error {
 // extractConfigFlag pulls the global --config flag out of args, supporting
 // both `--config=VALUE` and `--config VALUE` (and the single-dash variants).
 // Unknown flags are passed through to the selected frontend untouched.
-//
-// It scans the WHOLE command line, before and after the subcommand, because
-// `murtaugh --config X ping` and `murtaugh ping --config X` are both documented.
-// The cost of that reach is that no tool may ever take a flag called `config`:
-// its value would be eaten here and the tool would see nothing. That is not
-// hypothetical — `cfg node split --config <dest>` shipped that way and ran the
-// entire command against the destination — so a SECOND `--config` is now an
-// error rather than last-one-wins. Retargeting the whole invocation is never
-// what somebody who typed it twice meant, and the alternative to saying so is
-// the silent version of it.
 func extractConfigFlag(args []string, fallback string) (string, []string, error) {
 	out := make([]string, 0, len(args))
 	configPath := fallback
@@ -306,11 +291,6 @@ func helpRequest(args []string) ([]string, bool) {
 	return nil, false
 }
 
-// openJournal opens the event journal for this invocation. Setup tools run
-// before a valid config exists, so they get a nil store and a no-op recorder;
-// everything else takes the daemon's own opener, which degrades the same way
-// when the store cannot be opened. The caller must invoke the returned cleanup
-// before exit so buffered events flush.
 func openJournal(cfg config.Config, mode app.Mode, rest []string, logger *slog.Logger) (*journal.Store, journal.Recorder, func()) {
 	if isSetupInvocation(mode, rest) {
 		return nil, journal.NopRecorder{}, func() {}
@@ -349,28 +329,6 @@ func isSetupInvocation(mode app.Mode, rest []string) bool {
 	return rest[0] == "setup"
 }
 
-// roleFor decides which half of #170's split THIS invocation addresses.
-//
-// The role is set by the binary and never read from the file — a configuration
-// that could declare itself a gateway would be asserting a role the gateway
-// then trusts — so it is decided from the command line, and exactly two
-// commands decide it.
-//
-// `cfg node set` and `cfg node show` are the documented way to point an
-// installed node at its gateway: named in assets/cli-help.md, instructed inside
-// assets/node-config.yaml, and offered as the remedy by murtaugh-runtime's own
-// "no gateway address" error. Their subject IS the node's own root, which by
-// design has no `oauth:` block — so run at RoleCombined they die on
-// "oauth.app_token is required", asking an operator for a credential a node must
-// never hold and which they therefore cannot supply.
-//
-// `cfg node split` is deliberately NOT one of them. It runs from the GATEWAY's
-// root and writes the node's, which is why it already worked.
-//
-// RoleNode is only ever more permissive than RoleCombined here: it drops the
-// Slack-credential requirement and keeps every name→body check, since a node
-// holds the bodies. So pointing either of these two at a combined root still
-// does exactly what it did.
 func roleFor(mode app.Mode, rest []string) config.Role {
 	if mode != app.ModeCLI || len(rest) < 3 || rest[0] != "cfg" || rest[1] != "node" {
 		return config.RoleCombined

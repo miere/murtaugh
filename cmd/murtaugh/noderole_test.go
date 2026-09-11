@@ -8,19 +8,8 @@ import (
 	"github.com/miere/murtaugh/internal/config"
 )
 
-// `murtaugh cfg node set --gateway …` is the documented way to point an
-// installed node at its gateway. It is named in assets/cli-help.md, instructed
-// inside assets/node-config.yaml, and offered as the remedy by
-// murtaugh-runtime's own "no gateway address" error.
-//
-// Pointed at the node's own root it used to die on `oauth.app_token is
-// required` — a credential a node must never hold and an operator therefore
-// cannot supply. `node.gateway` is one of #198's headline additions and the only
-// documented way to set it was unusable.
-
-// TestCfgNodeSetRunsAgainstANodeRoot drives run() end to end against a real
-// seeded node root, because the failure was in the composition root and not in
-// the tool: the tool never ran.
+// This drives run() end to end because the failure was in the composition root:
+// the tool itself never ran.
 func TestCfgNodeSetRunsAgainstANodeRoot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := config.BootstrapNode(path); err != nil {
@@ -36,20 +25,14 @@ func TestCfgNodeSetRunsAgainstANodeRoot(t *testing.T) {
 		t.Fatalf("cfg node show on a node root: %v", err)
 	}
 
-	// The node's own rules still apply: this is a role, not a bypass.
 	if err := run([]string{"--config", path, "cfg", "node", "set",
 		"--gateway", "https://gateway.example.com"}); err == nil {
 		t.Error("an https:// seed address was accepted")
 	}
 }
 
-// TestRoleForNamesOnlyTheTwoCommandsThatAddressANodeRoot keeps the widening
-// deliberate.
-//
-// `cfg node split` is the one `cfg node …` command that runs from the GATEWAY's
-// root and writes the node's, which is why it already worked and why it must
-// keep the combined rules. Everything else on this binary is a gateway or a
-// combined install and must keep being asked for its Slack credentials.
+// `cfg node split` runs from the gateway's root, so it must keep the combined
+// rules; so must everything else on this binary.
 func TestRoleForNamesOnlyTheTwoCommandsThatAddressANodeRoot(t *testing.T) {
 	for name, tc := range map[string]struct {
 		mode app.Mode

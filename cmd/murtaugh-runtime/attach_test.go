@@ -9,23 +9,6 @@ import (
 	"github.com/miere/murtaugh/internal/nodesocket"
 )
 
-// gateways_test.go covers gatewayList. This file covers the LOOP around it,
-// because two of the behaviours #197 headlines are the loop's and not the
-// list's:
-//
-//   - a redirect naming the leader is followed at once, with no backoff wait
-//     between the refusal and the hop;
-//   - a backoff that has been PAID returns the hop budget, so a node that met a
-//     redirect loop on its first morning still follows redirects for the rest
-//     of its life.
-//
-// Both were deletable with `go test ./cmd/murtaugh-runtime/...` green, because
-// TestARedirectLoopStopsSpinning calls gateways.waited() itself rather than
-// driving the loop, which reaches past the caller under test.
-
-// loopHarness drives attach() with no socket and no clock: every dial is
-// answered from a script, and every backoff wait is recorded and returned
-// immediately.
 type loopHarness struct {
 	t *testing.T
 
@@ -33,10 +16,7 @@ type loopHarness struct {
 	dialled []string
 	waits   []time.Duration
 
-	// answer decides what the nth dial returns.
-	answer func(n int, address string) error
-	// stopAfter cancels the loop once this many dials have been made, which is
-	// the only way out of a loop whose whole job is never to give up.
+	answer    func(n int, address string) error
 	stopAfter int
 }
 
@@ -91,13 +71,8 @@ func (h *loopHarness) addresses() []string {
 	return append([]string(nil), h.dialled...)
 }
 
-// TestTheLoopHopsWithoutWaitingOutABackoff pins "the node hops at once".
-//
-// A redirect is not a failure — the fleet answered and named the leader — so
-// inheriting a backoff earned by unrelated failures would leave a healthy node
-// idle for up to half a minute holding the address it needs. Lose this and
-// "hops at once" silently becomes "hops after up to 30s", visible only as slow
-// failover in production.
+// A redirect means the fleet answered, not that it failed; waiting out a backoff
+// here would only show up as slow failover in production.
 func TestTheLoopHopsWithoutWaitingOutABackoff(t *testing.T) {
 	leader := "wss://leader.example.com:8787"
 	h := &loopHarness{
@@ -118,20 +93,12 @@ func TestTheLoopHopsWithoutWaitingOutABackoff(t *testing.T) {
 	}
 }
 
-// TestABackoffReturnsTheHopBudget pins "the budget is per chain, not per
-// process".
-//
-// With the budget spent once and never returned, a node that met a
-// misconfiguration on its first morning refuses to follow a redirect for the
-// rest of the process's life — and finds every later failover only by working
-// through its address list one backoff at a time. That is invisible until the
-// failover that needed it.
+// If the hop budget were never refilled, one early misconfiguration would stop
+// the node following redirects for the rest of its life.
 func TestABackoffReturnsTheHopBudget(t *testing.T) {
 	a, b := seed, "wss://b.example.com:8787"
 	h := &loopHarness{
-		t: t,
-		// Two full chains: the budget is spent, a backoff pays for it, and the
-		// budget must come back for the second chain to hop at all.
+		t:         t,
 		stopAfter: 2*(maxConsecutiveHops+1) + 1,
 		answer: func(_ int, _ string) error {
 			return &nodesocket.RedirectError{Addresses: []string{a, b}}
@@ -139,17 +106,12 @@ func TestABackoffReturnsTheHopBudget(t *testing.T) {
 	}
 	h.run()
 
-	// One wait per exhausted chain, and no more. Without the budget returning,
-	// every dial after the first exhaustion is a wait.
 	if got := h.waitCount(); got != 2 {
 		t.Errorf("the loop backed off %d times over two redirect chains, want 2: "+
 			"the hop budget was not returned after the node paid a wait", got)
 	}
 }
 
-// TestTheLoopKeepsRedialling is the ordinary case the two above are carved out
-// of: a gateway that is simply down costs one backoff per attempt, and the node
-// never gives up.
 func TestTheLoopKeepsRedialling(t *testing.T) {
 	h := &loopHarness{
 		t:         t,
