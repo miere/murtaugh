@@ -1187,7 +1187,10 @@ so a node can never make the bot post somewhere else.
 before anything is sent, with the same words it used on the gateway, and the
 gateway answers `no_conversation` itself for a turn it holds no location for,
 because nothing consumes a headless turn's cards and the tool would otherwise
-wait for its turn to be torn down.
+wait for its turn to be torn down. A sign-in is the exception: with no
+conversation, the node sends it outside any turn (`node.sign_in`), and the
+gateway draws it in the owner's DM alone, under the same owner, access and
+approval rules.
 
 **All three backends reach it the same way.** `ask` and `present_plan` are a
 contract with no Slack in it plus a display: in process the display is

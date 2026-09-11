@@ -155,7 +155,7 @@ func TestTheBridgeSubcommandIsDispatchedOnANode(t *testing.T) {
 // The node's tools run here and nothing of the gateway's is offered, so `help`
 // describes exactly what this node's agent can call.
 func TestANodeServesItsOwnTools(t *testing.T) {
-	registry := nodeTools()
+	registry := nodeTools(nodeserve.NewSignIns(nil))
 	var names []string
 	for _, tool := range registry.All() {
 		names = append(names, tool.Name())
@@ -175,5 +175,20 @@ func TestANodeServesItsOwnTools(t *testing.T) {
 		if !strings.Contains(out.(string), strings.ReplaceAll(name, ".", " ")) {
 			t.Errorf("help does not list %q:\n%s", name, out)
 		}
+	}
+}
+
+func TestANodesSignInWithNoConversationGoesToItsOwner(t *testing.T) {
+	registry := nodeTools(nodeserve.NewSignIns(nil))
+	tool, ok := registry.Get("auth.request")
+	if !ok {
+		t.Fatal("the node registers no auth.request")
+	}
+	_, err := tool.Invoke(context.Background(), map[string]any{"tool": "vendor-mcp", "profile": "custom", "command": "true"})
+	if err == nil || strings.Contains(err.Error(), "only works inside a Slack conversation") {
+		t.Fatalf("a sign-in with no conversation was answered %v; it should have been offered to the owner", err)
+	}
+	if !strings.Contains(err.Error(), "could not be shown to anyone") {
+		t.Fatalf("with no gateway attached the sign-in was answered %v", err)
 	}
 }

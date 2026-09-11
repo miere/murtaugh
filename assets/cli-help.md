@@ -736,8 +736,10 @@ Slack user its token was minted for; for an agent inside the gateway, the admin.
 Both cards are posted even when the requester is the owner, so their thread
 shows where the sign-in went.
 
-It only works inside a Slack conversation. A scheduled job, or a call from the
-CLI or MCP, is refused before anything runs.
+Outside a Slack conversation it only works on a runtime node. A scheduled job
+on a node still reaches its owner: the card arrives by DM and no thread is told.
+An agent inside the gateway, or a call from the CLI or MCP, is refused before
+anything runs.
 
 Flags — these are what an agent passes from inside a conversation; the same
 call from the CLI or MCP is refused before anything runs:

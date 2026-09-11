@@ -149,9 +149,11 @@ sign-in is stopped, and a node that is revoked or disconnects stops its sign-in
 too. The `custom` profile runs a command the agent chose, so its card shows the
 owner that exact command and nothing runs until they approve it. It fails
 closed — a refusal, a timeout or a failed sign-in all return an error — so the
-agent stops rather than retrying a call it still has no credentials for. It
-only works inside a Slack conversation: a scheduled job or a CLI call is refused
-before anything runs. See `murtaugh help auth request`.
+agent stops rather than retrying a call it still has no credentials for.
+Outside a conversation it only works on a runtime node: a scheduled job there
+still reaches the node's owner by DM, with no thread notice, while an agent
+inside the gateway or a CLI call is refused before anything runs. See
+`murtaugh help auth request`.
 
 Its built-in profiles are `gcloud`, `gcloud-adc`, `claude-code`, and `custom`.
 The `claude-code` profile re-authenticates the Claude Code CLI itself — the

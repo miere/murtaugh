@@ -222,6 +222,7 @@ func run(args []string) error {
 		client:     served.client,
 		gate:       served.gate,
 		background: served.background,
+		signIns:    served.signIns,
 		claim:      served.claim,
 		configure:  configure.apply,
 		// Fired by nodeserve AFTER the answer is on the wire, never by the
@@ -236,6 +237,7 @@ type servedAgent struct {
 	client     agent.Client
 	gate       *nodeserve.ToolGate
 	background *nodeserve.BackgroundSink
+	signIns    *nodeserve.SignIns
 	claim      *nodeserve.Advertiser
 	// serveTools binds this node's LOCAL aggregator socket, the one an
 	// acp/claude_code agent's bridge subprocess dials. nil when there is nothing
@@ -264,9 +266,10 @@ func serveAgent(cfg config.Config, logger *slog.Logger, requested string) (serve
 
 	gate := nodeserve.NewToolGate(logger)
 	background := nodeserve.NewBackgroundSink(logger)
+	signIns := nodeserve.NewSignIns(logger)
 	claim := nodeserve.NewAdvertiser(logger)
 
-	runtime := local.Builder(cfg, nodeTools(), logger)(nodeHooks(cfg, gate, background))
+	runtime := local.Builder(cfg, nodeTools(signIns), logger)(nodeHooks(cfg, gate, background))
 	client, ok := runtime.Clients[name]
 	if !ok {
 		return servedAgent{}, "", fmt.Errorf("agent %q did not build; see the errors above", name)
@@ -275,19 +278,20 @@ func serveAgent(cfg config.Config, logger *slog.Logger, requested string) (serve
 		client:     client,
 		gate:       gate,
 		background: background,
+		signIns:    signIns,
 		claim:      claim,
 		serveTools: runtime.ServeTools,
 	}, name, nil
 }
 
-func nodeTools() *tools.Registry {
+func nodeTools(signIns *nodeserve.SignIns) *tools.Registry {
 	registry := tools.NewRegistry()
 	registry.Register(ping.New())
 	registry.Register(versiontool.New(version))
 	registry.Register(helptool.New(func() []help.Doc { return helpDocs(registry) }))
 	registry.Register(ask.New(agent.TurnDisplay{}))
 	registry.Register(plan.New(agent.TurnDisplay{}))
-	registry.Register(authrequest.New(agent.TurnDisplay{}))
+	registry.Register(authrequest.New(agent.TurnDisplay{}).WithoutConversation(signIns))
 	return registry
 }
 
@@ -362,6 +366,7 @@ type attachment struct {
 	client     agent.Client
 	gate       *nodeserve.ToolGate
 	background *nodeserve.BackgroundSink
+	signIns    *nodeserve.SignIns
 	claim      *nodeserve.Advertiser
 	configure  func(context.Context, agentwire.NodeConfiguration) (agentwire.NodeConfigured, error)
 	restart    func()
@@ -448,6 +453,7 @@ func attach(ctx context.Context, logger *slog.Logger, a attachment) error {
 			Logger:      logger,
 			Gate:        a.gate,
 			Background:  a.background,
+			SignIns:     a.signIns,
 			Advertise:   a.claim,
 			Configure:   a.configure,
 			Restart:     a.restart,
