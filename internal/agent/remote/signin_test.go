@@ -31,7 +31,6 @@ func promptWithSignIn(t *testing.T, owner string) ([]agent.Event, string) {
 	return got, logs.String()
 }
 
-// A node's sign-in is only ever drawn for the owner its credential names.
 func TestASignInIsStampedWithTheConnectionsOwner(t *testing.T) {
 	events, _ := promptWithSignIn(t, "UOWNER")
 	if len(events) == 0 || events[0].SignIn == nil || events[0].SignIn.Owner != "UOWNER" {

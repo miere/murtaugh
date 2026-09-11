@@ -10,26 +10,8 @@ import (
 	"github.com/miere/murtaugh/internal/agentwire"
 )
 
-// This is the test for the placement decision, which is the load-bearing choice
-// in this package.
-//
-// Six optional capability surfaces are type-asserted for on this path. Two are
-// asserted on the CLIENT (internal/agent/session_manager.go:44 and :53) and are
-// answered by this package. The other four are asserted on the MANAGER, from
-// the gateway: Warm (chat_handler.go:413), an anonymous
-// Discard(agent.ConversationKey) (chat_handler.go:404), an anonymous
-// Interruptible() bool (gateway.go:1983) and io.Closer (gateway.go:861).
-//
-// Because the remote client goes UNDER *agent.SessionManager rather than in
-// place of it, those four keep being answered by the manager, unchanged. The
-// assertions below are copied from those call sites verbatim: if a later change
-// moves the remote client up to ChatSessionManager, this test is what says what
-// it has to re-satisfy.
-//
-// Three of the four fail SILENTLY when unsatisfied — a manager that does not
-// implement Discard disarms the idle-timeout drop, the tool-ceiling drop and
-// the credential-rejection drop at once, with no log line — so "it compiles"
-// proves nothing here.
+// Three of these checks fail silently when unmet (a manager without Discard disarms the
+// idle, tool-ceiling and credential drops at once), so compiling proves nothing.
 func TestSessionManagerKeepsTheGatewaysCapabilitySurfaces(t *testing.T) {
 	no := false
 	client, node, _ := dial(t, nodeConfig{interruptible: &no}, Options{})
@@ -52,9 +34,6 @@ func TestSessionManagerKeepsTheGatewaysCapabilitySurfaces(t *testing.T) {
 	if err := manager.Warm(ctx); err != nil {
 		t.Fatalf("warm: %v", err)
 	}
-	// The verdict came off the wire, through the client surface the manager
-	// probes: proof that folding it into the initialize answer keeps the
-	// manager's own reporting honest.
 	if manager.Interruptible() {
 		t.Fatal("the node said its agent cannot be interrupted and the manager disagreed")
 	}
@@ -74,9 +53,6 @@ func TestSessionManagerKeepsTheGatewaysCapabilitySurfaces(t *testing.T) {
 		t.Fatalf("manager cached session %q (found=%v)", sid, ok)
 	}
 
-	// The surface that could NOT have been degraded: on two of the three
-	// backends a session owns a real process, so a no-op here leaks one per
-	// evicted conversation.
 	manager.Discard(key)
 	if released := receive(t, "the node to release the discarded session", node.released); released != "session-42" {
 		t.Fatalf("node released %q", released)

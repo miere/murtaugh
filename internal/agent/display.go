@@ -93,9 +93,7 @@ type SignInRequest struct {
 type SignInState string
 
 const (
-	SignInWorking SignInState = "working"
-	// SignInReady carries the link of a command that only started once its owner
-	// approved it.
+	SignInWorking   SignInState = "working"
 	SignInReady     SignInState = "ready"
 	SignInSuccess   SignInState = "success"
 	SignInFailed    SignInState = "failed"

@@ -8,10 +8,6 @@ import (
 	"github.com/miere/murtaugh/internal/agent"
 )
 
-// Decoder translates wire events back into agent events. It runs on the
-// consuming side — the gateway — and produces exactly the values the renderer,
-// chat handler, session log and delegate runner already consume, so nothing
-// downstream can tell whether the turn ran in this process or on a node.
 type Decoder struct {
 	deliver AttachmentDeliverer
 
@@ -19,9 +15,6 @@ type Decoder struct {
 	signIns map[string]*agent.SignInPrompt
 }
 
-// NewDecoder returns a Decoder that materialises attachments through deliver. A
-// nil deliverer is legal for a caller that will never see an attachment (and
-// makes one an error if it does), which is what the error-path tests use.
 func NewDecoder(deliver AttachmentDeliverer) *Decoder {
 	return &Decoder{deliver: deliver, signIns: make(map[string]*agent.SignInPrompt)}
 }
@@ -42,14 +35,8 @@ func (d *Decoder) SignInOpen(id string) bool {
 	return ok
 }
 
-// Decode translates one wire event back into an agent event.
-//
-// The second result is the side channel a decoded event needs: for a permission
-// request, the channel the consumer answers on together with the id that answer
-// must be sent back under. It is nil for every other kind.
-//
-// An unknown kind is an error for the same reason it is on the way out: a node
-// running a newer build must not have its events quietly discarded.
+// Decode fails on an unknown kind so a node running a newer build never has its events
+// quietly discarded.
 func (d *Decoder) Decode(ctx context.Context, w Event) (agent.Event, *PendingDecision, error) {
 	switch w.Type {
 	case EventText:
@@ -141,12 +128,6 @@ func (d *Decoder) Decode(ctx context.Context, w Event) (agent.Event, *PendingDec
 	}
 }
 
-// decodePermission rebuilds the prompt the consumer expects, with a fresh
-// channel in place of the one that could not cross.
-//
-// The channel is buffered (cap 1) and written exactly once, exactly as both
-// backends construct it in process, so the consumer's send never blocks even if
-// the transport has already given up on the request.
 func decodePermission(req PermissionRequest) (agent.Event, *PendingDecision) {
 	options := make([]agent.PermissionOption, 0, len(req.Options))
 	for _, o := range req.Options {
@@ -169,8 +150,6 @@ func decodePermission(req PermissionRequest) (agent.Event, *PendingDecision) {
 	return ev, &PendingDecision{ID: req.ID, Gate: req.Gate, Decision: decision}
 }
 
-// decodeAttachment materialises the side transfer into the local byte source the
-// uploader consumes.
 func (d *Decoder) decodeAttachment(ctx context.Context, w Attachment) (*agent.AttachmentEvent, error) {
 	if d.deliver == nil {
 		return nil, fmt.Errorf("agentwire: attachment %q arrived with no deliverer to fetch transfer %q", w.Filename, w.TransferID)

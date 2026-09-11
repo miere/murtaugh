@@ -25,19 +25,6 @@ import (
 	"github.com/miere/murtaugh/internal/llm"
 )
 
-// This file is the definition of done for the protocol: every event kind and
-// every field crosses a real serialisation boundary and comes back meaning the
-// same thing. "Meaning" is deliberately stronger than "bytes" — an error is
-// checked with the identity comparisons the gateway actually makes, not by
-// string equality.
-//
-// It exists before any transport does. If a case here cannot be made to pass,
-// the wire shape is wrong and nothing has been built on it yet.
-
-// trip marshals a wire event to JSON and back, so every assertion below is made
-// about a value that really round-tripped rather than a struct copy: a field
-// that only survives in memory (an interface, a channel, a pointer to host
-// state) fails here rather than in production.
 func trip(t *testing.T, w Event) Event {
 	t.Helper()
 	raw, err := json.Marshal(w)
@@ -51,8 +38,6 @@ func trip(t *testing.T, w Event) Event {
 	return back
 }
 
-// roundTrip runs one agent event through encode → JSON → decode, which is the
-// whole path an event takes from a runtime node to the gateway.
 func roundTrip(t *testing.T, enc *Encoder, dec *Decoder, ev agent.Event) (agent.Event, *Transfer, *PendingDecision) {
 	t.Helper()
 	w, transfer, err := enc.Encode(ev)
@@ -132,25 +117,16 @@ func TestRoundTripTask(t *testing.T) {
 	}
 }
 
-// geminiOverloadBody is the verbatim payload behind the incident internal/llm's
-// classifier was written for; it is reused here so a provider failure crossing
-// the wire is checked against the same case the in-process path is.
 const geminiOverloadBody = `{"error":{"code":503,"message":"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.","status":"UNAVAILABLE"}}`
 
-// TestRoundTripErrorIdentity is the case the whole design turns on. Every
-// consumer on the gateway that compares Event.Error by identity is represented
-// here, because serialisation preserves an error's text and destroys its
-// identity, and nothing fails loudly when it does.
 func TestRoundTripErrorIdentity(t *testing.T) {
 	cases := []struct {
 		name     string
 		err      error
 		wantKind ErrorKind
-		// check asserts the identity comparison the gateway makes on this error.
-		check func(t *testing.T, decoded error)
+		check    func(t *testing.T, decoded error)
 	}{
 		{
-			// native/loop.go emits a bare ctx.Err().
 			name:     "bare cancellation from the native loop",
 			err:      context.Canceled,
 			wantKind: ErrorCancelled,
@@ -161,7 +137,6 @@ func TestRoundTripErrorIdentity(t *testing.T) {
 			},
 		},
 		{
-			// acp/prompt.go wraps it with its own prose.
 			name:     "wrapped cancellation from the ACP client",
 			err:      fmt.Errorf("acp: turn interrupted: %w", context.Canceled),
 			wantKind: ErrorCancelled,
@@ -175,7 +150,6 @@ func TestRoundTripErrorIdentity(t *testing.T) {
 			},
 		},
 		{
-			// claudecode.abortActive wraps it too, with different prose.
 			name:     "wrapped cancellation from the claude_code client",
 			err:      fmt.Errorf("claudecode: turn interrupted: %w", context.Canceled),
 			wantKind: ErrorCancelled,
@@ -189,9 +163,6 @@ func TestRoundTripErrorIdentity(t *testing.T) {
 			},
 		},
 		{
-			// acp/tool_heartbeat.go and claudecode/heartbeat.go both wrap the
-			// sentinel with the tool name and elapsed time — the entire
-			// diagnostic value of the error.
 			name:     "tool ceiling with its diagnostic detail",
 			err:      fmt.Errorf("%w: %q ran for 5m0s with no result", agent.ErrToolCeiling, "terminal"),
 			wantKind: ErrorToolCeiling,
@@ -205,14 +176,6 @@ func TestRoundTripErrorIdentity(t *testing.T) {
 			},
 		},
 		{
-			// The non-obvious consumer: gateway/alert.go's failSpec runs
-			// providerfail.Classify to build the user-facing card. A text-only
-			// wire degrades every provider failure to the generic card.
-			//
-			// The error is built the way the native backend hands one out —
-			// llm.CarryFailure at eventError — because that is where the
-			// litellm-shaped classification happens. The wire carries a
-			// classification; it does not derive one.
 			name:     "provider failure classified by the backend",
 			err:      llm.CarryFailure(fmt.Errorf("native: provider stream: %w", providers.NewHTTPError("gemini", 503, geminiOverloadBody))),
 			wantKind: ErrorProvider,
@@ -256,7 +219,6 @@ func TestRoundTripErrorIdentity(t *testing.T) {
 			},
 		},
 		{
-			// A JSON-RPC fault carries a numeric code a text-only wire flattens.
 			name:     "ACP RPC fault keeps its numeric code",
 			err:      fmt.Errorf("acp: prompt: %w", &acp.RPCError{Method: "session/cancel", Code: -32601, Message: "method not found"}),
 			wantKind: ErrorRPC,
@@ -307,9 +269,6 @@ func TestRoundTripErrorIdentity(t *testing.T) {
 			if back.Error == nil {
 				t.Fatal("round trip dropped the error")
 			}
-			// Every consumer that does not compare by identity reads the text:
-			// alertcard's Detail and the session journal's errText both take
-			// err.Error() verbatim.
 			if got, want := back.Error.Error(), tc.err.Error(); got != want {
 				t.Errorf("message = %q, want %q", got, want)
 			}
@@ -318,8 +277,6 @@ func TestRoundTripErrorIdentity(t *testing.T) {
 	}
 }
 
-// TestRoundTripErrorNil guards the shape where a backend completes a turn with
-// no error at all: nothing is invented on the way back.
 func TestRoundTripErrorNil(t *testing.T) {
 	enc, dec := NewEncoder(), NewDecoder(nil)
 	back, _, _ := roundTrip(t, enc, dec, agent.Event{Type: agent.EventError})
@@ -362,8 +319,6 @@ func TestRoundTripPermissionRequest(t *testing.T) {
 	if got.PolicyOwned {
 		t.Error("PolicyOwned = true, want false for an options-carrying request")
 	}
-	// The channel does not cross the wire: the consumer gets a fresh one, and
-	// the correlation id is what ties the answer back to the blocked backend.
 	if back.Permission.Decision == nil {
 		t.Fatal("decoded prompt has no decision channel for the consumer to answer on")
 	}
@@ -372,9 +327,6 @@ func TestRoundTripPermissionRequest(t *testing.T) {
 	}
 }
 
-// TestPermissionResponseReachesTheBlockedBackend is the request/response proof:
-// the backend blocks on a channel the wire cannot carry, so the answer arrives
-// as its own frame and the encoder routes it back by correlation id.
 func TestPermissionResponseReachesTheBlockedBackend(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -383,8 +335,6 @@ func TestPermissionResponseReachesTheBlockedBackend(t *testing.T) {
 		{"an agent-declared option id", "opt-b"},
 		{"a policy-owned allow", agent.PermissionAllow},
 		{"a policy-owned deny", agent.PermissionDeny},
-		// "" is deliberately distinct from a deliberate refusal: it means
-		// nobody chose, and both backends say something different to the model.
 		{"nobody chose", ""},
 	}
 	for _, tc := range cases {
@@ -410,8 +360,6 @@ func TestPermissionResponseReachesTheBlockedBackend(t *testing.T) {
 				t.Errorf("options = %+v, want none on a policy-owned request", back.Permission.Request.Options)
 			}
 
-			// The gateway answers on the channel it was handed; the transport
-			// turns that into a response frame.
 			back.Permission.Decision <- tc.optionID
 			resp := Response(pending.ID, <-pending.Decision)
 
@@ -466,11 +414,6 @@ func TestPermissionAbandonReleasesThePending(t *testing.T) {
 	}
 }
 
-// TestNativeApprovalRidesTheSameFrame covers the approval path that never
-// touches the event stream in-process: the native loop calls an Approver
-// synchronously. Moved onto a node that call has nothing to reach, so the same
-// request/response frame has to be able to express it — including the (allowed,
-// note) pair Approve returns.
 func TestNativeApprovalRidesTheSameFrame(t *testing.T) {
 	req := NativeApproval("req-1", "terminal", "rm -rf ./build")
 	if req.Gate != GateTool {
@@ -528,12 +471,9 @@ func TestNativeApprovalRidesTheSameFrame(t *testing.T) {
 	}
 }
 
-// memDeliverer stands in for the transport that will stream an attachment's
-// chunks in a later stage: it hands back the bytes recorded under the transfer
-// id, in whichever local form the test asks for.
 type memDeliverer struct {
 	bytesByID map[string][]byte
-	dir       string // non-empty: spool to a file and answer with a path
+	dir       string
 	seen      Attachment
 }
 
@@ -556,8 +496,6 @@ func (d *memDeliverer) DeliverAttachment(_ context.Context, a Attachment) (strin
 	return path, nil, nil
 }
 
-// drain reads the transfer the encoder handed back and registers it with the
-// deliverer, standing in for the chunk stream a later stage will carry.
 func drain(t *testing.T, d *memDeliverer, transfer *Transfer) {
 	t.Helper()
 	if transfer == nil {
@@ -577,11 +515,6 @@ func drain(t *testing.T, d *memDeliverer, transfer *Transfer) {
 	d.bytesByID[transfer.ID] = body
 }
 
-// assertAttachmentFrameCarriesMetadataOnly is the field census behind the
-// side-transfer decision: the marshalled attachment object may carry the
-// metadata and the reference, and nothing else. It is an allowlist rather than
-// a search for the payload because a new field is exactly how the bytes would
-// come back — a legitimate new metadata field has to be added here on purpose.
 func assertAttachmentFrameCarriesMetadataOnly(t *testing.T, raw []byte) {
 	t.Helper()
 	var frame struct {
@@ -609,10 +542,6 @@ func assertAttachmentFrameCarriesMetadataOnly(t *testing.T, raw []byte) {
 }
 
 func TestRoundTripAttachmentFromACPBytes(t *testing.T) {
-	// Deliberately larger than the frame budget asserted below. A twelve-byte
-	// fixture cannot distinguish a side transfer from an inlined payload — both
-	// fit — so the one behaviour attachment.go argues for at length would go
-	// undefended.
 	want := bytes.Repeat([]byte("a,b,c\n1,2,3\n"), 512)
 	a := &agent.AttachmentEvent{
 		Filename: "report.csv",
@@ -632,11 +561,6 @@ func TestRoundTripAttachmentFromACPBytes(t *testing.T) {
 	if w.Attachment.Size != int64(len(want)) {
 		t.Errorf("Size = %d, want %d", w.Attachment.Size, len(want))
 	}
-	// The bytes are NOT in the event frame: that is the side-transfer decision.
-	// Two assertions, because either alone is escapable. The size budget catches
-	// bytes carried whole (raw, base64, or any other encoding of a payload this
-	// size); the field census catches a partial or truncated inline, which would
-	// still fit the budget.
 	raw, err := json.Marshal(w)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -663,8 +587,6 @@ func TestRoundTripAttachmentFromACPBytes(t *testing.T) {
 	if string(got.Data) != string(want) {
 		t.Errorf("data = %q, want %q", got.Data, want)
 	}
-	// Slack's external-upload flow needs the byte count up front, so the size
-	// has to arrive with the metadata rather than be discovered by reading.
 	if deliverer.seen.Size != int64(len(want)) {
 		t.Errorf("deliverer saw Size = %d, want %d", deliverer.seen.Size, len(want))
 	}
@@ -692,8 +614,6 @@ func TestRoundTripAttachmentFromANativeToolPath(t *testing.T) {
 	}
 	assertAttachmentFrameCarriesMetadataOnly(t, mustJSON(t, w))
 
-	// The receiving side spools to a file of its own and answers with a path,
-	// which is what keeps a large attachment out of gateway memory.
 	deliverer := &memDeliverer{dir: t.TempDir()}
 	drain(t, deliverer, transfer)
 
@@ -741,9 +661,6 @@ func TestEncodeAttachmentWithoutBytesFails(t *testing.T) {
 	}
 }
 
-// TestTransferChunkRoundTrip pins the frame the bytes ride in, so stage 2 has
-// nothing left to invent: a chunk carries its correlation id, its position, and
-// whether it is the last one — or the reason the producer gave up.
 func TestTransferChunkRoundTrip(t *testing.T) {
 	cases := []TransferChunk{
 		{TransferID: "t-1", Seq: 0, Data: []byte{0x00, 0x01, 0xff}},
@@ -767,15 +684,8 @@ func TestTransferChunkRoundTrip(t *testing.T) {
 	}
 }
 
-// TestEncodeCoversEveryEventKind is the exhaustiveness guard, and it derives
-// the set it checks from internal/agent's own source (see agentEventKinds)
-// rather than restating it here. Adding a kind to internal/agent without
-// teaching the wire about it fails here rather than silently dropping the event
-// on a runtime node.
-//
-// The map supplies a representative event per kind, because encoding a kind
-// exercises its payload; the KEYS are what the guard checks, and they are
-// checked against the agent package, not against a hand-written count.
+// The kinds are read from internal/agent's source rather than restated here, so this guard
+// cannot drift into agreeing with a stale copy.
 func TestEncodeCoversEveryEventKind(t *testing.T) {
 	signIn := &agent.SignInPrompt{Answer: make(chan agent.DisplayAnswer, 2)}
 	covered := map[agent.EventType]struct {
@@ -838,14 +748,6 @@ func TestEncodeCoversEveryEventKind(t *testing.T) {
 	}
 }
 
-// agentEventKinds reads internal/agent's EventType constants out of its source,
-// so the exhaustiveness guard above cannot drift from the enum it claims to
-// cover. Reflection cannot do this — Go keeps no registry of a named string
-// type's constants — and a hand-copied list would be the very thing the guard
-// exists to catch, so the source is the only honest input.
-//
-// It is deliberately syntactic and local, in the spirit of internal/archtest:
-// no build, no package loading, just the const blocks of the sibling package.
 func agentEventKinds(t *testing.T) []agent.EventType {
 	t.Helper()
 	const dir = "../agent"
@@ -869,9 +771,6 @@ func agentEventKinds(t *testing.T) []agent.EventType {
 			if !ok || gen.Tok != token.CONST {
 				continue
 			}
-			// typeName carries across specs because a const spec with neither a
-			// type nor a value repeats the previous one; a spec with a value and
-			// no type is a fresh untyped constant and clears it.
 			typeName := ""
 			for _, spec := range gen.Specs {
 				value, ok := spec.(*ast.ValueSpec)
@@ -918,10 +817,6 @@ func TestDecodeRejectsAnUnknownKind(t *testing.T) {
 	}
 }
 
-// TestWireVocabularyIsIndependent pins the wire's own constants. They happen to
-// share their strings with internal/agent's today; the point of re-declaring
-// them is that changing the internal enum is a refactor and changing these is a
-// protocol change, and the two must be able to differ.
 func TestWireVocabularyIsIndependent(t *testing.T) {
 	for _, tc := range []struct {
 		got  EventType
@@ -1099,8 +994,6 @@ func TestDisplayRequestsCarryOnlyReviewedFields(t *testing.T) {
 	}
 }
 
-// A sign-in stays open after a code, because the node still has to hear a
-// cancel, and closes only when the node says how it ended.
 func TestASignInRoundTripsAndStaysOpenUntilItSettles(t *testing.T) {
 	enc, dec := NewEncoder(), NewDecoder(nil)
 	onNode := &agent.SignInPrompt{
@@ -1148,8 +1041,6 @@ func TestASignInRoundTripsAndStaysOpenUntilItSettles(t *testing.T) {
 	}
 }
 
-// Abandoning a sign-in at turn teardown releases it on both maps, or every
-// sign-in a dropped turn left behind would stay pending for the node's life.
 func TestAnAbandonedSignInIsForgotten(t *testing.T) {
 	enc := NewEncoder()
 	prompt := &agent.SignInPrompt{Request: agent.SignInRequest{Tool: "x", Profile: "gcloud", URL: "https://x"}, Answer: make(chan agent.DisplayAnswer, 2)}
@@ -1166,8 +1057,6 @@ func TestAnAbandonedSignInIsForgotten(t *testing.T) {
 	}
 }
 
-// A command the owner must approve crosses without a link, the approval keeps
-// the sign-in open, and the link follows once the command has started.
 func TestACommandToApproveCrossesBeforeItsLink(t *testing.T) {
 	enc, dec := NewEncoder(), NewDecoder(nil)
 	onNode := &agent.SignInPrompt{

@@ -7,10 +7,6 @@ import (
 	"testing"
 )
 
-// This file is the advertisement's half of the round-trip proof: what a node
-// claims must mean the same thing on the far side, on both of the two paths it
-// travels — the handshake answer and the later push.
-
 func fullAdvertisement() Advertisement {
 	return Advertisement{
 		Profiles: []string{"reviewer", "shipper"},
@@ -22,8 +18,6 @@ func fullAdvertisement() Advertisement {
 	}
 }
 
-// The connect-time path: the claim rides the answer the gateway already reads,
-// so it is in hand at the moment the registry entry is built.
 func TestAdvertisementRidesInitializeResult(t *testing.T) {
 	yes := true
 	result, err := Result("1", InitializeResult{Interruptible: &yes, Advertisement: fullAdvertisement()})
@@ -42,9 +36,6 @@ func TestAdvertisementRidesInitializeResult(t *testing.T) {
 	}
 }
 
-// The change path: the same value as a node-initiated request, because a
-// configuration edit must reach the gateway without a reconnect and the
-// handshake has already happened.
 func TestAdvertisementRoundTripsAsARequest(t *testing.T) {
 	request, err := Request("7", MethodAdvertise, fullAdvertisement())
 	if err != nil {
@@ -63,10 +54,6 @@ func TestAdvertisementRoundTripsAsARequest(t *testing.T) {
 	}
 }
 
-// Claim ORDER is the node's own first-match-wins order. The gateway never
-// merges rule lists across nodes, so this list's order is the only precedence
-// there is — a serialisation that reordered it would change which profile a
-// channel lands on with nothing failing.
 func TestClaimOrderSurvives(t *testing.T) {
 	request, err := Request("1", MethodAdvertise, fullAdvertisement())
 	if err != nil {
@@ -84,9 +71,6 @@ func TestClaimOrderSurvives(t *testing.T) {
 	}
 }
 
-// A node that claims nothing is a node that has never been configured, which
-// #170 makes an onboarding trigger rather than an error. It has to survive the
-// hop as itself and not as an absence.
 func TestEmptyAdvertisementIsAnAnswer(t *testing.T) {
 	result, err := Result("1", InitializeResult{})
 	if err != nil {
@@ -101,17 +85,11 @@ func TestEmptyAdvertisementIsAnAnswer(t *testing.T) {
 	}
 }
 
-// The rule that keeps a node from asserting anything the gateway would act on
-// as a permission. A reviewer checks this by reading the struct; this checks it
-// by reading the JSON, which is what actually crosses.
 func TestAdvertisementCarriesNoIdentityAndNothingThatGrants(t *testing.T) {
 	raw, err := json.Marshal(fullAdvertisement())
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	// node_id: a node that announces its own identity can announce somebody
-	// else's. allow_anyone: it waives the gateway's access list, and the node
-	// admin who writes it is not the gateway admin.
 	for _, forbidden := range []string{"node_id", "user_id", "allow_anyone", "reply_on_thread"} {
 		if strings.Contains(string(raw), forbidden) {
 			t.Fatalf("the advertisement carries %q; identity comes from the credential and access decisions are the gateway's", forbidden)
@@ -119,9 +97,6 @@ func TestAdvertisementCarriesNoIdentityAndNothingThatGrants(t *testing.T) {
 	}
 }
 
-// The gateway holds one of these under a mutex and hands it to delegation while
-// the node rebuilds its own on every configuration edit. A value copy shares
-// both slices, which is the aliasing that looks safe and is not.
 func TestCloneSharesNothing(t *testing.T) {
 	original := fullAdvertisement()
 	clone := original.Clone()
@@ -136,14 +111,6 @@ func TestCloneSharesNothing(t *testing.T) {
 	}
 }
 
-// TestAClaimMeansTheSameOnBothSidesOfTheLink covers the three shapes a claim's
-// match can take.
-//
-// They are chat.channels' three, and the reason the matcher lives on the type
-// rather than in the gateway is that a claim written on a node must select the
-// same channels on the gateway that reads it. A divergence would be silent: a
-// channel that matches on one side and not the other looks exactly like a
-// channel nobody claimed, which round robins and never errors.
 func TestAClaimMeansTheSameOnBothSidesOfTheLink(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -171,8 +138,6 @@ func TestAClaimMeansTheSameOnBothSidesOfTheLink(t *testing.T) {
 	}
 }
 
-// TestTheFirstMatchingClaimWins is the node's own rule list, evaluated in the
-// order its admin wrote it — the same positional precedence chat.channels has.
 func TestTheFirstMatchingClaimWins(t *testing.T) {
 	ad := Advertisement{Claims: []AssignmentClaim{
 		{Match: "nc-releases", Profile: "releases"},
@@ -189,9 +154,6 @@ func TestTheFirstMatchingClaimWins(t *testing.T) {
 	if _, ok := ad.ClaimFor("C3", "review-pr-1"); ok {
 		t.Fatal("a node claimed a channel none of its rules names")
 	}
-	// A node that claims nothing answers no, rather than answering for
-	// everything. That is what makes an unconfigured node round-robin fodder
-	// instead of a channel's owner.
 	if _, ok := (Advertisement{}).ClaimFor("C1", "nc-releases"); ok {
 		t.Fatal("an empty advertisement claimed a channel")
 	}

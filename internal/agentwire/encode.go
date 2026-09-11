@@ -12,16 +12,6 @@ import (
 	"github.com/miere/murtaugh/internal/agent"
 )
 
-// Encoder translates the agent event stream into wire events. It runs on the
-// producing side — a runtime node.
-//
-// It holds state for exactly one reason: a permission request is a request, and
-// the backend goroutine that raised it is blocked on a channel the wire cannot
-// carry. The Encoder keeps that channel under the correlation id it minted and
-// Resolve delivers the answer to it. Everything else is a pure translation.
-//
-// Safe for concurrent use: a session's events are produced by one goroutine but
-// answers arrive on the connection's.
 type Encoder struct {
 	mu       sync.Mutex
 	pending  map[string]chan string
@@ -34,7 +24,6 @@ type display struct {
 	open   bool
 }
 
-// NewEncoder returns an Encoder with no outstanding requests.
 func NewEncoder() *Encoder {
 	return &Encoder{
 		pending:  make(map[string]chan string),
@@ -43,15 +32,8 @@ func NewEncoder() *Encoder {
 	}
 }
 
-// Encode translates one agent event into its wire form.
-//
-// The second result is the side channel the event needs and the frame cannot
-// carry: an attachment's bytes. It is nil for every other kind, and when it is
-// non-nil the caller owns it and must close its Body.
-//
-// An unknown event kind is an error rather than a dropped event: a kind added to
-// internal/agent without being taught to the wire must fail loudly here, not
-// vanish somewhere between a node and a user.
+// The caller must close the returned Transfer's Body. An unknown kind fails loudly so a kind
+// added to internal/agent never vanishes between node and user.
 func (e *Encoder) Encode(ev agent.Event) (Event, *Transfer, error) {
 	switch ev.Type {
 	case agent.EventText:
@@ -133,8 +115,6 @@ func (e *Encoder) Encode(ev agent.Event) (Event, *Transfer, error) {
 	}
 }
 
-// track mints a correlation id for the prompt, remembers the channel its
-// backend is blocked on, and returns the request to put on the wire.
 func (e *Encoder) track(p *agent.PermissionPrompt) PermissionRequest {
 	id := uuid.NewString()
 	e.mu.Lock()
@@ -212,13 +192,8 @@ func (e *Encoder) Answer(a DisplayAnswer) error {
 	return nil
 }
 
-// Resolve delivers an answer to the backend blocked on the request it names.
-//
-// An unknown id is an error: the request was already answered, abandoned, or
-// never existed, and answering nothing quietly would leave a turn hanging with
-// no trace. The send is non-blocking because the prompt's channel is buffered
-// (cap 1) and written exactly once — the same contract the in-process consumer
-// works to.
+// Resolve fails on an unknown id because answering nothing quietly would leave a turn
+// hanging with no trace.
 func (e *Encoder) Resolve(resp PermissionResponse) error {
 	e.mu.Lock()
 	decision, ok := e.pending[resp.ID]
@@ -237,9 +212,8 @@ func (e *Encoder) Resolve(resp PermissionResponse) error {
 	return nil
 }
 
-// Abandon forgets a request without answering it, for turn teardown: the
-// backend's own ctx.Done escape has already decided the outcome (a deny), so
-// the entry would otherwise outlive the goroutine waiting on it.
+// Abandon exists for turn teardown: the backend's ctx.Done has already denied, and the entry
+// would otherwise outlive the goroutine waiting on it.
 func (e *Encoder) Abandon(id string) {
 	e.mu.Lock()
 	delete(e.pending, id)
@@ -260,9 +234,6 @@ func (e *Encoder) Pending() int {
 	return len(e.pending) + len(e.displays)
 }
 
-// encodeAttachment produces the metadata frame and opens the byte stream that
-// accompanies it. Data wins over Path when both are set, matching
-// agent.AttachmentEvent's documented precedence.
 func encodeAttachment(a *agent.AttachmentEvent) (Attachment, *Transfer, error) {
 	w := Attachment{
 		Filename:   a.Filename,
@@ -276,9 +247,6 @@ func encodeAttachment(a *agent.AttachmentEvent) (Attachment, *Transfer, error) {
 		w.Size = int64(len(a.Data))
 		return w, &Transfer{ID: w.TransferID, Size: w.Size, Body: io.NopCloser(bytes.NewReader(a.Data))}, nil
 	case a.Path != "":
-		// Opened and stat'd through the same handle so the size on the wire is
-		// the size of the bytes that will actually be sent, not of whatever the
-		// path pointed at a moment earlier.
 		f, err := os.Open(a.Path)
 		if err != nil {
 			return Attachment{}, nil, fmt.Errorf("open attachment %q: %w", a.Path, err)
@@ -291,9 +259,6 @@ func encodeAttachment(a *agent.AttachmentEvent) (Attachment, *Transfer, error) {
 		w.Size = info.Size()
 		return w, &Transfer{ID: w.TransferID, Size: w.Size, Body: f}, nil
 	default:
-		// The in-process handler drops this case silently. On a wire it must not
-		// be silent: an attachment with no bytes is a turn that promised the user
-		// a file and will not deliver one.
 		return Attachment{}, nil, fmt.Errorf("agentwire: attachment %q has neither data nor a path", a.Filename)
 	}
 }
