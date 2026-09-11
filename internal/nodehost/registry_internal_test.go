@@ -18,23 +18,10 @@ import (
 	"github.com/miere/murtaugh/internal/nodelink"
 )
 
-// The two registry properties that cannot be reached from outside the package:
-// what happens when several goroutines close one entry at the same instant, and
-// what the session map holds after a connection leaves.
-//
-// Everything else in this package is tested over the real loopback rig. These
-// two are here because the state they are about — a `chan struct{}` and an
-// unexported map — has no observable projection: the first fails as a panic on
-// a goroutine no test owns, and the second is a leak that never changes an
-// answer.
-
 func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
 }
 
-// noTokens is a credential store that answers nothing. These tests never
-// authenticate anything; New refuses a nil store, which is the only reason it
-// is here.
 type noTokens struct{}
 
 func (noTokens) Put(context.Context, config.NodeToken) error { return nil }
@@ -56,13 +43,6 @@ func testHost(t *testing.T) *Host {
 	return host
 }
 
-// newEntry is a registry entry over a pipe, which is what makes close() real:
-// it closes a live remote.Client rather than a nil one.
-//
-// The node's end of the pipe is closed first, so the client's goodbye fails on
-// the transport instead of waiting out its five-second answer timeout against a
-// peer that will never answer. What is under test is the entry's own
-// bookkeeping, not the close handshake, which nodelink tests.
 func newEntry(t *testing.T, connID string) *attached {
 	t.Helper()
 	gatewaySide, nodeSide := nodelink.Pipe(8)
@@ -72,23 +52,8 @@ func newEntry(t *testing.T, connID string) *attached {
 	return node
 }
 
-// Four production paths close one entry, and any two of them can arrive
-// together: the link's own serve loop on detach, shutdown's detachAll,
-// revocation's CloseCredential, and a redial displacing this connection.
-//
-// A check-then-close on the channel is `panic: close of closed channel` — not an
-// error anybody handles, but a panic on a goroutine with no recover above it,
-// which takes the gateway daemon down. It happens on shutdown and on a
-// credential revocation: the two moments least likely to be watched, and the two
-// where the daemon dying looks like the thing that was asked for.
-//
-// The barrier is what makes this deterministic rather than a race one run in
-// twenty loses, and it is a SPIN rather than a channel on purpose: releasing
-// eight goroutines by closing a channel wakes them one at a time through the
-// scheduler, which is enough serialisation to hide the window entirely — a
-// channel barrier over these same rounds reproduced nothing. Each closer
-// reports its own panic instead of crashing the suite, so a regression fails
-// this test rather than every test in the package.
+// The barrier spins on purpose: a channel barrier serialises the goroutines
+// enough to hide the double-close panic.
 func TestClosingOneConnectionFromSeveralGoroutinesAtOnceIsSafe(t *testing.T) {
 	const closers = 8
 	const rounds = 2000
@@ -134,13 +99,8 @@ func TestClosingOneConnectionFromSeveralGoroutinesAtOnceIsSafe(t *testing.T) {
 	}
 }
 
-// A departing connection takes its session bindings with it.
-//
-// sessionNode would answer correctly without this — it re-checks the registry
-// before trusting an entry — so nothing observable changes and that is exactly
-// why it needs its own test: the cost of losing it is a map that grows by one
-// entry for every session of every node that ever attached, on a gateway that
-// runs for months in front of laptops that connect and disconnect all day.
+// Nothing observable breaks without the pruning, so only this test stops the
+// binding map growing for as long as the gateway runs.
 func TestASessionBindingLeavesWithItsConnection(t *testing.T) {
 	host := testHost(t)
 	node := newEntry(t, "1")
@@ -160,10 +120,6 @@ func TestASessionBindingLeavesWithItsConnection(t *testing.T) {
 	if held != 0 {
 		t.Fatalf("the registry still holds %d session bindings for a connection that has gone", held)
 	}
-	// The takeover mark goes with it. Session ids are minted per node and
-	// nothing makes them unique across the fleet, so a mark left behind is one
-	// that could be handed to whatever next mints the same id — a takeover
-	// notice on a conversation that never moved.
 	if _, marked := host.takeTakeover("session-a"); marked {
 		t.Fatal("a takeover mark outlived the session it belonged to")
 	}
@@ -172,9 +128,7 @@ func TestASessionBindingLeavesWithItsConnection(t *testing.T) {
 	}
 }
 
-// Revocation and shutdown prune too. They take a different path out of the
-// registry — takeCredential and takeAll, neither of which goes through remove —
-// so each has to do it itself.
+// takeCredential and takeAll bypass remove, so each must prune on its own.
 func TestRevocationAndShutdownPruneTheirSessionBindings(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

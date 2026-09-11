@@ -11,22 +11,14 @@ import (
 )
 
 var (
-	// ErrLinkClosed is what an operation on a link that has stopped returns.
-	ErrLinkClosed = errors.New("nodelink: link closed")
-	// ErrSequenceGap is the discriminant for a detected hole in the stream.
-	// Everything above a failed link is failed with an error that satisfies
-	// errors.Is against it, so "an event went missing" is one identifiable
-	// condition rather than a string in a log.
-	ErrSequenceGap = errors.New("nodelink: sequence gap")
-	// ErrNotResumable answers a resume whose suffix is no longer held.
-	ErrNotResumable = errors.New("nodelink: not resumable")
-	// ErrVersionMismatch is a peer speaking a different envelope version.
+	ErrLinkClosed      = errors.New("nodelink: link closed")
+	ErrSequenceGap     = errors.New("nodelink: sequence gap")
+	ErrNotResumable    = errors.New("nodelink: not resumable")
 	ErrVersionMismatch = errors.New("nodelink: envelope version mismatch")
 )
 
-// SequenceGapError names the hole: the sequence expected and the one that
-// arrived. Both numbers are in the message because the size of the gap is the
-// first thing a maintainer wants and the last thing a re-run will reproduce.
+// Carries both sequence numbers because the gap size is what a maintainer needs first, and a re-run
+// will not reproduce it.
 type SequenceGapError struct {
 	Want uint64
 	Got  uint64
@@ -38,54 +30,23 @@ func (e *SequenceGapError) Error() string {
 
 func (e *SequenceGapError) Unwrap() error { return ErrSequenceGap }
 
-// Handler consumes one delivered payload.
-//
-// It is called from the read loop, in sequence order, and the frame is
-// acknowledged only once it RETURNS — so a handler that hands the payload
-// straight to a full channel is applying backpressure to the peer, which is the
-// intended behaviour and not a bug. It must not block forever: while it is
-// running no acknowledgement is processed, exactly as the ACP transport's read
-// loop already behaves when a turn's event channel is full. Bound every wait
-// inside it on a context.
-//
-// Returning an error fails the LINK. A consumer that cannot take a frame has
-// left the same hole a dropped frame would, so it is not something to log and
-// step over.
+// Blocking here is intended backpressure, since the frame is acked only on return, but bound the
+// wait: no acks are processed meanwhile. An error fails the link, as a skipped frame is a hole.
 type Handler func(payload []byte) error
 
-// Options configures a Link. The zero value of every field is usable.
 type Options struct {
-	// Handler receives delivered payloads. A nil handler discards them, which
-	// is only useful in a test.
 	Handler Handler
 	Logger  *slog.Logger
-	// WindowBytes bounds the unacknowledged bytes in flight before Send blocks.
-	// Bytes rather than frames: an attachment chunk is four megabytes and a
-	// text event is forty, so a frame count bounds nothing useful.
+	// Bytes, not frames: an attachment chunk is 4 MB and a text event is 40 bytes, so a frame count
+	// bounds nothing useful.
 	WindowBytes int
-	// AckThreshold is how many consumed frames may go unacknowledged before a
-	// standalone ack is sent. Acks piggyback on outbound traffic; this covers
-	// the direction that is only listening.
-	//
-	// It is a frame count, and frame counts alone are not enough: the WINDOW is
-	// measured in bytes, so a peer sending a few large frames — four 64 KiB
-	// attachment chunks against a 256 KiB window — fills the window before this
-	// many frames have been consumed, and waits for an acknowledgement that a
-	// frame count will never trigger. That is a deadlock, not a stall, and it
-	// was found by sending a real attachment over a real socket. A consumed-byte
-	// trigger runs alongside this one; see receive.
+	// A frame count alone deadlocks: a few large frames fill the byte window before it is reached, so
+	// a consumed-byte trigger runs alongside it.
 	AckThreshold uint64
-	// AckInterval sends a standalone ack when nothing has been sent for that
-	// long. It is a TRANSPORT keepalive — it proves the socket is alive and
-	// says nothing about whether the agent is still working, which is a
-	// different timer with a different owner. Zero disables it.
+	// A transport keepalive only: it proves the socket is alive, not that the agent is still working.
 	AckInterval time.Duration
-	// Epoch is the leadership term this link belongs to. A resume carrying a
-	// different one is refused.
-	Epoch uint64
-	// ResumeFrom seeds the receive watermark when this link continues a
-	// previous one, so the replayed prefix the peer re-sends is recognised as
-	// duplicate rather than delivered twice.
+	Epoch       uint64
+	// Seeds the receive watermark so a replayed prefix is dropped as a duplicate, not delivered twice.
 	ResumeFrom uint64
 }
 
@@ -100,22 +61,8 @@ type frame struct {
 	size int
 }
 
-// Link is one connection's delivery state: a sequenced, acknowledged,
-// flow-controlled stream of opaque payloads in each direction.
-//
-// Locking, because it is the part that goes wrong. Three separate mutexes, in
-// this order where more than one is held:
-//
-//   - sendMu serialises Send end to end (window wait, sequence assignment,
-//     write) so two concurrent senders cannot write frames out of sequence
-//     order — which the peer would report as a gap and kill the link over.
-//   - mu guards the shared counters and buffers. It is NEVER held across a
-//     write to the transport, so a stalled write cannot stop an arriving
-//     acknowledgement from opening the window.
-//   - connMu guards the transport write itself, and is the only thing the read
-//     loop takes in order to emit a standalone ack. It is deliberately not
-//     sendMu: a sender parked on a full window holds sendMu for as long as it
-//     takes, and the read loop must not queue behind it.
+// Lock order is sendMu, mu, connMu. mu is never held across a write and the read loop takes only
+// connMu, so neither a stalled write nor a sender parked on a full window can hold up an ack.
 type Link struct {
 	conn    Conn
 	handler Handler
@@ -134,19 +81,15 @@ type Link struct {
 	peerAck      uint64
 	lastSeen     uint64
 	ackedThrough uint64
-	// sinceAck is the payload bytes delivered since the last acknowledgement
-	// this side emitted, piggybacked or standalone. It is what makes a
-	// byte-sized window and a frame-counted ack policy agree.
-	sinceAck int
-	room     chan struct{}
-	err      error
+	sinceAck     int
+	room         chan struct{}
+	err          error
 
 	done      chan struct{}
 	closeOnce sync.Once
 }
 
-// New starts a link over conn and begins reading immediately. The caller owns
-// conn no longer: Close, and any failure, closes it.
+// Takes ownership of conn: Close, or any failure, closes it.
 func New(conn Conn, opts Options) *Link {
 	log := opts.Logger
 	if log == nil {
@@ -178,42 +121,30 @@ func New(conn Conn, opts Options) *Link {
 	return l
 }
 
-// Done closes when the link stops, for any reason.
 func (l *Link) Done() <-chan struct{} { return l.done }
 
-// Err reports why the link stopped, or nil while it is running. It is
-// ErrLinkClosed for an orderly Close.
 func (l *Link) Err() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.err
 }
 
-// LastSeen is the highest contiguous sequence delivered to the handler — what
-// a resume request carries.
 func (l *Link) LastSeen() uint64 {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.lastSeen
 }
 
-// Epoch is the leadership term this link was opened in.
 func (l *Link) Epoch() uint64 { return l.epoch }
 
-// Pending reports the retransmit buffer's depth: frames sent and not yet
-// acknowledged, and their bytes. A number that only grows is a peer that has
-// stopped consuming.
 func (l *Link) Pending() (frames, bytes int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return len(l.unacked), l.unackedBytes
 }
 
-// Send delivers one payload, blocking while the unacknowledged window is full.
-//
-// It returns when the frame has been written to the transport, not when the
-// peer has consumed it: the retransmit buffer is what carries the frame across
-// a reconnect, and it is pruned by the peer's acknowledgement.
+// Returns once the frame is written, not once the peer consumed it; the retransmit buffer, pruned
+// by the peer's ack, is what carries it across a reconnect.
 func (l *Link) Send(ctx context.Context, payload []byte) error {
 	l.sendMu.Lock()
 	defer l.sendMu.Unlock()
@@ -247,11 +178,6 @@ func (l *Link) Send(ctx context.Context, payload []byte) error {
 	return nil
 }
 
-// awaitRoom blocks until the window has space for another n bytes.
-//
-// The `already in flight` guard is what stops a payload larger than the whole
-// window from waiting forever for room that can never appear: an oversized
-// frame goes out alone.
 func (l *Link) awaitRoom(ctx context.Context, n int) error {
 	for {
 		l.mu.Lock()
@@ -276,7 +202,6 @@ func (l *Link) awaitRoom(ctx context.Context, n int) error {
 	}
 }
 
-// Close stops the link and the transport under it. Safe to call twice.
 func (l *Link) Close() error {
 	l.fail(ErrLinkClosed)
 	return nil
@@ -333,19 +258,12 @@ func (l *Link) readLoop() {
 				return
 			}
 		case KindAck:
-			// The acknowledgement above was the whole frame.
 		case KindResume, KindResumed:
-			// The reconnect exchange is driven by the owner of the connection
-			// (ReplayFrom / AcceptResume), not from inside the read loop: it
-			// arrives on a link that has just been built around a NEW transport,
-			// and only the owner knows which streams it belongs to.
 			l.log.Warn("nodelink: resume frame arrived on a link with no reconnect driver", "kind", env.Kind)
 		}
 	}
 }
 
-// receive applies the sequencing rules and, when the frame is the next one,
-// hands it to the consumer before advancing the watermark.
 func (l *Link) receive(env Envelope) error {
 	l.mu.Lock()
 	last := l.lastSeen
@@ -353,8 +271,6 @@ func (l *Link) receive(env Envelope) error {
 
 	switch {
 	case env.Seq <= last:
-		// A duplicate. Legal only after a resume replayed a suffix this side
-		// had already consumed; delivering it twice would double a sentence.
 		return nil
 	case env.Seq > last+1:
 		return &SequenceGapError{Want: last + 1, Got: env.Seq}
@@ -372,23 +288,12 @@ func (l *Link) receive(env Envelope) error {
 	behind := l.lastSeen - l.ackedThrough
 	bytesBehind := l.sinceAck
 	l.mu.Unlock()
-	// Either trigger. The frame count keeps a chatty stream's acknowledgements
-	// timely; the byte count is what stops a peer sending large frames from
-	// filling the window before the frame count is reached, which is a deadlock
-	// because the acknowledgement that would open it is the one being waited
-	// for. Half the window, so the peer has room to keep sending while the
-	// acknowledgement is in flight.
 	if behind >= l.ackAt || bytesBehind >= l.window/2 {
 		l.sendAck()
 	}
 	return nil
 }
 
-// applyAck prunes the retransmit buffer and opens the window.
-//
-// A lower or repeated acknowledgement is ignored rather than rolling the
-// watermark back: acknowledgements are cumulative, so an older one carries no
-// information, and un-pruning would resurrect frames the peer has consumed.
 func (l *Link) applyAck(ack uint64) {
 	if ack == 0 {
 		return
@@ -405,8 +310,6 @@ func (l *Link) applyAck(ack uint64) {
 		cut++
 	}
 	if cut > 0 {
-		// Re-slice into a fresh backing array so an acknowledged frame's bytes
-		// are collectable rather than pinned by the buffer's capacity.
 		l.unacked = append([]frame(nil), l.unacked[cut:]...)
 		close(l.room)
 		l.room = make(chan struct{})
@@ -414,8 +317,6 @@ func (l *Link) applyAck(ack uint64) {
 	l.mu.Unlock()
 }
 
-// sendAck emits a standalone acknowledgement. Failures are logged and not
-// fatal: the next message frame carries the same watermark.
 func (l *Link) sendAck() {
 	l.mu.Lock()
 	if l.err != nil || l.lastSeen == l.ackedThrough {
@@ -449,15 +350,8 @@ func (l *Link) keepalive(every time.Duration) {
 	}
 }
 
-// ReplayFrom returns the frames the peer must be re-sent after it resumes from
-// lastSeen: every frame this side sent after that sequence, in order, exactly
-// as they were first written.
-//
-// It refuses rather than guesses. Below the buffer's floor means the peer is
-// asking for frames it had already acknowledged, so they are gone; above what
-// was ever sent means it is not the same stream. Both are answered with
-// ErrNotResumable so the caller fails its open turns explicitly instead of
-// continuing into a hole.
+// Refuses rather than guesses, so the caller fails its open turns explicitly instead of carrying
+// on past a hole.
 func (l *Link) ReplayFrom(lastSeen uint64) ([][]byte, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -476,13 +370,8 @@ func (l *Link) ReplayFrom(lastSeen uint64) ([][]byte, error) {
 	return out, nil
 }
 
-// AcceptResume answers a peer's resume request: the answer frame to send, and
-// the frames to replay behind it.
-//
-// The epoch check is the reason this is not just ReplayFrom. A node resuming
-// into a gateway that was re-promoted since is talking to a process that never
-// held the buffer; saying yes there would silently drop the frames the resume
-// exists to recover.
+// Unlike ReplayFrom it checks the epoch: a gateway re-promoted since never held the buffer, and
+// saying yes would silently drop the frames the resume exists to recover.
 func (l *Link) AcceptResume(req Resume) (Envelope, [][]byte) {
 	if req.Epoch != l.epoch {
 		return Envelope{V: Version, Kind: KindResumed, Resume: &Resume{
@@ -506,7 +395,6 @@ func (l *Link) AcceptResume(req Resume) (Envelope, [][]byte) {
 	}}, frames
 }
 
-// ResumeRequest is what this side asks for after its transport was replaced.
 func (l *Link) ResumeRequest() Envelope {
 	return Envelope{V: Version, Kind: KindResume, Resume: &Resume{LastSeen: l.LastSeen(), Epoch: l.epoch}}
 }

@@ -63,11 +63,7 @@ type lockFileBody struct {
 	TeamID   string `json:"team_id"`
 	AppID    string `json:"app_id"`
 	Acquired string `json:"acquired_at"`
-	// Address is where the holder accepts runtime node connections. On this
-	// backend both gateways are on one machine, so the redirect target is
-	// loopback on a different port — which is precisely what a standby cannot
-	// guess and must be told.
-	Address string `json:"node_address,omitempty"`
+	Address  string `json:"node_address,omitempty"`
 }
 
 // openLocalLocker prepares the local leader lock for identity. It creates the
@@ -186,8 +182,6 @@ func (l *localLocker) Release(_ context.Context, lease config.Lease) error {
 	return nil
 }
 
-// Publish records where this holder accepts runtime node connections, into the
-// body it already writes on acquisition.
 func (l *localLocker) Publish(_ context.Context, lease config.Lease, addr config.LeaderAddress) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -202,18 +196,8 @@ func (l *localLocker) Publish(_ context.Context, lease config.Lease, addr config
 	return nil
 }
 
-// Holder reads the live claim without taking it.
-//
-// Whether the lock is held cannot be read out of the file's contents: the body
-// is diagnostic, it survives a release, and after a crash it describes a
-// process that no longer exists. The only honest question is the one flock
-// answers — so this ASKS for a shared lock and treats being refused as the
-// answer. A shared lock that is granted proves nobody holds the exclusive one,
-// which means there is no leader whatever the body says.
-//
-// The probe uses its own descriptor, so it is safe while this process holds the
-// lock on another: flock is scoped to an open file description, so the leader
-// reading its own lock is correctly told the lock is held.
+// Probes with a shared flock because the file body survives releases and crashes, so it
+// cannot say whether anyone holds the lock.
 func (l *localLocker) Holder(_ context.Context) (config.Lease, bool, error) {
 	file, err := os.OpenFile(l.path, os.O_RDONLY|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
@@ -228,8 +212,6 @@ func (l *localLocker) Holder(_ context.Context) (config.Lease, bool, error) {
 		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
 			return config.Lease{}, false, fmt.Errorf("read local lock %q: %w", l.path, err)
 		}
-		// Refused: somebody holds it exclusively, and that somebody is the
-		// leader.
 		body := l.readBody()
 		return config.Lease{
 			Key:     l.identity.Key(),
@@ -238,9 +220,6 @@ func (l *localLocker) Holder(_ context.Context) (config.Lease, bool, error) {
 			Address: config.ParseLeaderAddress(body.Address),
 		}, true, nil
 	}
-	// Granted, so there is no leader. Drop it immediately: holding a shared lock
-	// would block the next acquisition, which is the opposite of what a read is
-	// allowed to cost.
 	_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
 	return config.Lease{}, false, nil
 }

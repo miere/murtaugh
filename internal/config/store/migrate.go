@@ -68,20 +68,6 @@ func migrations(d Dialect) [][]string {
 				PRIMARY KEY (job, occurrence)
 			)`, d.TimestampType()),
 		},
-		// v4 — issued node credentials. One row per TOKEN, keyed by the public
-		// selector, so two live credentials for one node (a rotation in
-		// progress) is simply two rows sharing node_id.
-		//
-		// secret_hash is the SHA-256 of the token's secret half and is the only
-		// trace of the credential that survives minting. It is NOT the key:
-		// keying on it would perform the secret comparison inside the database
-		// index, where it cannot be done in constant time.
-		//
-		// The three timestamps are TEXT in every dialect, for the same reason
-		// job_runs.occurrence is: they are read back and compared in Go against
-		// a caller-supplied instant, and a fixed sortable layout makes that one
-		// parse rather than three drivers' worth of timestamp scanning. The
-		// empty string is the zero time — "never expires", "not revoked".
 		{
 			`CREATE TABLE IF NOT EXISTS node_tokens (
 				selector    TEXT PRIMARY KEY,
@@ -95,26 +81,6 @@ func migrations(d Dialect) [][]string {
 			)`,
 			`CREATE INDEX IF NOT EXISTS node_tokens_by_node ON node_tokens (node_id)`,
 		},
-		// v5 — conversation pins. One row per delegated Slack conversation: the
-		// node a conversation was elected onto, so turn two lands where turn one
-		// did and so the choice survives a gateway restart or a failover.
-		//
-		// The primary key IS the conversation key — the same four fields
-		// agent.ConversationKey carries — which is what makes a re-election an
-		// upsert rather than a delete-then-insert. #170 requires the stored pin
-		// to be OVERWRITTEN when a node goes away rather than bypassed, and a
-		// key that already identifies the row is how that becomes one statement
-		// with no window where the conversation has no pin at all.
-		//
-		// dm is an INTEGER 0/1 rather than a boolean because SQLite has no
-		// boolean type and the two drivers disagree about what to do with one;
-		// it is part of the key, so a representation both engines index the same
-		// way matters more than a nicer column.
-		//
-		// elected_at is TEXT in every dialect, for the reason node_tokens'
-		// timestamps are: it is read back and compared in Go, and one fixed
-		// sortable layout is one parse rather than three drivers' worth of
-		// timestamp scanning.
 		{
 			`CREATE TABLE IF NOT EXISTS conversation_pins (
 				team_id    TEXT    NOT NULL,
@@ -128,17 +94,6 @@ func migrations(d Dialect) [][]string {
 			)`,
 			`CREATE INDEX IF NOT EXISTS conversation_pins_by_node ON conversation_pins (node_id)`,
 		},
-		// v6 — where the leader accepts runtime nodes. A standby is already
-		// contending for this row, so putting the address on it is what lets it
-		// redirect a node instead of dropping it: the alternative is a bare
-		// socket close, which looks identical to a dead gateway, a rejected
-		// credential and broken wifi.
-		//
-		// It defaults to empty and empty means something precise — this leader
-		// accepts no nodes — so a row written before this column existed, and a
-		// leader started without a node listener, read the same and correct way.
-		// The column is written on every acquisition (cleared) and by Publish
-		// (set), never left over from a previous holder.
 		{
 			`ALTER TABLE leader_locks ADD COLUMN address TEXT NOT NULL DEFAULT ''`,
 		},

@@ -132,8 +132,6 @@ func (r *signInRig) finished(t *testing.T) {
 	}
 }
 
-// The owner is DMed, the requester's thread gets the notice, the owner's code
-// goes back, and the node's word on how it ended settles both cards.
 func TestASignInIsDrawnForItsOwnerAndSettledByTheNode(t *testing.T) {
 	r := drawSignIn(t)
 	posts, _ := r.api.snapshot()
@@ -168,8 +166,6 @@ func TestASignInIsDrawnForItsOwnerAndSettledByTheNode(t *testing.T) {
 	}
 }
 
-// Access withdrawn before the owner submits wins: no code goes back, the node is
-// told to stop, and the drawing ends.
 func TestASubmissionFromAnOwnerWhoLostAccessStopsTheSignIn(t *testing.T) {
 	r := drawSignIn(t)
 	*r.allowed = false
@@ -199,7 +195,6 @@ func TestADeclinedSignInTellsTheNode(t *testing.T) {
 	r.finished(t)
 }
 
-// A drawing withdrawn with its turn tells whoever runs the sign-in to stop.
 func TestAWithdrawnSignInTellsTheNodeToStop(t *testing.T) {
 	r := drawSignIn(t)
 	r.cancel()
@@ -209,7 +204,6 @@ func TestAWithdrawnSignInTellsTheNodeToStop(t *testing.T) {
 	r.finished(t)
 }
 
-// An owner who may not use the gateway is never sent a card, and the node hears why.
 func TestASignInForAnOwnerWhoMayNotUseTheGatewayIsRefused(t *testing.T) {
 	api := &cardAPI{posted: make(chan struct{}, 8)}
 	flow := authcard.New(slacklib.NewLazyClientWith(func() (slacklib.SlackAPI, error) { return api, nil }),
@@ -225,8 +219,6 @@ func TestASignInForAnOwnerWhoMayNotUseTheGatewayIsRefused(t *testing.T) {
 	}
 }
 
-// Raw gateway failures stay on the gateway: the node's model only hears that
-// the sign-in could not be shown.
 func TestAGatewayFailureReachesTheNodeAsAFixedReason(t *testing.T) {
 	flow := authcard.New(slacklib.NewLazyClientWith(func() (slacklib.SlackAPI, error) {
 		return nil, errors.New("slack: invalid_auth for xoxb-secret at /etc/murtaugh/templates")
@@ -240,8 +232,6 @@ func TestAGatewayFailureReachesTheNodeAsAFixedReason(t *testing.T) {
 	}
 }
 
-// A command the owner approves only then gets its link shown, and the code
-// typed after that still goes back.
 func TestACommandIsApprovedBeforeItsLinkIsShown(t *testing.T) {
 	r := drawSignInFor(t, agent.SignInRequest{Tool: "vendor-mcp", Profile: "custom", Command: "vendor-cli login", NeedsCode: true})
 	corr := r.corr(t)
@@ -273,7 +263,6 @@ func TestACommandIsApprovedBeforeItsLinkIsShown(t *testing.T) {
 	r.finished(t)
 }
 
-// Declining the command tells the node before anything has run.
 func TestADeclinedCommandTellsTheNode(t *testing.T) {
 	r := drawSignInFor(t, agent.SignInRequest{Tool: "vendor-mcp", Profile: "custom", Command: "vendor-cli login"})
 	if err := r.flow.HandleClick(context.Background(), r.corr(t), authcard.ActionDeny, "UOWNER", "t"); err != nil {

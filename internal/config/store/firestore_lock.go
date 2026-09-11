@@ -157,10 +157,7 @@ type lockState struct {
 	epoch      int64
 	expired    bool
 	updateTime time.Time
-	// address is where the holder accepts runtime nodes, empty when it accepts
-	// none — and empty for every document written before the field existed,
-	// which reads the same way and correctly.
-	address config.LeaderAddress
+	address    config.LeaderAddress
 }
 
 // read fetches the lock document and decides, in server time only, whether the
@@ -249,11 +246,7 @@ func (l *firestoreLocker) lockDoc(owner string, epoch int64) map[string]any {
 		fsLockTeamID:     l.identity.TeamID,
 		fsLockAppID:      l.identity.AppID,
 		fsLockReleased:   false,
-		// Cleared on every acquisition and on every renewal, because it belongs
-		// to whoever holds the lock and Publish is what puts it back. A takeover
-		// that inherited the previous holder's address would have every standby
-		// redirect nodes to a gateway that has stood down.
-		fsLockAddress: "",
+		fsLockAddress:    "",
 	}
 }
 
@@ -268,12 +261,6 @@ func (l *firestoreLocker) updatesFor(owner string, epoch int64) []firestore.Upda
 	return updates
 }
 
-// renewalUpdates is updatesFor without the address.
-//
-// A renewal must not disturb what Publish wrote. Sharing one update list with
-// acquisition would blank the address every few seconds, and a standby reading
-// the lock in one of those windows would turn a node away with nowhere to send
-// it — intermittently, which is the worst version of that bug.
 func (l *firestoreLocker) renewalUpdates(owner string, epoch int64) []firestore.Update {
 	updates := l.updatesFor(owner, epoch)
 	kept := updates[:0]
@@ -286,12 +273,8 @@ func (l *firestoreLocker) renewalUpdates(owner string, epoch int64) []firestore.
 	return kept
 }
 
-// Publish records where this holder accepts runtime node connections.
-//
-// Guarded by the same update-time precondition every other write here carries,
-// so a node that has already been taken over cannot stamp its address onto its
-// successor's document. Losing that race is not an error: the renewal loop is
-// what discovers the lease is gone, and it will.
+// Losing the update-time precondition is not an error: the renewal loop is what discovers
+// the lease is gone.
 func (l *firestoreLocker) Publish(ctx context.Context, lease config.Lease, addr config.LeaderAddress) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -312,13 +295,8 @@ func (l *firestoreLocker) Publish(ctx context.Context, lease config.Lease, addr 
 	return nil
 }
 
-// Holder reads the live claim without contending for it, so a standby can name
-// the leader to a node it is turning away.
-//
-// A released or lapsed document reports ok=false. The document outlives both so
-// the epoch survives a handover, which means "the document exists" and "there is
-// a leader" are different questions — and answering the first when asked the
-// second sends a node back to the gateway it just left.
+// The document outlives a release so the epoch survives a handover, so a document
+// existing does not mean there is a leader.
 func (l *firestoreLocker) Holder(ctx context.Context) (config.Lease, bool, error) {
 	state, err := l.read(ctx)
 	if err != nil {

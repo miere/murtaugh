@@ -64,8 +64,6 @@ func (a *Application) runGateway(ctx context.Context) error {
 	// replacement (see reloadConfig).
 	holder.get().WithLeaderElection(runner)
 	a.attachAgentSetup(ctx, holder.get(), a.cfg, holder, runner)
-	// The node endpoint learns how to ask the gateway its two questions. Once,
-	// not per reload: the closures go through the holder.
 	a.wireNodeOnboarding(holder)
 
 	// Close agent backends on the way out, whichever gateway is current by

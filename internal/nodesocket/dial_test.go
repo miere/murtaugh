@@ -9,28 +9,11 @@ import (
 	"time"
 )
 
-// The dialler's refusals are the compensating control for terminating TLS
-// outside this process. #170 makes wss mandatory; nodehost.Listen deliberately
-// does not provide it, and the sentence that makes that acceptable is "the
-// dialler enforces the other half of this: it refuses plain ws:// to anything
-// but a loopback host". A relaxation or a reordering here ships a node's bearer
-// token — which travels in an Authorization header — in cleartext across a
-// real network, so it is pinned rather than trusted to a comment.
-//
-// It matters twice as much since failover: a node now dials addresses it was
-// GIVEN, by a gateway, over an unauthenticated handshake response. Those go
-// through the same ResolveEndpoint as the seed, so "the gateway told me to"
-// cannot talk a node out of this rule.
-
 func TestPlainWebSocketIsOnlyAllowedToALoopbackHost(t *testing.T) {
-	// Loopback is carved out because that is the `--role both` deployment the
-	// split is exercised with: there is no network for anything to intercept.
 	for _, address := range []string{
 		"ws://127.0.0.1:9000",
 		"ws://localhost:9000",
 		"ws://[::1]:9000",
-		// The scheme that carries the credential safely is allowed anywhere,
-		// which is the whole point of the restriction being on ws:// alone.
 		"wss://gateway.example.com",
 		"wss://gateway.example.com:9000",
 	} {
@@ -44,8 +27,6 @@ func TestPlainWebSocketIsOnlyAllowedToALoopbackHost(t *testing.T) {
 		"ws://192.0.2.10:9000",
 		"ws://10.1.2.3",
 		"ws://[2001:db8::1]:9000",
-		// Not loopback, whatever the name suggests: only 127/8, ::1 and the
-		// literal "localhost" are.
 		"ws://localhost.example.com:9000",
 	} {
 		endpoint, err := ResolveEndpoint(address)
@@ -53,17 +34,14 @@ func TestPlainWebSocketIsOnlyAllowedToALoopbackHost(t *testing.T) {
 			t.Errorf("ResolveEndpoint(%q) = %q with no error; a node credential would cross a real network in cleartext", address, endpoint)
 			continue
 		}
-		// The operator has to be told what to change, not merely that something
-		// was refused.
 		if !strings.Contains(err.Error(), "wss://") {
 			t.Errorf("ResolveEndpoint(%q) = %v, which does not say what to use instead", address, err)
 		}
 	}
 }
 
-// A scheme that is neither ws:// nor wss:// is refused rather than defaulted.
-// An operator who pasted the gateway's https:// address must be told, not
-// silently upgraded to something that may not be what they meant.
+// An operator who pasted the gateway's https:// address must be told, not silently switched to a
+// scheme they may not have meant.
 func TestOnlyTheTwoWebSocketSchemesAreDialled(t *testing.T) {
 	for _, address := range []string{
 		"https://gateway.example.com",
@@ -78,9 +56,7 @@ func TestOnlyTheTwoWebSocketSchemesAreDialled(t *testing.T) {
 	}
 }
 
-// The endpoint path is supplied here so an operator configures a host and not a
-// URL shape — but a path they did supply is theirs, because that is what a
-// reverse proxy in front of the gateway needs.
+// A path the operator supplied is kept, because a reverse proxy in front of the gateway may need it.
 func TestTheEndpointPathIsSuppliedButNotOverridden(t *testing.T) {
 	for address, want := range map[string]string{
 		"wss://gateway.example.com":       "wss://gateway.example.com" + Path,
@@ -99,12 +75,8 @@ func TestTheEndpointPathIsSuppliedButNotOverridden(t *testing.T) {
 	}
 }
 
-// Dial refuses the plaintext address before it opens anything. The distinction
-// matters: a refusal that happened after the TCP connect would mean the guard
-// had already been passed by something.
+// A refusal after the TCP connect would mean something had already got past the guard.
 func TestDialRefusesAPlaintextCredentialWithoutTouchingTheNetwork(t *testing.T) {
-	// TEST-NET-1: routable to nothing, so a dial that did happen would hang
-	// until this context expires rather than failing fast for another reason.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -121,10 +93,6 @@ func TestDialRefusesAPlaintextCredentialWithoutTouchingTheNetwork(t *testing.T) 
 	}
 }
 
-// An empty token is refused before anything is opened too. There is no
-// unauthenticated connection this transport can reach, so dialling one and
-// letting the gateway answer 401 would be a connection attempt made for a
-// credential the node knows it does not have.
 func TestDialRefusesAnEmptyTokenBeforeItConnects(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

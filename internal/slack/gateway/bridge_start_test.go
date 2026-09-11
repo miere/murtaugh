@@ -10,8 +10,6 @@ import (
 	"github.com/miere/murtaugh/internal/journal"
 )
 
-// collectingRecorder keeps every journalled event so a test can assert on what
-// an operator would later be able to query.
 type collectingRecorder struct {
 	mu     sync.Mutex
 	events []journal.Event
@@ -33,11 +31,8 @@ func (r *collectingRecorder) kinds() []string {
 	return out
 }
 
-// startBridge is the promotion hook, and promotion happens more than once: a
-// standby that takes over, stands down and takes over again runs it each time.
-// Every call has to hand the runtime a LIVE context — an implementation that
-// served only the first promotion, or that reused the first serve context, would
-// leave every acp/claude_code agent tool-less from the second promotion onward.
+// A gateway can be promoted many times, and reusing the first serve context would
+// leave agents with no tools after the second promotion.
 func TestStartBridgeServesToolsOnEveryPromotion(t *testing.T) {
 	var mu sync.Mutex
 	var got []context.Context
@@ -59,7 +54,6 @@ func TestStartBridgeServesToolsOnEveryPromotion(t *testing.T) {
 	gw.startBridge(ctx1)
 	awaitServe(t, served)
 
-	// Demote: the first serve context ends.
 	stop1()
 
 	ctx2, stop2 := context.WithCancel(context.Background())
@@ -80,19 +74,14 @@ func TestStartBridgeServesToolsOnEveryPromotion(t *testing.T) {
 	}
 }
 
-// A gateway with no agent runtime has nothing to serve. Promotion must not
-// dereference the absent hook — that is the ordinary state of a deployment with
-// no agents configured, and it is the state a gateway binary that cannot run
-// agents at all is in permanently.
+// Having no runtime is the normal state of a gateway with no agents configured.
 func TestStartBridgeWithoutARuntimeIsANoop(t *testing.T) {
 	gw := &Gateway{logger: quietLogger()}
 	gw.startBridge(context.Background())
 }
 
-// A failed bind costs every acp/claude_code agent every Murtaugh tool, silently:
-// the agent still answers, and only fails hours later when it tries to post. A
-// log line at promotion time is not enough to diagnose that, so the failure is
-// journalled too, where `murtaugh journal query --stream gateway` will find it.
+// A failed bind silently leaves agents without Murtaugh tools until they fail
+// hours later, so a log line at promotion is not enough.
 func TestStartBridgeJournalsAFailureToServe(t *testing.T) {
 	rec := &collectingRecorder{}
 	done := make(chan struct{})

@@ -130,9 +130,6 @@ func (l *fakeLocker) Release(context.Context, config.Lease) error {
 	return l.releaseErr
 }
 
-// Publish records the address the runner wrote, and how many times it wrote it —
-// the second being the interesting half: an address that has not moved must not
-// cost a write on every tick.
 func (l *fakeLocker) Publish(_ context.Context, lease config.Lease, addr config.LeaderAddress) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -147,8 +144,6 @@ func (l *fakeLocker) Publish(_ context.Context, lease config.Lease, addr config.
 	return nil
 }
 
-// Holder answers as the real lockers do: a released or lapsed record is no
-// leader at all.
 func (l *fakeLocker) Holder(context.Context) (config.Lease, bool, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

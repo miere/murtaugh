@@ -253,8 +253,8 @@ func Custom(command string, needsCode bool) (Profile, error) {
 	}, nil
 }
 
-// ApprovalCommand is the caller's own shell line, which its owner must see and
-// approve before it runs; a built-in returns "" because its command is ours.
+// The owner must see and approve a custom shell line before it runs; built-ins need no approval
+// because their command is ours.
 func (p Profile) ApprovalCommand() string {
 	if p.Name != CustomProfileName || len(p.Args) != 2 {
 		return ""

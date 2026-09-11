@@ -41,24 +41,8 @@ func NewProvider(s config.Store) Provider {
 // satisfy that check while every other rule runs for real.
 var validationBase = config.Config{OAuth: config.OAuthConfig{AppToken: "x", BotToken: "x"}}
 
-// role is the half of #170's split this process is, and it decides which of
-// Validate's rules a `cfg …` write is held to.
-//
-// It is a package variable set once at registration rather than threaded
-// through every tool because it is a property of the PROCESS, not of a call:
-// the same binary cannot be a gateway for one write and a node for the next.
-// The zero value is RoleCombined, which is every existing caller and today's
-// shipping default.
-//
-// It matters for exactly one thing, and it is the behavioural change #198
-// makes: on a broker gateway, `cfg chat set --default-agent code` must be
-// accepted even though this process holds no `code` profile — the body is on
-// somebody's node, and the check moved to connect time. Held to the combined
-// rules, that write would be refused and the gateway could never be configured
-// at all.
 var role config.Role
 
-// validationBaseFor returns the base a store validation runs against.
 func validationBaseFor() config.Config {
 	base := validationBase
 	base.Role = role

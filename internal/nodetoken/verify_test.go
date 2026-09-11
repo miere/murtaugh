@@ -10,12 +10,8 @@ import (
 	"github.com/miere/murtaugh/internal/config"
 )
 
-// memStore is an in-memory config.NodeTokenStore. The three shipped backends are
-// held to this same contract in internal/config/store; here the store is a fake
-// so the verification rules are tested without a database in sight.
 type memStore struct {
-	records map[string]config.NodeToken
-	// failWith, when set, makes every read fail — the "database is down" case.
+	records  map[string]config.NodeToken
 	failWith error
 	lookups  int
 }
@@ -71,7 +67,6 @@ func (s *memStore) Close() error { return nil }
 
 var now = time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
 
-// enrol mints a credential for a node and stores it, returning the plaintext.
 func enrol(t *testing.T, store *memStore, nodeID, userID string, expiresAt time.Time) string {
 	t.Helper()
 	minted, err := Mint()
@@ -92,13 +87,6 @@ func enrol(t *testing.T, store *memStore, nodeID, userID string, expiresAt time.
 	return minted.Token
 }
 
-// TestVerifyResolvesTheIdentityFromTheTokenAlone is the property the whole
-// design turns on (#190): a node presents a credential and nothing else, and the
-// gateway is the one that says which node and which user that is.
-//
-// The test is written so that the only input from the "node" is the token
-// string. There is no node id to pass, so an impersonating node has nothing to
-// assert — which is the point being checked.
 func TestVerifyResolvesTheIdentityFromTheTokenAlone(t *testing.T) {
 	store := newMemStore()
 	ctx := context.Background()
@@ -113,9 +101,6 @@ func TestVerifyResolvesTheIdentityFromTheTokenAlone(t *testing.T) {
 		t.Fatalf("alpha's token resolved to node %q user %q", alpha.NodeID, alpha.UserID)
 	}
 
-	// The second node's token must resolve to the second node. Two credentials
-	// that both resolved to whoever was looked up first would pass a
-	// single-credential test.
 	beta, err := Verify(ctx, store, betaToken, now)
 	if err != nil {
 		t.Fatalf("Verify(beta): %v", err)
@@ -125,8 +110,6 @@ func TestVerifyResolvesTheIdentityFromTheTokenAlone(t *testing.T) {
 	}
 }
 
-// TestVerifyRejectsATamperedToken: a token with one character changed must not
-// verify, however plausible the rest of it is.
 func TestVerifyRejectsATamperedToken(t *testing.T) {
 	store := newMemStore()
 	ctx := context.Background()
@@ -136,9 +119,6 @@ func TestVerifyRejectsATamperedToken(t *testing.T) {
 		t.Fatalf("Parse: %v", err)
 	}
 
-	// The selector is left intact so the lookup SUCCEEDS and the secret
-	// comparison is what has to do the rejecting — otherwise this would only be
-	// testing that an unknown selector is unknown.
 	tampered := Prefix + credential.Selector + "_" + flipLastChar(credential.Secret)
 	if _, err := Verify(ctx, store, tampered, now); !errors.Is(err, ErrSecretMismatch) {
 		t.Fatalf("Verify(tampered secret) = %v, want ErrSecretMismatch", err)
@@ -147,15 +127,12 @@ func TestVerifyRejectsATamperedToken(t *testing.T) {
 		t.Fatal("a rejection must satisfy errors.Is(err, ErrNotAuthorized) so one check covers the handshake path")
 	}
 
-	// A valid-looking token for a selector nobody issued.
 	unknown := Prefix + strings.Repeat("ab", 8) + "_" + credential.Secret
 	if _, err := Verify(ctx, store, unknown, now); !errors.Is(err, ErrUnknownCredential) {
 		t.Fatalf("Verify(unknown selector) = %v, want ErrUnknownCredential", err)
 	}
 }
 
-// TestVerifyRejectsMalformedInputWithoutTouchingTheStore: an unauthenticated
-// peer must not be able to spend a database round trip per packet.
 func TestVerifyRejectsMalformedInputWithoutTouchingTheStore(t *testing.T) {
 	store := newMemStore()
 	ctx := context.Background()
@@ -198,7 +175,6 @@ func TestVerifyRejectsRevokedAndExpiredCredentials(t *testing.T) {
 		if _, err := Verify(ctx, store, token, expiry.Add(-time.Second)); err != nil {
 			t.Fatalf("the credential did not verify a second before expiry: %v", err)
 		}
-		// The boundary is exclusive: at the expiry instant it is already over.
 		if _, err := Verify(ctx, store, token, expiry); !errors.Is(err, ErrExpired) {
 			t.Fatalf("Verify(at expiry) = %v, want ErrExpired", err)
 		}
@@ -216,9 +192,6 @@ func TestVerifyRejectsRevokedAndExpiredCredentials(t *testing.T) {
 	})
 }
 
-// TestVerifyDoesNotTreatAStoreFailureAsARejection: a database that is down has
-// not told us the credential is bad. Conflating the two locks a fleet out on a
-// transient outage and logs it as an attack.
 func TestVerifyDoesNotTreatAStoreFailureAsARejection(t *testing.T) {
 	store := newMemStore()
 	ctx := context.Background()
@@ -236,14 +209,6 @@ func TestVerifyDoesNotTreatAStoreFailureAsARejection(t *testing.T) {
 	}
 }
 
-// TestTwoCredentialsForOneNodeVerifyAtOnceThenOneIsRevoked is the rotation
-// property, named for exactly what it checks rather than for "rotation".
-//
-// Two credentials are minted for the same node; BOTH must resolve to that node
-// at the same instant, so the new one can be deployed before the old one is
-// withdrawn. Then the first is revoked and must stop verifying while the second
-// keeps working — which is the half that makes the overlap a rotation rather
-// than just a second key.
 func TestTwoCredentialsForOneNodeVerifyAtOnceThenOneIsRevoked(t *testing.T) {
 	store := newMemStore()
 	ctx := context.Background()
@@ -276,7 +241,6 @@ func TestTwoCredentialsForOneNodeVerifyAtOnceThenOneIsRevoked(t *testing.T) {
 	}
 }
 
-// closerSpy records what the revocation seam was asked to tear down.
 type closerSpy struct {
 	closed []string
 	err    error
@@ -287,10 +251,6 @@ func (c *closerSpy) CloseCredential(_ context.Context, selector string) error {
 	return c.err
 }
 
-// TestRevokerClosesOnlyTheRevokedCredential covers the seam #190 asks to be left
-// for connections, and the granularity decision inside it: closing "every
-// connection of node X" would take the node down mid-rotation, which is the
-// downtime the two-credential overlap exists to avoid.
 func TestRevokerClosesOnlyTheRevokedCredential(t *testing.T) {
 	store := newMemStore()
 	ctx := context.Background()
@@ -315,9 +275,8 @@ func TestRevokerClosesOnlyTheRevokedCredential(t *testing.T) {
 	}
 }
 
-// TestRevokerDoesNotReachTheConnectionLayerForAnUnknownSelector: an unknown
-// selector is a typo or a probe, and letting either reach live sessions would
-// make revocation a way to disturb them.
+// An unknown selector is a typo or a probe, and must not be a way to disturb
+// live sessions.
 func TestRevokerDoesNotReachTheConnectionLayerForAnUnknownSelector(t *testing.T) {
 	store := newMemStore()
 	spy := &closerSpy{}
@@ -335,9 +294,8 @@ func TestRevokerDoesNotReachTheConnectionLayerForAnUnknownSelector(t *testing.T)
 	}
 }
 
-// TestRevokerReportsACloseFailureButKeepsTheRevocation: the credential is
-// already durably revoked, so a failure to hurry is not a failure to secure —
-// but it must still be surfaced, with the record, rather than swallowed.
+// The revocation is already durable, so a close failure is reported rather
+// than treated as a failed revoke.
 func TestRevokerReportsACloseFailureButKeepsTheRevocation(t *testing.T) {
 	store := newMemStore()
 	ctx := context.Background()
@@ -357,8 +315,6 @@ func TestRevokerReportsACloseFailureButKeepsTheRevocation(t *testing.T) {
 	}
 }
 
-// TestRevokerWithNoConnectionOwnerStillRevokes is stage 1's actual
-// configuration: nothing implements ConnectionCloser yet.
 func TestRevokerWithNoConnectionOwnerStillRevokes(t *testing.T) {
 	store := newMemStore()
 	ctx := context.Background()
@@ -381,9 +337,6 @@ func mustParse(t *testing.T, token string) Credential {
 	return credential
 }
 
-// flipLastChar changes the final character of a base64url secret to a different
-// legal one, so the tampered token is still well-formed and the rejection has to
-// come from the secret comparison rather than from Parse.
 func flipLastChar(s string) string {
 	last := s[len(s)-1]
 	replacement := byte('A')

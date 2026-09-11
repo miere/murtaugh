@@ -19,17 +19,6 @@ import (
 
 const defaultRelativePath = ".config/murtaugh/config.yaml"
 
-// defaultNodeRelativePath is the runtime node's own configuration root.
-//
-// It is a SUBDIRECTORY rather than a second file beside config.yaml, and that
-// is the load-bearing part. Two roles in one directory share a .env, a store, a
-// node-token — and, worst, a schema migration: internal/config/migrate backs up
-// and restores every top-level regular FILE in its directory, so a failed
-// migration in one role would restore over the other role's credentials.
-// Directories are skipped by both the backup and the restore, so a node rooted
-// below the gateway's directory is untouched by the gateway's migrations and
-// gets its own config.db, .env and node-token for free (Config.BaseName already
-// stems the sibling database names).
 const defaultNodeRelativePath = ".config/murtaugh/node/config.yaml"
 const defaultAgentsRelativePath = ".config/murtaugh/agents.yaml"
 const defaultJobsRelativePath = ".config/murtaugh/jobs.yaml"
@@ -42,11 +31,8 @@ type Config struct {
 	// the sibling database filenames so that several configs can share one
 	// directory without colliding on a single config.db/journal.db pair.
 	BaseName string `yaml:"-" json:"-"`
-	// Role is which half of #170's split this configuration belongs to. It is
-	// set by the binary that loaded it — never read from the file or the store,
-	// because a node that could declare itself a gateway by editing its own
-	// config would be asserting a role the gateway then trusts. The zero value
-	// is RoleCombined, which is today's behaviour and the shipping default.
+	// Role is set by the loading binary, never read from the file or store: a node that could edit
+	// its own role could claim to be a gateway.
 	Role  Role        `yaml:"-" json:"-"`
 	OAuth OAuthConfig `yaml:"oauth" json:"oauth"`
 	// Database is the config-store backend selection, parsed from the bootstrap
@@ -175,66 +161,18 @@ type AccessConfig struct {
 	AdminUser    string   `yaml:"admin_user" json:"admin_user"`
 	AllowedUsers []string `yaml:"allowed_users" json:"allowed_users,omitempty"`
 	Debug        bool     `yaml:"debug" json:"debug"`
-	// NodeGrants records who, besides its owner, may have a conversation
-	// delegated to a runtime node. The key is a NODE ID; the value is the Slack
-	// user IDs holding a grant on it.
-	//
-	// It lives in access rather than in a section of its own because #170 puts
-	// grants in the gateway's column: a grant is the gateway deciding whose
-	// conversation may land on whose machine, which is the same kind of
-	// statement admin_user and allowed_users make. It is deliberately NOT on the
-	// node's own configuration — a node admin writing their own grant list
-	// would be authorising themselves.
-	//
-	// It is manual configuration for now, which #170 permits: the vocabulary and
-	// the enforcement point are what item 10 needs settled, and a self-service
-	// grant surface (with the node owner, not the gateway admin, holding the
-	// pen) is later work. Two consequences of that follow, and both are
-	// deliberate. There is no owner check here, because the only writer is the
-	// gateway admin. And keys and values are Slack IDs rather than handles:
-	// nothing rewrites a handle in this map the way resolveAllowSet rewrites the
-	// allow list, so a handle here silently matches nobody.
-	//
-	// This is the GRANT of #170's vocabulary — a node owner letting another user
-	// run on their node, revocable by removing the entry. It is unrelated to
-	// internal/slack/interaction's Grants, which are the tool calls one user
-	// chose to always allow.
+	// NodeGrants lives on the gateway, not the node, so a node admin cannot grant themselves. Use
+	// Slack IDs, not handles: nothing resolves handles here, so a handle silently matches nobody.
 	NodeGrants map[string][]string `yaml:"node_grants" json:"node_grants,omitempty"`
-	// MainNode is the node id that serves HEADLESS work: scheduled jobs, workflow
-	// triggers and link unfurling. Empty means there is none, and every headless
-	// surface then refuses loudly rather than borrowing whichever node happens to
-	// be attached.
-	//
-	// It is here, beside NodeGrants, for that entry's whole reason and one more.
-	// Being main is the right to serve every user's unfurls and every job on the
-	// gateway, which is the largest grant the gateway makes — so it cannot be
-	// asserted by a file on somebody's laptop. #170's item 4 settled that a node
-	// must never assert its own identity; a `main: true` on the node's own
-	// configuration, or on its advertisement, would be exactly that, and the
-	// gateway would trust it. The gateway admin writes this one.
-	//
-	// It is a NODE ID and not a token selector because a node has more than one
-	// live credential during a rotation (see internal/nodehost's registry): a
-	// flag hung off the credential would have to be copied by hand on every
-	// rotation, and the failure of forgetting is that headless work stops at some
-	// unrelated later moment.
-	//
-	// One node, not a list. Round robin over several would put two unfurls of the
-	// same link on two machines with different checkouts and different answers,
-	// and #170 puts these on "the main node", singular. A fleet that needs more
-	// wants a second gateway.
+	// MainNode is set by the gateway admin, never by a node, because being main means serving every
+	// user's headless work. It is a node ID, not a token, so it survives token rotation.
 	MainNode string `yaml:"main_node" json:"main_node,omitempty"`
 }
 
-// MainNodeID is the designated main node, trimmed. Empty means none.
 func (a AccessConfig) MainNodeID() string { return strings.TrimSpace(a.MainNode) }
 
-// GrantsOn reports whether userID holds a grant on the node.
-//
-// A grant is checked per NODE and not per owner, because that is what the
-// vocabulary says it is: permission to run on a machine. An owner who wants to
-// share two nodes grants twice, which is worth the repetition — the alternative
-// silently widens as they enrol a third.
+// Grants are per node, not per owner, so enrolling another node never silently widens an
+// existing grant.
 func (a AccessConfig) GrantsOn(nodeID, userID string) bool {
 	nodeID = strings.TrimSpace(nodeID)
 	userID = strings.TrimSpace(userID)
@@ -533,12 +471,8 @@ type SessionDefaults struct {
 	// alive (so request_timeout never trips), and this is what stops a wedged tool.
 	// Empty takes a 1h default. Applies to ACP agents (native tools are in-process).
 	LongRunningToolTimeout string `yaml:"long_running_tool_timeout" json:"long_running_tool_timeout"`
-	// BackgroundIdleTimeout is RequestTimeout's counterpart for work that lands
-	// AFTER a turn ends — a claude_code subagent completing, then the model
-	// auto-continuing — which renders into the thread with no turn loop watching
-	// it. Also idle-bounded, and longer than RequestTimeout on purpose: the tool
-	// heartbeat that props a turn's window up is scoped to the turn, so nothing
-	// keeps this one alive but real output. Empty takes a 15m default.
+	// BackgroundIdleTimeout defaults longer than RequestTimeout because no tool heartbeat keeps
+	// background work alive; only real output resets it.
 	BackgroundIdleTimeout string `yaml:"background_idle_timeout" json:"background_idle_timeout"`
 	MaxConcurrent         int    `yaml:"max_concurrent" json:"max_concurrent"`
 }
@@ -661,21 +595,8 @@ type SandboxConfig struct {
 	Env []string `yaml:"env" json:"env,omitempty"`
 }
 
-// RootedAt returns the profile with its work_dir filled in when it carries
-// none, and unchanged when it does.
-//
-// It lives here rather than at the one call site because that call site is a
-// runtime node applying a profile its gateway just built (#170 Change I), and
-// the workdir guard — internal/archtest/workdiranalyzer, run in CI — forbids
-// downstream packages from READING the raw field. That rule is right: a
-// downstream read is somebody consuming an unresolved workdir instead of a
-// ResolvedAgent. This is not that. It is config AUTHORING, one step before the
-// row is written, and it belongs beside the field it defaults.
-//
-// The profile that needs it is the owner's `tweaker`, which is rooted wherever
-// the configuration lives so it can edit it. The gateway that built it cannot
-// know that path — it is a directory on somebody else's machine — so it leaves
-// the field empty and the node fills it in.
+// Lives here, not at its call site, because the workdir guard forbids other packages from reading
+// the raw field; the gateway can't know the node's path, so the node fills it in.
 func (p AgentProfile) RootedAt(dir string) AgentProfile {
 	if strings.TrimSpace(p.WorkDir) == "" {
 		p.WorkDir = dir
@@ -1007,12 +928,8 @@ func DefaultPath() (string, error) {
 	return filepath.Join(home, defaultRelativePath), nil
 }
 
-// DefaultNodePath is where a runtime node keeps its configuration when it was
-// not told otherwise: ~/.config/murtaugh/node/config.yaml.
-//
-// The gateway's default is unchanged — #170's split is about giving the node its
-// own root, not about moving an installed gateway — so an existing install stays
-// exactly where it is and a node lands beside it without touching it.
+// A subdirectory, not a file beside config.yaml: migrations back up and restore every top-level
+// file, so a shared directory would let one role's failed migration overwrite the other's credentials.
 func DefaultNodePath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -1201,8 +1118,6 @@ func Parse(data []byte) (Config, error) {
 
 func (c Config) Validate() error {
 	var errs []error
-	// A node has no Slack connection, so requiring the workspace's tokens of it
-	// would mean handing them to every laptop that runs an agent. See role.go.
 	if c.Role.HoldsSlackCredentials() {
 		if strings.TrimSpace(c.OAuth.AppToken) == "" {
 			errs = append(errs, errors.New("oauth.app_token is required"))
@@ -1264,13 +1179,6 @@ func (c Config) Validate() error {
 		}
 	}
 
-	// resolvesNames is the behavioural change #198 introduces, applied at every
-	// name→body site below. A gateway does not hold profile bodies, so it cannot
-	// tell a typo from a name only somebody's laptop can serve; the check moves
-	// to connect time (internal/nodehost) and runs against the profiles the
-	// attaching user's fleet advertises. Everything that is NOT a name→body
-	// check — a blank name, a duplicate match, a malformed glob — still runs for
-	// every role, because none of those needs a body to answer.
 	resolvesNames := c.Role.HoldsAgentProfiles()
 	known := agentSet{profiles: c.Agents, resolves: resolvesNames}
 	if c.Chat.Enabled {
@@ -1286,19 +1194,12 @@ func (c Config) Validate() error {
 			if strings.TrimSpace(user) == "" {
 				errs = append(errs, errors.New("chat.defaults.dm_agents has a blank user key"))
 			}
-			// Blankness before the lookup, and unconditionally. A blank value is
-			// not a name→body question — no body is needed to see it — so it must
-			// be raised for every role. Left to the lookup below it is deferred on
-			// a gateway, and AgentReferences deliberately skips blanks, so it
-			// would fall through both halves and be reported nowhere.
 			if strings.TrimSpace(agent) == "" {
 				errs = append(errs, fmt.Errorf("chat.defaults.dm_agents[%s] is blank; remove the entry or name an agent", user))
 			} else if _, ok := c.Agents[agent]; !ok && resolvesNames {
 				errs = append(errs, fmt.Errorf("chat.defaults.dm_agents[%s] %q not found in agents", user, agent))
 			}
 		}
-		// Set-but-blank rather than unset: `dm_agent: "  "` is somebody halfway
-		// through an edit, and it is the same fall-through as dm_agents above.
 		if c.Chat.Defaults.DMAgent != "" {
 			if strings.TrimSpace(c.Chat.Defaults.DMAgent) == "" {
 				errs = append(errs, errors.New("chat.defaults.dm_agent is blank; remove it or name an agent"))
@@ -1323,8 +1224,6 @@ func (c Config) Validate() error {
 			seenMatch[channel] = i
 			// A channel rule may set only reply_on_thread (empty agent → falls
 			// back to chat.defaults.agent), so validate the agent only when set.
-			// Set-but-blank is neither, and is raised for every role: see
-			// chat.defaults.dm_agents above.
 			if cc.Agent != "" {
 				if strings.TrimSpace(cc.Agent) == "" {
 					errs = append(errs, fmt.Errorf("chat.channels[%s].agent is blank; remove it to fall back to chat.defaults.agent", channel))
@@ -1636,11 +1535,6 @@ func (c RuntimeDefaults) EffectiveRequestTimeout() time.Duration {
 	return durationOrDefault(c.Session.RequestTimeout, 10*time.Minute)
 }
 
-// EffectiveBackgroundIdleTimeout is the idle timeout for a background stretch:
-// the longest a background completion may go with no agent activity before its
-// Slack message is closed out. Like EffectiveRequestTimeout it is reset by every
-// event, so it bounds inactivity; unlike it, no heartbeat feeds it, which is why
-// its default is the longer of the two.
 func (c RuntimeDefaults) EffectiveBackgroundIdleTimeout() time.Duration {
 	return durationOrDefault(c.Session.BackgroundIdleTimeout, 15*time.Minute)
 }
@@ -1738,21 +1632,11 @@ func validateRun(run RunTriggerConfig) error {
 	return nil
 }
 
-// agentSet answers the one question every name→body check asks — "is this the
-// name of a profile I hold?" — and can answer a third way that a bare map
-// cannot: "I do not hold profiles, so I cannot say".
-//
-// That third answer is what #198's move of validation to connect time needs. A
-// nil map would answer "unknown agent" to every name on a gateway, and a map
-// pre-filled with every name would defeat the check on a node.
 type agentSet struct {
 	profiles map[string]AgentProfile
-	// resolves is false for a role that holds no profile bodies (RoleGateway),
-	// which makes unknown always answer false and defers the check.
 	resolves bool
 }
 
-// unknown reports a name that this configuration can prove is not an agent.
 func (s agentSet) unknown(name string) bool {
 	if !s.resolves {
 		return false

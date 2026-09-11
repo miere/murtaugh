@@ -11,8 +11,6 @@ import (
 	"time"
 )
 
-// A grandchild that left the process group is still the sign-in's, so killing
-// the sign-in must reach it before it can act.
 func TestKillReachesADescendantThatLeftTheGroup(t *testing.T) {
 	if _, err := exec.LookPath("perl"); err != nil {
 		t.Skip("perl is needed to detach a grandchild from the group")

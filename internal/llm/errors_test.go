@@ -199,11 +199,8 @@ func TestHeadlineUnknownProvider(t *testing.T) {
 	}
 }
 
-// TestClassifyCarriedFailure covers the wire arm: a provider failure classified
-// once on a runtime node, carried across a serialisation that annihilates
-// litellm's typed error, must classify identically wherever it is read.
-// Otherwise every remote provider failure silently degrades to the generic
-// "Murtaugh hit an error" card.
+// Without this, every provider failure from a remote node degrades to the
+// generic "Murtaugh hit an error" card, because the wire drops litellm's error.
 func TestClassifyCarriedFailure(t *testing.T) {
 	original := wrapLikeProduction(providers.NewHTTPError("gemini", 503, geminiOverloadBody))
 	want, ok := Classify(original)
@@ -211,7 +208,6 @@ func TestClassifyCarriedFailure(t *testing.T) {
 		t.Fatalf("Classify(original) ok = false, want true")
 	}
 
-	// What the wire carries: the derived Failure plus the original text.
 	carried := NewFailureError(want, original.Error())
 
 	got, ok := Classify(fmt.Errorf("gateway: relay turn: %w", carried))

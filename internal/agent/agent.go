@@ -5,33 +5,12 @@ import (
 	"errors"
 )
 
-// ErrNonJSONOutput is returned by a delegation runner's RunForJSON when the
-// agent completed its turn but its output was not a valid JSON document. The
-// runner logs a warning with the raw output before returning it, so callers
-// should simply skip rendering.
-//
-// It lives here rather than beside the runner because the runner reaches its
-// callers through small local interfaces (workflow.AgentDelegator,
-// gateway.UnfurlDelegator) and this sentinel is part of that contract. Keeping
-// it here is what lets a caller branch on it without importing the runner —
-// which, for the Slack gateway, would mean reaching an agent backend three hops
-// down (#170 Change E).
+// ErrNonJSONOutput lives here, not beside the runner, so callers can match it without
+// importing the runner.
 var ErrNonJSONOutput = errors.New("delegate-to-agent: agent output was not valid JSON")
 
-// ErrSessionGone means the session id a Prompt named no longer resolves to
-// anything that could serve it, and that opening a fresh session would.
-//
-// It exists because of the split. In process a session id is only ever invalid
-// because the agent died, and the manager has nothing better to do than report
-// it. With a broker in front of several runtime nodes, a session id is minted BY
-// a node, so a node disconnecting invalidates every id it minted while the
-// conversation itself is perfectly servable — by somebody else. SessionManager
-// answers this one error by discarding the binding and opening a new session,
-// once. Every other error is still the caller's to render.
-//
-// It is a sentinel rather than a string match for the reason #170 gives about
-// error identity crossing a wire: text survives serialisation and identity does
-// not, so anything that has to be compared by identity needs a name.
+// ErrSessionGone exists because a node that disconnects invalidates the session ids it
+// minted while the conversation can still be served elsewhere, so SessionManager retries once.
 var ErrSessionGone = errors.New("the runtime node holding this session is no longer connected")
 
 // ErrCredentialRejected lets the gateway tell the user the machine's owner
@@ -53,14 +32,8 @@ type Session struct {
 type SessionMetadata struct {
 	TeamID    string `json:"teamId,omitempty"`
 	ChannelID string `json:"channelId,omitempty"`
-	// ChannelName is the channel's Slack name without the leading '#', when the
-	// gateway had resolved it. Empty for a DM, and empty for a channel whose
-	// name the gateway's cache had not learned yet.
-	//
-	// It is carried because delegation matches a node's channel claims, and a
-	// claim is an exact channel id, an exact channel NAME, or a glob over the
-	// name — so an id alone can only ever match the first of the three, and the
-	// worked example in #170 (`nc-*`, `review-*`) is entirely the other two.
+	// ChannelName is carried because a node's claim can match a channel by name or glob,
+	// which the id alone cannot satisfy.
 	ChannelName string `json:"channelName,omitempty"`
 	ThreadTS    string `json:"threadTs,omitempty"`
 	UserID      string `json:"userId,omitempty"`
@@ -80,23 +53,8 @@ type SessionMetadata struct {
 	// id, and a claude_code backend `--resume`s the previous delegation's
 	// transcript — see DeriveSessionID.
 	Ephemeral bool `json:"ephemeral,omitempty"`
-	// Headless says there is no human anywhere behind this session: a cron at
-	// 03:00, a workflow trigger, an unfurl. It is an EXPLICIT signal and not an
-	// inference, and that is the whole point of the field.
-	//
-	// In process the same fact is expressed by omission — agentdelegate builds a
-	// delegated client with no Approver and no BackgroundSink, so nothing can ask
-	// and nothing can render. Over a node link that omission is unavailable: the
-	// node builds every agent with its approval gate, because the node cannot
-	// know at construction which turns will have a thread. So the fact has to
-	// travel with the session.
-	//
-	// It cannot be derived on the other side either. "No TurnLocation on the
-	// context" is the in-process test and it is false over the link, where the
-	// location is set from the prompt's channel on every turn. "Ephemeral" is
-	// close but means something else — nothing to resume — and a later surface
-	// that wants a fresh session for a human would set it and silently lose the
-	// gate.
+	// Headless must be set explicitly: over a node link nothing else tells the node that no human
+	// is behind the session, and it would raise approvals nobody can answer.
 	Headless bool `json:"headless,omitempty"`
 }
 
@@ -198,8 +156,8 @@ const (
 	EventQuestion   EventType = "question"
 	EventPlan       EventType = "plan"
 	EventSignIn     EventType = "sign_in"
-	// EventSignInSettled answers nothing: the sign-in's own process decides how
-	// it ends, and whoever drew it has to hear that to settle the cards.
+	// EventSignInSettled answers nothing: the sign-in's own process decides how it
+	// ends, and whoever drew it has to hear that to settle the cards.
 	EventSignInSettled EventType = "sign_in_settled"
 )
 
@@ -285,28 +243,14 @@ type TurnLocation struct {
 
 type conversationKeyCtx struct{}
 
-// WithConversation returns ctx carrying the conversation key a turn belongs to.
-//
-// SessionManager puts it there on every Prompt, because the manager is the only
-// thing that holds both the key and the client: the key never crosses
-// agent.Client (NewSession takes metadata, Prompt takes a session id), and
-// SessionMetadata cannot stand in for it — it carries no DM flag, so the two
-// surfaces a conversation key deliberately keeps apart would collapse.
-//
-// It exists for delegation (#196): the gateway's broker has to know WHICH
-// conversation it is electing a runtime node for, and it is reached at
-// agent.Client. Every in-process backend ignores it, exactly as they ignore
-// TurnLocation on the paths that do not carry one.
+// WithConversation exists because the conversation key never crosses agent.Client, and
+// delegation needs it to pick a runtime node. In-process backends ignore it.
 func WithConversation(ctx context.Context, key ConversationKey) context.Context {
 	return context.WithValue(ctx, conversationKeyCtx{}, key)
 }
 
-// ConversationFromContext returns the conversation key stashed on ctx.
-//
-// ok is false for a caller with no conversation at all — a job, an unfurl, a
-// workflow trigger — which is a real state and not a failure: those are
-// #170's item 13, and a client that cannot identify a conversation must not
-// invent one to pin.
+// A caller with no conversation (a job, an unfurl, a workflow trigger) is a real state, and a
+// client must not invent a conversation to pin.
 func ConversationFromContext(ctx context.Context) (ConversationKey, bool) {
 	key, ok := ctx.Value(conversationKeyCtx{}).(ConversationKey)
 	return key, ok && key.ChannelID != ""
@@ -492,8 +436,8 @@ func (TurnDisplay) Plan(ctx context.Context, _ TurnLocation, req PlanRequest) (D
 	return awaitDisplay(ctx, answer, Event{Type: EventPlan, Plan: &PlanPrompt{Request: req, Answer: answer}}), nil
 }
 
-// SignIn raises req on the turn and hands back the prompt its answers keep
-// arriving on, because a sign-in can hear a code and then a cancel.
+// SignIn hands back a prompt rather than a single answer because a sign-in can hear a code
+// and then a cancel.
 func (TurnDisplay) SignIn(ctx context.Context, req SignInRequest) (*SignInPrompt, bool) {
 	emit, ok := TurnEmitterFromContext(ctx)
 	if !ok {

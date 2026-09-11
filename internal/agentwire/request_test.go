@@ -8,16 +8,6 @@ import (
 	"github.com/miere/murtaugh/internal/agent"
 )
 
-// This file is roundtrip_test.go's counterpart for the OTHER direction: every
-// call the gateway makes on agent.Client, and every answer, through a real
-// serialisation and back meaning the same thing.
-//
-// Nothing here knows about sequencing or acknowledgement, and that is the
-// point: those live in the envelope, so the request vocabulary can be proven
-// correct without a transport in the room.
-
-// tripMessage encodes a message and parses it back, so every assertion is made
-// about a value that really crossed a boundary.
 func tripMessage(t *testing.T, m Message) Message {
 	t.Helper()
 	raw, err := m.Encode()
@@ -70,9 +60,6 @@ func TestInitializeRoundTrip(t *testing.T) {
 	}
 }
 
-// A node that says nothing about interruptibility must be distinguishable from
-// one that says "no". This is the whole reason the field is a pointer: a plain
-// bool would decode to false and silently disable interrupting a live turn.
 func TestInitializeSilenceIsNotADenial(t *testing.T) {
 	result, err := Result("1", InitializeResult{})
 	if err != nil {
@@ -100,14 +87,7 @@ func TestNewSessionRoundTrip(t *testing.T) {
 		{"a canvas surface", agent.SessionMetadata{
 			TeamID: "T1", ChannelID: "C1", UserID: "U1", Source: "slack", Surface: "canvas", CanvasID: "F0123",
 		}},
-		// The one field whose loss is a known, named bug: without it every
-		// delegation derives the same session id and a claude_code backend
-		// resumes the previous delegation's transcript.
 		{"an ephemeral delegation", agent.SessionMetadata{Source: "delegate", Ephemeral: true}},
-		// And the other field whose loss is a named bug, in the same shape: a
-		// node that does not learn a turn is headless builds it a real approval
-		// gate, raises a card for a 03:00 job, and blocks on an answer the
-		// gateway has no thread to give — the job burns its whole timeout.
 		{"a headless delegation", agent.SessionMetadata{Source: "delegate", Ephemeral: true, Headless: true}},
 	}
 	for _, tc := range cases {
@@ -127,9 +107,6 @@ func TestNewSessionRoundTrip(t *testing.T) {
 			if got := wire.Decode(); got != tc.meta {
 				t.Fatalf("metadata came back as %+v, want %+v", got, tc.meta)
 			}
-			// The derived session id routes every later call, so the metadata
-			// has to derive the SAME id on the node as on the gateway — except
-			// for an ephemeral one, which is deliberately fresh every time.
 			got, want := agent.DeriveSessionID(wire.Decode()), agent.DeriveSessionID(tc.meta)
 			if tc.meta.Ephemeral && got == want {
 				t.Fatal("an ephemeral session derived a stable id; it must be fresh each time")
@@ -190,9 +167,6 @@ func TestPromptRoundTrip(t *testing.T) {
 	}
 }
 
-// Prompt's answer is an acceptance, and a refusal has to arrive as one too:
-// both consumers read Prompt's error synchronously, before any rendering, so a
-// rejection cannot be the first event on an already-opened stream.
 func TestPromptRejectionCarriesItsDiscriminant(t *testing.T) {
 	fault := tripMessage(t, Fault("9", context.Canceled))
 	err := fault.Fault()
@@ -248,8 +222,7 @@ func TestCloseRoundTrip(t *testing.T) {
 	}
 }
 
-// A method that takes nothing must survive a body that is absent entirely, not
-// only one that encodes to `{}`: an older or terser peer sends neither.
+// An older or terser peer sends no body at all, not even `{}`.
 func TestAbsentBodyIsNotAnError(t *testing.T) {
 	back := tripMessage(t, Message{Kind: MessageRequest, ID: "5", Method: MethodInitialize})
 	var result InitializeResult
@@ -284,10 +257,6 @@ func TestEventFramesAddressTheirStream(t *testing.T) {
 	}
 }
 
-// The background path has no request to correlate to: a subagent completing
-// after its turn ended is addressed by session id alone. A frame carrying a
-// session and no request id must stay distinguishable from a turn's event, or
-// it lands on somebody else's stream.
 func TestBackgroundEventIsAddressedBySession(t *testing.T) {
 	event, err := BackgroundEvent("session-42", Event{Type: EventComplete, StopReason: "end_turn"})
 	if err != nil {

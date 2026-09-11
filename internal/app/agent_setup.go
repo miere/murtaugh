@@ -124,22 +124,11 @@ func hasAgents(cfg config.Config) bool { return len(cfg.Agents) > 0 }
 // Repeated for every rebuilt gateway, like the run claimer: a reload replaces
 // the object, and a replacement that could not offer the form would strand an
 // operator who had not finished onboarding.
-// cfg is the configuration this gateway was built FROM, passed rather than read
-// off a.cfg: a reload attaches the replacement before it swaps that field, so
-// reading it here would publish the outgoing configuration's agent references.
 func (a *Application) attachAgentSetup(daemonCtx context.Context, gw *gateway.Gateway, cfg config.Config, holder *gatewayHolder, runner leaderRunner) {
 	if gw == nil {
 		return
 	}
 	gw.WithAgentProfileWriter(a.newAgentProfileWriter(daemonCtx, holder, runner))
-	// And the same form pointed at a runtime node instead. Attached here rather
-	// than once at startup for the reason above: the object is replaced on every
-	// reload, and a replacement that could not apply the form would strand a
-	// node owner mid-onboarding.
 	gw.WithNodeProfileWriter(a.newNodeProfileWriter())
-	// Republished on every reload, because it is what the node registry reads to
-	// answer "does anything in this fleet serve the profile my configuration
-	// names" — a question whose answer moved from write time to connect time in
-	// #198. See node_setup.go.
 	a.publishAgentReferences(cfg)
 }

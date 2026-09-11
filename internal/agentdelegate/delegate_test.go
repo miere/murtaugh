@@ -279,8 +279,6 @@ func TestRunAndForgetDiscardsOutput(t *testing.T) {
 	}
 }
 
-// An in-process run has no node behind it: the gateway's own process wrote the
-// reply, so it is marked as such rather than left looking like an unowned node.
 func TestRunForReplyIsMarkedInProcess(t *testing.T) {
 	client := &fakeClient{events: []agent.Event{textEvent("all green"), {Type: agent.EventComplete}}}
 	r := newTestRunner(t, client, "1m")

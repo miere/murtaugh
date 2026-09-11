@@ -13,10 +13,8 @@ import (
 	"github.com/miere/murtaugh/internal/oneshot"
 )
 
-// The three properties of the session a delegation opens. Each of them is a bug
-// that has either happened or would have: a non-ephemeral one resumes the
-// previous run's transcript, and a non-headless one raises an approval card
-// nobody can answer.
+// A non-ephemeral session resumes the previous run's transcript, and a
+// non-headless one raises an approval card nobody can answer.
 func TestADelegationOpensAnEphemeralHeadlessSession(t *testing.T) {
 	client := &recordingClient{reply: "done"}
 	if _, err := oneshot.Drive(context.Background(), client, oneshot.Request{Agent: "default", Prompt: "go"}); err != nil {
@@ -31,14 +29,12 @@ func TestADelegationOpensAnEphemeralHeadlessSession(t *testing.T) {
 	if client.meta.Source != "delegate" {
 		t.Fatalf("the session's source is %q", client.meta.Source)
 	}
-	// Nothing that would give a consumer somewhere to post. A delegation
-	// happens nowhere, and a zero-valued channel id is worse than none.
 	if client.meta.ChannelID != "" || client.meta.ThreadTS != "" || client.meta.UserID != "" {
 		t.Fatalf("the session named a Slack location: %+v", client.meta)
 	}
 }
 
-// Only reply text is captured, because the caller may parse it as JSON.
+// A caller may parse the reply as JSON, so progress events must not leak into it.
 func TestOnlyTheReplyTextIsCaptured(t *testing.T) {
 	client := &recordingClient{events: []agent.Event{
 		{Type: agent.EventStatus, Text: "compacting…"},
@@ -58,16 +54,12 @@ func TestOnlyTheReplyTextIsCaptured(t *testing.T) {
 	}
 }
 
-// A non-JSON answer is a skip, not a fault: the surface renders nothing rather
-// than reporting a failure to the user.
 func TestNonJSONOutputIsASkip(t *testing.T) {
 	if _, err := oneshot.ExpectJSON("sure, here you go", "default", nil); !errors.Is(err, agent.ErrNonJSONOutput) {
 		t.Fatalf("a prose answer produced %v", err)
 	}
 }
 
-// Bounded by inactivity, not by wall clock. A silent agent is cut loose, and the
-// event channel is drained so the client can tear down.
 func TestASilentAgentIsCutLoose(t *testing.T) {
 	client := &recordingClient{hang: true}
 	_, err := oneshot.Drive(context.Background(), client, oneshot.Request{
@@ -83,8 +75,8 @@ func TestASilentAgentIsCutLoose(t *testing.T) {
 	}
 }
 
-// An error event ends the turn and is reported with the partial text, which is
-// what a caller needs to say anything useful about a half-finished job.
+// The partial text is kept because a caller needs it to say anything useful
+// about a half-finished job.
 func TestAnErrorEventEndsTheTurn(t *testing.T) {
 	client := &recordingClient{events: []agent.Event{
 		{Type: agent.EventText, Text: "half "},
@@ -99,15 +91,8 @@ func TestAnErrorEventEndsTheTurn(t *testing.T) {
 	}
 }
 
-// The session this package opens is the session this package closes, on EVERY
-// way a turn can end.
-//
-// It matters here and not in process: agentdelegate's `defer client.Close()`
-// tore the whole agent down, so an unclosed session was invisible. Over the link
-// the client is the node's long-lived connection and closing it would drop the
-// node, so the session is the only thing that CAN be released — and an ephemeral
-// one belongs to no conversation, which means the session manager never sees it
-// and its idle eviction never reaches it either.
+// Over the link the client is the node's long-lived connection, so a session
+// left open here leaks until the node restarts.
 func TestEveryWayATurnEndsClosesItsSession(t *testing.T) {
 	for name, tc := range map[string]struct {
 		client *recordingClient
@@ -137,12 +122,9 @@ func TestEveryWayATurnEndsClosesItsSession(t *testing.T) {
 	}
 }
 
-// recordingClient is an agent.Client that answers from a script and remembers
-// the metadata it was opened with.
 type recordingClient struct {
-	reply  string
-	events []agent.Event
-	// hang leaves the turn silent, so the idle watchdog is what ends it.
+	reply    string
+	events   []agent.Event
 	hang     bool
 	meta     agent.SessionMetadata
 	prompted chan struct{}
@@ -151,8 +133,6 @@ type recordingClient struct {
 	closed []string
 }
 
-// CloseSession is the optional surface the two process-owning backends and
-// agent/remote implement. Drive is expected to find it structurally.
 func (c *recordingClient) CloseSession(id string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

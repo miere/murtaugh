@@ -70,8 +70,6 @@ func (b *bufferedCardBlock) UpdateFromEvent(ctx context.Context, ev *agent.TaskE
 	return b.render(ctx, false)
 }
 
-// The posted message is the only record of the run, and a card left spinning in
-// it reads as unfinished work.
 func (b *bufferedCardBlock) Finish(ctx context.Context) error {
 	if b.stopped {
 		return nil

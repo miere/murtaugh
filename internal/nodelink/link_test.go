@@ -9,16 +9,10 @@ import (
 	"time"
 )
 
-// sink records what the link handed to its consumer, in order.
 type sink struct {
-	mu   sync.Mutex
-	got  []string
-	fail error
-	// block, when non-nil, parks the handler on its first frame — the "the
-	// consumer is behind" case, which is meant to stop acknowledgements rather
-	// than lose frames. entered is signalled just before parking, so a test can
-	// assert on the link's state while the handler is provably still running
-	// rather than racing it.
+	mu      sync.Mutex
+	got     []string
+	fail    error
 	block   chan struct{}
 	entered chan struct{}
 }
@@ -27,7 +21,7 @@ func (s *sink) handle(payload []byte) error {
 	if s.block != nil {
 		select {
 		case s.entered <- struct{}{}:
-		default: // nobody is watching this frame; never park the link on the signal
+		default:
 		}
 		<-s.block
 	}
@@ -46,8 +40,6 @@ func (s *sink) seen() []string {
 	return append([]string(nil), s.got...)
 }
 
-// lossyConn drops one outbound frame, which is the only interesting way an
-// ordered transport can fail: the frames either side of the hole still arrive.
 type lossyConn struct {
 	Conn
 	drop  int
@@ -118,8 +110,6 @@ func TestSequenceNumbersAreContiguousAndAcksConsumeNone(t *testing.T) {
 		}
 	}
 
-	// Make the link acknowledge something, so a standalone ack is emitted
-	// between two message frames.
 	writeRaw(t, b, Message(1, 0, payload(99)))
 	ack := readEnv(t, b)
 	if ack.Kind != KindAck {
@@ -144,16 +134,8 @@ func TestSequenceNumbersAreContiguousAndAcksConsumeNone(t *testing.T) {
 	}
 }
 
-// TestFrameIsAcknowledgedOnlyAfterTheHandlerReturns pins the guarantee doc.go
-// states exactly — a frame is acknowledged when the local Handler has RETURNED,
-// not when it was decoded — which is the property the reconnect loop (#193,
-// #197) is built on: whatever is not acknowledged is replayed, so a frame the
-// consumer never finished must still be owed.
-//
-// The handler is parked mid-frame, which is the "the consumer is behind" case:
-// the watermark must not move and no acknowledgement may go out until it
-// returns. Advancing the watermark before the call — the obvious tidy-up in
-// receive — makes this fail here rather than lose a frame across a reconnect.
+// Advancing the watermark before the handler call looks like a tidy-up but loses a frame across a
+// reconnect: only what is unacked gets replayed.
 func TestFrameIsAcknowledgedOnlyAfterTheHandlerReturns(t *testing.T) {
 	a, b := Pipe(32)
 	consumer := &sink{block: make(chan struct{}), entered: make(chan struct{}, 1)}
@@ -167,7 +149,6 @@ func TestFrameIsAcknowledgedOnlyAfterTheHandlerReturns(t *testing.T) {
 		t.Fatal("the handler was never called")
 	}
 
-	// The handler is provably inside the call at this point.
 	if got := link.LastSeen(); got != 0 {
 		t.Fatalf("watermark advanced to %d while the handler was still running; "+
 			"an unfinished frame would not be replayed after a reconnect", got)
@@ -224,12 +205,6 @@ func TestAckPrunesTheRetransmitBuffer(t *testing.T) {
 		return frames == 1
 	})
 
-	// An older acknowledgement carries no information and must not resurrect
-	// what has already been released. The buffer alone cannot show that — the
-	// prune loop is a no-op for a lower ack either way — so the real assertion
-	// is on peerAck: roll it back and a resume from frame 1 starts answering OK
-	// and replaying a suffix with frame 2 missing, which is the hole this
-	// package exists to prevent.
 	writeRaw(t, b, Ack(1))
 	writeRaw(t, b, Message(1, 0, payload(50)))
 	waitFor(t, "the stale ack to be processed", func() bool { return link.LastSeen() == 1 })
@@ -275,19 +250,10 @@ func TestWindowBlocksUntilAcknowledged(t *testing.T) {
 	}
 }
 
-// A few large frames must be acknowledged on bytes, not only on a frame count.
-//
-// This is a deadlock, not a stall, and it was found by sending a real
-// attachment over a real socket: four 64 KiB chunks fill a 256 KiB window while
-// the frame count is still three short of its threshold, so the sender waits
-// for an acknowledgement that consuming more frames would trigger — and no more
-// frames can be sent. The consumed-byte trigger is what breaks the cycle.
 func TestLargeFramesAreAcknowledgedBeforeTheWindowFills(t *testing.T) {
 	ctx := context.Background()
 	a, b := Pipe(32)
 
-	// A window of four frames, and an ack threshold that would never be reached
-	// within it.
 	frame := payload(1)
 	window := len(frame) * 4
 	consumer := New(b, Options{Handler: (&sink{}).handle, WindowBytes: window, AckThreshold: 1000})
@@ -305,8 +271,7 @@ func TestLargeFramesAreAcknowledgedBeforeTheWindowFills(t *testing.T) {
 	}
 }
 
-// A blocked send must come back when its caller gives up, or a cancelled turn
-// leaks the goroutine that was writing it.
+// Otherwise a cancelled turn leaks the goroutine that was writing it.
 func TestBlockedSendReturnsOnContextCancel(t *testing.T) {
 	a, b := Pipe(32)
 	link := New(a, Options{Handler: (&sink{}).handle, WindowBytes: len(payload(1)) + 1})
@@ -332,12 +297,8 @@ func TestBlockedSendReturnsOnContextCancel(t *testing.T) {
 	}
 }
 
-// The named acceptance test: a dropped frame is DETECTED, not swallowed.
-//
-// The two assertions that matter are the second and the fourth. A transport
-// that reported the gap and then carried on delivering would leave a hole in a
-// sentence with a warning line nobody reads; a transport that stayed open would
-// keep every later frame in the same fiction.
+// Reporting the gap is not enough: the link must also stop, or later frames keep arriving around
+// a hole behind a log line nobody reads.
 func TestDroppedFrameIsDetectedNotSwallowed(t *testing.T) {
 	ctx := context.Background()
 	a, b := Pipe(32)
@@ -378,9 +339,6 @@ func TestDroppedFrameIsDetectedNotSwallowed(t *testing.T) {
 	})
 }
 
-// A duplicate is only legal after a resume replayed a suffix this side had
-// already consumed. It must not be delivered a second time, and it must not
-// move the watermark backwards.
 func TestDuplicateFramesAreDroppedNotDelivered(t *testing.T) {
 	a, b := Pipe(32)
 	consumer := &sink{}
@@ -443,12 +401,9 @@ func TestReplayFromReturnsTheUnacknowledgedSuffix(t *testing.T) {
 		t.Fatalf("replayed frame is %+v (%v), want seq 4", env, err)
 	}
 
-	// Below the floor: the peer is asking for frames it already acknowledged,
-	// and pretending otherwise would hand it a stream with a hole in it.
 	if _, err := link.ReplayFrom(1); !errors.Is(err, ErrNotResumable) {
 		t.Fatalf("replay below the floor returned %v, want not-resumable", err)
 	}
-	// Above what was ever sent: not the same stream.
 	if _, err := link.ReplayFrom(99); !errors.Is(err, ErrNotResumable) {
 		t.Fatalf("replay beyond the stream returned %v, want not-resumable", err)
 	}
@@ -478,8 +433,6 @@ func TestAcceptResumeRefusesAnotherEpoch(t *testing.T) {
 	}
 }
 
-// The other half of a resume: the side that continues must recognise the
-// replayed prefix as something it has already consumed.
 func TestResumedLinkTreatsTheReplayedPrefixAsDuplicate(t *testing.T) {
 	a, b := Pipe(32)
 	consumer := &sink{}
@@ -499,8 +452,6 @@ func TestResumedLinkTreatsTheReplayedPrefixAsDuplicate(t *testing.T) {
 	}
 }
 
-// A consumer that cannot take a frame has left the same hole a lost frame
-// would, so it fails the link rather than being logged and stepped over.
 func TestHandlerRefusalFailsTheLink(t *testing.T) {
 	a, b := Pipe(32)
 	link := New(a, Options{Handler: (&sink{fail: errors.New("no room")}).handle})

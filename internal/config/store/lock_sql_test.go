@@ -287,9 +287,6 @@ func TestSQLLockerBehaviours(t *testing.T) {
 				}
 			})
 
-			// The address on the lock record is what lets a standby redirect a
-			// node to the leader. Everything below is about the ways that read
-			// can send a node somewhere useless.
 			t.Run("a standby reads where the leader accepts nodes", func(t *testing.T) {
 				newLocker := build(t)
 				ctx := context.Background()
@@ -299,9 +296,6 @@ func TestSQLLockerBehaviours(t *testing.T) {
 				if err != nil || !ok {
 					t.Fatalf("Acquire: ok=%v err=%v", ok, err)
 				}
-				// Acquisition leaves no address: the listener may not have
-				// bound yet, and "leader, no address" is the honest answer for
-				// that moment.
 				standby := newLocker(t, time.Minute)
 				held, ok, err := standby.Holder(ctx)
 				if err != nil || !ok {
@@ -340,10 +334,6 @@ func TestSQLLockerBehaviours(t *testing.T) {
 					t.Fatalf("Release: %v", err)
 				}
 
-				// The row survives a release so the epoch survives a handover.
-				// Reading it as a live claim would redirect a node straight
-				// back to the gateway that just stood down — the loop #170
-				// warns about, and the one a naive read produces.
 				standby := newLocker(t, time.Minute)
 				if _, ok, err := standby.Holder(ctx); err != nil || ok {
 					t.Fatalf("Holder over a released lock: ok=%v err=%v; want no leader", ok, err)
@@ -392,9 +382,6 @@ func TestSQLLockerBehaviours(t *testing.T) {
 					t.Fatalf("takeover Acquire: ok=%v err=%v", ok, err)
 				}
 
-				// The displaced node still believes it leads until its next
-				// renewal. If its address landed anyway, every standby in the
-				// fleet would send nodes to a gateway that has lost the lock.
 				if err := old.Publish(ctx, lease, config.LeaderAddress{"wss://ghost.example.com:8787"}); err != nil {
 					t.Fatalf("Publish by a displaced holder: %v", err)
 				}

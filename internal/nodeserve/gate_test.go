@@ -12,14 +12,8 @@ import (
 	"github.com/miere/murtaugh/internal/nodelink"
 )
 
-// The gate's two "nobody can be asked" branches are the ones worth pinning,
-// because both are silent and they point in opposite directions. The rest of
-// this package is exercised end to end over a real socket by
-// internal/nodehost's loopback tests.
-
-// No turn on the context means no gateway is watching this call — a delegated
-// run, a job, an unfurl. In process those are built with no approver at all and
-// run ungated, so the gate must not invent a refusal for them.
+// Delegated runs, jobs and unfurls have no approver in process either, so the gate must not invent
+// a refusal for them.
 func TestAnUngatedCallOutsideATurnIsAllowed(t *testing.T) {
 	gate := NewToolGate(nil)
 
@@ -33,11 +27,6 @@ func TestAnUngatedCallOutsideATurnIsAllowed(t *testing.T) {
 	}
 }
 
-// An unbound gate means a turn is in flight but the connection to the gateway
-// is gone. That must DENY: the request exists because the call is
-// side-effecting, and "nobody could be asked" is not consent. The note matters
-// as much as the verdict — it is the string the model is handed as the call's
-// result.
 func TestATurnWithNoConnectionIsDeniedWithAReason(t *testing.T) {
 	gate := NewToolGate(nil)
 
@@ -51,14 +40,12 @@ func TestATurnWithNoConnectionIsDeniedWithAReason(t *testing.T) {
 	}
 }
 
-// discardLogger keeps the harness quiet; what these tests assert is behaviour,
-// not log output.
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
 }
 
-// An approval names the session it belongs to. The thread is the gateway's to
-// know, and a thread id in that field would be read as a session that does not exist.
+// The thread is the gateway's to know; a thread id in that field would be read as a session that
+// does not exist.
 func TestAnApprovalNamesTheNodesSession(t *testing.T) {
 	gate := NewToolGate(discardLogger())
 	frames := make(chan agentwire.Message, 16)

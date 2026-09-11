@@ -11,8 +11,6 @@ func TestPathForIsInsideTheConfigDirAndNamed(t *testing.T) {
 	if got := PathFor("/etc/murtaugh"); got != filepath.Join("/etc/murtaugh", FileName) {
 		t.Fatalf("PathFor = %q, want the config dir + %q", got, FileName)
 	}
-	// An empty config dir must not become a relative path in the working
-	// directory, which for a running agent IS the workdir.
 	if got := PathFor(""); got != "" {
 		t.Fatalf("PathFor(\"\") = %q, want the empty string", got)
 	}
@@ -47,8 +45,6 @@ func TestWriteFileUsesOwnerOnlyMode(t *testing.T) {
 	}
 }
 
-// TestWriteFileRefusesToOverwrite: replacing a node's credential in place is how
-// a rotation loses the old token before the new one has been accepted.
 func TestWriteFileRefusesToOverwrite(t *testing.T) {
 	path := filepath.Join(t.TempDir(), FileName)
 	if err := WriteFile(path, "mrtg_node_first"); err != nil {
@@ -66,10 +62,6 @@ func TestWriteFileRefusesToOverwrite(t *testing.T) {
 	}
 }
 
-// TestReadFileRefusesAWorldReadableCredential. On a node whose whole purpose is
-// running a model with a shell, a 0644 credential is readable by every process
-// on the box — and unlike a bad token, which fails loudly at the handshake, a
-// permissive mode fails silently forever.
 func TestReadFileRefusesAWorldReadableCredential(t *testing.T) {
 	for name, mode := range map[string]os.FileMode{
 		"group readable": 0o640,

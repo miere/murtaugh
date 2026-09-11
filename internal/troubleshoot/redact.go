@@ -22,20 +22,6 @@ const redactedToken = "‹redacted›"
 // is the backstop for secrets sitting under keys we don't recognise.
 var slackTokenPattern = regexp.MustCompile(`xox[bpaerso]-[A-Za-z0-9-]{6,}|xapp-[A-Za-z0-9-]{6,}`)
 
-// nodeTokenPattern matches the bearer tokens runtime nodes authenticate with
-// (nodetoken.Prefix + a hex selector + a base64url secret). This is what the
-// recognisable prefix is FOR: the token itself is opaque, so without a shape to
-// match, a token that reached a log line would travel into every bundle taken
-// afterwards.
-//
-// It matches the selector alone as well as a whole token — the trailing part is
-// optional — so a partially-copied token is still scrubbed. The selector is not
-// a secret, but over-redaction is the safe direction in a diagnostics bundle.
-//
-// The literal is spelled out rather than built from nodetoken.Prefix on purpose:
-// this package is imported by the bundler and has no other reason to depend on
-// the credential package, and TestNodeTokenPatternMatchesAMintedToken pins the
-// two together against a real minted token instead.
 var nodeTokenPattern = regexp.MustCompile(`mrtg_node_[A-Za-z0-9_-]{6,}`)
 
 // secretKeyPattern matches a YAML "key: value" line whose key names something

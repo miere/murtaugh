@@ -204,11 +204,8 @@ const (
 	SingletonJournal      = "journal"
 	SingletonTroubleshoot = "troubleshoot"
 	SingletonElection     = "election"
-	// SingletonNode is the runtime node's own block: the gateway seed address.
-	// It is the one section whose contents are ABOUT the gateway and held by
-	// the node, which is why #170's table lists it in the runtime column beside
-	// the node token — a node has to know where to dial before it can be told
-	// anything.
+	// SingletonNode holds the gateway seed address; it lives on the node because a node must know
+	// where to dial before the gateway can tell it anything.
 	SingletonNode = "node"
 )
 
@@ -307,10 +304,6 @@ func AssembleFromRows(base Config, items map[string]map[string]json.RawMessage, 
 	cfg := Config{
 		BaseDir:  base.BaseDir,
 		BaseName: base.BaseName,
-		// The role travels with the base, never with the rows: it is a property
-		// of the process that opened this store, not of the data in it. A store
-		// copied from a gateway onto a node is validated as a NODE the moment a
-		// node opens it, which is what makes the split migration checkable.
 		Role:     base.Role,
 		OAuth:    base.OAuth,
 		Database: base.Database,

@@ -445,14 +445,8 @@ func TestSessionManagerDiscardForcesFreshSession(t *testing.T) {
 	}
 }
 
-// brokerClient stands in for the node broker: a session id it did not mint is
-// ErrSessionGone, which is what a runtime node disconnecting looks like from
-// the gateway's side.
 type brokerClient struct {
 	fakeClient
-	// live is the only session id this client will answer for. Every session it
-	// mints becomes the live one; the previous node's id therefore stops
-	// resolving the moment a new session is opened.
 	live          string
 	prompted      []string
 	conversations []ConversationKey
@@ -475,10 +469,8 @@ func (b *brokerClient) Prompt(ctx context.Context, sessionID string, req PromptR
 	return b.fakeClient.Prompt(ctx, sessionID, req)
 }
 
-// TestPromptOpensANewSessionWhenTheOldOneIsGone is the recovery half of #196's
-// re-election. Overwriting the stored pin is not enough on its own: this map
-// still binds the conversation to the dead node's session id, and handing that
-// id to the node that took over produces an error the user sees on every turn.
+// Re-pinning alone is not enough: the manager still binds the conversation to the dead node's
+// session id, which the new node would reject on every turn.
 func TestPromptOpensANewSessionWhenTheOldOneIsGone(t *testing.T) {
 	c := &brokerClient{}
 	m := NewSessionManager(c, time.Hour, 100)
@@ -489,8 +481,6 @@ func TestPromptOpensANewSessionWhenTheOldOneIsGone(t *testing.T) {
 		t.Fatalf("first turn: %v", err)
 	}
 	stale := c.live
-	// The node holding it disconnects. Nothing tells the manager; it finds out
-	// by being refused.
 	c.live = "gone"
 
 	if _, err := m.Prompt(ctx, key, SessionMetadata{ChannelID: "C"}, PromptRequest{Text: "two"}); err != nil {
@@ -504,8 +494,6 @@ func TestPromptOpensANewSessionWhenTheOldOneIsGone(t *testing.T) {
 	}
 }
 
-// TestPromptDoesNotRetryForever bounds the recovery at one attempt: a second
-// refusal is a genuine failure and is reported rather than looped on.
 func TestPromptDoesNotRetryForever(t *testing.T) {
 	c := &alwaysGoneClient{}
 	m := NewSessionManager(c, time.Hour, 100)
@@ -515,13 +503,11 @@ func TestPromptDoesNotRetryForever(t *testing.T) {
 	if err == nil {
 		t.Fatal("a session that can never be opened reported success")
 	}
-	// Two prompts, not a loop: the first session's and the replacement's.
 	if len(c.prompted) != 2 {
 		t.Fatalf("expected exactly two attempts, got %v", c.prompted)
 	}
 }
 
-// alwaysGoneClient refuses every prompt, however fresh the session.
 type alwaysGoneClient struct {
 	fakeClient
 	prompted []string
@@ -532,9 +518,8 @@ func (a *alwaysGoneClient) Prompt(context.Context, string, PromptRequest) (<-cha
 	return nil, ErrSessionGone
 }
 
-// TestPromptCarriesTheConversationToTheClient covers the plumbing delegation
-// depends on: SessionMetadata has no DM flag, so the key is the only thing that
-// can tell a DM thread from a channel thread with the same ids.
+// SessionMetadata has no DM flag, so the key is the only thing that tells a DM thread from a
+// channel thread with the same ids.
 func TestPromptCarriesTheConversationToTheClient(t *testing.T) {
 	c := &brokerClient{}
 	m := NewSessionManager(c, time.Hour, 100)
