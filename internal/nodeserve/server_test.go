@@ -10,17 +10,6 @@ import (
 	"github.com/miere/murtaugh/internal/nodelink"
 )
 
-// A request is dispatched to its own goroutine, and this is what that buys.
-//
-// nodelink acknowledges a frame only once the handler RETURNS, so a request
-// served inline holds the read loop for as long as it runs. servePrompt calls
-// client.Prompt synchronously and serveInitialize can spawn a process — either
-// would then block delivery of the very Cancel frame meant to stop it, and the
-// only symptom a user sees is a conversation that will not interrupt.
-//
-// The mirror claim on the gateway side is guarded by nodehost's loopback tests
-// deadlocking without it. This side had nothing, which is the asymmetry that
-// makes it easy to lose.
 func TestACancelReachesANodeThatIsBusyStartingATurn(t *testing.T) {
 	client := &blockingClient{
 		entered:   make(chan struct{}, 1),
@@ -39,8 +28,6 @@ func TestACancelReachesANodeThatIsBusyStartingATurn(t *testing.T) {
 		t.Fatal("the node never began the turn")
 	}
 
-	// The turn is still inside Prompt. This is the frame that has to get
-	// through anyway.
 	peer.request(t, "c1", agentwire.MethodCancel, agentwire.SessionRef{SessionID: "session-1"})
 
 	select {
@@ -54,11 +41,6 @@ func TestACancelReachesANodeThatIsBusyStartingATurn(t *testing.T) {
 	close(client.release)
 }
 
-// ---- harness ---------------------------------------------------------------
-
-// pipePeer is the gateway's end of a link, raw: it sends frames and does not
-// care what comes back. What is under test is which goroutine the node serves
-// them on, not what it answers.
 type pipePeer struct{ link *nodelink.Link }
 
 func (p *pipePeer) request(t *testing.T, id string, method agentwire.Method, body any) {
@@ -101,8 +83,6 @@ func serveOverPipe(t *testing.T, client agent.Client) *pipePeer {
 	return &pipePeer{link: link}
 }
 
-// blockingClient parks inside Prompt until it is released, which is what a
-// backend spawning a process or waiting on a model looks like from here.
 type blockingClient struct {
 	entered   chan struct{}
 	release   chan struct{}

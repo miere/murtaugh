@@ -13,31 +13,16 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// DialOptions configures the node side of the connection.
 type DialOptions struct {
-	// Token is the node's bearer credential. Required: an unauthenticated
-	// connection is not a state this transport can reach.
-	Token string
-	// WriteTimeout bounds one write. Zero takes DefaultWriteTimeout.
+	Token        string
 	WriteTimeout time.Duration
-	// InsecureSkipVerify turns off certificate verification. It exists because
-	// an office gateway will not hold a publicly trusted certificate and the
-	// alternative is an operator who cannot connect at all; it is a named,
-	// greppable field rather than an ambient environment variable so a
-	// deployment that uses it says so.
+	// An office gateway rarely has a publicly trusted certificate; a named field rather than an env var
+	// means a deployment that turns verification off says so.
 	InsecureSkipVerify bool
 }
 
-// Dial opens a link to the gateway at rawURL.
-//
-// rawURL is the gateway's seed address: ws:// or wss://, with or without the
-// endpoint path — the path is supplied here so an operator configures a host
-// and not a URL shape.
-//
-// Plain ws:// is refused unless the host is loopback. #170 makes wss mandatory
-// and the credential travelling in a header is exactly why; loopback is carved
-// out because that is the `--role both` deployment the split is exercised with,
-// where there is no network to intercept.
+// Plain ws:// is refused unless the host is loopback, because the credential travels in a header;
+// loopback is the --role both setup, where there is no network to intercept.
 func Dial(ctx context.Context, rawURL string, opts DialOptions) (*Conn, error) {
 	if strings.TrimSpace(opts.Token) == "" {
 		return nil, fmt.Errorf("nodesocket: no node token to present")
@@ -61,24 +46,13 @@ func Dial(ctx context.Context, rawURL string, opts DialOptions) (*Conn, error) {
 
 	ws, resp, err := dialer.DialContext(ctx, endpoint, header)
 	if err != nil {
-		// The response is READ, not discarded, and that is the whole of the
-		// failover design's node side: the WebSocket client reports every
-		// non-101 as the same "bad handshake" error, and does not follow
-		// redirects, so the status and headers it hands back are the only place
-		// a refusal can say what kind of refusal it was.
 		return nil, classify(endpoint, resp, err)
 	}
 	return newConn(ws, opts.WriteTimeout), nil
 }
 
-// ResolveEndpoint normalises a seed or learned address into the endpoint to
-// dial, and refuses the ones that would put a credential on the wire in
-// cleartext.
-//
-// It is exported because a LEARNED address has to go through it too. An address
-// that arrived from a gateway is not more trustworthy than one an operator
-// typed — it is less — so the wss rule is applied to it before anything decides
-// to dial it, rather than after.
+// Exported because a learned address needs the same wss rule: one that came from a gateway is less
+// trustworthy than one an operator typed, not more.
 func ResolveEndpoint(rawURL string) (string, error) {
 	trimmed := strings.TrimSpace(rawURL)
 	if trimmed == "" {

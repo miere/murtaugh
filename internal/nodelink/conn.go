@@ -7,36 +7,15 @@ import (
 	"sync"
 )
 
-// Conn is the message-oriented byte transport a Link runs over: one call, one
-// frame, in order, no partial reads.
-//
-// It is this small so the transport can be replaced without touching a line of
-// the delivery logic. The stage that puts a node on a socket supplies a
-// WebSocket implementation (gorilla/websocket is already in go.mod, pulled in
-// by slack-go's socketmode, and needs only promoting to a direct dependency);
-// this package ships the in-memory duplex pair below and nothing that dials or
-// listens.
 type Conn interface {
-	// ReadMessage returns the next whole frame, or an error once the transport
-	// is done. It is called from one goroutine only — the Link's read loop.
 	ReadMessage() ([]byte, error)
-	// WriteMessage sends one whole frame. The Link serialises its own calls;
-	// an implementation need not be safe for concurrent use.
-	//
-	// It must bound its own wait — a WebSocket sets a write deadline. The Link
-	// cannot bound it: a write is the one place ordering forbids walking away,
-	// because the next frame's sequence number has already been issued. A
-	// transport that can block forever wedges the sender for as long as it
-	// does, whatever context the caller supplied.
+	// Implementations must bound their own wait: the Link cannot give up on a write once the next
+	// frame's sequence number has been issued.
 	WriteMessage([]byte) error
-	// Close releases the transport. It must unblock a pending ReadMessage.
+	// Close must unblock a pending ReadMessage, or the Link's read loop never exits.
 	Close() error
 }
 
-// Pipe returns the two ends of an in-memory duplex transport, with buffer
-// frames of slack in each direction. A buffer of zero makes every write block
-// until the peer reads it, which is how a test poses "the connection is wedged
-// mid-write".
 func Pipe(buffer int) (Conn, Conn) {
 	left := make(chan []byte, buffer)
 	right := make(chan []byte, buffer)
@@ -47,18 +26,14 @@ func Pipe(buffer int) (Conn, Conn) {
 }
 
 type pipeConn struct {
-	in   <-chan []byte
-	out  chan<- []byte
-	mine chan struct{}
-	// theirs is the peer's close signal, so a read reports EOF when the far end
-	// hangs up rather than blocking forever.
+	in     <-chan []byte
+	out    chan<- []byte
+	mine   chan struct{}
 	theirs <-chan struct{}
 	once   sync.Once
 }
 
 func (c *pipeConn) ReadMessage() ([]byte, error) {
-	// Anything already buffered outranks a close: a peer that wrote and then
-	// hung up still delivered what it wrote.
 	select {
 	case raw := <-c.in:
 		return raw, nil
@@ -102,10 +77,6 @@ func (c *pipeConn) Close() error {
 	return nil
 }
 
-// isClosedConn reports whether err is the transport reporting an orderly
-// shutdown rather than a fault. Both ends of Pipe and a closed socket produce
-// one of these, and a link that was deliberately closed should not report a
-// failure it did not have.
 func isClosedConn(err error) bool {
 	return errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrClosedPipe)
 }
