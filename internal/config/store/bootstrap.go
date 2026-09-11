@@ -39,17 +39,8 @@ func Bootstrap(ctx context.Context, configPath string, setup bool) (config.Confi
 	return BootstrapRole(ctx, configPath, config.RoleCombined, setup)
 }
 
-// BootstrapRole is Bootstrap for one half of #170's split.
-//
-// The role decides which rules apply to what the store holds: a node is not
-// asked for Slack credentials it must never carry, and a gateway is not asked to
-// resolve an agent NAME against a profile BODY it no longer holds. See
-// internal/config/role.go — that deferral is the behavioural change #198 makes,
-// and it moves those checks to connect time.
-//
-// The legacy YAML→store migration is skipped for a node: a node's root is new
-// (there is no pre-database node install to upgrade), and running it would make
-// a node adopt whatever agents.yaml happened to be sitting beside it.
+// Skips the legacy YAML migration for a node: a node's root is always new, and migrating
+// would make it adopt whatever agents.yaml sits beside it.
 func BootstrapRole(ctx context.Context, configPath string, role config.Role, setup bool) (config.Config, config.Store, error) {
 	boot, err := config.LoadBootstrap(configPath)
 	if err != nil {

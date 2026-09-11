@@ -14,16 +14,11 @@ import (
 	"github.com/miere/murtaugh/internal/config"
 )
 
-// firestoreNodeTokens holds issued node credentials in Firestore, one document
-// per credential keyed by its selector.
 type firestoreNodeTokens struct {
 	client *firestore.Client
 	root   string
 }
 
-// Firestore node-token document fields. The timestamps are stored as the same
-// fixed-layout strings the SQL backends use, so all three parse identically and
-// a document read by hand shows the same value the operator saw in the CLI.
 const (
 	fsTokenSelector   = "selector"
 	fsTokenSecretHash = "secret_hash"
@@ -35,8 +30,6 @@ const (
 	fsTokenRevokedAt  = "revoked_at"
 )
 
-// openFirestoreNodeTokens connects to the Firestore credential store. Firestore
-// has no schema to migrate: the collection appears on first write.
 func openFirestoreNodeTokens(ctx context.Context, fsc config.FirestoreConfig) (config.NodeTokenStore, error) {
 	client, err := newFirestoreClient(ctx, fsc)
 	if err != nil {
@@ -51,18 +44,12 @@ func (s *firestoreNodeTokens) tokens() *firestore.CollectionRef {
 	return s.client.Collection(s.root + "_node_tokens")
 }
 
-// tokenDocID renders a selector as a document ID. A selector is already
-// lowercase hex and therefore a legal ID on its own, but it goes through the
-// same escaping helper as every other document here so the collection reads
-// like its neighbours.
 func tokenDocID(selector string) string { return itemDocID("token", selector) }
 
 func (s *firestoreNodeTokens) Put(ctx context.Context, token config.NodeToken) error {
 	if err := token.Validate(); err != nil {
 		return err
 	}
-	// Create, not Set: an existing selector must fail rather than overwrite a
-	// live node's credential. See the SQL implementation for why.
 	_, err := s.tokens().Doc(tokenDocID(token.Selector)).Create(ctx, map[string]any{
 		fsTokenSelector:   token.Selector,
 		fsTokenSecretHash: token.SecretHash,
@@ -95,10 +82,6 @@ func (s *firestoreNodeTokens) BySelector(ctx context.Context, selector string) (
 }
 
 func (s *firestoreNodeTokens) List(ctx context.Context, nodeID string) ([]config.NodeToken, error) {
-	// Equality only, with the ordering done in Go. An equality filter plus an
-	// OrderBy on a different field would demand a composite index that an
-	// operator has to create by hand before this worked at all; the automatic
-	// single-field index serves this as it stands.
 	query := s.tokens().Query
 	if nodeID != "" {
 		query = query.Where(fsTokenNodeID, "==", nodeID)
@@ -131,7 +114,6 @@ func (s *firestoreNodeTokens) Revoke(ctx context.Context, selector string, at ti
 		return config.NodeToken{}, found, err
 	}
 	if !token.RevokedAt.IsZero() {
-		// Already revoked: the first timestamp is the audit fact and stands.
 		return token, true, nil
 	}
 	revoked := at.UTC()
@@ -144,13 +126,6 @@ func (s *firestoreNodeTokens) Revoke(ctx context.Context, selector string, at ti
 	return token, true, nil
 }
 
-// decodeNodeTokenDoc reads a credential document.
-//
-// Unlike the job-run scan, a malformed document is an ERROR rather than a
-// skipped row: a credential that cannot be read is a credential whose expiry
-// and revocation cannot be read either, and treating it as absent would be
-// indistinguishable from treating it as valid on the next code path that
-// touches it.
 func decodeNodeTokenDoc(snap *firestore.DocumentSnapshot) (config.NodeToken, error) {
 	var token config.NodeToken
 	for _, field := range []struct {

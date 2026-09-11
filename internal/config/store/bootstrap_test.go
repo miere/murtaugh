@@ -179,8 +179,6 @@ database:
 	return path
 }
 
-// Nothing about loading the configuration writes to it: an agent row comes back
-// from a start byte for byte as it was stored.
 func TestBootstrapLeavesStoredAgentsAsTheyAre(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	path := seedStore(t, map[string]config.AgentProfile{"code": nativeAgent()})

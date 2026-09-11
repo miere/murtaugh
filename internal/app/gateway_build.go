@@ -22,12 +22,6 @@ import (
 // managers, MCP servers, tool sets, routing — is decided here at construction,
 // which is precisely why a reload has to rebuild rather than mutate.
 func (a *Application) buildGateway(cfg config.Config) *gateway.Gateway {
-	// The agent runtime is built out of tree and handed in: this package is
-	// shared with cmd/murtaugh-gateway, which must not be able to reach an agent
-	// backend at all. A nil builder (that binary's case today) yields a gateway
-	// with no session managers and no delegator — which is exactly the state
-	// #170 Concern 1 is driving towards, reached here without un-wiring the
-	// gateway that is still serving.
 	var buildRuntime agentruntime.Builder
 	if a.agents.Runtime != nil {
 		buildRuntime = a.agents.Runtime(cfg, a.registry, a.logger)

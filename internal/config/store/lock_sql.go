@@ -164,11 +164,6 @@ func (l *sqlLocker) Acquire(ctx context.Context) (config.Lease, bool, error) {
 	// server's own reckoning. The epoch advances in SQL so takeovers stay
 	// totally ordered without a read-then-write that another node could
 	// interleave with.
-	//
-	// The address is cleared in the same statement, and that is not tidiness: it
-	// belongs to the node that just lost the lock, and leaving it would have
-	// every standby redirect nodes to a gateway that has stood down until this
-	// node gets round to publishing its own.
 	takeover := fmt.Sprintf(
 		`UPDATE leader_locks
 		    SET owner = %s, fence = %s, epoch = epoch + 1, acquired_at = %s,
@@ -217,12 +212,8 @@ func (l *sqlLocker) readLease(ctx context.Context, fence string) (config.Lease, 
 	return l.scanLease(l.db.QueryRowContext(ctx, query, l.identity.Key(), fence))
 }
 
-// Holder reads the live claim whoever holds it, without contending.
-//
-// The WHERE clause is the point. `released = 0 AND NOT expired` is what keeps a
-// standby from redirecting a node to the gateway that just stood down: the row
-// survives a release so the epoch survives a handover, so "there is a row" and
-// "there is a leader" are different questions.
+// Filters on released and expiry: the row outlives a release so the epoch survives a
+// handover, so a row existing does not mean there is a leader.
 func (l *sqlLocker) Holder(ctx context.Context) (config.Lease, bool, error) {
 	query := fmt.Sprintf(
 		`SELECT owner, epoch, acquired_at, lease_seconds, address
@@ -236,11 +227,7 @@ func (l *sqlLocker) Holder(ctx context.Context) (config.Lease, bool, error) {
 	return lease, ok, nil
 }
 
-// Publish records this node's node-endpoint address on the row it holds.
-//
-// Conditioned on the fence, like every other write here: a node that has been
-// taken over must not stamp its address onto its successor's lock, which would
-// send every node in the fleet to a gateway that no longer leads.
+// Fenced so a node that was taken over cannot stamp its address onto its successor's lock.
 func (l *sqlLocker) Publish(ctx context.Context, lease config.Lease, addr config.LeaderAddress) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -258,7 +245,6 @@ func (l *sqlLocker) Publish(ctx context.Context, lease config.Lease, addr config
 	return nil
 }
 
-// scanLease decodes one lock row into a lease.
 func (l *sqlLocker) scanLease(row *sql.Row) (config.Lease, bool, error) {
 	var (
 		owner   string

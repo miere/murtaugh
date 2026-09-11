@@ -53,9 +53,6 @@ func agentJobConfig() config.Config {
 	}
 }
 
-// testApp is the composition root a scheduled-run test needs: a real registry
-// and recorder, plus the agent machinery cmd/murtaugh links, so the fallback
-// path under test is the one that binary actually takes.
 func testApp() *Application {
 	return &Application{
 		recorder: journal.NopRecorder{},
@@ -89,8 +86,6 @@ func TestScheduledRunnerUsesTheGatewayDelegator(t *testing.T) {
 	}
 }
 
-// The gateway can only report a job whose reply reaches it, so the runner it is
-// handed must return what the agent said rather than drop it.
 func TestScheduledRunnerHandsTheReplyToTheGateway(t *testing.T) {
 	client := &completingClient{reply: "backups are green"}
 	gatewayRunner := agentdelegate.NewRunner(agentJobConfig().Agents, config.RuntimeDefaults{}, t.TempDir(), slog.Default()).

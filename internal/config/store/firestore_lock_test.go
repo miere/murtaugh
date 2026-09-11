@@ -352,12 +352,6 @@ func TestOpenLockerSelectsFirestore(t *testing.T) {
 	}
 }
 
-// TestFirestoreLockerAddressBehaviours is #197's redirect, on the only backend
-// that can arbitrate a real fleet.
-//
-// The flock backend is one machine and SQLite cannot coordinate two, so
-// Firestore is the only place the redirect means anything — and it was the one
-// place with no test of Publish, Holder or the renewal split at all.
 func TestFirestoreLockerAddressBehaviours(t *testing.T) {
 	t.Run("a standby reads where the leader accepts nodes", func(t *testing.T) {
 		fsc := firestoreTestConfig(t)
@@ -369,8 +363,6 @@ func TestFirestoreLockerAddressBehaviours(t *testing.T) {
 			t.Fatalf("Acquire: ok=%v err=%v", ok, err)
 		}
 
-		// Acquisition leaves no address: the listener may still be binding, and
-		// "leader, no address" is the honest answer for that moment.
 		standby := openTestFirestoreLocker(t, fsc, time.Minute)
 		held, ok, err := standby.Holder(ctx)
 		if err != nil || !ok {
@@ -393,13 +385,6 @@ func TestFirestoreLockerAddressBehaviours(t *testing.T) {
 		}
 	})
 
-	// The one the renewal split exists for, and the reason it is worth a test on
-	// this backend specifically: renewals happen every few seconds, so an
-	// address blanked by one is an address that is present most of the time and
-	// missing sometimes. A standby reading the lock inside one of those windows
-	// turns a node away with nowhere to send it, and does it intermittently —
-	// which is the worst version of that bug, because it looks like a network
-	// fault rather than a code one.
 	t.Run("a renewal does not blank the address", func(t *testing.T) {
 		fsc := firestoreTestConfig(t)
 		ctx := context.Background()
@@ -450,10 +435,6 @@ func TestFirestoreLockerAddressBehaviours(t *testing.T) {
 			t.Fatalf("Release: %v", err)
 		}
 
-		// The document survives a release so the epoch survives a handover, so
-		// "there is a row" and "there is a leader" are different questions.
-		// Answering the first when asked the second sends a node straight back
-		// to the gateway that just stood down.
 		standby := openTestFirestoreLocker(t, fsc, time.Minute)
 		if _, ok, err := standby.Holder(ctx); err != nil || ok {
 			t.Fatalf("Holder over a released lock: ok=%v err=%v; want no leader", ok, err)
@@ -502,9 +483,6 @@ func TestFirestoreLockerAddressBehaviours(t *testing.T) {
 			t.Fatalf("takeover Acquire: ok=%v err=%v", ok, err)
 		}
 
-		// The displaced node still believes it leads until its next renewal.
-		// Losing this race is not an error — the renewal loop is what discovers
-		// the loss — but the write must not land.
 		if err := old.Publish(ctx, lease, config.LeaderAddress{"wss://ghost.example.com:8787"}); err != nil {
 			t.Fatalf("Publish by a displaced holder: %v", err)
 		}
