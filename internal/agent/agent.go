@@ -175,6 +175,10 @@ type Event struct {
 	Permission *PermissionPrompt
 	Question   *QuestionPrompt
 	Plan       *PlanPrompt
+	SignIn     *SignInPrompt
+	// SignInSettled rides the turn's stream rather than a channel so it arrives
+	// in order with the reply, before the turn that raised the sign-in completes.
+	SignInSettled *SignInSettled
 }
 
 type EventType string
@@ -189,6 +193,10 @@ const (
 	EventPermission EventType = "permission"
 	EventQuestion   EventType = "question"
 	EventPlan       EventType = "plan"
+	EventSignIn     EventType = "sign_in"
+	// EventSignInSettled answers nothing: the sign-in's own process decides how
+	// it ends, and whoever drew it has to hear that to settle the cards.
+	EventSignInSettled EventType = "sign_in_settled"
 )
 
 // AttachmentEvent is a file the agent is sending to the user as part of its
@@ -445,6 +453,22 @@ type QuestionPrompt struct {
 type PlanPrompt struct {
 	Request PlanRequest
 	Answer  chan DisplayAnswer
+}
+
+// SignInPrompt stays open after its first answer, because a pasted code can
+// still be followed by a cancel until the sign-in settles.
+type SignInPrompt struct {
+	Request SignInRequest
+	Answer  chan DisplayAnswer
+}
+
+// SignInSettled names its prompt so whoever drew two sign-ins can tell which
+// one ended.
+type SignInSettled struct {
+	Prompt *SignInPrompt
+	State  SignInState
+	Reason string
+	URL    string
 }
 
 // TurnDisplay leaves where to draw to whoever renders the turn, which is how a

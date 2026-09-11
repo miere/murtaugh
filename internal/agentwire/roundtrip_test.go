@@ -768,6 +768,7 @@ func TestTransferChunkRoundTrip(t *testing.T) {
 // exercises its payload; the KEYS are what the guard checks, and they are
 // checked against the agent package, not against a hand-written count.
 func TestEncodeCoversEveryEventKind(t *testing.T) {
+	signIn := &agent.SignInPrompt{Answer: make(chan agent.DisplayAnswer, 2)}
 	covered := map[agent.EventType]struct {
 		ev   agent.Event
 		want EventType
@@ -793,10 +794,15 @@ func TestEncodeCoversEveryEventKind(t *testing.T) {
 			Type: agent.EventPlan,
 			Plan: &agent.PlanPrompt{Answer: make(chan agent.DisplayAnswer, 1)},
 		}, EventPlan},
+		agent.EventSignIn:        {agent.Event{Type: agent.EventSignIn, SignIn: signIn}, EventSignIn},
+		agent.EventSignInSettled: {agent.Event{Type: agent.EventSignInSettled, SignInSettled: &agent.SignInSettled{Prompt: signIn, State: agent.SignInSuccess}}, EventSignInSettled},
 	}
 
 	declared := agentEventKinds(t)
 	enc := NewEncoder()
+	if _, _, err := enc.Encode(covered[agent.EventSignIn].ev); err != nil {
+		t.Fatalf("Encode(sign_in): %v", err)
+	}
 	for _, kind := range declared {
 		tc, ok := covered[kind]
 		if !ok {
@@ -921,6 +927,8 @@ func TestWireVocabularyIsIndependent(t *testing.T) {
 		{EventPermission, "permission"},
 		{EventQuestion, "question"},
 		{EventPlan, "plan"},
+		{EventSignIn, "sign_in"},
+		{EventSignInSettled, "sign_in_settled"},
 	} {
 		if string(tc.got) != tc.want {
 			t.Errorf("wire kind = %q, want %q", tc.got, tc.want)
@@ -1041,6 +1049,8 @@ func TestDisplayRequestsCarryOnlyReviewedFields(t *testing.T) {
 		"Question":        {"Key key", "Header header", "Question question", "Options options", "MultiSelect multi_select"},
 		"QuestionOption":  {"Label label", "Description description"},
 		"PlanRequest":     {"ID id", "Title title", "Plan plan"},
+		"SignInRequest":   {"ID id", "Tool tool", "Profile profile", "URL url", "NeedsCode needs_code", "Command command"},
+		"SignInSettled":   {"ID id", "State state", "Reason reason", "URL url"},
 	}
 	got := map[string][]string{}
 	var walk func(reflect.Type)
@@ -1064,7 +1074,117 @@ func TestDisplayRequestsCarryOnlyReviewedFields(t *testing.T) {
 	}
 	walk(reflect.TypeOf(QuestionRequest{}))
 	walk(reflect.TypeOf(PlanRequest{}))
+	walk(reflect.TypeOf(SignInRequest{}))
+	walk(reflect.TypeOf(SignInSettled{}))
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("display request fields changed; review that none names a destination, then update this list.\n got %v\nwant %v", got, want)
+		t.Fatalf("display request fields changed; review that none names a destination or carries environment, then update this list.\n got %v\nwant %v", got, want)
+	}
+
+	var fields []string
+	typ := reflect.TypeOf(agent.SignInRequest{})
+	for i := 0; i < typ.NumField(); i++ {
+		fields = append(fields, typ.Field(i).Name)
+	}
+	if want := []string{"Tool", "Profile", "URL", "NeedsCode", "Command"}; !reflect.DeepEqual(fields, want) {
+		t.Fatalf("agent.SignInRequest fields changed; review that none names a destination or carries environment.\n got %v\nwant %v", fields, want)
+	}
+}
+
+// A sign-in stays open after a code, because the node still has to hear a
+// cancel, and closes only when the node says how it ended.
+func TestASignInRoundTripsAndStaysOpenUntilItSettles(t *testing.T) {
+	enc, dec := NewEncoder(), NewDecoder(nil)
+	onNode := &agent.SignInPrompt{
+		Request: agent.SignInRequest{Tool: "gcp-mcp", Profile: "gcloud", URL: "https://accounts.example.com/o/oauth2?x=1", NeedsCode: true},
+		Answer:  make(chan agent.DisplayAnswer, 2),
+	}
+
+	back, _, pending := roundTrip(t, enc, dec, agent.Event{Type: agent.EventSignIn, SignIn: onNode})
+	if back.Type != agent.EventSignIn || back.SignIn == nil || back.SignIn.Request != onNode.Request {
+		t.Fatalf("decoded %+v, want the sign-in unchanged", back)
+	}
+	if pending == nil || pending.ID == "" {
+		t.Fatalf("Decode returned %+v; the gateway has nothing to answer under", pending)
+	}
+
+	answerTrip(t, enc, pending.ID, agent.DisplayAnswer{Outcome: agent.DisplayAnswered, Code: "4/0Ab-code", UserID: "U1"})
+	if got := <-onNode.Answer; got.Outcome != agent.DisplayAnswered || got.Code != "4/0Ab-code" {
+		t.Fatalf("the node received %+v", got)
+	}
+	answerTrip(t, enc, pending.ID, agent.DisplayAnswer{Outcome: agent.DisplayDismissed})
+	if got := <-onNode.Answer; got.Outcome != agent.DisplayDismissed {
+		t.Fatalf("a cancel after the code reached the node as %+v", got)
+	}
+
+	working, _, _ := roundTrip(t, enc, dec, agent.Event{Type: agent.EventSignInSettled, SignInSettled: &agent.SignInSettled{Prompt: onNode, State: agent.SignInWorking}})
+	if working.SignInSettled == nil || working.SignInSettled.Prompt != back.SignIn || working.SignInSettled.State != agent.SignInWorking {
+		t.Fatalf("a progress update decoded as %+v", working.SignInSettled)
+	}
+	done, _, _ := roundTrip(t, enc, dec, agent.Event{Type: agent.EventSignInSettled, SignInSettled: &agent.SignInSettled{Prompt: onNode, State: agent.SignInFailed, Reason: "bad code"}})
+	if done.SignInSettled == nil || done.SignInSettled.Prompt != back.SignIn || done.SignInSettled.State != agent.SignInFailed || done.SignInSettled.Reason != "bad code" {
+		t.Fatalf("the terminal state decoded as %+v", done.SignInSettled)
+	}
+
+	if n := enc.Pending(); n != 0 {
+		t.Errorf("pending = %d after the sign-in settled, want 0", n)
+	}
+	if err := enc.Answer(DisplayAnswer{ID: pending.ID, Outcome: string(agent.DisplayDismissed)}); err == nil {
+		t.Error("a settled sign-in still accepted an answer")
+	}
+	if _, _, err := enc.Encode(agent.Event{Type: agent.EventSignInSettled, SignInSettled: &agent.SignInSettled{Prompt: onNode, State: agent.SignInFailed}}); err == nil {
+		t.Error("a sign-in settled twice without an error")
+	}
+	if _, _, err := dec.Decode(context.Background(), Event{Type: EventSignInSettled, SignInSettled: &SignInSettled{ID: pending.ID, State: "failed"}}); err == nil {
+		t.Error("the gateway decoded a settle for a sign-in it had already closed")
+	}
+}
+
+// Abandoning a sign-in at turn teardown releases it on both maps, or every
+// sign-in a dropped turn left behind would stay pending for the node's life.
+func TestAnAbandonedSignInIsForgotten(t *testing.T) {
+	enc := NewEncoder()
+	prompt := &agent.SignInPrompt{Request: agent.SignInRequest{Tool: "x", Profile: "gcloud", URL: "https://x"}, Answer: make(chan agent.DisplayAnswer, 2)}
+	w, _, err := enc.Encode(agent.Event{Type: agent.EventSignIn, SignIn: prompt})
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	enc.Abandon(w.SignIn.ID)
+	if n := enc.Pending(); n != 0 {
+		t.Fatalf("pending = %d after abandoning the sign-in, want 0", n)
+	}
+	if _, _, err := enc.Encode(agent.Event{Type: agent.EventSignInSettled, SignInSettled: &agent.SignInSettled{Prompt: prompt, State: agent.SignInCancelled}}); err == nil {
+		t.Fatal("an abandoned sign-in could still be settled")
+	}
+}
+
+// A command the owner must approve crosses without a link, the approval keeps
+// the sign-in open, and the link follows once the command has started.
+func TestACommandToApproveCrossesBeforeItsLink(t *testing.T) {
+	enc, dec := NewEncoder(), NewDecoder(nil)
+	onNode := &agent.SignInPrompt{
+		Request: agent.SignInRequest{Tool: "vendor-mcp", Profile: "custom", Command: "vendor-cli login --headless", NeedsCode: true},
+		Answer:  make(chan agent.DisplayAnswer, 2),
+	}
+	back, _, pending := roundTrip(t, enc, dec, agent.Event{Type: agent.EventSignIn, SignIn: onNode})
+	if back.SignIn == nil || back.SignIn.Request != onNode.Request {
+		t.Fatalf("decoded %+v, want the command unchanged and no link", back.SignIn)
+	}
+
+	answerTrip(t, enc, pending.ID, agent.DisplayAnswer{Outcome: agent.DisplayApproved, UserID: "UOWNER"})
+	if got := <-onNode.Answer; got.Outcome != agent.DisplayApproved {
+		t.Fatalf("the node received %+v", got)
+	}
+	ready, _, _ := roundTrip(t, enc, dec, agent.Event{Type: agent.EventSignInSettled, SignInSettled: &agent.SignInSettled{
+		Prompt: onNode, State: agent.SignInReady, URL: "https://vendor.example.com/device",
+	}})
+	if ready.SignInSettled == nil || ready.SignInSettled.State != agent.SignInReady || ready.SignInSettled.URL != "https://vendor.example.com/device" {
+		t.Fatalf("the link decoded as %+v", ready.SignInSettled)
+	}
+	if agent.SignInReady.Terminal() {
+		t.Fatal("a sign-in whose link just arrived was treated as over")
+	}
+	answerTrip(t, enc, pending.ID, agent.DisplayAnswer{Outcome: agent.DisplayAnswered, Code: "123-456"})
+	if got := <-onNode.Answer; got.Code != "123-456" {
+		t.Fatalf("the code after the link reached the node as %+v", got)
 	}
 }

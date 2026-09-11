@@ -103,6 +103,7 @@ type Client struct {
 	pending       map[string]chan agentwire.Message
 	streams       map[string]*stream
 	answers       map[string]*agentwire.PendingDecision
+	signIns       map[string]chan struct{}
 	interruptible *bool
 	resolved      bool
 	// advertisedOnce is set by the first claim to land, whichever path it came
@@ -138,6 +139,7 @@ func New(conn nodelink.Conn, opts Options) *Client {
 		pending:    make(map[string]chan agentwire.Message),
 		streams:    make(map[string]*stream),
 		answers:    make(map[string]*agentwire.PendingDecision),
+		signIns:    make(map[string]chan struct{}),
 	}
 	c.link = nodelink.New(conn, nodelink.Options{
 		Handler:      c.consume,
@@ -465,6 +467,8 @@ func (c *Client) dismissOrphanDisplay(msg agentwire.Message) {
 		id = wire.Question.ID
 	case wire.Plan != nil:
 		id = wire.Plan.ID
+	case wire.SignIn != nil:
+		id = wire.SignIn.ID
 	default:
 		return
 	}
@@ -482,11 +486,31 @@ func (c *Client) decode(msg agentwire.Message, s *stream) (agent.Event, bool, er
 	if err := msg.Into(&wire); err != nil {
 		return agent.Event{}, false, err
 	}
+	if settled := wire.SignInSettled; settled != nil && (s == nil || !c.decoder.SignInOpen(settled.ID)) {
+		c.log.Debug("remote: a sign-in settled that nothing here is drawing", "id", settled.ID, "state", settled.State)
+		return agent.Event{}, true, nil
+	}
 	ev, pending, err := c.decoder.Decode(context.Background(), wire)
 	if err != nil {
 		return agent.Event{}, false, err
 	}
+	if ev.SignInSettled != nil && ev.SignInSettled.State.Terminal() {
+		c.settleSignIn(wire.SignInSettled.ID)
+	}
 	if pending == nil {
+		return ev, false, nil
+	}
+	if ev.SignIn != nil {
+		if s == nil || s.location.ChannelID == "" {
+			c.decoder.ForgetSignIn(pending.ID)
+			go c.sendDisplayAnswer(agentwire.DisplayAnswer{ID: pending.ID, Outcome: string(agent.DisplayNoConversation)})
+			return agent.Event{}, true, nil
+		}
+		settled := make(chan struct{})
+		c.mu.Lock()
+		c.signIns[pending.ID] = settled
+		c.mu.Unlock()
+		go c.relaySignIn(pending.ID, ev.SignIn, s, settled)
 		return ev, false, nil
 	}
 	if answers := displayAnswers(ev); answers != nil {
@@ -601,6 +625,47 @@ func (c *Client) answerDisplay(id string, answers <-chan agent.DisplayAnswer, s 
 		}
 	case <-c.link.Done():
 	}
+}
+
+func (c *Client) relaySignIn(id string, prompt *agent.SignInPrompt, s *stream, settled <-chan struct{}) {
+	defer c.dropSignIn(id)
+	for {
+		select {
+		case answer := <-prompt.Answer:
+			c.sendDisplayAnswer(agentwire.EncodeDisplayAnswer(id, answer))
+			if answer.Outcome != agent.DisplayAnswered && answer.Outcome != agent.DisplayApproved {
+				return
+			}
+		case <-settled:
+			return
+		case <-s.quit:
+			select {
+			case <-settled:
+			default:
+				c.sendDisplayAnswer(agentwire.DisplayAnswer{ID: id, Outcome: string(agent.DisplayDismissed)})
+			}
+			return
+		case <-c.link.Done():
+			return
+		}
+	}
+}
+
+func (c *Client) settleSignIn(id string) {
+	c.mu.Lock()
+	settled := c.signIns[id]
+	delete(c.signIns, id)
+	c.mu.Unlock()
+	if settled != nil {
+		close(settled)
+	}
+}
+
+func (c *Client) dropSignIn(id string) {
+	c.mu.Lock()
+	delete(c.signIns, id)
+	c.mu.Unlock()
+	c.decoder.ForgetSignIn(id)
 }
 
 func (c *Client) sendDisplayAnswer(answer agentwire.DisplayAnswer) {

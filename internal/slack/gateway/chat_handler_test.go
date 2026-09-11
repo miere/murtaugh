@@ -1173,3 +1173,54 @@ func TestChatHandlerWithdrawsACardWhenItsTurnDies(t *testing.T) {
 		t.Fatal("the turn ended but its card was never withdrawn")
 	}
 }
+
+type fakeChatSessionsWithASignIn struct {
+	answers chan agent.DisplayAnswer
+}
+
+func (f *fakeChatSessionsWithASignIn) Prompt(_ context.Context, _ agent.ConversationKey, _ agent.SessionMetadata, _ agent.PromptRequest) (<-chan agent.Event, error) {
+	ch := make(chan agent.Event)
+	go func() {
+		defer close(ch)
+		prompt := &agent.SignInPrompt{
+			Request: agent.SignInRequest{Tool: "gcp-mcp", Profile: "gcloud", URL: "https://accounts.example.com/o/oauth2", NeedsCode: true},
+			Answer:  make(chan agent.DisplayAnswer, 2),
+		}
+		ch <- agent.Event{Type: agent.EventSignIn, SignIn: prompt}
+		f.answers <- <-prompt.Answer
+		ch <- agent.Event{Type: agent.EventSignInSettled, SignInSettled: &agent.SignInSettled{Prompt: prompt, State: agent.SignInCancelled}}
+		ch <- agent.Event{Type: agent.EventText, Text: "I could not sign in."}
+		ch <- agent.Event{Type: agent.EventComplete}
+	}()
+	return ch, nil
+}
+
+func (f *fakeChatSessionsWithASignIn) Lookup(agent.ConversationKey) (string, bool) { return "", false }
+func (f *fakeChatSessionsWithASignIn) Cancel(context.Context, string) error        { return nil }
+
+// A sign-in nobody can draw is still answered, so the node stops its sign-in
+// process instead of holding it open until the turn is torn down.
+func TestChatHandlerWithNothingToDrawASignInAnswersUnavailable(t *testing.T) {
+	f := &fakeChatSessionsWithASignIn{answers: make(chan agent.DisplayAnswer, 1)}
+	handler := NewChatHandler(&fakeStreamAPI{}, map[string]ChatSessionManager{"default": f}, func(ChatRequest) ChatRoute { return ChatRoute{Agent: "default", ReplyOnThread: true} }, time.Hour, 5, nil)
+	done := make(chan error, 1)
+	go func() {
+		done <- handler.handleResolving(context.Background(), ChatRequest{TeamID: "T1", ChannelID: "C1", UserID: "U1", MessageTS: "123.4", Text: "hi", Source: "test"})
+	}()
+	select {
+	case got := <-f.answers:
+		if got.Outcome != agent.DisplayUnavailable {
+			t.Fatalf("answered %+v with nothing to draw it", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a sign-in nobody can draw was never answered")
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Handle returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the turn did not finish after its sign-in settled")
+	}
+}

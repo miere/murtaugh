@@ -3,6 +3,7 @@ package agentwire
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/miere/murtaugh/internal/agent"
 )
@@ -13,13 +14,32 @@ import (
 // downstream can tell whether the turn ran in this process or on a node.
 type Decoder struct {
 	deliver AttachmentDeliverer
+
+	mu      sync.Mutex
+	signIns map[string]*agent.SignInPrompt
 }
 
 // NewDecoder returns a Decoder that materialises attachments through deliver. A
 // nil deliverer is legal for a caller that will never see an attachment (and
 // makes one an error if it does), which is what the error-path tests use.
 func NewDecoder(deliver AttachmentDeliverer) *Decoder {
-	return &Decoder{deliver: deliver}
+	return &Decoder{deliver: deliver, signIns: make(map[string]*agent.SignInPrompt)}
+}
+
+// ForgetSignIn is for a gateway that stopped drawing a sign-in before the node
+// settled it; a later settle for it then decodes as an error.
+func (d *Decoder) ForgetSignIn(id string) {
+	d.mu.Lock()
+	delete(d.signIns, id)
+	d.mu.Unlock()
+}
+
+// SignInOpen lets a caller drop a stale settle quietly instead of reporting it.
+func (d *Decoder) SignInOpen(id string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, ok := d.signIns[id]
+	return ok
 }
 
 // Decode translates one wire event back into an agent event.
@@ -84,6 +104,38 @@ func (d *Decoder) Decode(ctx context.Context, w Event) (agent.Event, *PendingDec
 			Answer:  answer,
 		}}
 		return ev, &PendingDecision{ID: w.Plan.ID}, nil
+	case EventSignIn:
+		if w.SignIn == nil {
+			return agent.Event{}, nil, fmt.Errorf("agentwire: sign-in event carries no request")
+		}
+		prompt := &agent.SignInPrompt{
+			Request: agent.SignInRequest{Tool: w.SignIn.Tool, Profile: w.SignIn.Profile, URL: w.SignIn.URL, NeedsCode: w.SignIn.NeedsCode, Command: w.SignIn.Command},
+			Answer:  make(chan agent.DisplayAnswer, 2),
+		}
+		d.mu.Lock()
+		d.signIns[w.SignIn.ID] = prompt
+		d.mu.Unlock()
+		return agent.Event{Type: agent.EventSignIn, SignIn: prompt}, &PendingDecision{ID: w.SignIn.ID}, nil
+	case EventSignInSettled:
+		if w.SignInSettled == nil {
+			return agent.Event{}, nil, fmt.Errorf("agentwire: sign-in settle carries no state")
+		}
+		state := agent.SignInState(w.SignInSettled.State)
+		d.mu.Lock()
+		prompt, ok := d.signIns[w.SignInSettled.ID]
+		if ok && state.Terminal() {
+			delete(d.signIns, w.SignInSettled.ID)
+		}
+		d.mu.Unlock()
+		if !ok {
+			return agent.Event{}, nil, fmt.Errorf("agentwire: no sign-in open for id %q", w.SignInSettled.ID)
+		}
+		return agent.Event{Type: agent.EventSignInSettled, SignInSettled: &agent.SignInSettled{
+			Prompt: prompt,
+			State:  state,
+			Reason: w.SignInSettled.Reason,
+			URL:    w.SignInSettled.URL,
+		}}, nil, nil
 	default:
 		return agent.Event{}, nil, fmt.Errorf("agentwire: unknown event kind %q", w.Type)
 	}

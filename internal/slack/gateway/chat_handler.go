@@ -826,6 +826,15 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest, route ChatRou
 				event.Plan.Answer <- answer
 			}
 			resetIdleTimer(idle, h.effectiveIdleTimeout())
+		case agent.EventSignIn:
+			if event.SignIn == nil {
+				continue
+			}
+			h.logger.Warn("agent raised a sign-in but nothing can draw it", "channel", req.ChannelID, "tool", event.SignIn.Request.Tool)
+			select {
+			case event.SignIn.Answer <- agent.DisplayAnswer{Outcome: agent.DisplayUnavailable}:
+			default:
+			}
 		case agent.EventError:
 			// Recorded first so every exit below reports the same cause — including
 			// the cancellation path, which the session log reads as an interrupt
