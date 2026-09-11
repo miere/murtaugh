@@ -144,8 +144,6 @@ func TestCommandSpecGuardOutranksTheAgentEnvironment(t *testing.T) {
 	}
 }
 
-// The node runs the sign-in end to end: it hands back the link to show, takes
-// the pasted code, and reads success from the exit.
 func TestStartLoginHandsBackTheLinkAndTakesTheCode(t *testing.T) {
 	p, err := Custom(`echo "Go to https://example.com/auth?x=1 to sign in"; read code; [ "$code" = GOOD ]`, true)
 	if err != nil {
@@ -201,7 +199,6 @@ func TestStartLoginFailsWithoutALink(t *testing.T) {
 	}
 }
 
-// A cancelled sign-in must leave nothing waiting on stdin.
 func TestStopKillsTheSignIn(t *testing.T) {
 	p, err := Custom(`echo "https://example.com/auth"; exec sleep 30`, false)
 	if err != nil {
