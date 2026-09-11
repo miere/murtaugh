@@ -36,6 +36,8 @@ type fakeNode struct {
 	released  chan string
 	goodbyes  chan struct{}
 	decisions chan agentwire.PermissionResponse
+	responses chan agentwire.Message
+	answers   chan agentwire.DisplayAnswer
 }
 
 type nodeConfig struct {
@@ -67,6 +69,8 @@ func newFakeNode(t *testing.T, conn nodelink.Conn, cfg nodeConfig) *fakeNode {
 		released:      make(chan string, 8),
 		goodbyes:      make(chan struct{}, 8),
 		decisions:     make(chan agentwire.PermissionResponse, 8),
+		responses:     make(chan agentwire.Message, 8),
+		answers:       make(chan agentwire.DisplayAnswer, 8),
 	}
 	if n.sessionID == "" && !cfg.noSessionID {
 		n.sessionID = "session-42"
@@ -92,6 +96,14 @@ func (n *fakeNode) consume(payload []byte) error {
 			return err
 		}
 		n.decisions <- answer
+	case agentwire.MessageResponse:
+		n.responses <- msg
+	case agentwire.MessageAnswer:
+		var answer agentwire.DisplayAnswer
+		if err := msg.Into(&answer); err != nil {
+			return err
+		}
+		n.answers <- answer
 	}
 	return nil
 }

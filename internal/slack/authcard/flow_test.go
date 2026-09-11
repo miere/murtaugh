@@ -3,9 +3,6 @@ package authcard
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -422,8 +419,8 @@ func TestNoAdminConfiguredFailsClosed(t *testing.T) {
 	}
 }
 
-// When the requester IS the admin, the two cards collapse into one.
-func TestCollapsesWhenRequesterIsTheAdmin(t *testing.T) {
+// The admin asking in a thread still gets the thread notice as well as the card.
+func TestTheAdminRequesterStillGetsTwoCards(t *testing.T) {
 	api := newSyncAPI()
 	f := newTestFlow(api)
 	p := script(t, false, `echo "Open https://example.com/auth?x=1"; sleep 0.2`)
@@ -435,11 +432,8 @@ func TestCollapsesWhenRequesterIsTheAdmin(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	posts, _, _ := api.snapshot()
-	if len(posts) != 1 {
-		t.Fatalf("expected a single collapsed card, got %d", len(posts))
-	}
-	if posts[0].ChannelID != "D-"+adminID {
-		t.Fatalf("the collapsed card should go to the admin DM, got %q", posts[0].ChannelID)
+	if len(posts) != 2 || posts[0].ChannelID != "C1" || posts[1].ChannelID != "D-"+adminID {
+		t.Fatalf("expected the thread notice and the admin's DM card, got %d posts", len(posts))
 	}
 }
 
@@ -460,8 +454,8 @@ func TestCollapsesWithNoRequesterThread(t *testing.T) {
 	}
 }
 
-// Only the admin may answer. A click from anyone else is refused even though
-// the action_id is valid.
+// Only the person the card was sent to may answer. A click from anyone else is
+// refused even though the action_id is valid.
 func TestNonAdminCannotResolve(t *testing.T) {
 	api := newSyncAPI()
 	f := newTestFlow(api)
@@ -653,160 +647,6 @@ func TestEmptyCodeIsRejected(t *testing.T) {
 	f := newTestFlow(newSyncAPI())
 	if err := f.HandleCodeSubmission("any", "   ", adminID); err == nil {
 		t.Fatal("an empty verification code should be rejected")
-	}
-}
-
-// TestCommandSpecLayersTheAgentEnvironment is the fix for a live failure: a
-// gcloud sign-in that reported success while the agent that asked for it still
-// saw no credential. The command has to run in the agent's environment, with
-// the agent's values beating anything the daemon loaded from .env.
-func TestCommandSpecLayersTheAgentEnvironment(t *testing.T) {
-	t.Setenv("CLOUDSDK_CONFIG", "/home/op/.config/gcloud")
-	t.Setenv("MURTAUGH_TEST_UNTOUCHED", "keep-me")
-
-	profile, err := auth.Resolve("gcloud", "", false)
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
-	spec, cleanup, err := commandSpec(Request{
-		Profile: profile,
-		Env:     []string{"CLOUDSDK_CONFIG=/srv/work/.gcloud"},
-	})
-	if err != nil {
-		t.Fatalf("commandSpec: %v", err)
-	}
-	defer cleanup()
-
-	if !slices.Contains(spec.Env, "CLOUDSDK_CONFIG=/srv/work/.gcloud") {
-		t.Error("the agent's CLOUDSDK_CONFIG did not reach the spawned command")
-	}
-	if slices.Contains(spec.Env, "CLOUDSDK_CONFIG=/home/op/.config/gcloud") {
-		t.Error("the .env value survived alongside the agent's; the sign-in would be ambiguous")
-	}
-	// Layered, not replaced: the CLI still needs everything else the daemon has.
-	if !slices.Contains(spec.Env, "MURTAUGH_TEST_UNTOUCHED=keep-me") {
-		t.Error("the inherited environment was dropped instead of layered")
-	}
-}
-
-// TestCommandSpecInheritsWithoutAnAgentEnvironment. A nil Spec.Env is how proc
-// says "inherit"; pinning a snapshot instead would freeze the environment at
-// the wrong moment for every caller that has nothing to override.
-func TestCommandSpecInheritsWithoutAnAgentEnvironment(t *testing.T) {
-	profile, err := auth.Resolve("gcloud", "", false)
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
-	spec, cleanup, err := commandSpec(Request{Profile: profile})
-	if err != nil {
-		t.Fatalf("commandSpec: %v", err)
-	}
-	defer cleanup()
-	if spec.Env != nil {
-		t.Errorf("Spec.Env = %v, want nil so the command inherits", spec.Env)
-	}
-}
-
-// TestCommandSpecGuardsTheBrowserForClaudeCode. `claude auth login` has no
-// --no-launch-browser switch and opens the consent page on whatever machine it
-// runs on — which, under launchd, is the admin's desktop rather than wherever
-// they are reading Slack. The guard has to be on PATH, because the darwin
-// branch of the CLI's opener spawns the bare command `open`.
-func TestCommandSpecGuardsTheBrowserForClaudeCode(t *testing.T) {
-	profile, err := auth.Resolve("claude-code", "", false)
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
-	spec, cleanup, err := commandSpec(Request{Profile: profile})
-	if err != nil {
-		t.Fatalf("commandSpec: %v", err)
-	}
-	defer cleanup()
-
-	guardDir := ""
-	for _, entry := range spec.Env {
-		if value, ok := strings.CutPrefix(entry, "PATH="); ok {
-			guardDir, _, _ = strings.Cut(value, string(os.PathListSeparator))
-		}
-	}
-	if guardDir == "" {
-		t.Fatal("no PATH override was applied; the CLI would find the real launcher")
-	}
-	for _, name := range []string{"open", "xdg-open"} {
-		info, err := os.Stat(filepath.Join(guardDir, name))
-		if err != nil {
-			t.Fatalf("stat guard %s: %v", name, err)
-		}
-		if info.Mode().Perm()&0o100 == 0 {
-			t.Errorf("guard %s is not executable, so PATH lookup would skip past it", name)
-		}
-	}
-	// The rest of PATH must survive: the sign-in still shells out for the
-	// keychain, and a login that cannot persist is worse than one that pops a
-	// window.
-	if !slices.ContainsFunc(spec.Env, func(entry string) bool {
-		value, ok := strings.CutPrefix(entry, "PATH=")
-		return ok && strings.Contains(value, string(os.PathListSeparator))
-	}) {
-		t.Error("PATH was replaced rather than prepended to")
-	}
-}
-
-// TestCommandSpecCleanupRemovesTheGuard. The stand-ins are executables written
-// into a temp directory; leaving one behind per sign-in would litter the host
-// with shadowing binaries.
-func TestCommandSpecCleanupRemovesTheGuard(t *testing.T) {
-	profile, err := auth.Resolve("claude-code", "", false)
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
-	spec, cleanup, err := commandSpec(Request{Profile: profile})
-	if err != nil {
-		t.Fatalf("commandSpec: %v", err)
-	}
-
-	guardDir := ""
-	for _, entry := range spec.Env {
-		if value, ok := strings.CutPrefix(entry, "PATH="); ok {
-			guardDir, _, _ = strings.Cut(value, string(os.PathListSeparator))
-		}
-	}
-	cleanup()
-	if _, err := os.Stat(guardDir); !os.IsNotExist(err) {
-		t.Errorf("guard directory %s survived cleanup (err=%v)", guardDir, err)
-	}
-}
-
-// TestCommandSpecGuardOutranksTheAgentEnvironment. The guard is a safety
-// control: an agent that could put its own PATH back could put a browser window
-// back on the host desktop.
-func TestCommandSpecGuardOutranksTheAgentEnvironment(t *testing.T) {
-	profile, err := auth.Resolve("claude-code", "", false)
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
-	spec, cleanup, err := commandSpec(Request{
-		Profile: profile,
-		Env:     []string{"PATH=/agent/only"},
-	})
-	if err != nil {
-		t.Fatalf("commandSpec: %v", err)
-	}
-	defer cleanup()
-
-	for _, entry := range spec.Env {
-		value, ok := strings.CutPrefix(entry, "PATH=")
-		if !ok {
-			continue
-		}
-		if value == "/agent/only" {
-			t.Fatal("the agent's PATH replaced the guard; the browser would open on the host")
-		}
-		// The agent's own entry still has to be reachable — the guard shadows
-		// the launchers, it does not evict the agent's tooling.
-		if !strings.Contains(value, "/agent/only") {
-			t.Errorf("PATH = %q, want the agent's entry preserved behind the guard", value)
-		}
 	}
 }
 

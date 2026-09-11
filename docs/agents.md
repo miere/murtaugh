@@ -133,18 +133,27 @@ capabilities an agent may call. Values are native tool **groups** plus registry
 | `ask` | Put a question with options to you as clickable buttons, and **wait** for the answer. |
 | `present_plan` | Show a plan with Proceed / Revise / Cancel and **wait** for sign-off. |
 | `attach` | Return a workspace file (report, image, export) as a real Slack upload; confined to `workdir`. |
-| `auth.request` | Ask the **admin** for credentials the agent lacks, and **wait** until they grant or refuse them. |
+| `auth.request` | Sign in for credentials the agent lacks, on the machine it runs on, and **wait** until that machine's **owner** completes or refuses it. |
 
 `ask` and `present_plan` are recommended — they let the agent get a real answer
 instead of guessing. See [Slack → Asking the user](slack.md#asking-the-user).
 
 `auth.request` is the one tool that does **not** ask the person in the thread.
-Credentials belong to the admin, so the request always goes to
-`configuration.admin_user`; the requester only sees a notice that their admin
-has been asked. It fails closed — a denial, a timeout or a failed sign-in all
-return an error — so the agent stops rather than retrying a call it still has no
-credentials for. With no admin configured, nothing is posted and the request is
-refused. See `murtaugh help auth request`.
+Credentials belong to the machine the agent runs on, so the sign-in runs there,
+in that agent's environment, and the machine's owner completes it: for a runtime
+node, the Slack user its token was minted for; for an agent running inside the
+gateway, `configuration.admin_user`. The owner gets the card by DM and must be
+allowed to use the gateway; the thread only sees a notice that a DM was sent. If
+the owner loses access while the card is open, their answer is refused and the
+sign-in is stopped, and a node that is revoked or disconnects stops its sign-in
+too. The `custom` profile runs a command the agent chose, so its card shows the
+owner that exact command and nothing runs until they approve it. It fails
+closed — a refusal, a timeout or a failed sign-in all return an error — so the
+agent stops rather than retrying a call it still has no credentials for.
+Outside a conversation it only works on a runtime node: a scheduled job there
+still reaches the node's owner by DM, with no thread notice, while an agent
+inside the gateway or a CLI call is refused before anything runs. See
+`murtaugh help auth request`.
 
 Its built-in profiles are `gcloud`, `gcloud-adc`, `claude-code`, and `custom`.
 The `claude-code` profile re-authenticates the Claude Code CLI itself — the

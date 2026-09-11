@@ -175,6 +175,10 @@ type Event struct {
 	Permission *PermissionPrompt
 	Question   *QuestionPrompt
 	Plan       *PlanPrompt
+	SignIn     *SignInPrompt
+	// SignInSettled rides the turn's stream rather than a channel so it arrives
+	// in order with the reply, before the turn that raised the sign-in completes.
+	SignInSettled *SignInSettled
 }
 
 type EventType string
@@ -189,6 +193,10 @@ const (
 	EventPermission EventType = "permission"
 	EventQuestion   EventType = "question"
 	EventPlan       EventType = "plan"
+	EventSignIn     EventType = "sign_in"
+	// EventSignInSettled answers nothing: the sign-in's own process decides how
+	// it ends, and whoever drew it has to hear that to settle the cards.
+	EventSignInSettled EventType = "sign_in_settled"
 )
 
 // AttachmentEvent is a file the agent is sending to the user as part of its
@@ -447,6 +455,25 @@ type PlanPrompt struct {
 	Answer  chan DisplayAnswer
 }
 
+// SignInPrompt stays open after its first answer, because a pasted code can
+// still be followed by a cancel until the sign-in settles.
+type SignInPrompt struct {
+	Request SignInRequest
+	// Owner is stamped by the gateway from the node's credential and never read
+	// off the wire; empty means the sign-in is for the gateway admin.
+	Owner  string
+	Answer chan DisplayAnswer
+}
+
+// SignInSettled names its prompt so whoever drew two sign-ins can tell which
+// one ended.
+type SignInSettled struct {
+	Prompt *SignInPrompt
+	State  SignInState
+	Reason string
+	URL    string
+}
+
 // TurnDisplay leaves where to draw to whoever renders the turn, which is how a
 // node asks without ever naming a Slack destination.
 type TurnDisplay struct{}
@@ -459,6 +486,28 @@ func (TurnDisplay) Question(ctx context.Context, _ TurnLocation, req QuestionReq
 func (TurnDisplay) Plan(ctx context.Context, _ TurnLocation, req PlanRequest) (DisplayAnswer, error) {
 	answer := make(chan DisplayAnswer, 1)
 	return awaitDisplay(ctx, answer, Event{Type: EventPlan, Plan: &PlanPrompt{Request: req, Answer: answer}}), nil
+}
+
+// SignIn raises req on the turn and hands back the prompt its answers keep
+// arriving on, because a sign-in can hear a code and then a cancel.
+func (TurnDisplay) SignIn(ctx context.Context, req SignInRequest) (*SignInPrompt, bool) {
+	emit, ok := TurnEmitterFromContext(ctx)
+	if !ok {
+		return nil, false
+	}
+	prompt := &SignInPrompt{Request: req, Answer: make(chan DisplayAnswer, 2)}
+	if !emit(Event{Type: EventSignIn, SignIn: prompt}) {
+		return nil, false
+	}
+	return prompt, true
+}
+
+// SettleSignIn rides the turn's stream so the cards close before the reply
+// that follows the sign-in is drawn.
+func (TurnDisplay) SettleSignIn(ctx context.Context, update SignInSettled) {
+	if emit, ok := TurnEmitterFromContext(ctx); ok {
+		emit(Event{Type: EventSignInSettled, SignInSettled: &update})
+	}
 }
 
 func awaitDisplay(ctx context.Context, answer <-chan DisplayAnswer, ev Event) DisplayAnswer {

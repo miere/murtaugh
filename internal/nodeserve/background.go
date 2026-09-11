@@ -109,7 +109,7 @@ func (s *Server) sendBackground(sessionID string, ev agent.Event) {
 		case answers <- agent.DisplayAnswer{Outcome: agent.DisplayNoConversation}:
 		default:
 		}
-		s.log.Warn("nodeserve: refusing a question or plan raised with no turn to answer it", "session_id", sessionID)
+		s.log.Warn("nodeserve: refusing a question, plan or sign-in raised with no turn to answer it", "session_id", sessionID)
 		return
 	}
 
@@ -154,6 +154,8 @@ func displayAnswers(ev agent.Event) chan agent.DisplayAnswer {
 		return ev.Question.Answer
 	case ev.Plan != nil:
 		return ev.Plan.Answer
+	case ev.SignIn != nil:
+		return ev.SignIn.Answer
 	}
 	return nil
 }

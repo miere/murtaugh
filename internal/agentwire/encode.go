@@ -25,12 +25,22 @@ import (
 type Encoder struct {
 	mu       sync.Mutex
 	pending  map[string]chan string
-	displays map[string]chan agent.DisplayAnswer
+	displays map[string]display
+	signIns  map[*agent.SignInPrompt]string
+}
+
+type display struct {
+	answer chan agent.DisplayAnswer
+	open   bool
 }
 
 // NewEncoder returns an Encoder with no outstanding requests.
 func NewEncoder() *Encoder {
-	return &Encoder{pending: make(map[string]chan string), displays: make(map[string]chan agent.DisplayAnswer)}
+	return &Encoder{
+		pending:  make(map[string]chan string),
+		displays: make(map[string]display),
+		signIns:  make(map[*agent.SignInPrompt]string),
+	}
 }
 
 // Encode translates one agent event into its wire form.
@@ -91,6 +101,33 @@ func (e *Encoder) Encode(ev agent.Event) (Event, *Transfer, error) {
 		}
 		id := e.trackDisplay(ev.Plan.Answer)
 		return Event{Type: EventPlan, Plan: &PlanRequest{ID: id, Title: ev.Plan.Request.Title, Plan: ev.Plan.Request.Plan}}, nil, nil
+	case agent.EventSignIn:
+		if ev.SignIn == nil {
+			return Event{}, nil, fmt.Errorf("agentwire: sign-in event carries no prompt")
+		}
+		r := ev.SignIn.Request
+		return Event{Type: EventSignIn, SignIn: &SignInRequest{
+			ID:        e.trackSignIn(ev.SignIn),
+			Tool:      r.Tool,
+			Profile:   r.Profile,
+			URL:       r.URL,
+			NeedsCode: r.NeedsCode,
+			Command:   r.Command,
+		}}, nil, nil
+	case agent.EventSignInSettled:
+		if ev.SignInSettled == nil {
+			return Event{}, nil, fmt.Errorf("agentwire: sign-in settle carries no state")
+		}
+		id, err := e.settleSignIn(ev.SignInSettled)
+		if err != nil {
+			return Event{}, nil, err
+		}
+		return Event{Type: EventSignInSettled, SignInSettled: &SignInSettled{
+			ID:     id,
+			State:  string(ev.SignInSettled.State),
+			Reason: ev.SignInSettled.Reason,
+			URL:    ev.SignInSettled.URL,
+		}}, nil, nil
 	default:
 		return Event{}, nil, fmt.Errorf("agentwire: unknown event kind %q", ev.Type)
 	}
@@ -125,26 +162,51 @@ func (e *Encoder) track(p *agent.PermissionPrompt) PermissionRequest {
 func (e *Encoder) trackDisplay(answer chan agent.DisplayAnswer) string {
 	id := uuid.NewString()
 	e.mu.Lock()
-	e.displays[id] = answer
+	e.displays[id] = display{answer: answer}
 	e.mu.Unlock()
 	return id
+}
+
+func (e *Encoder) trackSignIn(p *agent.SignInPrompt) string {
+	id := uuid.NewString()
+	e.mu.Lock()
+	e.displays[id] = display{answer: p.Answer, open: true}
+	e.signIns[p] = id
+	e.mu.Unlock()
+	return id
+}
+
+func (e *Encoder) settleSignIn(s *agent.SignInSettled) (string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	id, ok := e.signIns[s.Prompt]
+	if !ok {
+		return "", fmt.Errorf("agentwire: no sign-in pending to settle as %q", s.State)
+	}
+	if s.State.Terminal() {
+		delete(e.signIns, s.Prompt)
+		delete(e.displays, id)
+	}
+	return id, nil
 }
 
 // Answer fails on an unknown id for the reason Resolve does: answering nothing
 // quietly would leave a tool waiting with no trace.
 func (e *Encoder) Answer(a DisplayAnswer) error {
 	e.mu.Lock()
-	answer, ok := e.displays[a.ID]
-	delete(e.displays, a.ID)
+	pending, ok := e.displays[a.ID]
+	if !pending.open {
+		delete(e.displays, a.ID)
+	}
 	e.mu.Unlock()
 	if !ok {
-		return fmt.Errorf("agentwire: no question or plan pending for id %q", a.ID)
+		return fmt.Errorf("agentwire: no question, plan or sign-in pending for id %q", a.ID)
 	}
-	if answer == nil {
+	if pending.answer == nil {
 		return nil
 	}
 	select {
-	case answer <- a.Decode():
+	case pending.answer <- a.Decode():
 	default:
 	}
 	return nil
@@ -182,6 +244,11 @@ func (e *Encoder) Abandon(id string) {
 	e.mu.Lock()
 	delete(e.pending, id)
 	delete(e.displays, id)
+	for prompt, held := range e.signIns {
+		if held == id {
+			delete(e.signIns, prompt)
+		}
+	}
 	e.mu.Unlock()
 }
 

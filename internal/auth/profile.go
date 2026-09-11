@@ -235,9 +235,8 @@ func Names() []string {
 // The command runs through `sh -c`, because callers describe these as command
 // *lines* — with pipes, redirects and quoting — rather than as an argv. That is
 // an explicit shell-execution primitive: whatever the agent passes here is
-// executed. It is gated by the fact that an admin has to approve every auth
-// request before anything runs, which is the control that makes it acceptable;
-// it is not safe on its own.
+// executed. The machine's owner approving the exact command before it starts is
+// the control that makes it acceptable; it is not safe on its own.
 //
 // needsCode selects the card layout, exactly as for a built-in.
 func Custom(command string, needsCode bool) (Profile, error) {
@@ -252,6 +251,15 @@ func Custom(command string, needsCode bool) (Profile, error) {
 		Args:       []string{"-c", command},
 		urlPattern: anyHTTPSURL,
 	}, nil
+}
+
+// ApprovalCommand is the caller's own shell line, which its owner must see and
+// approve before it runs; a built-in returns "" because its command is ours.
+func (p Profile) ApprovalCommand() string {
+	if p.Name != CustomProfileName || len(p.Args) != 2 {
+		return ""
+	}
+	return p.Args[1]
 }
 
 // Resolve picks the profile for a tool invocation. command and needsCode are

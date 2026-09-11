@@ -26,6 +26,7 @@ func Runtime(host *Host) func(config.Config, *slog.Logger) agentruntime.Builder 
 			// and a reload replaces it, so the sink is refreshed here rather
 			// than captured when the connection was made.
 			host.setBackground(hooks.BackgroundEvents)
+			host.setSignIns(hooks.SignIn)
 
 			rt := agentruntime.Runtime{
 				// Headless dispatch (#199): jobs, workflow triggers and unfurls

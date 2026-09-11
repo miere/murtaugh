@@ -28,9 +28,13 @@
 						{
 							"type": "rich_text_section",
 							"elements": [
-								{
+								{{ if or (eq .State "pending") (eq .State "success") (eq .State "denied") }}{
+									"type": "user",
+									"user_id": {{ json .RecipientUserID }}
+								},
+								{{ end }}{
 									"type": "text",
-									"text": {{ if eq .State "pending" }}"Your admin user has been notified to finish the authentication."{{ else if eq .State "success" }}"Your admin completed the authentication. Carrying on."{{ else if eq .State "denied" }}"Your admin declined this authentication request."{{ else if eq .State "timeout" }}"This authentication request expired before your admin answered."{{ else }}"The authentication attempt failed."{{ end }}
+									"text": {{ if eq .State "pending" }}" has been sent a direct message to finish the authentication."{{ else if eq .State "success" }}" completed the authentication. Carrying on."{{ else if eq .State "denied" }}" declined this authentication request."{{ else if eq .State "timeout" }}"This authentication request expired before it was answered."{{ else if eq .State "cancelled" }}"This authentication request was cancelled before it was completed."{{ else }}"The authentication attempt failed."{{ end }}
 								}
 							]
 						}

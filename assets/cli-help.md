@@ -723,18 +723,26 @@ murtaugh troubleshoot bundle --out /tmp/murtaugh-diag.zip --max-log-bytes 104857
 
 ## murtaugh auth request
 
-Request credentials the agent does not have, and block until the configured
-admin grants them. The command never authenticates anything itself: it posts a
-card to the admin's DM and waits for them to complete the sign-in, deny it, or
-let it expire.
+Request credentials the agent does not have, and block until they are granted.
+The sign-in command runs on the machine the agent runs on, in the agent's own
+environment, because that is where the credential has to land. Slack only shows
+it: the machine's owner gets a card by DM and completes the sign-in, declines
+it, or lets it expire.
 
 Two people are involved. Whoever triggered the turn gets a short notice in their
-own thread ("your admin has been notified") and nothing else — no buttons, no
-command output. The admin gets the card that does the work. When the requester
-*is* the admin, or there is no thread at all (CLI/MCP), the two collapse into a
-single card.
+own thread saying who was sent the DM, and nothing else — no buttons, no command
+output. The owner gets the card that does the work: for a runtime node, the
+Slack user its token was minted for; for an agent inside the gateway, the admin.
+Both cards are posted even when the requester is the owner, so their thread
+shows where the sign-in went.
 
-Flags:
+Outside a Slack conversation it only works on a runtime node. A scheduled job
+on a node still reaches its owner: the card arrives by DM and no thread is told.
+An agent inside the gateway, or a call from the CLI or MCP, is refused before
+anything runs.
+
+Flags — these are what an agent passes from inside a conversation; the same
+call from the CLI or MCP is refused before anything runs:
 
 - `--tool` (required) — the capability that needs authentication, named as the
   user knows it (e.g. `gcp-mcp`, `postgres-mcp`). Name the **directly affected**
@@ -747,11 +755,14 @@ Flags:
   - `gcloud-adc` — `gcloud auth application-default login`, writing the
     application-default credentials that client libraries and MCP servers
     usually read. Finishes with a verification code.
-  - `custom` — run `--command` in the background. For flows Murtaugh does not
-    ship a profile for.
+  - `custom` — run `--command` in the background, but only after the owner
+    has seen that exact command on the card and approved it. For flows
+    Murtaugh does not ship a profile for.
   - (`aws` is named in the design but not implemented yet, and is rejected.)
-- `--command` — only with `--profile custom`: the command line to run. Passing
-  it alongside a built-in profile is an error rather than a silent no-op.
+- `--command` — only with `--profile custom`: the command line to run. The
+  owner is shown it verbatim and nothing runs until they click **Approve**; a
+  denial, a timeout or a withdrawn card leaves it unrun. Passing it alongside a
+  built-in profile is an error rather than a silent no-op.
 - `--needs-code` — only with `--profile custom`: `true` when the flow completes
   by pasting a verification code back, `false` when the whole exchange happens
   in the browser. Defaults to `false`. Booleans need an explicit value on the
@@ -763,12 +774,15 @@ primary button with **Open In Browser** beside it; a browser-only flow shows
 single attempt: clicking it retires the whole button bar and reveals the footer,
 and the request then runs to completion on its own.
 
-Fails closed, always. A denial, a timeout, a failed sign-in, no configured
-admin, or an undeliverable card all return an error — never a partial success —
-so the caller stops rather than retrying the call that lacked credentials.
+Fails closed, always. A refusal, a timeout, a failed sign-in or an
+undeliverable card all return an error — never a partial success — so the
+caller stops rather than retrying the call that lacked credentials.
 
-Requires `configuration.admin_user` to be set; with no admin nobody can approve,
-and the request is refused before anything is posted.
+The owner must be allowed to use the gateway, and is checked again on every
+click: an owner who has lost access is not sent a card, and one who loses it
+while the card is open has their sign-in stopped, even one that finishes
+afterwards: it counts as declined and the agent is not told it signed in. The
+sign-in also stops when its turn ends or the node's connection drops.
 
 ```
 murtaugh auth request --tool gcp-mcp --profile gcloud-adc
@@ -790,7 +804,7 @@ later.
 | Flag           | Required | Type     | Notes                                                                                  |
 |----------------|----------|----------|----------------------------------------------------------------------------------------|
 | `--node`       | yes      | string   | Node id this credential identifies.                                                    |
-| `--user`       | yes      | string   | Murtaugh user the node acts for.                                                       |
+| `--user`       | yes      | string   | Slack user ID (`U…` or `W…`) of the node's owner. A handle or a name is refused.       |
 | `--label`      | no       | string   | Free-text note about where the credential lives (`mac mini`, `rotation 2026-09`).      |
 | `--expires-in` | no       | duration | Go duration (e.g. `720h`). Omitted means the credential lasts until it is revoked.      |
 | `--token-file` | no       | string   | Write the token to this file (mode `0600`) instead of printing it. Refuses to overwrite.|

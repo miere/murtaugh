@@ -86,6 +86,10 @@ func (c *Client) serveRequest(msg agentwire.Message) {
 	switch msg.Method {
 	case agentwire.MethodAdvertise:
 		c.serveAdvertise(msg)
+	case agentwire.MethodSignIn:
+		c.serveSignIn(msg)
+	case agentwire.MethodSignInSettled:
+		c.serveSignInSettled(msg)
 	default:
 		c.rejectRequest(msg)
 	}

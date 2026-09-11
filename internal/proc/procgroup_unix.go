@@ -21,11 +21,45 @@ func configureProcessGroup(cmd *exec.Cmd) {
 	}
 }
 
-// killGroup SIGKILLs the child's whole process group. A no-op before the
-// process has started or after it has been reaped, so it is safe to defer.
 func killGroup(cmd *exec.Cmd) {
 	if cmd.Process == nil {
 		return
 	}
-	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	pid := cmd.Process.Pid
+	var tree []int
+	if cmd.Process.Signal(syscall.SIGSTOP) == nil {
+		tree = stopDescendants(pid)
+	}
+	_ = syscall.Kill(-pid, syscall.SIGKILL)
+	_ = cmd.Process.Signal(syscall.SIGKILL)
+	for _, p := range tree {
+		_ = syscall.Kill(p, syscall.SIGKILL)
+	}
+}
+
+func stopDescendants(root int) []int {
+	stopped := map[int]bool{root: true}
+	var found []int
+	for range 8 {
+		children := childrenByParent()
+		fresh := 0
+		queue := []int{root}
+		for len(queue) > 0 {
+			parent := queue[0]
+			queue = queue[1:]
+			for _, child := range children[parent] {
+				if !stopped[child] {
+					stopped[child] = true
+					found = append(found, child)
+					_ = syscall.Kill(child, syscall.SIGSTOP)
+					fresh++
+				}
+				queue = append(queue, child)
+			}
+		}
+		if fresh == 0 {
+			break
+		}
+	}
+	return found
 }
