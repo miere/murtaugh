@@ -74,6 +74,7 @@ const (
 	// MethodCredentialHealth is answered so the node sends its reports one at a
 	// time, and a recovery can never arrive ahead of the failure it ends.
 	MethodCredentialHealth Method = "node.credential_health"
+	MethodRenewCredential  Method = "node.renew_credential"
 )
 
 // Message is one payload: what the envelope wraps.

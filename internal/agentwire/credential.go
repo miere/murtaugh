@@ -11,3 +11,9 @@ type CredentialHealth struct {
 	Since      time.Time `json:"since,omitzero"`
 	ExpiresAt  time.Time `json:"expires_at,omitzero"`
 }
+
+// CredentialRenewal says what the node did, so nobody is told a sign-in is on
+// its way when the node already had one open or had nothing to sign in.
+type CredentialRenewal struct {
+	Status string `json:"status"`
+}

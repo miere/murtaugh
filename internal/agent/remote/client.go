@@ -309,6 +309,16 @@ func (c *Client) Configure(ctx context.Context, cfg agentwire.NodeConfiguration)
 	return out, nil
 }
 
+// RenewCredential is not on agent.Client for the reason Configure is not: only
+// a caller that knows it is talking to a node can ask a node to sign in.
+func (c *Client) RenewCredential(ctx context.Context) (agentwire.CredentialRenewal, error) {
+	var out agentwire.CredentialRenewal
+	if err := c.call(ctx, agentwire.MethodRenewCredential, agentwire.Empty{}, &out); err != nil {
+		return agentwire.CredentialRenewal{}, err
+	}
+	return out, nil
+}
+
 // CloseSession releases one conversation's node-side resources.
 //
 // It returns immediately, always. The session manager calls it while holding

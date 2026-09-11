@@ -17,6 +17,7 @@ package agentruntime
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/miere/murtaugh/internal/agent"
@@ -141,7 +142,32 @@ type Runtime struct {
 
 	InProcess         bool
 	CredentialReports func() []CredentialHealth
+
+	PinnedNode      func(ctx context.Context, conversation agent.ConversationKey) (NodeRef, error)
+	ConnectedNodes  func() []NodeRef
+	RenewCredential func(ctx context.Context, nodeID string) (RenewalStatus, error)
 }
+
+// ErrNotPinned is refused rather than answered with some other node, because
+// signing in a machine the conversation does not run on fixes nothing.
+var ErrNotPinned = errors.New("this conversation is not running on any runtime node yet")
+
+// NodeRef carries the owner with the node, because only they or the admin may
+// have a sign-in run on it.
+type NodeRef struct {
+	NodeID string
+	Owner  string
+}
+
+// RenewalStatus is reported back as it is, so nobody is told a sign-in is on its
+// way when one was already open or there was nothing to sign in.
+type RenewalStatus string
+
+const (
+	RenewalStarted        RenewalStatus = "started"
+	RenewalAlreadyRunning RenewalStatus = "already_running"
+	RenewalNothingToRenew RenewalStatus = "none"
+)
 
 // Builder constructs a Runtime from the hooks its host supplies. The
 // configuration, tool registry and logger are the builder's own business: it is

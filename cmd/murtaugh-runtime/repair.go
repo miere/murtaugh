@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/miere/murtaugh/internal/agent"
+	"github.com/miere/murtaugh/internal/agentruntime"
+	"github.com/miere/murtaugh/internal/agentwire"
 	"github.com/miere/murtaugh/internal/auth"
 	"github.com/miere/murtaugh/internal/claudeauth"
 	"github.com/miere/murtaugh/internal/config"
@@ -20,6 +22,7 @@ import (
 const (
 	repairCooldown = 10 * time.Minute
 	repairShowWait = 10 * time.Second
+	repairDrain    = time.Second
 )
 
 type repairer struct {
@@ -71,6 +74,31 @@ func (r *repairer) failed(err error) error {
 	return fmt.Errorf("the Claude Code credential on this machine was rejected, and no sign-in could be put in front of its owner: %w", err)
 }
 
+func (r *repairer) renew(context.Context) (agentwire.CredentialRenewal, error) {
+	if r == nil {
+		return agentwire.CredentialRenewal{Status: string(agentruntime.RenewalNothingToRenew)}, nil
+	}
+	r.mu.Lock()
+	previous := r.running
+	r.mu.Unlock()
+	if previous != nil {
+		previous.cancel()
+		select {
+		case <-previous.done:
+		case <-time.After(repairDrain):
+			r.log.Warn("an earlier Claude Code sign-in would not stop; refusing to start a second", "agent", r.agent)
+			return agentwire.CredentialRenewal{Status: string(agentruntime.RenewalAlreadyRunning)}, nil
+		}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.running != nil {
+		return agentwire.CredentialRenewal{Status: string(agentruntime.RenewalAlreadyRunning)}, nil
+	}
+	r.startLocked()
+	return agentwire.CredentialRenewal{Status: string(agentruntime.RenewalStarted)}, nil
+}
+
 func (r *repairer) current() *repairRun {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -95,7 +123,7 @@ func (r *repairer) startLocked() *repairRun {
 	profile, _ := auth.Lookup("claude-code")
 	profile.Command = r.identity.Command
 	display := &shownDisplay{Display: r.signIns, shown: run.shown}
-	r.log.Warn("the Claude Code credential was rejected; asking this node's owner to sign in again", "agent", r.agent, "credential", r.identity.String())
+	r.log.Warn("asking this node's owner to sign Claude Code in again", "agent", r.agent, "credential", r.identity.String())
 	go func() {
 		defer close(run.done)
 		defer cancel()

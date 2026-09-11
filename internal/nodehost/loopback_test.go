@@ -57,6 +57,9 @@ type loopback struct {
 	signIns     *nodeserve.SignIns
 	credentials *nodeserve.Credentials
 	reports     func() []agentruntime.CredentialHealth
+	pinnedNode  func(context.Context, agent.ConversationKey) (agentruntime.NodeRef, error)
+	nodes       func() []agentruntime.NodeRef
+	renew       func(context.Context, string) (agentruntime.RenewalStatus, error)
 	approved    chan approval
 	// notices is what the GATEWAY's background hook received. It is the far end
 	// of the same path.
@@ -122,6 +125,7 @@ type rigConfig struct {
 	drawSignIn       func(context.Context, *agent.SignInPrompt, <-chan agent.SignInSettled, func(error))
 	credentialsNow   func() []agentwire.CredentialHealth
 	credentialHealth func(agentruntime.CredentialHealth)
+	renewCredential  func(context.Context) (agentwire.CredentialRenewal, error)
 	// logs, when set, is where the GATEWAY's own logger writes. Some of what
 	// this Host does is only observable there — a WARN about a turn it does not
 	// recognise has no other output — and a warning nothing asserts is a warning
@@ -181,6 +185,10 @@ func drawingSignIns(draw func(context.Context, *agent.SignInPrompt, <-chan agent
 
 func reportingCredentials(now func() []agentwire.CredentialHealth, heard func(agentruntime.CredentialHealth)) rigOption {
 	return func(c *rigConfig) { c.credentialsNow, c.credentialHealth = now, heard }
+}
+
+func renewing(renew func(context.Context) (agentwire.CredentialRenewal, error)) rigOption {
+	return func(c *rigConfig) { c.renewCredential = renew }
 }
 
 // logging captures what the GATEWAY logs, at WARN and above.
@@ -297,6 +305,8 @@ func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *lo
 			Configure:   cfg.configure,
 			Restart:     cfg.restart,
 			WindowBytes: nodesocket.DefaultWindowBytes,
+
+			RenewCredential: cfg.renewCredential,
 		})
 	}()
 	t.Cleanup(func() {
@@ -330,6 +340,9 @@ func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *lo
 		nodeStopped: nodeStopped,
 		credentials: credentials,
 		reports:     runtime.CredentialReports,
+		pinnedNode:  runtime.PinnedNode,
+		nodes:       runtime.ConnectedNodes,
+		renew:       runtime.RenewCredential,
 	}
 }
 

@@ -230,9 +230,12 @@ type Gateway struct {
 	journalSweep      func(context.Context) error
 	journalSweepEvery time.Duration
 
-	credWarden  *credwarden.Warden
-	credAlerts  *credentialAlerter
-	credReports func() []agentruntime.CredentialHealth
+	credWarden      *credwarden.Warden
+	credAlerts      *credentialAlerter
+	credReports     func() []agentruntime.CredentialHealth
+	pinnedNode      func(ctx context.Context, conversation agent.ConversationKey) (agentruntime.NodeRef, error)
+	connectedNodes  func() []agentruntime.NodeRef
+	renewCredential func(ctx context.Context, nodeID string) (agentruntime.RenewalStatus, error)
 	// backgroundCancel stops the daemon-lifetime work started by
 	// StartBackground (today: the credential warden). Guarded by backgroundMu;
 	// nil means nothing is running.
@@ -650,8 +653,11 @@ func New(cfg config.Config, logger *slog.Logger, recorder journal.Recorder, brok
 		selfUserID:   selfUserID,
 		selfBotID:    selfBotID,
 
-		credWarden:  localCredentialWarden(cfg.Agents, runtime, logger),
-		credReports: runtime.CredentialReports,
+		credWarden:      localCredentialWarden(cfg.Agents, runtime, logger),
+		credReports:     runtime.CredentialReports,
+		pinnedNode:      runtime.PinnedNode,
+		connectedNodes:  runtime.ConnectedNodes,
+		renewCredential: runtime.RenewCredential,
 
 		credRepair:        credRepair,
 		chatRouting:       cfg.Chat,

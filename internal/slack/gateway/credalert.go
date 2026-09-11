@@ -101,8 +101,8 @@ func (c *credentialAlerter) alertNode(h agentruntime.CredentialHealth) {
 		reason:    h.Reason,
 		since:     h.Since,
 		expiresAt: h.ExpiresAt,
-		nextSteps: "Sign Claude Code in again on that machine with `claude auth login`. " +
-			"`/murtaugh auth status` shows what each node last reported.",
+		nextSteps: "The node asks you to sign in again by DM when one of its agents is refused. To do it now, run " +
+			"`/murtaugh auth login " + h.NodeID + "`, or `claude auth login` on the machine.",
 	})
 }
 

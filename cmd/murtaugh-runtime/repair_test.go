@@ -14,6 +14,7 @@ import (
 
 	"github.com/miere/murtaugh/internal/agent"
 	"github.com/miere/murtaugh/internal/agent/remote"
+	"github.com/miere/murtaugh/internal/agentruntime"
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/nodelink"
 	"github.com/miere/murtaugh/internal/nodeserve"
@@ -180,4 +181,73 @@ func TestANodeLeavesOtherFailuresAlone(t *testing.T) {
 	if err := claude.failed(ordinary); err != ordinary {
 		t.Fatalf("an ordinary failure came back as %v", err)
 	}
+}
+
+func TestAnAskToSignInAgainReplacesTheSignInAlreadyOpen(t *testing.T) {
+	var none *repairer
+	if got, _ := none.renew(context.Background()); got.Status != string(agentruntime.RenewalNothingToRenew) {
+		t.Fatalf("a node with no claude_code agent answered %q", got.Status)
+	}
+
+	type drawing struct {
+		prompt *agent.SignInPrompt
+		ended  chan agent.SignInState
+	}
+	drawn := make(chan drawing, 4)
+	repair, _ := repairRig(t, false, func(ctx context.Context, prompt *agent.SignInPrompt, updates <-chan agent.SignInSettled, shown func(error)) {
+		d := drawing{prompt: prompt, ended: make(chan agent.SignInState, 1)}
+		drawn <- d
+		shown(nil)
+		for {
+			select {
+			case u := <-updates:
+				if u.State.Terminal() {
+					d.ended <- u.State
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	})
+	await := func() drawing {
+		select {
+		case d := <-drawn:
+			return d
+		case <-time.After(10 * time.Second):
+			t.Fatal("no sign-in was drawn")
+			return drawing{}
+		}
+	}
+
+	if got, _ := repair.renew(context.Background()); got.Status != string(agentruntime.RenewalStarted) {
+		t.Fatalf("an idle node answered %q", got.Status)
+	}
+	first := await()
+	if got, _ := repair.renew(context.Background()); got.Status != string(agentruntime.RenewalStarted) {
+		t.Fatalf("a node with a sign-in open answered %q; asking again must replace it", got.Status)
+	}
+	select {
+	case state := <-first.ended:
+		if state != agent.SignInCancelled {
+			t.Fatalf("the replaced sign-in ended as %q", state)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the replaced sign-in was never withdrawn")
+	}
+	if second := await(); second.prompt == first.prompt {
+		t.Fatal("no fresh sign-in replaced the old one")
+	}
+
+	stuck := &repairRun{cancel: func() {}, shown: make(chan struct{}), done: make(chan struct{})}
+	repair.mu.Lock()
+	previous := repair.running
+	repair.running = stuck
+	repair.mu.Unlock()
+	if got, _ := repair.renew(context.Background()); got.Status != string(agentruntime.RenewalAlreadyRunning) {
+		t.Fatalf("a node whose sign-in would not stop answered %q", got.Status)
+	}
+	repair.mu.Lock()
+	repair.running = previous
+	repair.mu.Unlock()
 }

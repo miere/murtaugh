@@ -1,6 +1,8 @@
 package gateway
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -8,9 +10,12 @@ import (
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/socketmode"
 
+	"github.com/miere/murtaugh/internal/agent"
 	"github.com/miere/murtaugh/internal/agentruntime"
 	"github.com/miere/murtaugh/internal/slack/alertcard"
 )
+
+const nodeRenewTimeout = 2500 * time.Millisecond
 
 // isAuthSlashCommand reports whether the slash text names the `auth` verb.
 func isAuthSlashCommand(text string) bool {
@@ -18,20 +23,11 @@ func isAuthSlashCommand(text string) bool {
 	return len(fields) > 0 && strings.EqualFold(fields[0], "auth")
 }
 
-// handleAuthSlashCommand implements `<command> auth [status]`.
-//
-// It is the operator's way in. The credential warden is deliberately internal —
-// not a config-store job — so that no agent can enumerate, run, redefine or
-// silently disable it. The cost of that is losing the visibility a job would
-// have given, and this verb pays it back: `auth status` reports what the warden
-// sees, and the bare verb starts a re-authentication before a lockout rather
-// than after one.
-//
-// Admin-only, on the same two-layer model as `restart`: handleSlashCommand has
-// already checked IsAllowedUser, and credentials belong to the admin alone. A
-// non-admin gets an explicit deny rather than silence, so the boundary is
-// discoverable.
 func (a *Gateway) handleAuthSlashCommand(event socketmode.Event, command slack.SlashCommand) {
+	if a.renewCredential != nil && !authSlashWantsStatus(command.Text) {
+		a.ack(event, a.renewNodeCredential(command, slashCommandThreadTS(event)))
+		return
+	}
 	if !a.access().IsAdminUser(command.UserID) {
 		a.logger.Info("denied auth slash command from non-admin user",
 			"command", command.Command, "user", command.UserID, "channel", command.ChannelID)
@@ -75,6 +71,85 @@ func (a *Gateway) handleAuthSlashCommand(event socketmode.Event, command slack.S
 		a.ack(event, ephemeralAlert(alertcard.LevelError,
 			"Could not start the Claude Code sign-in. Check the gateway logs."))
 	}
+}
+
+func (a *Gateway) renewNodeCredential(command slack.SlashCommand, threadTS string) AckResponse {
+	ctx, cancel := context.WithTimeout(context.Background(), nodeRenewTimeout)
+	defer cancel()
+	admin := a.access().IsAdminUser(command.UserID)
+	named := authSlashNode(command.Text)
+	conversation := agent.ConversationKey{TeamID: command.TeamID, ChannelID: command.ChannelID, ThreadTS: threadTS, DM: strings.HasPrefix(command.ChannelID, "D")}
+	node, err := a.pinnedNode(ctx, conversation)
+	switch {
+	case err == nil && named != "" && named != node.NodeID:
+		return ephemeralAlert(alertcard.LevelWarn, fmt.Sprintf(
+			"This conversation runs on node `%s`, not `%s`. Run this in a conversation on `%s`, or somewhere no node is pinned.", node.NodeID, named, named))
+	case errors.Is(err, agentruntime.ErrNotPinned) && named == "":
+		return ephemeralAlert(alertcard.LevelInfo, "No runtime node is pinned to this conversation, and Murtaugh will not pick one for you. "+
+			"Name one with `/murtaugh auth login <node>`. "+a.nameableNodes(command.UserID, admin))
+	case errors.Is(err, agentruntime.ErrNotPinned):
+		if node, err = a.connectedNode(named, command.UserID, admin); err != nil {
+			return ephemeralAlert(alertcard.LevelWarn, err.Error()+" "+a.nameableNodes(command.UserID, admin))
+		}
+	case err != nil:
+		return ephemeralAlert(alertcard.LevelError, "Could not find the node this conversation runs on: "+err.Error())
+	}
+	if !admin && command.UserID != node.Owner {
+		a.logger.Info("denied auth slash command from someone who neither administers the gateway nor owns the node",
+			"user", command.UserID, "node_id", node.NodeID, "channel", command.ChannelID)
+		return ephemeralAlert(alertcard.LevelWarn, "Only the admin, or the owner of the node this conversation runs on, can sign it in again.")
+	}
+	if !a.access().IsAllowedUser(node.Owner) {
+		return ephemeralAlert(alertcard.LevelWarn, fmt.Sprintf(
+			"The owner of node `%s` may no longer use this gateway, so nobody can be asked to sign it in.", node.NodeID))
+	}
+	status, err := a.renewCredential(ctx, node.NodeID)
+	a.logger.Info("claude_code re-authentication requested on a node via slash command",
+		"user", command.UserID, "node_id", node.NodeID, "status", status, "error", err)
+	switch {
+	case err != nil:
+		return ephemeralAlert(alertcard.LevelError, fmt.Sprintf("Could not ask node `%s` to sign in again: %v", node.NodeID, err))
+	case status == agentruntime.RenewalStarted:
+		return ephemeralText(fmt.Sprintf("Asked node `%s` to sign Claude Code in again — the card is on its way to <@%s>'s DMs.", node.NodeID, node.Owner))
+	case status == agentruntime.RenewalAlreadyRunning:
+		return ephemeralAlert(alertcard.LevelWarn, fmt.Sprintf(
+			"Node `%s` has an earlier Claude Code sign-in that would not stop, so a new one was not started. Its card is in <@%s>'s DMs.", node.NodeID, node.Owner))
+	}
+	return ephemeralAlert(alertcard.LevelInfo, fmt.Sprintf("Node `%s` runs no claude_code agent, so there is nothing to sign in.", node.NodeID))
+}
+
+func (a *Gateway) connectedNode(nodeID, userID string, admin bool) (agentruntime.NodeRef, error) {
+	for _, node := range a.connectedNodes() {
+		if node.NodeID != nodeID {
+			continue
+		}
+		if !admin && node.Owner != userID {
+			return agentruntime.NodeRef{}, fmt.Errorf("Node `%s` is not yours, so you cannot sign it in.", nodeID)
+		}
+		return node, nil
+	}
+	return agentruntime.NodeRef{}, fmt.Errorf("No node called `%s` is connected.", nodeID)
+}
+
+func (a *Gateway) nameableNodes(userID string, admin bool) string {
+	var names []string
+	for _, node := range a.connectedNodes() {
+		if admin || node.Owner == userID {
+			names = append(names, "`"+node.NodeID+"`")
+		}
+	}
+	if len(names) == 0 {
+		return "No connected node is yours to name."
+	}
+	return "Nodes you may name: " + strings.Join(names, ", ") + "."
+}
+
+func authSlashNode(text string) string {
+	fields := strings.Fields(text)
+	if len(fields) > 2 && strings.EqualFold(fields[1], "login") {
+		return fields[2]
+	}
+	return ""
 }
 
 // authSlashWantsStatus reports whether the verb was `auth status` rather than a

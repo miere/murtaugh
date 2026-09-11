@@ -238,6 +238,7 @@ func run(args []string) error {
 
 		credentials: credentials,
 		failed:      repair.failed,
+		renew:       repair.renew,
 	})
 }
 
@@ -383,6 +384,7 @@ type attachment struct {
 
 	credentials *nodeserve.Credentials
 	failed      func(error) error
+	renew       func(context.Context) (agentwire.CredentialRenewal, error)
 
 	// dial and wait are the loop's two seams, nil in every binary and set only
 	// by the loop's own test.
@@ -474,6 +476,8 @@ func attach(ctx context.Context, logger *slog.Logger, a attachment) error {
 			Restart:     a.restart,
 			WindowBytes: nodesocket.DefaultWindowBytes,
 			AckInterval: 30 * time.Second,
+
+			RenewCredential: a.renew,
 		}); err != nil {
 			logger.Warn("gateway connection ended", "error", err, "gateway", address)
 		} else {

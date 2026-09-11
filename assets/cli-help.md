@@ -784,6 +784,11 @@ while the card is open has their sign-in stopped, even one that finishes
 afterwards: it counts as declined and the agent is not told it signed in. The
 sign-in also stops when its turn ends or the node's connection drops.
 
+A `claude_code` agent refused its own credential cannot call this at all, so
+the machine it runs on starts the `claude-code` sign-in for it: a node sends its
+owner the card, one sign-in at a time, and the user is told their turn is
+waiting on it.
+
 ```
 murtaugh auth request --tool gcp-mcp --profile gcloud-adc
 murtaugh auth request --tool vendor-mcp --profile custom --command "vendor-cli login --headless" --needs-code false
@@ -809,6 +814,10 @@ later.
 | `--expires-in` | no       | duration | Go duration (e.g. `720h`). Omitted means the credential lasts until it is revoked.      |
 | `--token-file` | no       | string   | Write the token to this file (mode `0600`) instead of printing it. Refuses to overwrite.|
 
+- The owner is who the node's sign-ins go to, who is told when one of its Claude
+  Code credentials fails, and who, besides the admin, may run `/murtaugh auth
+  login` in a conversation pinned to the node or name the node with
+  `/murtaugh auth login <node>`.
 - Tokens carry the prefix `mrtg_node_`, so a leaked one is greppable in a log and
   matchable by a secret scanner. `troubleshoot bundle` redacts on that prefix.
 - Put the file on the node, mode `0600`. A seatbelt-confined agent is denied it
