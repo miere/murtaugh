@@ -15,18 +15,6 @@ import (
 	"github.com/miere/murtaugh/internal/nodeclaim"
 )
 
-// This file is #195's verification, over the same loopback rig #193 and #194
-// use: a real Host, real token verification, a real nodeserve.Server over
-// 127.0.0.1, with only the agent and the credential store faked.
-//
-// There are two halves and the second is the one that matters. A round trip
-// proves the transport. What #195 actually asks for is that a node-side
-// CONFIGURATION CHANGE reaches the gateway without a reconnect — so the second
-// test writes to the node's own configuration store and lets the node's own
-// detector find it, and asserts that the connection never went down while that
-// happened. Calling the advertiser directly would have proved the wire and left
-// the crux of the item — that the node notices at all — untested.
-
 func claim(profiles []string, matches ...string) agentwire.Advertisement {
 	ad := agentwire.Advertisement{Profiles: profiles}
 	for _, match := range matches {
@@ -35,8 +23,6 @@ func claim(profiles []string, matches ...string) agentwire.Advertisement {
 	return ad
 }
 
-// The connect-time claim rides the handshake answer, so the registry entry is
-// complete at the instant it is published — never attached-and-mute.
 func TestTheGatewayLearnsWhatANodeClaimsAtTheHandshake(t *testing.T) {
 	want := claim([]string{"reviewer"}, "review-*", "C0999")
 	rig := dialLoopback(t, newScriptedAgent(func(*scriptedTurn) {}), claiming(want))
@@ -53,9 +39,6 @@ func TestTheGatewayLearnsWhatANodeClaimsAtTheHandshake(t *testing.T) {
 	}
 }
 
-// A node that has never been configured claims nothing, and nothing is an
-// answer rather than an absence — #170 makes it the trigger to onboard its
-// owner.
 func TestANodeThatClaimsNothingStillRegisters(t *testing.T) {
 	rig := dialLoopback(t, newScriptedAgent(func(*scriptedTurn) {}))
 	nodes := rig.host.Nodes()
@@ -67,15 +50,8 @@ func TestANodeThatClaimsNothingStillRegisters(t *testing.T) {
 	}
 }
 
-// THE HARD HALF. A node-side configuration change reaches the gateway with no
-// reconnect: the test writes a rule into the NODE's own configuration store,
-// the node's own watcher notices, and the gateway's registry changes while the
-// connection it changed over never went down.
-//
-// The two negative assertions are the point. Without them a reconnect would
-// pass this test — the handshake carries the whole claim, so tearing the link
-// down and dialling back in would produce exactly the same registry contents by
-// exactly the wrong mechanism.
+// The no-reconnect checks are the point: a reconnect re-sends the whole claim,
+// so without them this test would pass by the wrong mechanism.
 func TestAConfigurationChangeReachesTheGatewayWithoutAReconnect(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -95,9 +71,6 @@ func TestAConfigurationChangeReachesTheGatewayWithoutAReconnect(t *testing.T) {
 	})
 	attachedAt := rig.host.Nodes()[0].AttachedAt
 
-	// The node's own detector, over its own store, on its own goroutine. The
-	// interval is injected rather than the poll being reached past, so what is
-	// under test is the thing that will run in production.
 	watcher, err := nodeclaim.NewWatcher(ctx, nodeclaim.Options{
 		Store:    store,
 		Base:     base,
@@ -111,8 +84,6 @@ func TestAConfigurationChangeReachesTheGatewayWithoutAReconnect(t *testing.T) {
 	}
 	go watcher.Run(ctx)
 
-	// The node admin edits their own node. No approval card, no rollback: on a
-	// node they are the authority.
 	putChat(t, store, config.ChatConfig{
 		Enabled:  true,
 		Defaults: config.ChatDefaults{Agent: "default"},
@@ -131,8 +102,6 @@ func TestAConfigurationChangeReachesTheGatewayWithoutAReconnect(t *testing.T) {
 	if node.Advertisement.Claims[1].Match != "review-*" {
 		t.Fatalf("the gateway learned %+v; the node's own rule order is the only precedence there is", node.Advertisement.Claims)
 	}
-	// Nothing reconnected. A fresh connection would have a later attach time
-	// and a different registry entry behind it.
 	if !node.AttachedAt.Equal(attachedAt) {
 		t.Fatal("the registry entry was replaced; the change was carried by a reconnect, which is the thing this must not do")
 	}
@@ -143,9 +112,8 @@ func TestAConfigurationChangeReachesTheGatewayWithoutAReconnect(t *testing.T) {
 	}
 }
 
-// A claim routing to a profile this node does not serve never leaves the node.
-// The gateway acting on it would delegate a conversation to a machine that
-// answers with an error, and the node is the only side that knows.
+// Only the node knows what it serves, and a gateway acting on such a claim
+// would delegate to a node that answers with an error.
 func TestAClaimForAProfileTheNodeDoesNotServeIsNotSent(t *testing.T) {
 	store, base := nodeConfigStore(t)
 	putChat(t, store, config.ChatConfig{
@@ -165,11 +133,6 @@ func TestAClaimForAProfileTheNodeDoesNotServeIsNotSent(t *testing.T) {
 	}
 }
 
-// #170: "Disconnects are journalled, not announced." A laptop sleeping at six
-// o'clock disconnects every evening, and a nightly DM teaches the one admin who
-// would act on the message that matters to ignore it. So both ends of a node's
-// life land on the gateway stream, where a query finds them, and nowhere a user
-// is interrupted by them.
 func TestANodesArrivalAndDepartureAreJournalled(t *testing.T) {
 	rec := &recordingJournal{}
 	rig := dialLoopback(t, newScriptedAgent(func(*scriptedTurn) {}),
@@ -192,10 +155,6 @@ func TestANodesArrivalAndDepartureAreJournalled(t *testing.T) {
 	}
 	waitFor(t, "the detach to be journalled", func() bool { return rec.has("detached") })
 
-	// A revocation is its own record, and it is the one an auditor comes for:
-	// "detached" is what a laptop lid does every evening, and a connection ended
-	// because somebody revoked its credential must be distinguishable from that
-	// without inferring it from a timestamp.
 	revoked := rec.find("revoked")
 	if revoked.Kind == "" {
 		t.Fatal("a credential revocation closed a live connection and left no journal record; nothing about a node is announced, so this is the only trace it leaves")
@@ -211,14 +170,8 @@ func TestANodesArrivalAndDepartureAreJournalled(t *testing.T) {
 	}
 }
 
-// A node changing what it claims is journalled too, and the opening claim is
-// NOT: it is part of the arrival, and a second line saying the same thing is
-// the noise that makes a journal unreadable.
-//
-// The claim is what delegation will act on, so a change to it is a change to
-// where conversations go — and #170 says these are journalled rather than
-// announced, which makes this record the only trace an operator has when a
-// channel starts landing somewhere new.
+// The opening claim is already part of the arrival line, so logging it again
+// is only noise.
 func TestAChangedClaimIsJournalledAndTheOpeningOneIsNot(t *testing.T) {
 	rec := &recordingJournal{}
 	rig := dialLoopback(t, newScriptedAgent(func(*scriptedTurn) {}),
@@ -229,8 +182,6 @@ func TestAChangedClaimIsJournalledAndTheOpeningOneIsNot(t *testing.T) {
 		t.Fatalf("the opening claim produced %d re-advertisement records; it is already part of the arrival", n)
 	}
 
-	// The node's own advertiser, which is what nodeclaim.Watcher drives when a
-	// node admin edits their node's configuration.
 	rig.claim.Publish(context.Background(), claim([]string{"reviewer"}, "review-*", "nc-*"))
 
 	waitFor(t, "the changed claim to be journalled", func() bool { return rec.has("advertised") })
@@ -247,9 +198,6 @@ func TestAChangedClaimIsJournalledAndTheOpeningOneIsNot(t *testing.T) {
 	}
 }
 
-// recordingJournal keeps what the Host recorded, decoded far enough to assert
-// on. It is a fake because internal/journal's own store has its own tests; what
-// is under test here is what nodehost hands it.
 type recordingJournal struct {
 	mu      sync.Mutex
 	entries []recordedEvent
@@ -297,19 +245,13 @@ func (r *recordingJournal) find(state string) recordedEvent {
 	return recordedEvent{}
 }
 
-// nodeConfigStore opens a real SQLite configuration store for a node, with one
-// agent profile in it. It is the node's own store: nothing in this file touches
-// the gateway's.
 func nodeConfigStore(t *testing.T) (config.Store, config.Config) {
 	t.Helper()
 	dir := t.TempDir()
 	base := config.Config{
 		BaseDir:  dir,
 		BaseName: "config",
-		// A node's configuration is validated as a whole, which today still
-		// includes the Slack credentials it will never use. That is the
-		// configuration split (#170 item 12), not this item.
-		OAuth: config.OAuthConfig{AppToken: "xapp-test", BotToken: "xoxb-test"},
+		OAuth:    config.OAuthConfig{AppToken: "xapp-test", BotToken: "xoxb-test"},
 		Database: config.DatabaseConfig{
 			Backend: "sqlite",
 			SQLite:  config.SQLiteConfig{Path: filepath.Join(dir, "config.db")},
@@ -320,10 +262,6 @@ func nodeConfigStore(t *testing.T) (config.Store, config.Config) {
 		t.Fatalf("open the node's config store: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	// Two profiles, one of which this node's process serves. That is the
-	// ordinary shape — cmd/murtaugh-runtime picks one agent, because the
-	// protocol carries no agent name — and it is what makes "advertise what you
-	// serve, not what you have configured" a distinction with teeth.
 	for _, name := range []string{"default", "ops"} {
 		profile := config.AgentProfile{WorkDir: dir, Native: &config.NativeProfile{Provider: "anthropic", Model: "claude-sonnet-4", APIKeyEnv: "ANTHROPIC_API_KEY"}}
 		if err := store.UpsertItem(context.Background(), config.SectionAgent, name, profile); err != nil {
@@ -340,8 +278,6 @@ func putChat(t *testing.T, store config.Store, chat config.ChatConfig) {
 	}
 }
 
-// loadClaim is what cmd/murtaugh-runtime does before its first dial: assemble
-// the configuration and derive the claim from it.
 func loadClaim(t *testing.T, store config.Store, base config.Config) agentwire.Advertisement {
 	t.Helper()
 	cfg, err := store.Load(context.Background(), base)
@@ -351,10 +287,8 @@ func loadClaim(t *testing.T, store config.Store, base config.Config) agentwire.A
 	return nodeclaim.Advertise(cfg, []string{"default"})
 }
 
-// A reconnect re-advertises from scratch. That is what makes dropping a push
-// while nothing is attached the right behaviour rather than a compromise: a
-// queued claim would be replayed at the exact moment a current one is already
-// riding the new handshake.
+// This is why a push made while nothing is attached is dropped, not queued:
+// the new handshake already carries the current claim.
 func TestAReconnectReAdvertisesFromScratch(t *testing.T) {
 	want := claim([]string{"reviewer"}, "review-*")
 	rig := dialLoopback(t, newScriptedAgent(func(*scriptedTurn) {}), claiming(want))

@@ -86,8 +86,6 @@ func (s *cardSlack) dmCard(t *testing.T) (channel, corr string) {
 	return "", ""
 }
 
-// The whole sign-in on a node: nothing runs until the owner approves by DM, and
-// the code they paste then reaches the command and settles both cards.
 func TestANodeSignsInForItsOwnerEndToEnd(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "ran")
 	result := make(chan string, 1)
@@ -191,8 +189,6 @@ func TestANodeSignsInForItsOwnerEndToEnd(t *testing.T) {
 	}
 }
 
-// A node whose link drops mid-sign-in kills its login command, even for a tool
-// that is not waiting on the turn's context.
 func TestALinkDropStopsTheNodesSignIn(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "pid")
 	meta := agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4", UserID: nodeOwner}

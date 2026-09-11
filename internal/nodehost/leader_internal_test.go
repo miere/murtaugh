@@ -7,14 +7,6 @@ import (
 	"github.com/miere/murtaugh/internal/config"
 )
 
-// What a gateway can work out about itself, and what it must not invent.
-//
-// #170 asks for a hostname AND an IP because neither survives alone: an IP moves
-// under DHCP, a changed network or a VPN, and a hostname does not resolve from
-// every network a laptop wakes up on. The pair is assembled here, from two
-// sources that each fail in their own way on a real machine, so both halves are
-// injected rather than trusted.
-
 func TestBothANameAndAnAddressAreOffered(t *testing.T) {
 	got := discoverAddresses("0.0.0.0:8787",
 		func() (string, error) { return "gateway.local", nil },
@@ -26,10 +18,8 @@ func TestBothANameAndAnAddressAreOffered(t *testing.T) {
 	}
 }
 
-// A bind to one interface has already answered the question the routing table
-// would be asked. Consulting it anyway would publish the address of whichever
-// interface happens to reach the internet, which is not where this gateway is
-// listening.
+// The routing table would publish whichever interface reaches the internet,
+// not the one this gateway listens on.
 func TestASpecificBindIsPreferredToTheRoutingTable(t *testing.T) {
 	got := discoverAddresses("192.0.2.7:8787",
 		func() (string, error) { return "gateway.local", nil },
@@ -41,8 +31,6 @@ func TestASpecificBindIsPreferredToTheRoutingTable(t *testing.T) {
 	}
 }
 
-// Either half may be missing on a real machine — a host with no name, a machine
-// with no route — and one address is worth publishing. None is not.
 func TestOneHalfIsBetterThanNothingAndNoHalvesIsNothing(t *testing.T) {
 	noName := discoverAddresses("0.0.0.0:8787",
 		func() (string, error) { return "", errors.New("no hostname") },
@@ -66,10 +54,8 @@ func TestOneHalfIsBetterThanNothingAndNoHalvesIsNothing(t *testing.T) {
 	}
 }
 
-// A loopback bind is the `--role both` deployment, and its one address is the
-// whole correct answer rather than a degraded one: a hostname there is an
-// address a node dials and fails on, and it is also the only form the node's own
-// transport rule will accept in cleartext.
+// A hostname here is an address the node dials and fails on, and cleartext
+// ws:// is only accepted for loopback.
 func TestALoopbackBindOffersOnlyLoopback(t *testing.T) {
 	got := discoverAddresses("127.0.0.1:8787",
 		func() (string, error) { return "gateway.local", nil },
@@ -80,10 +66,8 @@ func TestALoopbackBindOffersOnlyLoopback(t *testing.T) {
 	}
 }
 
-// A configured address is used as written. The one thing that is added is the
-// scheme, because a bare host on a real network is exactly what a node refuses
-// to put its credential on; the one thing that must NOT be added is the port,
-// because the terminator this option exists for answers on its own.
+// A node refuses a bare host, so the scheme is added; the port is not, because
+// the TLS terminator answers on its own.
 func TestAConfiguredAddressIsTakenVerbatimExceptTheScheme(t *testing.T) {
 	for name, tc := range map[string]struct {
 		configured string

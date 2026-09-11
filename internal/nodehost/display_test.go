@@ -48,8 +48,6 @@ func promptDefault(t *testing.T, rig *loopback) <-chan agent.Event {
 	return events
 }
 
-// A question asked by a native tool on a node crosses as a display request and
-// the answer the gateway gets from its human is what the tool hands the model.
 func TestANativeToolsQuestionIsAnsweredThroughTheGateway(t *testing.T) {
 	var script *scriptedAgent
 	script = newScriptedAgent(func(turn *scriptedTurn) {
@@ -97,8 +95,8 @@ func TestANativeToolsQuestionIsAnsweredThroughTheGateway(t *testing.T) {
 	}
 }
 
-// A turn torn down under an open question must answer it: a bridged call waits
-// on its own context, which the turn ending does not cancel.
+// A bridged call waits on its own context, which the turn ending does not
+// cancel.
 func TestATornDownTurnAnswersItsOpenPlan(t *testing.T) {
 	meta := agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4", UserID: nodeOwner}
 	outcome := make(chan string, 1)
@@ -139,8 +137,6 @@ func TestATornDownTurnAnswersItsOpenPlan(t *testing.T) {
 	}
 }
 
-// A headless run has no conversation, so the node's tool refuses before anything
-// is sent, with the words it used when it ran on the gateway.
 func TestAHeadlessQuestionIsRefusedOnTheNode(t *testing.T) {
 	var script *scriptedAgent
 	refused := make(chan error, 1)
@@ -176,8 +172,7 @@ func TestAHeadlessQuestionIsRefusedOnTheNode(t *testing.T) {
 	}
 }
 
-// A node that raises a question on a headless turn anyway is refused by the
-// gateway: nobody consumes a headless turn's cards, so it would wait forever.
+// Nobody reads a headless turn's cards, so the question would wait forever.
 func TestAHeadlessQuestionIsRefusedByTheGateway(t *testing.T) {
 	answered := make(chan agent.DisplayAnswer, 1)
 	script := newScriptedAgent(func(turn *scriptedTurn) {
@@ -208,8 +203,7 @@ func TestAHeadlessQuestionIsRefusedByTheGateway(t *testing.T) {
 	}
 }
 
-// A question raised after the gateway dropped its turn must still be answered,
-// or the tool that raised it waits on nobody.
+// Left unanswered, the tool that raised it would wait forever.
 func TestAQuestionOnATurnTheGatewayDroppedIsAnswered(t *testing.T) {
 	answered := make(chan agent.DisplayAnswer, 1)
 	script := newScriptedAgent(func(turn *scriptedTurn) {
@@ -253,8 +247,7 @@ func TestAQuestionOnATurnTheGatewayDroppedIsAnswered(t *testing.T) {
 	}
 }
 
-// Outside a turn there is no stream to carry an answer back, so the node refuses
-// a question itself rather than sending one nobody can resolve.
+// Outside a turn there is no stream to carry an answer back.
 func TestABackgroundQuestionIsRefusedOnTheNode(t *testing.T) {
 	rig := dialLoopback(t, newScriptedAgent(func(*scriptedTurn) {}))
 
@@ -279,8 +272,6 @@ func TestABackgroundQuestionIsRefusedOnTheNode(t *testing.T) {
 	}
 }
 
-// A node that sends a question outside any turn anyway is refused by the gateway,
-// and nothing about it reaches the background router.
 func TestABackgroundQuestionIsNotRenderedByTheGateway(t *testing.T) {
 	rig := dialLoopback(t, newScriptedAgent(func(*scriptedTurn) {}))
 	node := attachRaw(t, rig, "node-raw")

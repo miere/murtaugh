@@ -27,32 +27,15 @@ import (
 	"github.com/miere/murtaugh/internal/nodetoken"
 )
 
-// This file is #193's verification, over a real WebSocket on loopback: a chat
-// turn, a cancellation mid-turn, an approval round trip, and — in
-// backpressure_test.go — the measurement.
-//
-// Everything below the test is production code. The gateway half is the real
-// Host, the real token verification, the real remote client under a real
-// agent.SessionManager built by the real runtime builder; the node half is the
-// real nodeserve.Server and the real tool gate. Only two things are fakes: the
-// agent (a scripted agent.Client, because a language model is not what is under
-// test) and the credential store (in memory, because the SQL one has its own
-// tests).
-
-// loopback is one gateway and one node, attached over 127.0.0.1.
 type loopback struct {
-	host     *nodehost.Host
-	store    *memTokens
-	addr     string
-	selector string
-	// token is the credential this node dialled with, kept so a test can dial
-	// the SAME node back in after a drop.
-	token    string
-	sessions map[string]*agent.SessionManager
-	agent    *scriptedAgent
-	gate     *nodeserve.ToolGate
-	// background is the NODE's sink — what a backend on the node calls when it
-	// emits outside a turn.
+	host        *nodehost.Host
+	store       *memTokens
+	addr        string
+	selector    string
+	token       string
+	sessions    map[string]*agent.SessionManager
+	agent       *scriptedAgent
+	gate        *nodeserve.ToolGate
 	background  *nodeserve.BackgroundSink
 	signIns     *nodeserve.SignIns
 	credentials *nodeserve.Credentials
@@ -61,18 +44,11 @@ type loopback struct {
 	nodes       func() []agentruntime.NodeRef
 	renew       func(context.Context, string) (agentruntime.RenewalStatus, error)
 	approved    chan approval
-	// notices is what the GATEWAY's background hook received. It is the far end
-	// of the same path.
-	notices chan notice
-	// claim is the NODE's advertiser — what it tells the gateway it serves. It
-	// is always present, because a node that claims nothing is a real state and
-	// not a disabled feature.
-	claim *nodeserve.Advertiser
-	// nodeStopped closes when the node's Serve returns, however it ended.
+	notices     chan notice
+	claim       *nodeserve.Advertiser
 	nodeStopped chan struct{}
 }
 
-// approval records what the gateway's tool gate was asked, and answers it.
 type approval struct {
 	tool    string
 	summary string
@@ -84,97 +60,58 @@ type approvalAnswer struct {
 	note    string
 }
 
-// notice is one event the gateway's background router was handed.
 type notice struct {
 	sessionID string
 	event     agent.Event
 }
 
-// rigOption tunes the rig for the handful of tests that need something other
-// than one healthy attached node.
 type rigOption func(*rigConfig)
 
 type rigConfig struct {
-	waitForAttach bool
-	// claim is what the node claims before it dials, so the handshake answer
-	// carries it — which is the path a connect-time claim actually takes.
-	claim agentwire.Advertisement
-	// journal is the gateway's recorder. nil discards, which is what a Host
-	// built without one does.
-	journal journal.Recorder
-	// pins is where delegation writes its choice. nil means the gateway does
-	// not pin, which is a supported state: every conversation is re-elected on
-	// its next cold session.
-	pins config.ConversationPinStore
-	// references is what the GATEWAY's configuration names, and unconfigured is
-	// what it does about a node that claims nothing. Both nil is a Host that
-	// journals what it sees and disturbs nobody, which is what a gateway with no
-	// Slack side is.
-	references   func() []config.AgentReference
-	unconfigured func(context.Context, nodehost.Node)
-	// settled is the other end of unconfigured: the node advertised something,
-	// or it went away, so its owner's invitation is over.
-	settled func(nodehost.Node)
-	// configure is what the NODE does with a configuration its gateway hands it.
-	// nil refuses the method, which is every node that did not opt in.
-	configure func(context.Context, agentwire.NodeConfiguration) (agentwire.NodeConfigured, error)
-	// restart is what the NODE does after applying a configuration whose answer
-	// said it would restart. nil is a node that applies and keeps running, which
-	// is only useful to a test.
+	waitForAttach    bool
+	claim            agentwire.Advertisement
+	journal          journal.Recorder
+	pins             config.ConversationPinStore
+	references       func() []config.AgentReference
+	unconfigured     func(context.Context, nodehost.Node)
+	settled          func(nodehost.Node)
+	configure        func(context.Context, agentwire.NodeConfiguration) (agentwire.NodeConfigured, error)
 	restart          func()
 	drawSignIn       func(context.Context, *agent.SignInPrompt, <-chan agent.SignInSettled, func(error))
 	credentialsNow   func() []agentwire.CredentialHealth
 	credentialHealth func(agentruntime.CredentialHealth)
 	renewCredential  func(context.Context) (agentwire.CredentialRenewal, error)
-	// logs, when set, is where the GATEWAY's own logger writes. Some of what
-	// this Host does is only observable there — a WARN about a turn it does not
-	// recognise has no other output — and a warning nothing asserts is a warning
-	// that can start firing on every job without anybody noticing.
-	logs io.Writer
+	logs             io.Writer
 }
 
-// withoutWaitingForAttach is for the tests whose point is that the node does
-// NOT get published.
 func withoutWaitingForAttach() rigOption {
 	return func(c *rigConfig) { c.waitForAttach = false }
 }
 
-// claiming gives the node something to advertise before it dials.
 func claiming(ad agentwire.Advertisement) rigOption {
 	return func(c *rigConfig) { c.claim = ad }
 }
 
-// journalling gives the gateway a recorder, so a test can read what a node's
-// arrival and departure wrote.
 func journalling(rec journal.Recorder) rigOption {
 	return func(c *rigConfig) { c.journal = rec }
 }
 
-// pinning gives the gateway somewhere to record which node it delegated a
-// conversation to.
 func pinning(pins config.ConversationPinStore) rigOption {
 	return func(c *rigConfig) { c.pins = pins }
 }
 
-// onboarding gives the gateway the two answers only its Slack side has: what its
-// configuration names, and who to offer the setup form to.
 func onboarding(references func() []config.AgentReference, unconfigured func(context.Context, nodehost.Node)) rigOption {
 	return func(c *rigConfig) { c.references, c.unconfigured = references, unconfigured }
 }
 
-// settling records the other end of the trigger: a node that stopped being one
-// with nothing configured.
 func settling(settled func(nodehost.Node)) rigOption {
 	return func(c *rigConfig) { c.settled = settled }
 }
 
-// configurable lets the node accept a configuration from its gateway.
 func configurable(apply func(context.Context, agentwire.NodeConfiguration) (agentwire.NodeConfigured, error)) rigOption {
 	return func(c *rigConfig) { c.configure = apply }
 }
 
-// restarting gives the node the supervisor hook nodeserve fires after a
-// configuration whose answer said it would restart.
 func restarting(restart func()) rigOption {
 	return func(c *rigConfig) { c.restart = restart }
 }
@@ -191,13 +128,10 @@ func renewing(renew func(context.Context) (agentwire.CredentialRenewal, error)) 
 	return func(c *rigConfig) { c.renewCredential = renew }
 }
 
-// logging captures what the GATEWAY logs, at WARN and above.
 func logging(w io.Writer) rigOption {
 	return func(c *rigConfig) { c.logs = w }
 }
 
-// gatewayLog is a concurrency-safe sink for the gateway's log lines: the Host
-// writes from whichever goroutine served the frame.
 type gatewayLog struct {
 	mu  sync.Mutex
 	buf strings.Builder
@@ -237,9 +171,6 @@ func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *lo
 	if err != nil {
 		t.Fatalf("host: %v", err)
 	}
-	// Every rig below is a gateway that LEADS. A Host accepts nothing until it
-	// is told which election to defer to — see failover_test.go, where that
-	// default is the thing under test.
 	host.FollowLeader(elected{})
 	if cfg.references != nil || cfg.unconfigured != nil || cfg.settled != nil {
 		host.WithOnboarding(cfg.references, cfg.unconfigured, cfg.settled)
@@ -252,8 +183,6 @@ func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *lo
 	served := make(chan error, 1)
 	go func() { served <- host.Serve(ctx, listener) }()
 
-	// The real builder, so the test exercises the wiring a gateway would use —
-	// including the choice of which agent's approval gate a node reaches.
 	agentCfg := config.Config{
 		Agents: map[string]config.AgentProfile{"default": {}},
 		Chat:   config.ChatConfig{Enabled: true, Defaults: config.ChatDefaults{Agent: "default"}},
@@ -268,8 +197,6 @@ func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *lo
 				return answer.allowed, answer.note
 			}),
 		},
-		// The gateway's background router in miniature: what a claude_code
-		// stretch that finished after its turn would be rendered from.
 		BackgroundEvents: func(sessionID string, ev agent.Event) {
 			notices <- notice{sessionID: sessionID, event: ev}
 		},
@@ -282,16 +209,12 @@ func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *lo
 	signIns := nodeserve.NewSignIns(testLogger())
 	credentials := nodeserve.NewCredentials(testLogger(), cfg.credentialsNow)
 	claim := nodeserve.NewAdvertiser(testLogger())
-	// Set while unbound, exactly as cmd/murtaugh-runtime sets it before its
-	// first dial: the value is held and the handshake answer carries it.
 	claim.Publish(ctx, cfg.claim)
 	script.gate = gate
 	conn, err := nodesocket.Dial(ctx, "ws://"+listener.Addr().String(), nodesocket.DialOptions{Token: minted.Token})
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	// Closed rather than sent on, so a test can wait for the node's connection
-	// to end and the cleanup can wait for the same thing.
 	nodeStopped := make(chan struct{})
 	go func() {
 		defer close(nodeStopped)
@@ -346,9 +269,6 @@ func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *lo
 	}
 }
 
-// reload rebuilds the gateway's runtime over the SAME live node connection,
-// which is what a configuration reload does: buildGateway runs again while the
-// node's socket is untouched.
 func (l *loopback) reload(t *testing.T, access config.AccessConfig) *agent.SessionManager {
 	t.Helper()
 	cfg := config.Config{
@@ -365,14 +285,6 @@ func (l *loopback) reload(t *testing.T, access config.AccessConfig) *agent.Sessi
 	return manager
 }
 
-// mintInto adds one usable credential to the store and returns it.
-// nodeOwner is the Murtaugh user every credential in this file is minted for.
-//
-// It is named rather than spelled inline because delegation is keyed on it: a
-// conversation is served by the initiating user's OWN nodes, so a turn whose
-// metadata names somebody else is not a routing near-miss — it has no fleet at
-// all and is refused. The tests below say so by using this constant on both
-// sides.
 const nodeOwner = "U-owner"
 
 func mintInto(t *testing.T, store *memTokens, nodeID string) nodetoken.Minted {
@@ -393,7 +305,6 @@ func mintInto(t *testing.T, store *memTokens, nodeID string) nodetoken.Minted {
 	return minted
 }
 
-// 1. A chat turn, end to end against a connected runtime.
 func TestAChatTurnIsServedByAConnectedNode(t *testing.T) {
 	script := newScriptedAgent(func(turn *scriptedTurn) {
 		turn.emit(agent.Event{Type: agent.EventStatus, Text: "thinking"})
@@ -443,15 +354,13 @@ func TestAChatTurnIsServedByAConnectedNode(t *testing.T) {
 	}
 }
 
-// 2. A cancellation mid-turn. The gateway's idle path and its /stop command
-// both do `cancel(); for range events {}` and block until the channel closes;
-// across a link the context reaches nothing, so the cancel has to travel.
+// The gateway's cancel paths block until the event channel closes, and a
+// context does not cross the link, so the cancel itself must.
 func TestCancellationMidTurnReachesTheNodeAndClosesTheStream(t *testing.T) {
 	started := make(chan struct{})
 	script := newScriptedAgent(func(turn *scriptedTurn) {
 		turn.emit(agent.Event{Type: agent.EventText, Text: "working"})
 		close(started)
-		// Ends only when the node's backend is interrupted.
 		<-turn.cancelled
 		turn.emit(agent.Event{Type: agent.EventError, Error: context.Canceled})
 	})
@@ -480,10 +389,6 @@ func TestCancellationMidTurnReachesTheNodeAndClosesTheStream(t *testing.T) {
 		t.Fatalf("cancel: %v", err)
 	}
 
-	// The interrupt has to reach the node's backend, and the resulting error
-	// must still satisfy the identity check the renderer branches on — a
-	// cancellation that arrives as a generic failure becomes a failure card
-	// instead of an "interrupted" seal.
 	sawCancelled := false
 	drained := make(chan struct{})
 	go func() {
@@ -507,9 +412,8 @@ func TestCancellationMidTurnReachesTheNodeAndClosesTheStream(t *testing.T) {
 	}
 }
 
-// 3. An approval round trip: the node's native tool gate, the gateway's human,
-// and the note that comes back — which for a native tool call is not
-// diagnostics but the result string the model is handed.
+// For a native tool call the note is the result string the model is handed,
+// not diagnostics.
 func TestApprovalRoundTripCarriesTheDecisionAndTheNote(t *testing.T) {
 	outcome := make(chan approvalAnswer, 1)
 	script := newScriptedAgent(func(turn *scriptedTurn) {
@@ -551,8 +455,6 @@ func TestApprovalRoundTripCarriesTheDecisionAndTheNote(t *testing.T) {
 		t.Fatal("the node's tool gate never got its answer")
 	}
 
-	// The approval is a request, not an event: rendering it would give a remote
-	// native agent a card the local one does not have.
 	for ev := range events {
 		if ev.Type == agent.EventPermission {
 			t.Fatal("a native tool approval reached the renderer as an event")
@@ -560,10 +462,8 @@ func TestApprovalRoundTripCarriesTheDecisionAndTheNote(t *testing.T) {
 	}
 }
 
-// A turn torn down with an approval outstanding must answer it. claude_code's
-// control request waits on its process exiting rather than on the turn's
-// context, so an unanswered approval parks a backend goroutine until the agent
-// is killed.
+// claude_code's control request waits on its process exiting, not on the
+// turn's context, so an unanswered approval parks a goroutine.
 func TestATornDownTurnAnswersItsOutstandingApproval(t *testing.T) {
 	outcome := make(chan approvalAnswer, 1)
 	asked := make(chan struct{})
@@ -612,13 +512,10 @@ func TestATornDownTurnAnswersItsOutstandingApproval(t *testing.T) {
 	}
 }
 
-// An attachment's bytes cross as a side transfer, and the chunks are sent
-// AHEAD of the event that references them. That ordering is the whole design:
-// the gateway materialises an attachment from inside the link's read loop, so a
-// deliverer that had to pull chunks arriving on that same loop would deadlock
-// it.
+// Chunks must arrive before the event: the gateway reads attachments inside
+// the link's read loop, so pulling them would deadlock it.
 func TestAnAttachmentCrossesAsASideTransfer(t *testing.T) {
-	body := bytes.Repeat([]byte("murtaugh "), 40000) // ~360 KiB: several chunks
+	body := bytes.Repeat([]byte("murtaugh "), 40000)
 	script := newScriptedAgent(func(turn *scriptedTurn) {
 		turn.emit(agent.Event{Type: agent.EventAttachment, Attachment: &agent.AttachmentEvent{
 			Filename: "report.txt",
@@ -664,13 +561,8 @@ func TestAnAttachmentCrossesAsASideTransfer(t *testing.T) {
 	}
 }
 
-// A background event — one a session emits with no turn open — crosses the link
-// addressed by SESSION and reaches the gateway's background router.
-//
-// This is the feature split/06-liveness exists to render: without it a
-// claude_code stretch that goes quiet on a node produces no notice at all, and
-// because the gateway-side plumbing is complete the failure is silent on the
-// side anyone would debug.
+// Without this a quiet claude_code stretch on a node gives no notice, and the
+// gateway side looks fine, so nobody would know where to look.
 func TestABackgroundEventReachesTheGatewaysRouter(t *testing.T) {
 	rig := dialLoopback(t, newScriptedAgent(func(turn *scriptedTurn) {
 		turn.emit(agent.Event{Type: agent.EventComplete, StopReason: "end_turn"})
@@ -691,8 +583,6 @@ func TestABackgroundEventReachesTheGatewaysRouter(t *testing.T) {
 		t.Fatal("the manager did not record the node's session")
 	}
 
-	// The turn is over. This is what claude_code's emit does when a subagent
-	// finishes afterwards: no active turn, so it goes to the node's sink.
 	rig.background.Handle(sessionID, agent.Event{Type: agent.EventText, Text: "the subagent finished"})
 
 	select {
@@ -708,10 +598,8 @@ func TestABackgroundEventReachesTheGatewaysRouter(t *testing.T) {
 	}
 }
 
-// A background event addressed to a session must not be delivered as an
-// approval request. There is no stream for an answer to come back on, so
-// encoding one would register a correlation id nothing can resolve and park the
-// backend goroutine that raised it.
+// No stream exists to answer on, so sending it would park the backend
+// goroutine on an id nothing can resolve.
 func TestABackgroundApprovalIsAnsweredRatherThanSent(t *testing.T) {
 	rig := dialLoopback(t, newScriptedAgent(func(*scriptedTurn) {}))
 
@@ -739,8 +627,8 @@ func TestABackgroundApprovalIsAnsweredRatherThanSent(t *testing.T) {
 	}
 }
 
-// The session id on a background frame is the node's to choose, so one naming
-// another node's session must never reach that conversation's thread.
+// The session id on a background frame is chosen by the node, so it cannot be
+// trusted.
 func TestANodeCannotPostIntoAnotherNodesSession(t *testing.T) {
 	rig := dialLoopback(t, newScriptedAgent(func(turn *scriptedTurn) {
 		turn.emit(agent.Event{Type: agent.EventComplete, StopReason: "end_turn"})
@@ -770,8 +658,8 @@ func TestANodeCannotPostIntoAnotherNodesSession(t *testing.T) {
 	}
 }
 
-// A node that presents a credential the gateway does not know must be refused
-// before the upgrade, with an HTTP status a dialler can print.
+// Upgrading first would hand an unauthenticated peer a connection, and the
+// refusal would be a close frame the dialler cannot print.
 func TestAnUnknownCredentialIsRefusedBeforeTheUpgrade(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -780,7 +668,6 @@ func TestAnUnknownCredentialIsRefusedBeforeTheUpgrade(t *testing.T) {
 	if err != nil {
 		t.Fatalf("host: %v", err)
 	}
-	// Leading, so the 401 below is the credential's refusal and not leadership's.
 	host.FollowLeader(elected{})
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -804,15 +691,11 @@ func TestAnUnknownCredentialIsRefusedBeforeTheUpgrade(t *testing.T) {
 	}
 }
 
-// Revoking a credential closes the connection it authenticated, which is what
-// #170 says revocation means. It closes by selector, never by node: during a
-// rotation a node holds two live credentials.
 func TestRevokingACredentialClosesItsConnection(t *testing.T) {
 	rig := dialLoopback(t, newScriptedAgent(func(*scriptedTurn) {}))
 	if _, ok := rig.host.Attached(); !ok {
 		t.Fatal("the node did not attach")
 	}
-	// The selector is the one the rig minted; the host holds it.
 	if err := rig.host.CloseCredential(context.Background(), rig.selector); err != nil {
 		t.Fatalf("close credential: %v", err)
 	}
@@ -822,18 +705,13 @@ func TestRevokingACredentialClosesItsConnection(t *testing.T) {
 	})
 }
 
-// The other half of that rule, and the half the overlap window exists for.
-// During a rotation a node holds two live credentials: it has already moved to
-// the new one and the old one is revoked behind it. Closing "every connection
-// of node X" would drop the node in the middle of the seamless operation, so
-// the match is on SELECTOR alone.
+// Mid-rotation the node is on the new credential while the old one is
+// revoked, so the match is on selector alone.
 func TestRevokingADifferentCredentialLeavesTheConnectionUp(t *testing.T) {
 	rig := dialLoopback(t, newScriptedAgent(func(turn *scriptedTurn) {
 		turn.emit(agent.Event{Type: agent.EventText, Text: "still here"})
 	}))
 
-	// The credential being retired: same node, different selector — which is
-	// exactly the state a rotation's overlap window is.
 	retired := mintInto(t, rig.store, "node-1")
 	if retired.Selector == rig.selector {
 		t.Fatal("the two credentials share a selector; the rig cannot pose a rotation")
@@ -849,7 +727,6 @@ func TestRevokingADifferentCredentialLeavesTheConnectionUp(t *testing.T) {
 	if _, ok := rig.host.Attached(); !ok {
 		t.Fatal("revoking the credential the node had already rotated OFF dropped the node")
 	}
-	// Attached is a flag; a turn is the proof the link still carries anything.
 	events, err := rig.sessions["default"].Prompt(context.Background(),
 		agent.ConversationKey{ChannelID: "C1", ThreadTS: "123.4"},
 		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4", UserID: nodeOwner},
@@ -864,30 +741,24 @@ func TestRevokingADifferentCredentialLeavesTheConnectionUp(t *testing.T) {
 	}
 }
 
-// The node's agent is initialized at the HANDSHAKE, not lazily on the first
-// turn. agent.SessionManager latches "initialized" on first success and never
-// repeats it, so a node that attaches after the gateway's first turn would
-// otherwise never be initialized at all — and the symptom is one conversation
-// class working and another not, long after whatever change caused it.
+// agent.SessionManager initializes only once, so a node attaching after the
+// first turn would never be initialized.
 func TestTheNodesAgentIsInitializedAtTheHandshake(t *testing.T) {
 	rig := dialLoopback(t, newScriptedAgent(func(*scriptedTurn) {}))
 
-	// Nothing has been prompted. The count can only come from the handshake.
 	waitFor(t, "the node's agent to be initialized", func() bool {
 		return rig.agent.initializes() == 1
 	})
 }
 
-// And a node whose agent will not come up is not published. Publishing it would
-// give every conversation an agent that fails on its first turn, with the
-// failure surfacing to a user rather than to the operator who attached it.
+// Publishing it would show the failure to a user on their first turn instead
+// of to the operator who attached it.
 func TestANodeWhoseAgentWillNotInitializeIsNotPublished(t *testing.T) {
 	script := newScriptedAgent(func(*scriptedTurn) {})
 	script.initErr = errors.New("the backend is not installed on this machine")
 
 	rig := dialLoopback(t, script, withoutWaitingForAttach())
 
-	// Give the handshake every chance to publish it.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if nodeID, ok := rig.host.Attached(); ok {
@@ -900,9 +771,6 @@ func TestANodeWhoseAgentWillNotInitializeIsNotPublished(t *testing.T) {
 	}
 }
 
-// A second node JOINS the first. This is the behaviour #195 replaces: #193
-// shipped one slot, where the newcomer evicted the incumbent and the gateway
-// forgot a machine that was still connected and still willing to work.
 func TestASecondNodeJoinsRatherThanEvicting(t *testing.T) {
 	rig := dialLoopback(t, newScriptedAgent(func(*scriptedTurn) {}))
 	if nodeID, _ := rig.host.Attached(); nodeID != "node-1" {
@@ -914,8 +782,6 @@ func TestASecondNodeJoinsRatherThanEvicting(t *testing.T) {
 		return len(rig.host.Nodes()) == 2
 	})
 
-	// The incumbent's connection is untouched. A registry that evicted it would
-	// look identical from the newcomer's side and be wrong from the user's.
 	select {
 	case <-rig.nodeStopped:
 		t.Fatal("the first node's connection was closed; a second node must join the registry, not replace the first")
@@ -926,8 +792,6 @@ func TestASecondNodeJoinsRatherThanEvicting(t *testing.T) {
 	if nodes[0].NodeID != "node-1" || nodes[1].NodeID != "node-2" {
 		t.Fatalf("the registry lists %q and %q; it must be ordered so two gateways given one fleet choose alike", nodes[0].NodeID, nodes[1].NodeID)
 	}
-	// Identity comes from the credential each connection presented, never from
-	// anything the node said — there is no node id on the wire at all.
 	for _, node := range nodes {
 		if node.UserID == "" || node.Selector == "" || node.AttachedAt.IsZero() {
 			t.Fatalf("registry entry %+v is missing what the credential established", node)
@@ -935,15 +799,8 @@ func TestASecondNodeJoinsRatherThanEvicting(t *testing.T) {
 	}
 }
 
-// A conversation stays on the node that opened it, and the second node that
-// attaches does not inherit it.
-//
-// With one slot this could not be posed: a second node evicted the first, so
-// there was never another node for a conversation to leak onto. With a registry
-// the first node is still connected and still serving, and routing every call to
-// "whichever node is newest" hands the newcomer a session id it never minted —
-// so the user's next message in a thread is answered by a machine with none of
-// the conversation's history, working directory or files.
+// Routing to the newest node would hand it a session id it never minted,
+// losing the conversation's history and files.
 func TestAConversationStaysOnItsOwnNodeWhenASecondAttaches(t *testing.T) {
 	first := newScriptedAgent(func(turn *scriptedTurn) {
 		turn.emit(agent.Event{Type: agent.EventText, Text: "the first node"})
@@ -955,8 +812,6 @@ func TestAConversationStaysOnItsOwnNodeWhenASecondAttaches(t *testing.T) {
 	meta := agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4", UserID: nodeOwner}
 	drainPrompt(t, manager, key, meta, "turn one")
 
-	// A second node joins and is now the most recently attached — the answer
-	// every unbound lookup gives.
 	second := attachScripted(t, rig, "node-2", newScriptedAgent(func(turn *scriptedTurn) {
 		turn.emit(agent.Event{Type: agent.EventText, Text: "the second node"})
 	}))
@@ -972,14 +827,8 @@ func TestAConversationStaysOnItsOwnNodeWhenASecondAttaches(t *testing.T) {
 	}
 }
 
-// And a cancel reaches the node actually running the turn.
-//
-// This is the failure that costs more than a wrong answer. The gateway's /stop
-// and its idle path both do `cancel(); for range events {}`; a cancel delivered
-// to a node that holds no such session is answered as SUCCESS — remote cancel of
-// an unknown session is idempotent by design — so the gateway reports the turn
-// interrupted, the turn keeps running on the other node, and the drain blocks
-// until the full idle timeout.
+// A cancel for an unknown session succeeds on a node, so a misrouted cancel
+// reports success while the turn keeps running.
 func TestACancelReachesTheNodeRunningTheTurnRatherThanTheNewestOne(t *testing.T) {
 	started := make(chan struct{})
 	script := newScriptedAgent(func(turn *scriptedTurn) {
@@ -1003,7 +852,6 @@ func TestACancelReachesTheNodeRunningTheTurnRatherThanTheNewestOne(t *testing.T)
 	}
 	<-started
 
-	// The turn is in flight on the first node when the second one arrives.
 	attachAnother(t, rig, "node-2")
 
 	sessionID, ok := manager.Lookup(key)
@@ -1032,19 +880,8 @@ func TestACancelReachesTheNodeRunningTheTurnRatherThanTheNewestOne(t *testing.T)
 	}
 }
 
-// A conversation whose node is gone MOVES, and the model that inherits it is
-// told so — on the real path, end to end.
-//
-// This is the whole of #196's "recovers VISIBLY" and #170's "a conversation is
-// never lost silently", and it is also the justification for not building #170
-// Change G's card: the move is made visible by the model itself. The notice
-// reaching the node is therefore not a detail of takeover.go — it is the
-// feature. It travels through four seams that each look harmless alone: the
-// binding answers ErrSessionGone, the session manager opens a fresh session,
-// the election marks the takeover against that session, and the next prompt
-// folds it into the user message. A test that called foldTakeover directly
-// would assert the notice's SHAPE while every one of those seams could be
-// deleted with the suite green.
+// End to end because the notice crosses four seams; calling foldTakeover
+// directly would stay green with any of them deleted.
 func TestAConversationWhoseNodeIsGoneMovesAndTheModelIsToldInsideTheTurn(t *testing.T) {
 	pins, err := configstore.OpenConversationPins(context.Background(),
 		config.DatabaseConfig{Backend: config.BackendSQLite,
@@ -1067,8 +904,6 @@ func TestAConversationWhoseNodeIsGoneMovesAndTheModelIsToldInsideTheTurn(t *test
 	successor := attachScripted(t, rig, "node-2", newScriptedAgent(func(turn *scriptedTurn) {
 		turn.emit(agent.Event{Type: agent.EventText, Text: "the second node"})
 	}))
-	// The conversation's node goes: a revoked credential is a real drop, and it
-	// is the shape a laptop's lid has.
 	if err := rig.host.CloseCredential(context.Background(), rig.selector); err != nil {
 		t.Fatalf("close credential: %v", err)
 	}
@@ -1077,8 +912,6 @@ func TestAConversationWhoseNodeIsGoneMovesAndTheModelIsToldInsideTheTurn(t *test
 		return len(nodes) == 1 && nodes[0].NodeID == "node-2"
 	})
 
-	// The user's next message in the SAME thread. It is served rather than
-	// failed — the conversation is not lost with the machine.
 	if got := drainPrompt(t, manager, key, meta, "what did we decide?"); got != "the second node" {
 		t.Fatalf("the turn after the node left was answered by %q", got)
 	}
@@ -1094,8 +927,6 @@ func TestAConversationWhoseNodeIsGoneMovesAndTheModelIsToldInsideTheTurn(t *test
 		t.Fatalf("the user's own words are not the tail of the message:\n%q", moved.Text)
 	}
 
-	// The pin was overwritten rather than bypassed: left naming the dead
-	// machine, every later turn re-elects and lands somewhere new.
 	pin, found, err := pins.Get(context.Background(),
 		config.ConversationRef{TeamID: "T1", ChannelID: "C1", ThreadTS: "123.4"})
 	if err != nil || !found {
@@ -1105,8 +936,6 @@ func TestAConversationWhoseNodeIsGoneMovesAndTheModelIsToldInsideTheTurn(t *test
 		t.Fatalf("the stored pin still names %q", pin.NodeID)
 	}
 
-	// Journalled, because nothing about a node is announced — this record is
-	// what somebody debugging "why did the agent forget" comes for.
 	takeover := rec.find("takeover")
 	if takeover.Kind != "delegation" {
 		t.Fatal("the conversation moved machines and nothing was journalled; the only other trace is the model's own sentence, which is not queryable")
@@ -1115,29 +944,19 @@ func TestAConversationWhoseNodeIsGoneMovesAndTheModelIsToldInsideTheTurn(t *test
 		t.Fatalf("the record does not say what moved where: %+v", takeover.Payload)
 	}
 
-	// And the notice is consumed: a model told on every message that it has
-	// just arrived and can see nothing behaves as though that were true.
 	drainPrompt(t, manager, key, meta, "and the third turn")
 	if strings.Contains(successor.agent.lastPrompt().Text, "conversation-takeover") {
 		t.Fatalf("the notice was repeated on a later turn:\n%q", successor.agent.lastPrompt().Text)
 	}
 }
 
-// A grant written in the gateway's configuration reaches an election, and it
-// reaches it through the RUNTIME BUILDER.
-//
-// The grant tests next door call host.setAccess directly, so deleting that one
-// line from the builder leaves them all green — and the cost of losing it is not
-// subtle: Host.access stays the zero value for the process's life, GrantsOn
-// always answers false, and every guest holding a grant is told "no runtime node
-// of yours is connected" while the machine they were granted is sitting there
-// connected and idle.
+// The other grant tests call host.setAccess directly, so only this one catches
+// the runtime builder dropping that call.
 func TestAGrantInTheGatewaysConfigurationReachesAnElection(t *testing.T) {
 	rig := dialLoopback(t, newScriptedAgent(func(turn *scriptedTurn) {
 		turn.emit(agent.Event{Type: agent.EventText, Text: "the granted node"})
 	}))
 
-	// A guest with no node of their own. Without the grant this is ErrNoFleet.
 	const guest = "U-guest"
 	key := agent.ConversationKey{ChannelID: "C1", ThreadTS: "123.4"}
 	meta := agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4", UserID: guest}
@@ -1146,9 +965,6 @@ func TestAGrantInTheGatewaysConfigurationReachesAnElection(t *testing.T) {
 		t.Fatalf("a guest with no grant got %v, want ErrNoFleet", err)
 	}
 
-	// The gateway admin adds the grant and the configuration is reloaded, which
-	// re-runs the runtime builder over the surviving node connection. This is
-	// the only way a grant is ever added.
 	granted := rig.reload(t, config.AccessConfig{NodeGrants: map[string][]string{"node-1": {guest}}})
 
 	if got := drainPrompt(t, granted, key, meta, "after the grant"); got != "the granted node" {
@@ -1156,7 +972,6 @@ func TestAGrantInTheGatewaysConfigurationReachesAnElection(t *testing.T) {
 	}
 }
 
-// drainPrompt runs one turn to completion and returns the prose it produced.
 func drainPrompt(t *testing.T, manager *agent.SessionManager, key agent.ConversationKey, meta agent.SessionMetadata, text string) string {
 	t.Helper()
 	events, err := manager.Prompt(context.Background(), key, meta,
@@ -1176,10 +991,8 @@ func drainPrompt(t *testing.T, manager *agent.SessionManager, key agent.Conversa
 	return prose
 }
 
-// The SAME credential dialling back in does replace, and must: a node whose
-// laptop slept is very often behind a half-dead socket the gateway has not
-// noticed, and refusing the newcomer would lock it out until the gateway
-// restarted. That is what cmd/murtaugh-runtime's jittered redial loop meets.
+// A laptop that slept often leaves a half-dead socket behind; refusing the
+// redial would lock it out until the gateway restarts.
 func TestARedialOnTheSameCredentialReplacesItsOwnConnection(t *testing.T) {
 	rig := dialLoopback(t, newScriptedAgent(func(*scriptedTurn) {}))
 
@@ -1196,16 +1009,6 @@ func TestARedialOnTheSameCredentialReplacesItsOwnConnection(t *testing.T) {
 	})
 }
 
-// ONE machine on two live connections is one node.
-//
-// This is the rotation the overlap window exists for: the node has dialled back
-// in on its new credential while the old connection is still up. The registry
-// keeps both, because closing by selector is what makes revoking the old one
-// safe — but enumeration collapses them, because a fleet list that named the
-// same machine twice would round-robin a node against itself and call the result
-// balance, and the symptom of that is a machine quietly taking twice its share
-// of the work. The tie-break is the attach time, so the entry is the connection
-// that would actually be used.
 func TestOneNodeOnTwoConnectionsIsListedOnce(t *testing.T) {
 	rig := dialLoopback(t, newScriptedAgent(func(*scriptedTurn) {}))
 	first := rig.host.Nodes()
@@ -1213,14 +1016,10 @@ func TestOneNodeOnTwoConnectionsIsListedOnce(t *testing.T) {
 		t.Fatalf("the registry holds %d nodes before the rotation, want 1", len(first))
 	}
 
-	// The same NODE on a second credential — a rotation in progress, which is
-	// the only state in which this can arise.
 	rotated := attachScripted(t, rig, "node-1", newScriptedAgent(func(*scriptedTurn) {}))
 	if rotated.selector == rig.selector {
 		t.Fatal("the two credentials share a selector; the rig cannot pose a rotation")
 	}
-	// Both connections are genuinely live: the point is a collapse of two
-	// entries, not the eviction of one.
 	select {
 	case <-rig.nodeStopped:
 		t.Fatal("the rotation's second connection displaced the first; the overlap window exists so it does not")
@@ -1237,8 +1036,6 @@ func TestOneNodeOnTwoConnectionsIsListedOnce(t *testing.T) {
 		t.Fatalf("the entry is the OLDER connection (%s, was %s); the tie-break must name the one a turn would be sent to",
 			nodes[0].AttachedAt, first[0].AttachedAt)
 	}
-	// And revoking the retired credential leaves the machine listed, which is
-	// the whole reason the registry keeps both in the first place.
 	if err := rig.host.CloseCredential(context.Background(), rig.selector); err != nil {
 		t.Fatalf("close credential: %v", err)
 	}
@@ -1255,14 +1052,8 @@ func TestOneNodeOnTwoConnectionsIsListedOnce(t *testing.T) {
 	}
 }
 
-// Revocation closes the connection on the revoked credential and leaves the
-// rest of the fleet alone.
-//
-// It is deliberately NOT named "every connection on the credential": there can
-// only ever be one, because insert removes any existing entry sharing a selector
-// before publishing the newcomer. These two connections hold DIFFERENT
-// credentials, which is the state that can actually arise, and the property
-// worth pinning is that one node's revocation is not the fleet's.
+// A credential only ever has one connection, since a newcomer on the same
+// selector replaces the old one, so these two hold different credentials.
 func TestRevocationClosesTheRevokedConnectionAndLeavesTheFleet(t *testing.T) {
 	rig := dialLoopback(t, newScriptedAgent(func(*scriptedTurn) {}))
 	attachAnother(t, rig, "node-2")
@@ -1296,11 +1087,9 @@ func redial(t *testing.T, rig *loopback) {
 	served := make(chan error, 1)
 	go func() {
 		served <- nodeserve.Serve(ctx, conn, rig.agent, nodeserve.Options{
-			Logger:     testLogger(),
-			Gate:       rig.gate,
-			Background: rig.background,
-			// The same advertiser: a reconnect re-advertises from scratch,
-			// which is what makes dropping a push while unbound harmless.
+			Logger:      testLogger(),
+			Gate:        rig.gate,
+			Background:  rig.background,
 			Advertise:   rig.claim,
 			WindowBytes: nodesocket.DefaultWindowBytes,
 		})
@@ -1315,9 +1104,6 @@ func redial(t *testing.T, rig *loopback) {
 	})
 }
 
-// peer is a SECOND node on the same gateway: its own credential, its own
-// connection, and its own agent the test can question. The rig's own node is the
-// first; this is how a test poses a fleet.
 type peer struct {
 	nodeID   string
 	selector string
@@ -1325,15 +1111,11 @@ type peer struct {
 	stopped  chan struct{}
 }
 
-// attachAnother dials a second node into the same gateway.
 func attachAnother(t *testing.T, rig *loopback, nodeID string) *peer {
 	t.Helper()
 	return attachScripted(t, rig, nodeID, newScriptedAgent(func(*scriptedTurn) {}))
 }
 
-// attachScripted is attachAnother with an agent the caller can observe — which
-// is what it takes to tell "the turn went to the right node" from "the turn
-// went somewhere and came back".
 func attachScripted(t *testing.T, rig *loopback, nodeID string, script *scriptedAgent) *peer {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1368,16 +1150,9 @@ func attachScripted(t *testing.T, rig *loopback, nodeID string, script *scripted
 	return joined
 }
 
-// ---- fakes -----------------------------------------------------------------
-
-// scriptedAgent is an agent.Client whose turns are a Go function. It is the one
-// thing in these tests that is not production code, because what is under test
-// is the hop and not the model.
 type scriptedAgent struct {
-	script func(*scriptedTurn)
-	gate   *nodeserve.ToolGate
-	// initErr makes the agent refuse to come up, which is a real state — a
-	// backend binary that is not installed on the node's machine.
+	script  func(*scriptedTurn)
+	gate    *nodeserve.ToolGate
 	initErr error
 
 	mu        sync.Mutex
@@ -1386,8 +1161,6 @@ type scriptedAgent struct {
 	prompted  int
 	cancelled int
 	initCalls int
-	// opened counts NewSession, closedIDs records which of them were closed.
-	// Both exist for the session-leak guard in headless_test.go.
 	opened    int
 	closedIDs map[string]bool
 }
@@ -1412,9 +1185,6 @@ func (a *scriptedAgent) Initialize(context.Context) error {
 	return err
 }
 
-// NewSession mints a DISTINCT id per session, the way every real backend does —
-// an ephemeral headless turn derives a fresh UUID by construction — so
-// opened/closed can be counted rather than assumed.
 func (a *scriptedAgent) NewSession(_ context.Context, _ agent.SessionMetadata) (agent.Session, error) {
 	a.mu.Lock()
 	a.opened++
@@ -1423,10 +1193,6 @@ func (a *scriptedAgent) NewSession(_ context.Context, _ agent.SessionMetadata) (
 	return agent.Session{ID: id}, nil
 }
 
-// CloseSession is what a node's real backends implement — acp and claude_code
-// each own a per-session OS process, and it is the only place their teardown
-// runs. Counting it here is how a session leak over the link becomes visible in
-// a test instead of in a node's memory an hour later.
 func (a *scriptedAgent) CloseSession(id string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -1436,8 +1202,6 @@ func (a *scriptedAgent) CloseSession(id string) {
 	a.closedIDs[id] = true
 }
 
-// sessionCounts reports how many sessions this agent opened and how many of them
-// were closed.
 func (a *scriptedAgent) sessionCounts() (opened, closed int) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -1470,7 +1234,6 @@ func (a *scriptedAgent) Cancel(_ context.Context, sessionID string) error {
 	a.cancelled++
 	a.mu.Unlock()
 	if turn == nil {
-		// Idempotent, the way acp.Client.Cancel is for an unknown session.
 		return nil
 	}
 	turn.once.Do(func() { close(turn.cancelled) })
@@ -1485,8 +1248,6 @@ func (a *scriptedAgent) lastPrompt() agent.PromptRequest {
 	return a.last
 }
 
-// prompts is how many turns this node's agent was asked to run. It is the only
-// way to tell which of two connected nodes a turn actually reached.
 func (a *scriptedAgent) prompts() int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -1518,8 +1279,6 @@ func (f approverFunc) Approve(ctx context.Context, toolName, summary string) (bo
 	return f(ctx, toolName, summary)
 }
 
-// memTokens is the credential store in memory. The SQL implementations have
-// their own tests; what these need is a store that answers.
 type memTokens struct {
 	mu      sync.Mutex
 	records map[string]config.NodeToken
@@ -1570,8 +1329,6 @@ func (m *memTokens) Revoke(_ context.Context, selector string, at time.Time) (co
 
 func (m *memTokens) Close() error { return nil }
 
-// ---- helpers ---------------------------------------------------------------
-
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
 }
@@ -1611,15 +1368,8 @@ func contains(haystack, needle string) bool {
 	return false
 }
 
-// TestARealTurnIsDelegatedAndPinned is delegation on the real path: a real
-// socket, a real handshake, a real session manager, and a pin written to a real
-// SQLite store.
-//
-// The unit tests next door prove the algorithm. This proves it is WIRED — that
-// the conversation key reaches the broker at all, which it can only do by
-// travelling on the context the session manager sets, and that the node id in
-// the pin is the one the credential resolved to rather than anything the node
-// said about itself.
+// The unit tests prove the algorithm; this proves the wiring, since the key
+// only reaches the broker on the session manager's context.
 func TestARealTurnIsDelegatedAndPinned(t *testing.T) {
 	pins, err := configstore.OpenConversationPins(context.Background(),
 		config.DatabaseConfig{Backend: config.BackendSQLite,
@@ -1664,8 +1414,6 @@ func TestARealTurnIsDelegatedAndPinned(t *testing.T) {
 	if pin.UserID != nodeOwner {
 		t.Fatalf("the pin records %q as the electing user, want %q", pin.UserID, nodeOwner)
 	}
-	// The prompt the node actually received must be the user's, unadorned: this
-	// conversation was never anywhere else, so there is nothing to announce.
 	if got := script.lastPrompt(); got.Text != "hello" {
 		t.Fatalf("an ordinary turn carried something extra: %q", got.Text)
 	}
