@@ -52,6 +52,8 @@ type Options struct {
 	SignIns *SignIns
 
 	Credentials *Credentials
+
+	Failed func(error) error
 	// Configure applies the agent profiles a Slack onboarding form produced for
 	// this node's owner, into this node's OWN store.
 	//
@@ -93,6 +95,7 @@ type Server struct {
 	// refuses the method; see Options.Configure.
 	configure func(ctx context.Context, cfg agentwire.NodeConfiguration) (agentwire.NodeConfigured, error)
 	restart   func()
+	failed    func(error) error
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -153,6 +156,7 @@ func Serve(ctx context.Context, conn nodelink.Conn, client agent.Client, opts Op
 		claim:     opts.Advertise,
 		configure: opts.Configure,
 		restart:   opts.Restart,
+		failed:    opts.Failed,
 	}
 	s.ctx, s.cancel = context.WithCancel(ctx)
 	defer s.cancel()
@@ -392,7 +396,7 @@ func (s *Server) servePrompt(msg agentwire.Message) {
 	events, err := s.client.Prompt(turnCtx, body.SessionID, body.Prompt.Decode())
 	if err != nil {
 		s.endTurn(msg.ID, false)
-		s.fault(msg.ID, err)
+		s.fault(msg.ID, s.turnFailed(err))
 		return
 	}
 	// The acceptance goes out before the first event so a gateway reading its
@@ -652,6 +656,13 @@ func (s *Server) shutdown() {
 	s.dismissTurnAsks("")
 	s.failCalls()
 	s.cancel()
+}
+
+func (s *Server) turnFailed(err error) error {
+	if s.failed == nil || err == nil {
+		return err
+	}
+	return s.failed(err)
 }
 
 func (s *Server) reply(id string, body any) {

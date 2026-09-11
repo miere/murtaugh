@@ -146,7 +146,22 @@ func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 		}
 		display = t.headless
 	}
+	return t.signIn(ctx, display, toolName, profile)
+}
 
+// RepairTimeout is longer than a requested sign-in's, because the owner is not
+// expecting this DM and has to notice it first.
+const RepairTimeout = 20 * time.Minute
+
+// Repair exists because an agent refused its credential cannot run to ask for
+// a sign-in itself.
+func Repair(ctx context.Context, display Display, toolName string, profile auth.Profile) error {
+	t := &Tool{display: display, timeout: RepairTimeout, urlWait: auth.DefaultURLWait}
+	_, err := t.signIn(ctx, display, toolName, profile)
+	return err
+}
+
+func (t *Tool) signIn(ctx context.Context, display Display, toolName string, profile auth.Profile) (any, error) {
 	timer := time.NewTimer(t.timeout)
 	defer timer.Stop()
 	req := agent.SignInRequest{Tool: toolName, Profile: profile.Name, NeedsCode: profile.NeedsCode, Command: profile.ApprovalCommand()}

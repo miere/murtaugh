@@ -424,13 +424,6 @@ func New(cfg config.Config, logger *slog.Logger, recorder journal.Recorder, brok
 		logger.Error("startup Slack ping disabled", "error", err)
 	}
 
-	// Built once and shared by both entry points: the chat handler reaches it when
-	// a turn fails on a rejected credential, and the `auth` slash verb reaches it
-	// when the admin repairs one pre-emptively. It must exist even with chat
-	// disabled, since claude_code agents still serve jobs, workflow rules and
-	// unfurls.
-	credRepair := newCredentialRepair(authFlow, cfg.Agents, logger)
-
 	var chat *ChatHandler
 	var sessions map[string]ChatSessionManager
 	// This bot's own Slack identity, resolved once by the auth.test below and
@@ -524,6 +517,7 @@ func New(cfg config.Config, logger *slog.Logger, recorder journal.Recorder, brok
 		}
 		runtime = buildRuntime(hooks)
 	}
+	credRepair := localCredentialRepair(authFlow, cfg.Agents, runtime, logger)
 	// agentToolProblems records the tool groups dropped while building each agent
 	// (a degraded feature, not a failed agent) so the startup summary can surface
 	// them in logs and the journal.

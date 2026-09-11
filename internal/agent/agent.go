@@ -34,6 +34,10 @@ var ErrNonJSONOutput = errors.New("delegate-to-agent: agent output was not valid
 // not, so anything that has to be compared by identity needs a name.
 var ErrSessionGone = errors.New("the runtime node holding this session is no longer connected")
 
+// ErrCredentialRejected lets the gateway tell the user the machine's owner
+// already has a sign-in in front of them, instead of starting one itself.
+var ErrCredentialRejected = errors.New("the agent's credential was rejected")
+
 type Client interface {
 	Initialize(context.Context) error
 	NewSession(context.Context, SessionMetadata) (Session, error)

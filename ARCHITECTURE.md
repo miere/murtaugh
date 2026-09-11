@@ -167,8 +167,9 @@ internal/providerfail/ What a provider failure is reduced to (kind, provider,
                       status, message, retryable) and how it is worded for a
                       human. A leaf: no litellm, nothing of ours.
 internal/claudeauth/  Recognises, from its prose, a Claude Code failure a
-                      re-authentication would fix. Read by the gateway's
-                      credential-repair path, not by the backend.
+                      re-authentication would fix. Read by whoever repairs the
+                      credential — the node, or a gateway running its own
+                      agents — not by the backend.
 internal/toolset/     Per-agent toolset resolver (native tools + registry + MCP).
 internal/mcpclient/   External MCP client: remote tools as tools.Tool.
 internal/agentdelegate/ One-shot isolated agent runner (delegate-to-agent).
@@ -220,9 +221,11 @@ Three consequences are load-bearing and easy to undo by accident:
   every reader downstream — the alert card, the wire encoder — reads the carried
   classification. Classifying at the reader would work in-process and silently
   stop working across a node link, where no `*providers.LiteLLMError` survives.
-- Deciding whether a Claude Code failure warrants re-authentication is gateway
-  policy, so the prose matcher lives in `internal/claudeauth`, outside the
-  backend it describes.
+- Deciding whether a Claude Code failure warrants re-authentication belongs to
+  the machine holding the credential, so the prose matcher lives in
+  `internal/claudeauth`, outside the backend it describes. A node that decides
+  so marks the error `agent.ErrCredentialRejected`, which crosses the wire as its
+  own kind.
 - `agentdelegate.ErrNonJSONOutput` moved to `internal/agent`, because a caller
   branching on it (the workflow engine) would otherwise reach `agentbuild` three
   hops down for one sentinel.

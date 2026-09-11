@@ -169,6 +169,7 @@ func run(args []string) error {
 		credentials = reportCredentials(warden, logger)
 		go warden.Run(ctx)
 	}
+	repair := newRepairer(cfg, name, served.signIns, logger)
 
 	// What this node claims, set BEFORE the first dial so the handshake answer
 	// carries it. A node that advertised after attaching would be attached and
@@ -236,6 +237,7 @@ func run(args []string) error {
 		restart: restart,
 
 		credentials: credentials,
+		failed:      repair.failed,
 	})
 }
 
@@ -380,6 +382,7 @@ type attachment struct {
 	restart    func()
 
 	credentials *nodeserve.Credentials
+	failed      func(error) error
 
 	// dial and wait are the loop's two seams, nil in every binary and set only
 	// by the loop's own test.
@@ -465,6 +468,7 @@ func attach(ctx context.Context, logger *slog.Logger, a attachment) error {
 			Background:  a.background,
 			SignIns:     a.signIns,
 			Credentials: a.credentials,
+			Failed:      a.failed,
 			Advertise:   a.claim,
 			Configure:   a.configure,
 			Restart:     a.restart,
