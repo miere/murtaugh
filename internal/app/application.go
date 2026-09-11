@@ -32,6 +32,7 @@ import (
 	"github.com/miere/murtaugh/internal/slack/askcard"
 	"github.com/miere/murtaugh/internal/slack/authcard"
 	slacklib "github.com/miere/murtaugh/internal/slack/client"
+	"github.com/miere/murtaugh/internal/slack/display"
 	gateway "github.com/miere/murtaugh/internal/slack/gateway"
 	"github.com/miere/murtaugh/internal/slack/interaction"
 	"github.com/miere/murtaugh/internal/tools"
@@ -507,13 +508,14 @@ func buildRegistry(cfg config.Config, cfgStore config.Store, configPath, version
 	// Slack buttons and wait for the answer, instead of assuming one. It shares
 	// the interaction broker with the gateway (which routes the click back). An
 	// agent opts in by adding `ask` to its `tools:` list.
-	reg.Register(ask.New(broker, askFlow))
+	slackDisplay := display.New(broker, askFlow)
+	reg.Register(ask.New(slackDisplay))
 
 	// `present_plan` lets an agent lay a plan in front of the user with
 	// Proceed / Revise / Cancel buttons and WAIT for sign-off before doing
 	// multi-step work. It shares the same interaction broker as `ask`; an
 	// agent opts in by adding `present_plan` to its `tools:` list.
-	reg.Register(plan.New(broker))
+	reg.Register(plan.New(slackDisplay))
 
 	// `auth.request` lets an agent ask for credentials it does not have and
 	// block until the configured ADMIN grants them — never the person it is

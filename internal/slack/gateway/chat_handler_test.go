@@ -1017,3 +1017,149 @@ func TestChatHandlerIdleTimerResetsOnActivity(t *testing.T) {
 		t.Fatalf("a progressing turn must not post an idle-timeout aside, got text: %q", got)
 	}
 }
+
+type fakeDisplayer struct {
+	questionLoc agent.TurnLocation
+	question    agent.QuestionRequest
+	planLoc     agent.TurnLocation
+	plan        agent.PlanRequest
+}
+
+func (d *fakeDisplayer) Question(_ context.Context, loc agent.TurnLocation, req agent.QuestionRequest) (agent.DisplayAnswer, error) {
+	d.questionLoc, d.question = loc, req
+	return agent.DisplayAnswer{Outcome: agent.DisplayAnswered, Answers: map[string][]string{"q0": {"Yes"}}, UserID: "U1"}, nil
+}
+
+func (d *fakeDisplayer) Plan(_ context.Context, loc agent.TurnLocation, req agent.PlanRequest) (agent.DisplayAnswer, error) {
+	d.planLoc, d.plan = loc, req
+	return agent.DisplayAnswer{Outcome: agent.DisplayAnswered, Choice: agent.PlanProceed, UserID: "U1"}, nil
+}
+
+type fakeChatSessionsWithDisplays struct {
+	answers chan agent.DisplayAnswer
+}
+
+func (f *fakeChatSessionsWithDisplays) Prompt(_ context.Context, _ agent.ConversationKey, _ agent.SessionMetadata, _ agent.PromptRequest) (<-chan agent.Event, error) {
+	ch := make(chan agent.Event)
+	go func() {
+		defer close(ch)
+		ch <- agent.Event{Type: agent.EventText, Text: "I need to check something."}
+		question := make(chan agent.DisplayAnswer, 1)
+		ch <- agent.Event{Type: agent.EventQuestion, Question: &agent.QuestionPrompt{
+			Request: agent.QuestionRequest{Questions: []agent.Question{{Key: "q0", Question: "Ship it?", Options: []agent.QuestionOption{{Label: "Yes"}, {Label: "No"}}}}},
+			Answer:  question,
+		}}
+		f.answers <- <-question
+		plan := make(chan agent.DisplayAnswer, 1)
+		ch <- agent.Event{Type: agent.EventPlan, Plan: &agent.PlanPrompt{Request: agent.PlanRequest{Title: "Plan", Plan: "1. ship"}, Answer: plan}}
+		f.answers <- <-plan
+		ch <- agent.Event{Type: agent.EventText, Text: "Shipped."}
+		ch <- agent.Event{Type: agent.EventComplete}
+	}()
+	return ch, nil
+}
+
+func (f *fakeChatSessionsWithDisplays) Lookup(agent.ConversationKey) (string, bool) { return "", false }
+func (f *fakeChatSessionsWithDisplays) Cancel(context.Context, string) error        { return nil }
+
+// A node's question and plan carry no destination, so the conversation the turn
+// belongs to is the only place they can be drawn.
+func TestChatHandlerDrawsQuestionsAndPlansInTheTurnsConversation(t *testing.T) {
+	api := &fakeStreamAPI{}
+	drawn := &fakeDisplayer{}
+	f := &fakeChatSessionsWithDisplays{answers: make(chan agent.DisplayAnswer, 2)}
+	handler := NewChatHandler(api, map[string]ChatSessionManager{"default": f}, func(ChatRequest) ChatRoute { return ChatRoute{Agent: "default", ReplyOnThread: true} }, time.Hour, 5, nil).
+		WithDisplay(drawn)
+	if err := handler.handleResolving(context.Background(), ChatRequest{TeamID: "T1", ChannelID: "C1", UserID: "U1", MessageTS: "123.4", Text: "hi", Source: "test"}); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+
+	want := agent.TurnLocation{ChannelID: "C1", ThreadTS: "123.4", UserID: "U1"}
+	if drawn.questionLoc != want || drawn.planLoc != want {
+		t.Fatalf("drawn at question %+v and plan %+v, want both in %+v", drawn.questionLoc, drawn.planLoc, want)
+	}
+	if len(drawn.question.Questions) != 1 || drawn.question.Questions[0].Question != "Ship it?" || drawn.plan.Plan != "1. ship" {
+		t.Fatalf("drew question %+v and plan %+v", drawn.question, drawn.plan)
+	}
+	if got := <-f.answers; got.Outcome != agent.DisplayAnswered || got.Answers["q0"][0] != "Yes" {
+		t.Fatalf("the question's answer came back as %+v", got)
+	}
+	if got := <-f.answers; got.Outcome != agent.DisplayAnswered || got.Choice != agent.PlanProceed {
+		t.Fatalf("the plan's answer came back as %+v", got)
+	}
+	if api.stops < 2 {
+		t.Fatalf("the reply was not settled before the card; %d messages committed", api.stops)
+	}
+}
+
+// A gateway that cannot draw must still answer, or the tool on the node waits
+// until its turn is torn down.
+func TestChatHandlerWithNothingToDrawAnswersUnavailable(t *testing.T) {
+	f := &fakeChatSessionsWithDisplays{answers: make(chan agent.DisplayAnswer, 2)}
+	handler := NewChatHandler(&fakeStreamAPI{}, map[string]ChatSessionManager{"default": f}, func(ChatRequest) ChatRoute { return ChatRoute{Agent: "default", ReplyOnThread: true} }, time.Hour, 5, nil)
+	if err := handler.handleResolving(context.Background(), ChatRequest{TeamID: "T1", ChannelID: "C1", UserID: "U1", MessageTS: "123.4", Text: "hi", Source: "test"}); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	for range 2 {
+		if got := <-f.answers; got.Outcome != agent.DisplayUnavailable {
+			t.Fatalf("answered %+v with nothing to draw it", got)
+		}
+	}
+}
+
+type blockingDisplayer struct {
+	withdrawn chan struct{}
+}
+
+func (d *blockingDisplayer) Question(ctx context.Context, _ agent.TurnLocation, _ agent.QuestionRequest) (agent.DisplayAnswer, error) {
+	<-ctx.Done()
+	close(d.withdrawn)
+	return agent.DisplayAnswer{Outcome: agent.DisplayDismissed}, nil
+}
+
+func (d *blockingDisplayer) Plan(ctx context.Context, _ agent.TurnLocation, _ agent.PlanRequest) (agent.DisplayAnswer, error) {
+	<-ctx.Done()
+	close(d.withdrawn)
+	return agent.DisplayAnswer{Outcome: agent.DisplayDismissed}, nil
+}
+
+type fakeChatSessionsDyingUnderACard struct{}
+
+func (f *fakeChatSessionsDyingUnderACard) Prompt(_ context.Context, _ agent.ConversationKey, _ agent.SessionMetadata, _ agent.PromptRequest) (<-chan agent.Event, error) {
+	ch := make(chan agent.Event, 2)
+	ch <- agent.Event{Type: agent.EventQuestion, Question: &agent.QuestionPrompt{
+		Request: agent.QuestionRequest{Questions: []agent.Question{{Key: "q0", Question: "Ship it?", Options: []agent.QuestionOption{{Label: "Yes"}, {Label: "No"}}}}},
+		Answer:  make(chan agent.DisplayAnswer, 1),
+	}}
+	ch <- agent.Event{Type: agent.EventError, Error: fmt.Errorf("remote: connection to the node failed")}
+	close(ch)
+	return ch, nil
+}
+
+func (f *fakeChatSessionsDyingUnderACard) Lookup(agent.ConversationKey) (string, bool) {
+	return "", false
+}
+func (f *fakeChatSessionsDyingUnderACard) Cancel(context.Context, string) error { return nil }
+
+// A card belongs to its turn: when the turn dies under it, the card is withdrawn
+// instead of waiting out its ten minutes for an answer nobody can deliver.
+func TestChatHandlerWithdrawsACardWhenItsTurnDies(t *testing.T) {
+	drawn := &blockingDisplayer{withdrawn: make(chan struct{})}
+	handler := NewChatHandler(&fakeStreamAPI{}, map[string]ChatSessionManager{"default": &fakeChatSessionsDyingUnderACard{}}, func(ChatRequest) ChatRoute { return ChatRoute{Agent: "default", ReplyOnThread: true} }, time.Hour, 5, nil).
+		WithDisplay(drawn)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = handler.handleResolving(context.Background(), ChatRequest{TeamID: "T1", ChannelID: "C1", UserID: "U1", MessageTS: "123.4", Text: "hi", Source: "test"})
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the handler is still parked on a card whose turn has already died")
+	}
+	select {
+	case <-drawn.withdrawn:
+	default:
+		t.Fatal("the turn ended but its card was never withdrawn")
+	}
+}

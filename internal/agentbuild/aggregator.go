@@ -25,12 +25,8 @@ import (
 // external MCP server — so the ACP agent sees the same Murtaugh surface a native
 // agent would, with third-party credentials staying inside the gateway.
 type acpAggregator struct {
-	server *mcpbridge.Server
-	binary string
-	// registry and resolved are held rather than resolved into a []tools.Tool at
-	// construction. See resolvedToolset: on a runtime node the registry is EMPTY
-	// when this is built and is filled at the gateway handshake, so a snapshot
-	// taken here is a snapshot of nothing.
+	server   *mcpbridge.Server
+	binary   string
 	registry *tools.Registry
 	resolved ResolvedAgent
 	approver mcp.Approver
@@ -43,23 +39,12 @@ type acpAggregator struct {
 	// agent.WithTurnEnv for why that distinction has teeth.
 	agentEnv []string
 
-	// The built-ins are resolved and the external MCP servers opened once, on
-	// the first session. The MCP half is lazy because it is network I/O kept out
-	// of gateway startup; the built-in half is lazy because of WHEN the registry
-	// is filled.
 	once       sync.Once
 	mgr        *mcpclient.Manager
 	toolset    []tools.Tool
 	resolveErr error
 }
 
-// newACPAggregator records what the agent's toolset will be resolved from and
-// the authoritative external MCP servers to proxy. resolved carries the agent's
-// effective (pruned) allowlist and its workspace Root; approver (may be nil)
-// gates side-effecting calls; mcpCfgs is the global, authoritative MCP server set
-// (native.MCPServerConfigs).
-//
-// It deliberately does NOT resolve the toolset here. See resolvedToolset.
 func newACPAggregator(server *mcpbridge.Server, registry *tools.Registry, resolved ResolvedAgent, approver mcp.Approver, mcpCfgs []mcpclient.ServerConfig, aliases map[string]string, logger *slog.Logger) (*acpAggregator, error) {
 	binary, err := os.Executable()
 	if err != nil {
@@ -81,35 +66,6 @@ func newACPAggregator(server *mcpbridge.Server, registry *tools.Registry, resolv
 	}, nil
 }
 
-// resolvedToolset resolves the agent's built-ins and opens the external MCP
-// servers once (lazily), and returns the full served toolset: built-ins followed
-// by the proxied MCP tools.
-//
-// # Why the registry is read HERE and not at construction
-//
-// On a runtime node the registry this aggregator is built from is
-// nodeserve.ToolProxy's, and it is EMPTY at construction: the node builds its
-// agent before it has a gateway connection, and the proxy is filled at the
-// handshake (nodeserve.serveInitialize). An aggregator that snapshotted the
-// registry when it was built therefore served zero tools for the whole life of
-// the process — an `acp` or `claude_code` agent on a node reached nothing, while
-// `native` worked because it resolves inside its own Initialize, which runs
-// after the handshake. That is the regression #194 exists to prevent, in the two
-// backends it was written for.
-//
-// Reading it on the first session is the earliest point that is late enough for
-// every caller: a node has completed its handshake by then (the gateway sends
-// initialize before session.new), and in the gateway process the registry is
-// built once in app.New, before any agent, so nothing changes there but the
-// moment the work happens.
-//
-// A resolve failure is remembered and returned to every caller rather than
-// swallowed here. What the two callers then DO with it is unchanged and is worth
-// stating rather than implying: both `acp` and `claude_code` downgrade it to a
-// warning and run the session tool-less (acp/session.go, claudecode.go). So this
-// is not a session that refuses — the error is merely reported at the point that
-// can name the session instead of at construction. The branch is unreachable
-// today in any case: toolset.Resolve returns no error, degrading via []Problem.
 func (a *acpAggregator) resolvedToolset() ([]tools.Tool, error) {
 	a.once.Do(func() {
 		builtins, err := resolveBuiltins(a.registry, a.resolved)

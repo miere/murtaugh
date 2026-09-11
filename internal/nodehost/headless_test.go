@@ -12,7 +12,6 @@ import (
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/journal"
 	"github.com/miere/murtaugh/internal/nodehost"
-	"github.com/miere/murtaugh/internal/tools"
 )
 
 // HEADLESS DISPATCH (#199). Everything below is about work with no user behind
@@ -36,7 +35,7 @@ func delegatorFor(t *testing.T, rig *loopback, access config.AccessConfig, chat 
 	// card raised by a headless turn lands somewhere a test can see it. Building
 	// the runtime with no approver would have made "no card arrived" true for the
 	// wrong reason.
-	rt := nodehost.Runtime(rig.host)(cfg, rig.registry, testLogger())(agentruntime.Hooks{
+	rt := nodehost.Runtime(rig.host)(cfg, testLogger())(agentruntime.Hooks{
 		Chat: chat,
 		Approvers: map[string]agentruntime.Approver{
 			"default": approverFunc(func(_ context.Context, tool, summary string) (bool, string) {
@@ -336,67 +335,5 @@ func TestAHeadlessRunThatFailsStillClosesItsSession(t *testing.T) {
 			t.Fatalf("sessions opened on the node: %d, closed: %d, after a turn that ended in an error", opened, closed)
 		}
 		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-// A turn the gateway MINTED is never a turn the gateway does not know.
-//
-// nodehost.locate warns when a node's tool call names a turn this gateway has no
-// record of — a real fault, worth a line, because the call then runs with no
-// thread to ask in and the approval gate short-circuits to allowed. Answering
-// "do I know this stream?" with "did its prompt name a channel?" makes those two
-// states one, and a turn with no channel is not an anomaly: it is a turn with no
-// channel, which every consumer already handles by taking its no-thread branch.
-//
-// The turn below has a user and no channel, which is the state that separates
-// the two answers. Headless dispatch reaches the same place by a shorter road —
-// nodeserve puts no stream at all on a headless turn's context, so `ask` runs
-// ungated and locate is never consulted — and that path is asserted too, because
-// it is the one #199 ships.
-func TestATurnWithNoChannelIsNotReportedAsAnUnknownTurn(t *testing.T) {
-	registry := tools.NewRegistry()
-	registry.Register(&locationTool{})
-
-	located := make(chan any, 2)
-	script := newScriptedAgent(func(turn *scriptedTurn) {
-		where, err := turn.invoke("ask", nil)
-		if err != nil {
-			t.Errorf("ask over the tool channel: %v", err)
-		}
-		located <- where
-		turn.emit(agent.Event{Type: agent.EventText, Text: `{"text":"ok"}`})
-		turn.emit(agent.Event{Type: agent.EventComplete})
-	})
-	logs := &gatewayLog{}
-	rig := dialLoopback(t, script, withTools(registry), logging(logs))
-
-	// A turn with somebody behind it but nowhere to point at.
-	events, err := rig.sessions["default"].Prompt(context.Background(),
-		agent.ConversationKey{ThreadTS: "123.4"},
-		agent.SessionMetadata{UserID: nodeOwner},
-		agent.PromptRequest{Text: "hello", User: nodeOwner})
-	if err != nil {
-		t.Fatalf("prompt: %v", err)
-	}
-	for range events {
-	}
-	if got := receiveAny(t, located); got != "no location" {
-		t.Fatalf("a turn with no channel ran its tool with location %#v; there is no thread for it to post into", got)
-	}
-	if out := logs.String(); strings.Contains(out, "does not know") {
-		t.Fatalf("the gateway warned that it does not know a turn it minted itself:\n%s", out)
-	}
-
-	// And the headless road: no stream on the context at all, so the tool is
-	// ungated and locate is not reached.
-	delegator := delegatorFor(t, rig, config.AccessConfig{MainNode: "node-1"}, true)
-	if err := delegator.RunAndForget(context.Background(), "default", "the 03:00 job"); err != nil {
-		t.Fatalf("the headless run failed: %v", err)
-	}
-	if got := receiveAny(t, located); got != "no location" {
-		t.Fatalf("a headless turn's tool ran with location %#v", got)
-	}
-	if out := logs.String(); strings.Contains(out, "does not know") {
-		t.Fatalf("a scheduled job was reported as a turn the gateway does not know. Every job, workflow trigger and unfurl would log this:\n%s", out)
 	}
 }

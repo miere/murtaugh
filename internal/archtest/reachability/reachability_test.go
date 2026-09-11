@@ -79,49 +79,120 @@ func TestPatternMatchesWholeLinesOnly(t *testing.T) {
 	}
 }
 
-// The rule is written twice — once here in Go, once as a shell step in the CI
-// workflow — and the shell copy is the one CI actually runs. This is the decay
-// test: it reads the committed workflow and fails when the two drift, so adding
-// a package to Forbidden without regenerating the step cannot silently leave the
-// guard checking the old list.
-//
-// It also pins the `if` form. A pipeline ending in `grep … && exit 1` fails in
-// the clean case too, and a guard that fails when nothing is wrong gets disabled
-// within a week.
+// The shell copy of each rule is the one CI runs, so it must be exactly the
+// script the Go rule implies; any edit to it, however small, fails here.
 func TestTheCommittedCIStepMatchesTheRule(t *testing.T) {
 	const workflow = "../../../.github/workflows/ci.yml"
 	raw, err := os.ReadFile(workflow)
 	if err != nil {
 		t.Fatalf("reading %s: %v", workflow, err)
 	}
-	step := ciStep(t, string(raw), "Gateway reachability rule")
-
-	if !strings.Contains(step, "forbidden='"+reachability.Pattern()+"'") {
-		t.Errorf("the CI step's pattern has drifted from reachability.Pattern().\nstep:\n%s\nwant the line:\n          forbidden='%s'", step, reachability.Pattern())
-	}
-	if !strings.Contains(step, "go list -deps "+reachability.GatewayBinary) {
-		t.Errorf("the CI step does not check %s:\n%s", reachability.GatewayBinary, step)
-	}
-	if !strings.Contains(step, `if reached="$(`) {
-		t.Errorf("the CI step does not use the `if` form, so it fails when nothing is wrong:\n%s", step)
-	}
-	if strings.Contains(step, "&& exit 1") {
-		t.Errorf("the CI step ends a pipeline in `&& exit 1`, which also fails the clean case:\n%s", step)
+	for _, rule := range []struct {
+		step, pattern, binary, noun string
+	}{
+		{"Gateway reachability rule", reachability.Pattern(), reachability.GatewayBinary, "gateway"},
+		{"Runtime reachability rule", reachability.RuntimePattern(), reachability.RuntimeBinary, "runtime"},
+	} {
+		want := strings.Join([]string{
+			"set -euo pipefail",
+			"forbidden='" + rule.pattern + "'",
+			`deps="$(go list -deps ` + rule.binary + `)"`,
+			`if reached="$(printf '%s\n' "$deps" | grep -E "$forbidden")"; then`,
+			`  echo "::error::the ` + rule.noun + ` binary reaches a package it must not:"`,
+			`  echo "$reached"`,
+			"  exit 1",
+			"fi",
+		}, "\n")
+		if got := runScript(t, string(raw), rule.step); got != want {
+			t.Errorf("the %q step is not the script the rule implies.\n got:\n%s\nwant:\n%s", rule.step, got, want)
+		}
 	}
 }
 
-// ciStep returns the body of the named workflow step: everything indented under
-// its `run: |` up to the next step or the end of the job.
-func ciStep(t *testing.T, workflow, name string) string {
+func runScript(t *testing.T, workflow, name string) string {
 	t.Helper()
-	marker := "- name: " + name + "\n"
-	i := strings.Index(workflow, marker)
-	if i < 0 {
+	lines := strings.Split(workflow, "\n")
+	at := slices.IndexFunc(lines, func(l string) bool { return strings.TrimSpace(l) == "- name: "+name })
+	if at < 0 {
 		t.Fatalf("no CI step named %q; the reachability rule is not enforced anywhere", name)
 	}
-	rest := workflow[i+len(marker):]
-	if j := strings.Index(rest, "\n      - name: "); j >= 0 {
-		rest = rest[:j]
+	var script []string
+	indent := ""
+	for _, line := range lines[at+1:] {
+		trimmed := strings.TrimSpace(line)
+		if indent == "" {
+			if trimmed == "run: |" {
+				indent = line[:len(line)-len(strings.TrimLeft(line, " "))] + "  "
+			} else if strings.HasPrefix(trimmed, "- ") {
+				break
+			}
+			continue
+		}
+		if trimmed != "" && !strings.HasPrefix(line, indent) {
+			break
+		}
+		script = append(script, strings.TrimPrefix(line, indent))
 	}
-	return rest
+	for len(script) > 0 && strings.TrimSpace(script[len(script)-1]) == "" {
+		script = script[:len(script)-1]
+	}
+	return strings.Join(script, "\n")
+}
+
+// A node that could reach a Slack client could post as the bot without the
+// gateway deciding where, which is the one thing display requests exist to stop.
+func TestTheRuntimeBinaryReachesNoSlack(t *testing.T) {
+	reached, err := reachability.CheckRuntime(reachability.RuntimeBinary)
+	if err != nil {
+		t.Fatalf("checking %s: %v", reachability.RuntimeBinary, err)
+	}
+	if len(reached) > 0 {
+		t.Fatalf("%s reaches packages it must not: %v", reachability.RuntimeBinary, reached)
+	}
+}
+
+// The CLI links the Slack gateway, so it must trip the runtime rule; if it does
+// not, the check has stopped working.
+func TestTheRuntimeCheckReportsABinaryThatTalksToSlack(t *testing.T) {
+	reached, err := reachability.CheckRuntime("./cmd/murtaugh")
+	if err != nil {
+		t.Fatalf("checking ./cmd/murtaugh: %v", err)
+	}
+	for _, want := range []string{
+		"github.com/slack-go/slack",
+		reachability.Module + "/internal/slack/gateway",
+		reachability.Module + "/internal/tools/slack/sendmsg",
+	} {
+		if !slices.Contains(reached, want) {
+			t.Errorf("./cmd/murtaugh does not reach %s; the check has stopped working", want)
+		}
+	}
+}
+
+func TestRuntimePatternMatchesWholeSubtreesOnly(t *testing.T) {
+	re, err := regexp.Compile(reachability.RuntimePattern())
+	if err != nil {
+		t.Fatalf("RuntimePattern() does not compile: %v", err)
+	}
+	for _, forbidden := range []string{
+		reachability.Module + "/internal/slack",
+		reachability.Module + "/internal/slack/display",
+		reachability.Module + "/internal/tools/slack/sendmsg",
+		"github.com/slack-go/slack",
+		"github.com/slack-go/slack/socketmode",
+	} {
+		if !re.MatchString(forbidden) {
+			t.Errorf("RuntimePattern() does not match %q", forbidden)
+		}
+	}
+	for _, allowed := range []string{
+		reachability.Module + "/internal/slackish",
+		reachability.Module + "/internal/tools/ask",
+		reachability.Module + "/internal/agent",
+		"github.com/slack-go/slacker",
+	} {
+		if re.MatchString(allowed) {
+			t.Errorf("RuntimePattern() matches %q, which the rule permits", allowed)
+		}
+	}
 }

@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -784,6 +785,14 @@ func TestEncodeCoversEveryEventKind(t *testing.T) {
 			Type:       agent.EventPermission,
 			Permission: &agent.PermissionPrompt{Decision: make(chan string, 1)},
 		}, EventPermission},
+		agent.EventQuestion: {agent.Event{
+			Type:     agent.EventQuestion,
+			Question: &agent.QuestionPrompt{Answer: make(chan agent.DisplayAnswer, 1)},
+		}, EventQuestion},
+		agent.EventPlan: {agent.Event{
+			Type: agent.EventPlan,
+			Plan: &agent.PlanPrompt{Answer: make(chan agent.DisplayAnswer, 1)},
+		}, EventPlan},
 	}
 
 	declared := agentEventKinds(t)
@@ -910,6 +919,8 @@ func TestWireVocabularyIsIndependent(t *testing.T) {
 		{EventTask, "task"},
 		{EventAttachment, "attachment"},
 		{EventPermission, "permission"},
+		{EventQuestion, "question"},
+		{EventPlan, "plan"},
 	} {
 		if string(tc.got) != tc.want {
 			t.Errorf("wire kind = %q, want %q", tc.got, tc.want)
@@ -924,4 +935,136 @@ func mustJSON(t *testing.T, v any) []byte {
 		t.Fatalf("marshal: %v", err)
 	}
 	return raw
+}
+
+func answerTrip(t *testing.T, enc *Encoder, id string, a agent.DisplayAnswer) {
+	t.Helper()
+	msg, err := AnswerDisplay(EncodeDisplayAnswer(id, a))
+	if err != nil {
+		t.Fatalf("AnswerDisplay: %v", err)
+	}
+	raw, err := msg.Encode()
+	if err != nil {
+		t.Fatalf("encode frame: %v", err)
+	}
+	back, err := DecodeMessage(raw)
+	if err != nil {
+		t.Fatalf("decode frame: %v", err)
+	}
+	if back.Kind != MessageAnswer || back.ID != id {
+		t.Fatalf("the answer frame came back as kind %q id %q", back.Kind, back.ID)
+	}
+	var answer DisplayAnswer
+	if err := back.Into(&answer); err != nil {
+		t.Fatalf("read answer: %v", err)
+	}
+	if err := enc.Answer(answer); err != nil {
+		t.Fatalf("Answer: %v", err)
+	}
+}
+
+func TestAQuestionRoundTripsAndItsAnswerReachesTheTool(t *testing.T) {
+	enc, dec := NewEncoder(), NewDecoder(nil)
+	waiting := make(chan agent.DisplayAnswer, 1)
+	request := agent.QuestionRequest{Title: "Deploy", Questions: []agent.Question{
+		{Key: "q0", Header: "Env", Question: "Where?", Options: []agent.QuestionOption{{Label: "Staging", Description: "safe"}, {Label: "Production"}}},
+		{Key: "q1", Question: "Regions?", MultiSelect: true, Options: []agent.QuestionOption{{Label: "US"}, {Label: "EU"}}},
+	}}
+
+	back, _, pending := roundTrip(t, enc, dec, agent.Event{
+		Type:     agent.EventQuestion,
+		Question: &agent.QuestionPrompt{Request: request, Answer: waiting},
+	})
+	if back.Type != agent.EventQuestion || back.Question == nil {
+		t.Fatalf("decoded %+v, want a question", back)
+	}
+	if !reflect.DeepEqual(back.Question.Request, request) {
+		t.Fatalf("the question changed crossing the wire:\n got %+v\nwant %+v", back.Question.Request, request)
+	}
+	if pending == nil || pending.ID == "" {
+		t.Fatalf("Decode returned %+v; the gateway has nothing to answer under", pending)
+	}
+
+	back.Question.Answer <- agent.DisplayAnswer{Outcome: agent.DisplayAnswered, Answers: map[string][]string{"q0": {"Production"}, "q1": {"US", "EU"}}, UserID: "U1"}
+	answerTrip(t, enc, pending.ID, <-back.Question.Answer)
+
+	select {
+	case got := <-waiting:
+		if got.Outcome != agent.DisplayAnswered || got.UserID != "U1" || len(got.Answers["q1"]) != 2 {
+			t.Fatalf("the tool received %+v", got)
+		}
+	default:
+		t.Fatal("the tool is still waiting; the answer never arrived")
+	}
+	if n := enc.Pending(); n != 0 {
+		t.Errorf("pending = %d after answering, want 0", n)
+	}
+}
+
+func TestAPlanRoundTripsAndItsAnswerReachesTheTool(t *testing.T) {
+	enc, dec := NewEncoder(), NewDecoder(nil)
+	waiting := make(chan agent.DisplayAnswer, 1)
+	request := agent.PlanRequest{Title: "Plan", Plan: "1. back up\n2. migrate"}
+
+	back, _, pending := roundTrip(t, enc, dec, agent.Event{
+		Type: agent.EventPlan,
+		Plan: &agent.PlanPrompt{Request: request, Answer: waiting},
+	})
+	if back.Type != agent.EventPlan || back.Plan == nil || back.Plan.Request != request {
+		t.Fatalf("decoded %+v, want the plan unchanged", back)
+	}
+
+	back.Plan.Answer <- agent.DisplayAnswer{Outcome: agent.DisplayAnswered, Choice: agent.PlanRevise}
+	answerTrip(t, enc, pending.ID, <-back.Plan.Answer)
+
+	select {
+	case got := <-waiting:
+		if got.Outcome != agent.DisplayAnswered || got.Choice != agent.PlanRevise {
+			t.Fatalf("the tool received %+v", got)
+		}
+	default:
+		t.Fatal("the tool is still waiting; the answer never arrived")
+	}
+}
+
+func TestADisplayAnswerForAnUnknownRequestIsAnError(t *testing.T) {
+	if err := NewEncoder().Answer(DisplayAnswer{ID: "no-such-request"}); err == nil {
+		t.Fatal("Answer of an unknown id = nil, want an error")
+	}
+}
+
+// The gateway alone decides where a card is drawn, so every field a display
+// request may carry is listed here and a new one fails until someone reviews it.
+func TestDisplayRequestsCarryOnlyReviewedFields(t *testing.T) {
+	want := map[string][]string{
+		"QuestionRequest": {"ID id", "Title title", "Questions questions"},
+		"Question":        {"Key key", "Header header", "Question question", "Options options", "MultiSelect multi_select"},
+		"QuestionOption":  {"Label label", "Description description"},
+		"PlanRequest":     {"ID id", "Title title", "Plan plan"},
+	}
+	got := map[string][]string{}
+	var walk func(reflect.Type)
+	walk = func(typ reflect.Type) {
+		for typ.Kind() == reflect.Pointer || typ.Kind() == reflect.Slice || typ.Kind() == reflect.Map {
+			typ = typ.Elem()
+		}
+		if typ.Kind() != reflect.Struct {
+			return
+		}
+		if _, seen := got[typ.Name()]; seen {
+			return
+		}
+		got[typ.Name()] = []string{}
+		for i := 0; i < typ.NumField(); i++ {
+			field := typ.Field(i)
+			tag, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+			got[typ.Name()] = append(got[typ.Name()], field.Name+" "+tag)
+			walk(field.Type)
+		}
+	}
+	walk(reflect.TypeOf(QuestionRequest{}))
+	walk(reflect.TypeOf(PlanRequest{}))
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("display request fields changed; review that none names a destination, then update this list.\n got %v\nwant %v", got, want)
+	}
 }

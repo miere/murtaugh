@@ -25,7 +25,6 @@ import (
 	"github.com/miere/murtaugh/internal/nodeserve"
 	"github.com/miere/murtaugh/internal/nodesocket"
 	"github.com/miere/murtaugh/internal/nodetoken"
-	"github.com/miere/murtaugh/internal/tools"
 )
 
 // This file is #193's verification, over a real WebSocket on loopback: a chat
@@ -51,10 +50,6 @@ type loopback struct {
 	token    string
 	sessions map[string]*agent.SessionManager
 	agent    *scriptedAgent
-	// registry is the GATEWAY's tool registry, or nil when this rig has no tool
-	// channel. Kept so a delegator built off this rig serves the same tools the
-	// chat path does.
-	registry *tools.Registry
 	gate     *nodeserve.ToolGate
 	// background is the NODE's sink — what a backend on the node calls when it
 	// emits outside a turn.
@@ -63,10 +58,6 @@ type loopback struct {
 	// notices is what the GATEWAY's background hook received. It is the far end
 	// of the same path.
 	notices chan notice
-	// proxy is the NODE's stand-in registry for Murtaugh's tools; nil unless the
-	// rig was built with withTools. Its registry is what a node's agent would
-	// have been built from.
-	proxy *nodeserve.ToolProxy
 	// claim is the NODE's advertiser — what it tells the gateway it serves. It
 	// is always present, because a node that claims nothing is a real state and
 	// not a disabled feature.
@@ -105,10 +96,6 @@ type rigConfig struct {
 	// journal is the gateway's recorder. nil discards, which is what a Host
 	// built without one does.
 	journal journal.Recorder
-	// registry is the GATEWAY's tool registry, and serving it is opt-in: a node
-	// built with no ToolProxy never asks for a tool list, which is the state
-	// every test above this one is in and the state a node was in before #194.
-	registry *tools.Registry
 	// pins is where delegation writes its choice. nil means the gateway does
 	// not pin, which is a supported state: every conversation is re-elected on
 	// its next cold session.
@@ -140,12 +127,6 @@ type rigConfig struct {
 // NOT get published.
 func withoutWaitingForAttach() rigOption {
 	return func(c *rigConfig) { c.waitForAttach = false }
-}
-
-// withTools gives the gateway a registry and the node a proxy for it — the tool
-// channel switched on.
-func withTools(registry *tools.Registry) rigOption {
-	return func(c *rigConfig) { c.registry = registry }
 }
 
 // claiming gives the node something to advertise before it dials.
@@ -255,7 +236,7 @@ func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *lo
 		Agents: map[string]config.AgentProfile{"default": {}},
 		Chat:   config.ChatConfig{Enabled: true, Defaults: config.ChatDefaults{Agent: "default"}},
 	}
-	runtime := nodehost.Runtime(host)(agentCfg, cfg.registry, gatewayLogger)(agentruntime.Hooks{
+	runtime := nodehost.Runtime(host)(agentCfg, gatewayLogger)(agentruntime.Hooks{
 		Chat: true,
 		Approvers: map[string]agentruntime.Approver{
 			"default": approverFunc(func(_ context.Context, tool, summary string) (bool, string) {
@@ -278,13 +259,6 @@ func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *lo
 	// Set while unbound, exactly as cmd/murtaugh-runtime sets it before its
 	// first dial: the value is held and the handshake answer carries it.
 	claim.Publish(ctx, cfg.claim)
-	var proxy *nodeserve.ToolProxy
-	if cfg.registry != nil {
-		proxy = nodeserve.NewToolProxy(testLogger())
-		// What a node's runtime builder would be handed. The scripted agent
-		// reaches for tools out of it exactly as a real backend's toolset does.
-		script.tools = proxy.Registry()
-	}
 	script.gate = gate
 	conn, err := nodesocket.Dial(ctx, "ws://"+listener.Addr().String(), nodesocket.DialOptions{Token: minted.Token})
 	if err != nil {
@@ -299,7 +273,6 @@ func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *lo
 			Logger:      testLogger(),
 			Gate:        gate,
 			Background:  background,
-			Tools:       proxy,
 			Advertise:   claim,
 			Configure:   cfg.configure,
 			Restart:     cfg.restart,
@@ -327,12 +300,10 @@ func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *lo
 		token:      minted.Token,
 		sessions:   runtime.Sessions,
 		agent:      script,
-		registry:   cfg.registry,
 		gate:       gate,
 		background: background,
 		approved:   approved,
 		notices:    notices,
-		proxy:      proxy,
 		claim:      claim,
 
 		nodeStopped: nodeStopped,
@@ -349,7 +320,7 @@ func (l *loopback) reload(t *testing.T, access config.AccessConfig) *agent.Sessi
 		Chat:   config.ChatConfig{Enabled: true, Defaults: config.ChatDefaults{Agent: "default"}},
 		Access: access,
 	}
-	rt := nodehost.Runtime(l.host)(cfg, nil, testLogger())(agentruntime.Hooks{Chat: true})
+	rt := nodehost.Runtime(l.host)(cfg, testLogger())(agentruntime.Hooks{Chat: true})
 	manager := rt.Sessions["default"]
 	if manager == nil {
 		t.Fatal("the reloaded runtime built no session manager")
@@ -729,6 +700,37 @@ func TestABackgroundApprovalIsAnsweredRatherThanSent(t *testing.T) {
 	case got := <-rig.notices:
 		t.Fatalf("an approval request was rendered as a background event: %+v", got.event)
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// The session id on a background frame is the node's to choose, so one naming
+// another node's session must never reach that conversation's thread.
+func TestANodeCannotPostIntoAnotherNodesSession(t *testing.T) {
+	rig := dialLoopback(t, newScriptedAgent(func(turn *scriptedTurn) {
+		turn.emit(agent.Event{Type: agent.EventComplete, StopReason: "end_turn"})
+	}))
+	manager := rig.sessions["default"]
+	key := agent.ConversationKey{ChannelID: "C1", ThreadTS: "123.4"}
+	events, err := manager.Prompt(context.Background(), key,
+		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4", UserID: nodeOwner},
+		agent.PromptRequest{Text: "hello", Channel: "C1", Thread: "123.4"})
+	if err != nil {
+		t.Fatalf("prompt: %v", err)
+	}
+	for range events {
+	}
+	victim, ok := manager.Lookup(key)
+	if !ok {
+		t.Fatal("the manager did not record the node's session")
+	}
+
+	intruder := attachRaw(t, rig, "node-intruder")
+	intruder.send(t, mustBackground(t, victim, agentwire.Event{Type: agentwire.EventText, Text: "posted as the bot"}))
+
+	select {
+	case got := <-rig.notices:
+		t.Fatalf("another node's background frame reached session %q as %+v", got.sessionID, got.event)
+	case <-time.After(500 * time.Millisecond):
 	}
 }
 
@@ -1246,13 +1248,6 @@ func TestRevocationClosesTheRevokedConnectionAndLeavesTheFleet(t *testing.T) {
 	})
 }
 
-// redial brings the SAME node back after its connection dropped: the same
-// agent, the same tool proxy and the same credential, over a NEW socket.
-//
-// It is what cmd/murtaugh-runtime's redial loop does about a second after a
-// laptop wakes up, and it is the only way a test can observe whether anything on
-// either side repeats a call that was in flight when the previous connection
-// died — with one connection there is no path by which a repeat could arrive.
 func redial(t *testing.T, rig *loopback) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1268,7 +1263,6 @@ func redial(t *testing.T, rig *loopback) {
 			Logger:     testLogger(),
 			Gate:       rig.gate,
 			Background: rig.background,
-			Tools:      rig.proxy,
 			// The same advertiser: a reconnect re-advertises from scratch,
 			// which is what makes dropping a push while unbound harmless.
 			Advertise:   rig.claim,
@@ -1346,10 +1340,6 @@ func attachScripted(t *testing.T, rig *loopback, nodeID string, script *scripted
 type scriptedAgent struct {
 	script func(*scriptedTurn)
 	gate   *nodeserve.ToolGate
-	// tools is the node-side registry a real backend's toolset would be
-	// resolved from. A scripted turn reaches into it the way a model's tool call
-	// would.
-	tools *tools.Registry
 	// initErr makes the agent refuse to come up, which is a real state — a
 	// backend binary that is not installed on the node's machine.
 	initErr error
@@ -1364,35 +1354,14 @@ type scriptedAgent struct {
 	// Both exist for the session-leak guard in headless_test.go.
 	opened    int
 	closedIDs map[string]bool
-	// The two moments a real backend latches its toolset, recorded as the names
-	// visible in the node's registry at each. native resolves inside Initialize;
-	// an acp/claude_code agent's aggregator resolves when its first session is
-	// registered, which is inside NewSession. Both must already see the
-	// gateway's tools or that backend is tool-less for the life of the process.
-	atInitialize []string
-	atNewSession []string
 }
 
 type scriptedTurn struct {
 	ctx       context.Context
 	gate      *nodeserve.ToolGate
-	tools     *tools.Registry
 	events    chan agent.Event
 	cancelled chan struct{}
 	once      sync.Once
-}
-
-// invoke calls a tool out of the node's registry, which is what a backend does
-// with the toolset toolset.Resolve handed it.
-func (t *scriptedTurn) invoke(name string, args map[string]any) (any, error) {
-	if t.tools == nil {
-		return nil, errors.New("this rig was built without a tool channel")
-	}
-	tool, ok := t.tools.Get(name)
-	if !ok {
-		return nil, fmt.Errorf("no tool named %q reached the node", name)
-	}
-	return tool.Invoke(t.ctx, args)
 }
 
 func newScriptedAgent(script func(*scriptedTurn)) *scriptedAgent {
@@ -1402,7 +1371,6 @@ func newScriptedAgent(script func(*scriptedTurn)) *scriptedAgent {
 func (a *scriptedAgent) Initialize(context.Context) error {
 	a.mu.Lock()
 	a.initCalls++
-	a.atInitialize = registryNames(a.tools)
 	err := a.initErr
 	a.mu.Unlock()
 	return err
@@ -1413,7 +1381,6 @@ func (a *scriptedAgent) Initialize(context.Context) error {
 // opened/closed can be counted rather than assumed.
 func (a *scriptedAgent) NewSession(_ context.Context, _ agent.SessionMetadata) (agent.Session, error) {
 	a.mu.Lock()
-	a.atNewSession = registryNames(a.tools)
 	a.opened++
 	id := fmt.Sprintf("node-session-%d", a.opened)
 	a.mu.Unlock()
@@ -1441,24 +1408,10 @@ func (a *scriptedAgent) sessionCounts() (opened, closed int) {
 	return a.opened, len(a.closedIDs)
 }
 
-// registryNames is what a backend resolving its toolset out of the node's
-// registry would see at that instant.
-func registryNames(reg *tools.Registry) []string {
-	if reg == nil {
-		return nil
-	}
-	var names []string
-	for _, t := range reg.All() {
-		names = append(names, t.Name())
-	}
-	return names
-}
-
 func (a *scriptedAgent) Prompt(ctx context.Context, sessionID string, req agent.PromptRequest) (<-chan agent.Event, error) {
 	turn := &scriptedTurn{
 		ctx:       ctx,
 		gate:      a.gate,
-		tools:     a.tools,
 		events:    make(chan agent.Event, 8),
 		cancelled: make(chan struct{}),
 	}
@@ -1514,18 +1467,6 @@ func (a *scriptedAgent) initializes() int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.initCalls
-}
-
-func (a *scriptedAgent) toolsAtInitialize() []string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return append([]string(nil), a.atInitialize...)
-}
-
-func (a *scriptedAgent) toolsAtNewSession() []string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return append([]string(nil), a.atNewSession...)
 }
 
 func (t *scriptedTurn) emit(ev agent.Event) {

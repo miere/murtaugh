@@ -324,6 +324,23 @@ func (c *Client) Prompt(ctx context.Context, sessionID string, req agent.PromptR
 	c.mu.Unlock()
 
 	events := make(chan agent.Event, 32)
+	turnCtx := runCtx
+	runCtx = agent.WithTurnEmitter(runCtx, func(ev agent.Event) (sent bool) {
+		defer func() {
+			if recover() != nil {
+				sent = false
+			}
+		}()
+		if turnCtx.Err() != nil {
+			return false
+		}
+		select {
+		case events <- ev:
+			return true
+		case <-turnCtx.Done():
+			return false
+		}
+	})
 	go func() {
 		defer close(events)
 		defer func() {

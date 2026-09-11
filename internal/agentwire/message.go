@@ -35,16 +35,8 @@ const (
 	MessageChunk MessageKind = "chunk"
 )
 
-// Method is the request vocabulary, and it is not one list but two.
-//
-// Gateway → node is agent.Client's five methods plus session.close, which is not
-// on the interface but is asserted for on the concrete client and tears down a
-// real per-conversation process on two of the three backends.
-//
-// Node → gateway is the tool channel: tool.list and tool.call. It is the only
-// direction a node initiates a call in, and the direction ids for it are minted
-// by the NODE — see the note on Message about ids being per direction. A shared
-// pending map would collapse two live requests both numbered "1".
+// Method ids are per direction: node.advertise, the one call a node makes, is
+// numbered by the node and must never be matched against the gateway's calls.
 type Method string
 
 const (
@@ -55,16 +47,6 @@ const (
 	MethodCloseSession Method = "session.close"
 	MethodClose        Method = "close"
 
-	// MethodToolList asks the gateway which of Murtaugh's tools this node may
-	// reach. The answer is the partition applied (toolset.Reach), not the
-	// gateway's registry: a node never learns the name of a tool it may not
-	// call.
-	MethodToolList Method = "tool.list"
-	// MethodToolCall runs one of them, on the gateway, with the gateway's
-	// credentials. The gateway re-checks the partition on every call — a node
-	// that names a tool it was not offered is refused rather than filtered,
-	// because a node cannot be trusted to filter itself.
-	MethodToolCall Method = "tool.call"
 	// MethodAdvertise replaces what the gateway believes this node claims. Its
 	// body is an Advertisement and its answer is Empty.
 	//

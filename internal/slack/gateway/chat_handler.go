@@ -108,6 +108,7 @@ type ChatHandler struct {
 	// that agent's approval settings — today, whether a settled card is kept or
 	// swept.
 	permissionAskers map[string]agent.PermissionAsker
+	display          displayer
 	// backgroundEventsRouter renders a claude_code background completion (a subagent
 	// finishing after its turn ended) into the conversation's thread. Handle
 	// registers each turn's thread with it so the router knows where to post. nil
@@ -331,6 +332,16 @@ func (h *ChatHandler) WithPermissionAskers(askers map[string]agent.PermissionAsk
 		return h
 	}
 	h.permissionAskers = askers
+	return h
+}
+
+type displayer interface {
+	Question(ctx context.Context, loc agent.TurnLocation, req agent.QuestionRequest) (agent.DisplayAnswer, error)
+	Plan(ctx context.Context, loc agent.TurnLocation, req agent.PlanRequest) (agent.DisplayAnswer, error)
+}
+
+func (h *ChatHandler) WithDisplay(d displayer) *ChatHandler {
+	h.display = d
 	return h
 }
 
@@ -727,144 +738,176 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest, route ChatRou
 	// trips it. A long turn that keeps emitting tool calls never times out.
 	idle := time.NewTimer(h.effectiveIdleTimeout())
 	defer idle.Stop()
+	var held []heldEvent
 	for {
-		select {
-		case <-idle.C:
-			// The agent went silent for the whole idle window. Ask it to stop, post
-			// an honest notice (the parent ctx is still alive — we never cancelled
-			// it), finalise the open section, then unblock the in-flight request and
-			// drain so the stream tears down cleanly. Tool blocks keep their last
-			// reported state: the agent did not fail, we stopped waiting.
-			timedOut = true
-			if sid, ok := sessions.Lookup(key); ok {
-				cancelCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				if cerr := sessions.Cancel(cancelCtx, sid); cerr != nil {
-					h.logger.Warn("agent session cancel on idle timeout failed", "error", cerr, "session_id", sid)
+		var event agent.Event
+		ok := true
+		if len(held) > 0 {
+			event, ok = held[0].event, held[0].ok
+			held = held[1:]
+		} else {
+			select {
+			case <-idle.C:
+				// The agent went silent for the whole idle window. Ask it to stop, post
+				// an honest notice (the parent ctx is still alive — we never cancelled
+				// it), finalise the open section, then unblock the in-flight request and
+				// drain so the stream tears down cleanly. Tool blocks keep their last
+				// reported state: the agent did not fail, we stopped waiting.
+				timedOut = true
+				if sid, ok := sessions.Lookup(key); ok {
+					cancelCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					if cerr := sessions.Cancel(cancelCtx, sid); cerr != nil {
+						h.logger.Warn("agent session cancel on idle timeout failed", "error", cerr, "session_id", sid)
+					}
+					cancel()
+					// Drop the wedged session so the next turn opens a fresh one rather
+					// than reusing a session that may still hold an in-flight tool call —
+					// agents without session/cancel cannot be told to abandon it. The
+					// shared agent process keeps running; only this binding is reset.
+					discardSession(sessions, key)
 				}
-				cancel()
-				// Drop the wedged session so the next turn opens a fresh one rather
-				// than reusing a session that may still hold an in-flight tool call —
-				// agents without session/cancel cannot be told to abandon it. The
-				// shared agent process keeps running; only this binding is reset.
-				discardSession(sessions, key)
+				// Settle the reply into its own committed message first, then post the
+				// notice as a discrete context-block aside below it — a light grey nudge
+				// rather than an error card wedged into the reply stream.
+				renderer.EnsureStopped(ctx)
+				h.postIdleAside(ctx, req.ChannelID, streamThreadTS)
+				cancelPrompt()
+				// Drain until the agent layer closes the channel. The prompt goroutine
+				// and the shared readLoop block on their sends; abandoning the channel
+				// here would stall event delivery for every other conversation.
+				for range events {
+				}
+				h.logger.Warn("agent chat timed out on inactivity", "source", req.Source, "channel", req.ChannelID, "duration", time.Since(startedAt), "idle_timeout", h.effectiveIdleTimeout())
+				return nil
+			case event, ok = <-events:
 			}
-			// Settle the reply into its own committed message first, then post the
-			// notice as a discrete context-block aside below it — a light grey nudge
-			// rather than an error card wedged into the reply stream.
-			renderer.EnsureStopped(ctx)
-			h.postIdleAside(ctx, req.ChannelID, streamThreadTS)
-			cancelPrompt()
-			// Drain until the agent layer closes the channel. The prompt goroutine
-			// and the shared readLoop block on their sends; abandoning the channel
-			// here would stall event delivery for every other conversation.
-			for range events {
+		}
+		if !ok {
+			// Channel closed without an explicit EventComplete/EventError.
+			return finish()
+		}
+		resetIdleTimer(idle, h.effectiveIdleTimeout())
+		switch event.Type {
+		case agent.EventText:
+			if event.Text != "" {
+				chunkSeen++
+				byteSeen += len(event.Text)
+				respBuf.WriteString(event.Text)
+				if !firstChunkLogged {
+					firstChunkLogged = true
+					h.logger.Info("received first agent text chunk", "source", req.Source, "channel", req.ChannelID, "duration", time.Since(startedAt), "bytes", len(event.Text))
+				}
 			}
-			h.logger.Warn("agent chat timed out on inactivity", "source", req.Source, "channel", req.ChannelID, "duration", time.Since(startedAt), "idle_timeout", h.effectiveIdleTimeout())
-			return nil
-		case event, ok := <-events:
-			if !ok {
-				// Channel closed without an explicit EventComplete/EventError.
-				return finish()
+			if err := renderer.Text(ctx, event.Text); err != nil {
+				return err
+			}
+		case agent.EventStatus:
+			// Progress/meta only (e.g. compaction, empty-reply retry, or a
+			// tool-heartbeat keep-alive from either backend) — never part of the
+			// reply. The idle timer was already reset above, which is the whole
+			// point of the heartbeat: it keeps a long tool's turn alive.
+			if event.Text != "" {
+				h.logger.Debug("agent status", "source", req.Source, "channel", req.ChannelID, "status", event.Text)
+			}
+		case agent.EventTask:
+			if event.Task == nil {
+				continue
+			}
+			// Plan entries are the agent's task list, not work it ran — only tool
+			// calls count towards what an empty turn actually did.
+			if event.Task.Kind != agent.TaskKindPlan && event.Task.ID != "" {
+				toolsRun[event.Task.ID] = struct{}{}
+			}
+			if err := renderer.Task(ctx, event.Task); err != nil {
+				return err
+			}
+		case agent.EventAttachment:
+			if event.Attachment == nil {
+				continue
+			}
+			// Best-effort: a failed upload is logged but never aborts the turn —
+			// the text reply still matters. attachSeen counts only successful
+			// deliveries, so a failed attachment-only turn still surfaces the
+			// empty-reply note rather than going silent.
+			if err := renderer.Attachment(ctx, event.Attachment); err != nil {
+				h.logger.Warn("failed to deliver agent attachment", "source", req.Source, "channel", req.ChannelID, "filename", event.Attachment.Filename, "error", err)
+			} else {
+				attachSeen++
+				h.logger.Info("delivered agent attachment", "source", req.Source, "channel", req.ChannelID, "filename", event.Attachment.Filename)
+			}
+		case agent.EventPermission:
+			// An ACP agent is asking the human to approve a tool call. Resolve it
+			// on this event loop — so it is ordered after the reply text/tasks that
+			// preceded it on the stream — and feed the decision back to the agent.
+			// Settling the open reply first means the approval card lands below a
+			// committed message instead of an unfinished, streaming one (the "looks
+			// truncated" symptom); this mirrors the native loop, whose inline
+			// approval is naturally ordered after the tool's task event.
+			if event.Permission == nil {
+				continue
+			}
+			decision := h.askPermission(ctx, req, route.Agent, streamThreadTS, renderer, event.Permission.Request)
+			if event.Permission.Decision != nil {
+				event.Permission.Decision <- decision
+			}
+		case agent.EventQuestion:
+			if event.Question == nil {
+				continue
+			}
+			answer, arrived := h.draw(ctx, renderer, events, func(cardCtx context.Context, d displayer, loc agent.TurnLocation) (agent.DisplayAnswer, error) {
+				return d.Question(cardCtx, loc, event.Question.Request)
+			}, req, streamThreadTS)
+			held = append(held, arrived...)
+			if event.Question.Answer != nil {
+				event.Question.Answer <- answer
 			}
 			resetIdleTimer(idle, h.effectiveIdleTimeout())
-			switch event.Type {
-			case agent.EventText:
-				if event.Text != "" {
-					chunkSeen++
-					byteSeen += len(event.Text)
-					respBuf.WriteString(event.Text)
-					if !firstChunkLogged {
-						firstChunkLogged = true
-						h.logger.Info("received first agent text chunk", "source", req.Source, "channel", req.ChannelID, "duration", time.Since(startedAt), "bytes", len(event.Text))
-					}
-				}
-				if err := renderer.Text(ctx, event.Text); err != nil {
-					return err
-				}
-			case agent.EventStatus:
-				// Progress/meta only (e.g. compaction, empty-reply retry, or a
-				// tool-heartbeat keep-alive from either backend) — never part of the
-				// reply. The idle timer was already reset above, which is the whole
-				// point of the heartbeat: it keeps a long tool's turn alive.
-				if event.Text != "" {
-					h.logger.Debug("agent status", "source", req.Source, "channel", req.ChannelID, "status", event.Text)
-				}
-			case agent.EventTask:
-				if event.Task == nil {
-					continue
-				}
-				// Plan entries are the agent's task list, not work it ran — only tool
-				// calls count towards what an empty turn actually did.
-				if event.Task.Kind != agent.TaskKindPlan && event.Task.ID != "" {
-					toolsRun[event.Task.ID] = struct{}{}
-				}
-				if err := renderer.Task(ctx, event.Task); err != nil {
-					return err
-				}
-			case agent.EventAttachment:
-				if event.Attachment == nil {
-					continue
-				}
-				// Best-effort: a failed upload is logged but never aborts the turn —
-				// the text reply still matters. attachSeen counts only successful
-				// deliveries, so a failed attachment-only turn still surfaces the
-				// empty-reply note rather than going silent.
-				if err := renderer.Attachment(ctx, event.Attachment); err != nil {
-					h.logger.Warn("failed to deliver agent attachment", "source", req.Source, "channel", req.ChannelID, "filename", event.Attachment.Filename, "error", err)
-				} else {
-					attachSeen++
-					h.logger.Info("delivered agent attachment", "source", req.Source, "channel", req.ChannelID, "filename", event.Attachment.Filename)
-				}
-			case agent.EventPermission:
-				// An ACP agent is asking the human to approve a tool call. Resolve it
-				// on this event loop — so it is ordered after the reply text/tasks that
-				// preceded it on the stream — and feed the decision back to the agent.
-				// Settling the open reply first means the approval card lands below a
-				// committed message instead of an unfinished, streaming one (the "looks
-				// truncated" symptom); this mirrors the native loop, whose inline
-				// approval is naturally ordered after the tool's task event.
-				if event.Permission == nil {
-					continue
-				}
-				decision := h.askPermission(ctx, req, route.Agent, streamThreadTS, renderer, event.Permission.Request)
-				if event.Permission.Decision != nil {
-					event.Permission.Decision <- decision
-				}
-			case agent.EventError:
-				// Recorded first so every exit below reports the same cause — including
-				// the cancellation path, which the session log reads as an interrupt
-				// even when our own ctx has not been cancelled yet (the grace period).
-				turnErr = event.Error
-				// A caller interrupt (new message / /stop) surfaces here as a context
-				// cancellation, not an agent failure: return it and let the deferred
-				// interrupt handler render the "_interrupted_" marker without painting
-				// a tool red. Real agent errors are surfaced on the reply surface.
-				if errors.Is(event.Error, context.Canceled) || errors.Is(context.Cause(ctx), context.Canceled) {
-					return event.Error
-				}
-				// A credential rejected mid-turn is the admin's to repair, not the
-				// user's. Drop the session so the retry re-launches rather than
-				// reusing a process whose credential the server has refused.
-				if h.failedOnCredential(route.Agent, event.Error) {
-					discardSession(sessions, key)
-					h.logger.Warn("claude_code credential rejected mid-turn; asked admin to re-authenticate",
-						"agent", route.Agent, "channel", req.ChannelID, "session_id", sessionID)
-					return renderer.Fail(ctx, errCredentialBlocked)
-				}
-				if errors.Is(event.Error, agent.ErrToolCeiling) {
-					// A tool blew past its ceiling. The backend may still be running it
-					// and (lacking session/cancel) cannot be stopped, so drop the session
-					// binding like the idle path — the next message opens a fresh session.
-					// Matched on the backend-neutral error: any backend that grows a
-					// ceiling gets this handling without touching the relay.
-					discardSession(sessions, key)
-					h.logger.Warn("dropped agent session after tool ceiling", "source", req.Source, "channel", req.ChannelID, "session_id", sessionID)
-				}
-				return renderer.Fail(ctx, event.Error)
-			case agent.EventComplete:
-				stopReason = event.StopReason
-				return finish()
+		case agent.EventPlan:
+			if event.Plan == nil {
+				continue
 			}
+			answer, arrived := h.draw(ctx, renderer, events, func(cardCtx context.Context, d displayer, loc agent.TurnLocation) (agent.DisplayAnswer, error) {
+				return d.Plan(cardCtx, loc, event.Plan.Request)
+			}, req, streamThreadTS)
+			held = append(held, arrived...)
+			if event.Plan.Answer != nil {
+				event.Plan.Answer <- answer
+			}
+			resetIdleTimer(idle, h.effectiveIdleTimeout())
+		case agent.EventError:
+			// Recorded first so every exit below reports the same cause — including
+			// the cancellation path, which the session log reads as an interrupt
+			// even when our own ctx has not been cancelled yet (the grace period).
+			turnErr = event.Error
+			// A caller interrupt (new message / /stop) surfaces here as a context
+			// cancellation, not an agent failure: return it and let the deferred
+			// interrupt handler render the "_interrupted_" marker without painting
+			// a tool red. Real agent errors are surfaced on the reply surface.
+			if errors.Is(event.Error, context.Canceled) || errors.Is(context.Cause(ctx), context.Canceled) {
+				return event.Error
+			}
+			// A credential rejected mid-turn is the admin's to repair, not the
+			// user's. Drop the session so the retry re-launches rather than
+			// reusing a process whose credential the server has refused.
+			if h.failedOnCredential(route.Agent, event.Error) {
+				discardSession(sessions, key)
+				h.logger.Warn("claude_code credential rejected mid-turn; asked admin to re-authenticate",
+					"agent", route.Agent, "channel", req.ChannelID, "session_id", sessionID)
+				return renderer.Fail(ctx, errCredentialBlocked)
+			}
+			if errors.Is(event.Error, agent.ErrToolCeiling) {
+				// A tool blew past its ceiling. The backend may still be running it
+				// and (lacking session/cancel) cannot be stopped, so drop the session
+				// binding like the idle path — the next message opens a fresh session.
+				// Matched on the backend-neutral error: any backend that grows a
+				// ceiling gets this handling without touching the relay.
+				discardSession(sessions, key)
+				h.logger.Warn("dropped agent session after tool ceiling", "source", req.Source, "channel", req.ChannelID, "session_id", sessionID)
+			}
+			return renderer.Fail(ctx, event.Error)
+		case agent.EventComplete:
+			stopReason = event.StopReason
+			return finish()
 		}
 	}
 }
@@ -889,6 +932,50 @@ func (h *ChatHandler) askPermission(ctx context.Context, req ChatRequest, agentN
 		return ""
 	}
 	return optionID
+}
+
+type heldEvent struct {
+	event agent.Event
+	ok    bool
+}
+
+func (h *ChatHandler) draw(ctx context.Context, renderer chatRenderer, events <-chan agent.Event, ask func(context.Context, displayer, agent.TurnLocation) (agent.DisplayAnswer, error), req ChatRequest, threadTS string) (agent.DisplayAnswer, []heldEvent) {
+	renderer.BeginInterjection(ctx)
+	if h.display == nil {
+		h.logger.Warn("agent raised a question or plan but nothing can draw it", "channel", req.ChannelID)
+		return agent.DisplayAnswer{Outcome: agent.DisplayUnavailable}, nil
+	}
+	type drawn struct {
+		answer agent.DisplayAnswer
+		err    error
+	}
+	cardCtx, withdraw := context.WithCancel(ctx)
+	defer withdraw()
+	done := make(chan drawn, 1)
+	go func() {
+		answer, err := ask(cardCtx, h.display, agent.TurnLocation{ChannelID: req.ChannelID, ThreadTS: threadTS, UserID: req.UserID})
+		done <- drawn{answer, err}
+	}()
+
+	var held []heldEvent
+	for {
+		var result drawn
+		select {
+		case result = <-done:
+		case ev, ok := <-events:
+			held = append(held, heldEvent{event: ev, ok: ok})
+			if ok && ev.Type != agent.EventError && ev.Type != agent.EventComplete {
+				continue
+			}
+			withdraw()
+			result = <-done
+		}
+		if result.err != nil {
+			h.logger.Warn("could not draw an agent's question or plan", "channel", req.ChannelID, "error", result.err)
+			return agent.DisplayAnswer{Outcome: agent.DisplayUnavailable, Note: result.err.Error()}, held
+		}
+		return result.answer, held
+	}
 }
 
 func (h *ChatHandler) refreshAssistantStatus(ctx context.Context, channelID, threadTS, status string, done chan<- struct{}) {

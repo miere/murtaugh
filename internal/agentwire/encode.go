@@ -23,13 +23,14 @@ import (
 // Safe for concurrent use: a session's events are produced by one goroutine but
 // answers arrive on the connection's.
 type Encoder struct {
-	mu      sync.Mutex
-	pending map[string]chan string
+	mu       sync.Mutex
+	pending  map[string]chan string
+	displays map[string]chan agent.DisplayAnswer
 }
 
 // NewEncoder returns an Encoder with no outstanding requests.
 func NewEncoder() *Encoder {
-	return &Encoder{pending: make(map[string]chan string)}
+	return &Encoder{pending: make(map[string]chan string), displays: make(map[string]chan agent.DisplayAnswer)}
 }
 
 // Encode translates one agent event into its wire form.
@@ -78,6 +79,18 @@ func (e *Encoder) Encode(ev agent.Event) (Event, *Transfer, error) {
 		}
 		req := e.track(ev.Permission)
 		return Event{Type: EventPermission, Permission: &req}, nil, nil
+	case agent.EventQuestion:
+		if ev.Question == nil {
+			return Event{}, nil, fmt.Errorf("agentwire: question event carries no prompt")
+		}
+		req := encodeQuestion(e.trackDisplay(ev.Question.Answer), ev.Question.Request)
+		return Event{Type: EventQuestion, Question: &req}, nil, nil
+	case agent.EventPlan:
+		if ev.Plan == nil {
+			return Event{}, nil, fmt.Errorf("agentwire: plan event carries no prompt")
+		}
+		id := e.trackDisplay(ev.Plan.Answer)
+		return Event{Type: EventPlan, Plan: &PlanRequest{ID: id, Title: ev.Plan.Request.Title, Plan: ev.Plan.Request.Plan}}, nil, nil
 	default:
 		return Event{}, nil, fmt.Errorf("agentwire: unknown event kind %q", ev.Type)
 	}
@@ -107,6 +120,34 @@ func (e *Encoder) track(p *agent.PermissionPrompt) PermissionRequest {
 		PolicyOwned: p.Request.PolicyOwned,
 		Options:     options,
 	}
+}
+
+func (e *Encoder) trackDisplay(answer chan agent.DisplayAnswer) string {
+	id := uuid.NewString()
+	e.mu.Lock()
+	e.displays[id] = answer
+	e.mu.Unlock()
+	return id
+}
+
+// Answer fails on an unknown id for the reason Resolve does: answering nothing
+// quietly would leave a tool waiting with no trace.
+func (e *Encoder) Answer(a DisplayAnswer) error {
+	e.mu.Lock()
+	answer, ok := e.displays[a.ID]
+	delete(e.displays, a.ID)
+	e.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("agentwire: no question or plan pending for id %q", a.ID)
+	}
+	if answer == nil {
+		return nil
+	}
+	select {
+	case answer <- a.Decode():
+	default:
+	}
+	return nil
 }
 
 // Resolve delivers an answer to the backend blocked on the request it names.
@@ -140,15 +181,16 @@ func (e *Encoder) Resolve(resp PermissionResponse) error {
 func (e *Encoder) Abandon(id string) {
 	e.mu.Lock()
 	delete(e.pending, id)
+	delete(e.displays, id)
 	e.mu.Unlock()
 }
 
-// Pending reports how many permission requests are outstanding. It exists for
-// tests and for a health surface: a number that only grows is a leak.
+// Pending exists for tests and for a health surface: a number that only grows
+// is a leak.
 func (e *Encoder) Pending() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return len(e.pending)
+	return len(e.pending) + len(e.displays)
 }
 
 // encodeAttachment produces the metadata frame and opens the byte stream that

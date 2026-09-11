@@ -1,58 +1,5 @@
-// Command murtaugh-runtime is the runtime node daemon: the process that holds a
-// connection open to a gateway and runs agents on this machine.
-//
-// It dials; the gateway never dials it. That is #170's attack-surface argument
-// and it is why a node works from a laptop behind NAT with no tunnel and no
-// inbound firewall rule: revoking a node is closing a socket, not chasing an
-// address.
-//
-// # Which gateway, and why it did not attach
-//
-// Dialling in means this process owns finding the gateway, which after a
-// failover is a different machine. A gateway that is not the elected one
-// redirects rather than dropping the connection, and the addresses it names are
-// ADDED to the configured seeds — never substituted for them, or a node asleep
-// through a topology change wakes holding only addresses that no longer exist.
-// gateways.go owns that list and the rule. The seeds come from this node's own
-// configuration (`node.gateway`) or from -gateway, which overrides it.
-//
-// # A node that has never been configured
-//
-// It still attaches, advertising nothing. That empty claim is #170 Change I's
-// onboarding trigger: the gateway learns who OWNS the node from the credential
-// it presented, offers that person the existing Slack setup form, and sends the
-// answers back down this connection for configure.go to apply. A node that
-// refused to start without a profile — which is what this did before item 12 —
-// made the trigger unreachable, because the one node that needed onboarding was
-// the one node that could never connect to ask for it.
-//
-// It also owns the distinction #197 exists for: a failed dial is reported as
-// "wrong gateway", "gateway down" or "credential rejected", because those are
-// three different problems with three different owners and a single "could not
-// attach" line names none of them.
-//
-// Unlike cmd/murtaugh-gateway, this binary MAY reach the agent packages — it is
-// the half of the split whose whole job is running a model.
-//
-// # Murtaugh's own tools reach this node over the link
-//
-// A node's agent gets Murtaugh's tools — the ones the gateway will let it have —
-// through nodeserve.ToolProxy: a registry of stand-ins whose Invoke is one
-// round trip over the connection this process already holds open. The gateway
-// decides what is in that registry; see internal/toolset's partition and
-// internal/nodehost, which is the one place it is enforced.
-//
-// Two consequences worth knowing before reading the wiring below. The proxy is
-// built BEFORE the runtime, because both backend families latch: a native agent
-// resolves its toolset at its first Initialize, and an acp/claude_code agent's
-// aggregator resolves it when its first session is registered. The gateway
-// handshake fills the proxy ahead of both; a registry filled after either is one
-// that backend never looks at again. And ServeTools is started here, which it
-// was not before: an
-// acp/claude_code agent reaches tools through a local MCP aggregator socket, and
-// nothing on a node was binding it — so those two backends were not merely
-// tool-less, they were spawning a bridge subprocess against a socket nobody was
-// listening on.
+// Command murtaugh-runtime dials the gateway rather than being dialled, so a
+// node needs no inbound port and revoking one is closing a socket.
 package main
 
 import (
@@ -78,11 +25,18 @@ import (
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/config/migrate"
 	configstore "github.com/miere/murtaugh/internal/config/store"
+	"github.com/miere/murtaugh/internal/help"
 	"github.com/miere/murtaugh/internal/mcpbridge"
 	"github.com/miere/murtaugh/internal/nodeclaim"
 	"github.com/miere/murtaugh/internal/nodeserve"
 	"github.com/miere/murtaugh/internal/nodesocket"
 	"github.com/miere/murtaugh/internal/nodetoken"
+	"github.com/miere/murtaugh/internal/tools"
+	"github.com/miere/murtaugh/internal/tools/ask"
+	"github.com/miere/murtaugh/internal/tools/helptool"
+	"github.com/miere/murtaugh/internal/tools/ping"
+	"github.com/miere/murtaugh/internal/tools/plan"
+	versiontool "github.com/miere/murtaugh/internal/tools/version"
 )
 
 var version = "dev"
@@ -250,15 +204,6 @@ func run(args []string) error {
 		go watcher.Run(ctx)
 	}
 
-	// The node's own MCP aggregator socket, which an acp/claude_code agent's
-	// bridge subprocess dials. It is local to this machine and never crosses the
-	// network: the tool CALLS cross, one frame each, not the MCP byte stream —
-	// which is what keeps a reconnect from leaving a half-initialised MCP
-	// session on the far side (#170 Concern 5).
-	//
-	// A failure here degrades those two backends and does not stop the node: a
-	// native agent needs no aggregator, and a node that refused to start over it
-	// would take chat down for an agent that never used it.
 	if served.serveTools != nil {
 		go func() {
 			if err := served.serveTools(ctx); err != nil && !errors.Is(err, context.Canceled) {
@@ -276,7 +221,6 @@ func run(args []string) error {
 		client:     served.client,
 		gate:       served.gate,
 		background: served.background,
-		tools:      served.tools,
 		claim:      served.claim,
 		configure:  configure.apply,
 		// Fired by nodeserve AFTER the answer is on the wire, never by the
@@ -291,12 +235,7 @@ type servedAgent struct {
 	client     agent.Client
 	gate       *nodeserve.ToolGate
 	background *nodeserve.BackgroundSink
-	tools      *nodeserve.ToolProxy
-	// claim holds what this node tells the gateway it serves. Like the three
-	// above it is built before the agent and bound to whichever connection is
-	// serving; unlike them it is also read at one specific moment, when the
-	// handshake answer is assembled.
-	claim *nodeserve.Advertiser
+	claim      *nodeserve.Advertiser
 	// serveTools binds this node's LOCAL aggregator socket, the one an
 	// acp/claude_code agent's bridge subprocess dials. nil when there is nothing
 	// to serve.
@@ -316,33 +255,17 @@ func serveAgent(cfg config.Config, logger *slog.Logger, requested string) (serve
 		return servedAgent{}, "", err
 	}
 	if name == "" {
-		// Nothing configured. The node attaches anyway, with an empty
-		// advertisement, because that empty claim is what triggers onboarding
-		// its owner through Slack — see the call site, and #170 Change I. None
-		// of the collaborators below are built: there is no agent for them to
-		// serve, and the gate, the proxy and the aggregator all exist to feed
-		// one. The claim advertiser is the exception, because the empty claim is
-		// the entire point.
 		return servedAgent{
 			client: nodeserve.UnconfiguredClient{},
 			claim:  nodeserve.NewAdvertiser(logger),
 		}, "", nil
 	}
 
-	// All three collaborators are built before the agent because the backends
-	// want them at construction, and bound to a connection when one arrives.
-	// The proxy especially: its registry is what the agent's toolset is resolved
-	// from, and both backend families latch that resolution — native at its
-	// first Initialize, acp/claude_code when their aggregator registers its first
-	// session. The registry handed over here is EMPTY; the handshake fills it
-	// before either latch, which is the whole reason the aggregator resolves
-	// lazily rather than at construction.
 	gate := nodeserve.NewToolGate(logger)
 	background := nodeserve.NewBackgroundSink(logger)
-	proxy := nodeserve.NewToolProxy(logger)
 	claim := nodeserve.NewAdvertiser(logger)
 
-	runtime := local.Builder(cfg, proxy.Registry(), logger)(nodeHooks(cfg, gate, background))
+	runtime := local.Builder(cfg, nodeTools(), logger)(nodeHooks(cfg, gate, background))
 	client, ok := runtime.Clients[name]
 	if !ok {
 		return servedAgent{}, "", fmt.Errorf("agent %q did not build; see the errors above", name)
@@ -351,10 +274,28 @@ func serveAgent(cfg config.Config, logger *slog.Logger, requested string) (serve
 		client:     client,
 		gate:       gate,
 		background: background,
-		tools:      proxy,
 		claim:      claim,
 		serveTools: runtime.ServeTools,
 	}, name, nil
+}
+
+func nodeTools() *tools.Registry {
+	registry := tools.NewRegistry()
+	registry.Register(ping.New())
+	registry.Register(versiontool.New(version))
+	registry.Register(helptool.New(func() []help.Doc { return helpDocs(registry) }))
+	registry.Register(ask.New(agent.TurnDisplay{}))
+	registry.Register(plan.New(agent.TurnDisplay{}))
+	return registry
+}
+
+func helpDocs(registry *tools.Registry) []help.Doc {
+	all := registry.All()
+	docs := make([]help.Doc, 0, len(all))
+	for _, t := range all {
+		docs = append(docs, t)
+	}
+	return docs
 }
 
 // nodeHooks is everything a node contributes to its own in-process runtime.
@@ -419,7 +360,6 @@ type attachment struct {
 	client     agent.Client
 	gate       *nodeserve.ToolGate
 	background *nodeserve.BackgroundSink
-	tools      *nodeserve.ToolProxy
 	claim      *nodeserve.Advertiser
 	configure  func(context.Context, agentwire.NodeConfiguration) (agentwire.NodeConfigured, error)
 	restart    func()
@@ -506,7 +446,6 @@ func attach(ctx context.Context, logger *slog.Logger, a attachment) error {
 			Logger:      logger,
 			Gate:        a.gate,
 			Background:  a.background,
-			Tools:       a.tools,
 			Advertise:   a.claim,
 			Configure:   a.configure,
 			Restart:     a.restart,
@@ -536,14 +475,6 @@ func nextBackoff(backoff time.Duration) time.Duration {
 	return backoff
 }
 
-// runMCPBridge runs the `murtaugh-runtime mcp-bridge` subcommand: a transparent
-// pipe between the spawning agent's stdio and this node's own aggregator socket.
-// It is byte-for-byte the same job `murtaugh mcp-bridge` does, and it stays a
-// local hop — the socket is on this machine, and it is the tool CALLS that cross
-// the network, one frame each.
-//
-// The socket path and session token arrive via the environment, so there is no
-// argument parsing to collide with this binary's flags.
 func runMCPBridge() error {
 	socket := os.Getenv(mcpbridge.EnvSocket)
 	token := os.Getenv(mcpbridge.EnvToken)

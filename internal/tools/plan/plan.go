@@ -1,37 +1,30 @@
-// Package plan implements the `present_plan` tool: the agent's way to lay a
-// concrete plan in front of the user as a Slack message with Proceed / Revise /
-// Cancel buttons and WAIT for their sign-off before doing multi-step work. It is
-// an ExitPlanMode-style consumer of the shared interaction broker
-// (internal/slack/interaction), mirroring the `ask` tool.
-//
-// Like `ask`, it only works inside a Slack conversation: the turn's location is
-// read from the context the native client stashes per turn, so the plan is shown
-// in the same thread the agent is talking in — not the admin DM, and not wherever
-// the model guesses. Outside a chat turn (CLI/MCP) it returns an error rather than
-// blocking.
+// Package plan holds the `present_plan` tool's contract and none of its drawing,
+// so the same tool runs on a node that cannot reach Slack.
 package plan
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
 
 	"github.com/miere/murtaugh/internal/agent"
-	"github.com/miere/murtaugh/internal/slack/interaction"
 )
+
+// Display may ignore loc: on a node the gateway binds the plan to the
+// conversation it came from, never to where the node says.
+type Display interface {
+	Plan(ctx context.Context, loc agent.TurnLocation, req agent.PlanRequest) (agent.DisplayAnswer, error)
+}
 
 // Tool is the `present_plan` capability.
 type Tool struct {
-	broker *interaction.Broker
+	display Display
 }
 
-// New constructs a present_plan Tool against the shared interaction broker. A nil
-// broker leaves the tool registered but inert (it returns an error when invoked),
-// which is the right behaviour in CLI/MCP processes that have no gateway to route
-// the click back.
-func New(broker *interaction.Broker) *Tool { return &Tool{broker: broker} }
+func New(display Display) *Tool { return &Tool{display: display} }
 
 // Name returns the registry key.
 func (t *Tool) Name() string { return "present_plan" }
@@ -80,55 +73,59 @@ func (r Result) String() string {
 	return "The user did not approve the plan."
 }
 
-// Invoke posts the plan to the current Slack thread and blocks until the user
-// decides (or the wait times out / is cancelled).
 func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
-	if t.broker == nil {
-		return nil, fmt.Errorf("Error: interactive plan approval is not available in this context")
+	if t.display == nil {
+		return nil, errUnavailable()
 	}
 	loc, ok := agent.TurnLocationFromContext(ctx)
 	if !ok {
-		return nil, fmt.Errorf("Error: the present_plan tool only works inside a Slack conversation")
+		return nil, errNoConversation()
 	}
 	planText := strings.TrimSpace(stringArg(args, "plan"))
 	if planText == "" {
 		return nil, fmt.Errorf("Error: a plan is required")
 	}
-
 	title := strings.TrimSpace(stringArg(args, "title"))
 	if title == "" {
 		title = ":clipboard: Plan — approve?"
 	}
 
-	decision, err := t.broker.Ask(ctx, interaction.Destination{ChannelID: loc.ChannelID, ThreadTS: loc.ThreadTS}, interaction.PromptSpec{
-		Title:    title,
-		Question: planText,
-		Options: []interaction.Option{
-			{ID: "proceed", Label: "Proceed", Style: "primary"},
-			{ID: "revise", Label: "Revise"},
-			{ID: "cancel", Label: "Cancel", Style: "danger"},
-		},
-	})
+	answer, err := t.display.Plan(ctx, loc, agent.PlanRequest{Title: title, Plan: planText})
 	if err != nil {
 		return nil, err
 	}
-
-	switch {
-	case decision.TimedOut:
+	switch answer.Outcome {
+	case agent.DisplayAnswered:
+	case agent.DisplayTimedOut:
 		return Result{Approved: false, Note: "No response in time. Do not assume approval — ask again or stop."}, nil
-	case decision.Cancelled:
+	case agent.DisplayDismissed:
 		return Result{Approved: false, Note: "The plan prompt was dismissed before they answered."}, nil
-	}
-	switch decision.OptionID {
-	case "proceed":
-		return Result{Approved: true, Choice: decision.Label, Note: "Approved — proceed with the plan as presented."}, nil
-	case "revise":
-		return Result{Approved: false, Choice: decision.Label, Note: "The user wants changes before you proceed. Ask what to adjust; do not start yet."}, nil
-	case "cancel":
-		return Result{Approved: false, Choice: decision.Label, Note: "The user cancelled. Do not proceed."}, nil
+	case agent.DisplayNoConversation:
+		return nil, errNoConversation()
 	default:
-		return Result{Approved: false, Choice: decision.Label}, nil
+		if answer.Note != "" {
+			return nil, errors.New(answer.Note)
+		}
+		return nil, errUnavailable()
 	}
+	switch answer.Choice {
+	case agent.PlanProceed:
+		return Result{Approved: true, Choice: "Proceed", Note: "Approved — proceed with the plan as presented."}, nil
+	case agent.PlanRevise:
+		return Result{Approved: false, Choice: "Revise", Note: "The user wants changes before you proceed. Ask what to adjust; do not start yet."}, nil
+	case agent.PlanCancel:
+		return Result{Approved: false, Choice: "Cancel", Note: "The user cancelled. Do not proceed."}, nil
+	default:
+		return Result{Approved: false, Choice: answer.Choice}, nil
+	}
+}
+
+func errUnavailable() error {
+	return fmt.Errorf("Error: interactive plan approval is not available in this context")
+}
+
+func errNoConversation() error {
+	return fmt.Errorf("Error: the present_plan tool only works inside a Slack conversation")
 }
 
 func stringArg(args map[string]any, key string) string {

@@ -61,6 +61,12 @@ func (s *Server) forward(ctx context.Context, stream string, ev agent.Event) err
 		// belongs to, for the teardown that has to answer it.
 		s.register(wire.Permission.ID, stream, nil)
 	}
+	switch {
+	case wire.Question != nil:
+		s.registerDisplay(wire.Question.ID, stream)
+	case wire.Plan != nil:
+		s.registerDisplay(wire.Plan.ID, stream)
+	}
 	msg, err := agentwire.StreamEvent(stream, wire)
 	if err != nil {
 		return err

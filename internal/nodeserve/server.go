@@ -15,6 +15,8 @@ import (
 	"github.com/miere/murtaugh/internal/nodelink"
 )
 
+var errLinkGone = errors.New("the connection to the gateway ended")
+
 // sendTimeout bounds one outbound frame's wait for window room. It is long
 // because the window only stays shut while the gateway is genuinely not
 // consuming — a Slack upload, or a human staring at an approval card — and
@@ -36,14 +38,6 @@ type Options struct {
 	// lasts. nil drops them, which is what a node whose runtime was built with
 	// no background hook already does.
 	Background *BackgroundSink
-	// Tools is the node's proxy for Murtaugh's own tools, which live on the
-	// gateway. Like the gate it is built before the agent — the agent's toolset
-	// is resolved and LATCHED at its first Initialize, so a proxy populated
-	// after that point would be a registry the agent never looks at again.
-	//
-	// nil leaves the node's agent with its backend's own tools and none of
-	// Murtaugh's, which is what every node did before #194.
-	Tools *ToolProxy
 	// Advertise holds what this node claims to serve. Like the three above it
 	// is built before the agent and bound for as long as the connection lasts,
 	// but it is read at a specific moment rather than called back into: the
@@ -90,7 +84,6 @@ type Server struct {
 	enc    *agentwire.Encoder
 	link   *nodelink.Link
 	ready  chan struct{}
-	proxy  *ToolProxy
 	claim  *Advertiser
 	// configure applies a configuration the gateway hands this node. nil
 	// refuses the method; see Options.Configure.
@@ -100,26 +93,12 @@ type Server struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	// nextID numbers the requests this side mints — today only the tool
-	// channel's. Ids are per DIRECTION: the gateway's counter also starts at
-	// "1", and the two are never compared, which is why calls below is a
-	// separate map from anything the gateway's ids index.
 	nextID atomic.Int64
 
-	mu    sync.Mutex
-	turns map[string]*turn
-	asks  map[string]*ask
-	calls map[string]chan agentwire.Message
-	// headless is the set of session ids opened with no human behind them — a
-	// scheduled job, a workflow trigger, an unfurl. A turn on one of these is
-	// served WITHOUT a stream on its context, which is what makes the approval
-	// gate and every gateway-side interactive tool take their documented
-	// no-human branch instead of raising a frame nobody can answer. See
-	// servePrompt.
-	//
-	// It is keyed by session rather than carried on the prompt because the fact
-	// belongs to the session: the gateway opens one, prompts it once, and closes
-	// it, and a second prompt on the same session is the same delegation.
+	mu       sync.Mutex
+	turns    map[string]*turn
+	asks     map[string]*ask
+	calls    map[string]chan agentwire.Message
 	headless map[string]bool
 }
 
@@ -137,8 +116,9 @@ type turn struct {
 // every approval belonging to this turn" a single loop rather than two
 // bookkeeping schemes that drift.
 type ask struct {
-	stream string
-	answer chan agentwire.PermissionResponse
+	stream  string
+	answer  chan agentwire.PermissionResponse
+	display bool
 }
 
 // Serve runs one connection to completion and returns why it ended.
@@ -157,24 +137,15 @@ func Serve(ctx context.Context, conn nodelink.Conn, client agent.Client, opts Op
 		log = slog.Default()
 	}
 	s := &Server{
-		client:   client,
-		log:      log,
-		enc:      agentwire.NewEncoder(),
-		ready:    make(chan struct{}),
-		turns:    make(map[string]*turn),
-		asks:     make(map[string]*ask),
-		calls:    make(map[string]chan agentwire.Message),
-		headless: make(map[string]bool),
-		// Set at construction, not alongside the binds below: the read loop
-		// starts inside nodelink.New and serveInitialize reads this field off
-		// that loop, so assigning it afterwards is a data race with the first
-		// frame the gateway sends.
-		proxy: opts.Tools,
-		// Same reason: serveInitialize reads the claim to put on the handshake
-		// answer, and that runs off the read loop before the binds below.
-		claim: opts.Advertise,
-		// And the same again: the gateway may send node.configure at any point
-		// after the handshake, which is served off that loop.
+		client:    client,
+		log:       log,
+		enc:       agentwire.NewEncoder(),
+		ready:     make(chan struct{}),
+		turns:     make(map[string]*turn),
+		asks:      make(map[string]*ask),
+		calls:     make(map[string]chan agentwire.Message),
+		headless:  make(map[string]bool),
+		claim:     opts.Advertise,
 		configure: opts.Configure,
 		restart:   opts.Restart,
 	}
@@ -200,10 +171,6 @@ func Serve(ctx context.Context, conn nodelink.Conn, client agent.Client, opts Op
 	if opts.Background != nil {
 		opts.Background.bind(s)
 		defer opts.Background.unbind(s)
-	}
-	if opts.Tools != nil {
-		opts.Tools.bind(s)
-		defer opts.Tools.unbind(s)
 	}
 	if opts.Advertise != nil {
 		opts.Advertise.bind(s)
@@ -239,11 +206,9 @@ func (s *Server) consume(payload []byte) error {
 		go s.serve(msg)
 	case agentwire.MessagePermission:
 		s.answer(msg)
+	case agentwire.MessageAnswer:
+		s.answerDisplay(msg)
 	case agentwire.MessageResponse:
-		// The tool channel's answers. Applied on the read loop because it is a
-		// buffered channel send that cannot block — exactly as a permission
-		// answer is. Handing this to a goroutine would reorder nothing and cost
-		// one per call.
 		s.deliverResponse(msg)
 	default:
 		s.log.Warn("nodeserve: unexpected frame from gateway", "kind", msg.Kind, "id", msg.ID)
@@ -258,8 +223,6 @@ func (s *Server) deliverResponse(msg agentwire.Message) {
 	delete(s.calls, msg.ID)
 	s.mu.Unlock()
 	if waiting == nil {
-		// The caller gave up, or the turn ended under it. Ordinary, not an
-		// error: a tool call abandoned mid-flight still gets its answer.
 		s.log.Debug("nodeserve: response for a call nobody is waiting on", "id", msg.ID)
 		return
 	}
@@ -267,12 +230,6 @@ func (s *Server) deliverResponse(msg agentwire.Message) {
 	close(waiting)
 }
 
-// callGateway performs one node → gateway round trip and returns the answer.
-//
-// It is called from the goroutine running a tool's Invoke — which is inside the
-// agent's own turn, never on the link's read loop. That matters: nodelink acks a
-// frame only once its handler returns, so a call issued from the read loop and
-// waiting on the gateway's answer would deadlock the link in both directions.
 func (s *Server) callGateway(ctx context.Context, method agentwire.Method, body any) (agentwire.Message, error) {
 	id := strconv.FormatInt(s.nextID.Add(1), 10)
 	answer := make(chan agentwire.Message, 1)
@@ -295,12 +252,6 @@ func (s *Server) callGateway(ctx context.Context, method agentwire.Method, body 
 
 	select {
 	case <-ctx.Done():
-		// Both can fire together, and which one the model is told about
-		// matters. A turn's context on a node is cancelled BY the link dying —
-		// shutdown ends every turn before it fails the calls — so when both are
-		// ready the link's verdict is the true one and the more actionable.
-		// Go's select picks at random among ready cases, so the priority is
-		// spelled out rather than left to chance.
 		select {
 		case <-s.link.Done():
 			return agentwire.Message{}, errLinkGone
@@ -326,14 +277,6 @@ func (s *Server) callGateway(ctx context.Context, method agentwire.Method, body 
 	}
 }
 
-// failCalls ends every outstanding tool call when the connection does.
-//
-// It is the node-side half of the no-retry abort policy, and the reason it is
-// unconditional is that nothing in the tool surface says whether a call may be
-// repeated: tools.Tool is Name/Description/InputSchema/Invoke, and neither of
-// the two optional interfaces beside it is about retryability. With no
-// idempotency information the only sound policy is to fail everything and retry
-// nothing. The wording the model sees is written once, in tools.go.
 func (s *Server) failCalls() {
 	s.mu.Lock()
 	waiting := s.calls
@@ -369,25 +312,6 @@ func (s *Server) serve(msg agentwire.Message) {
 }
 
 func (s *Server) serveInitialize(msg agentwire.Message) {
-	// The tool surface is fetched HERE, immediately before the agent comes up,
-	// and the ordering is load-bearing rather than tidy. Both backend families
-	// latch, at different moments: a native agent resolves its toolset on its
-	// first Initialize, and an acp/claude_code agent's aggregator resolves it
-	// when its first session is registered (agentbuild.acpAggregator's
-	// resolvedToolset, which is lazy for exactly this reason). A proxy populated
-	// after either point would be a registry that backend never consults again —
-	// the same construct-once, latch, warn-only shape that made #185 invisible.
-	//
-	// A gateway that cannot answer fails the handshake. That is deliberate: the
-	// node's redial loop retries in about a second, whereas publishing an agent
-	// with an empty toolset would look like working software to everyone except
-	// the user asking it to do something.
-	if s.proxy != nil {
-		if err := s.proxy.refresh(s.ctx, s); err != nil {
-			s.fault(msg.ID, fmt.Errorf("nodeserve: could not fetch this gateway's tool surface: %w", err))
-			return
-		}
-	}
 	if err := s.client.Initialize(s.ctx); err != nil {
 		s.fault(msg.ID, err)
 		return
@@ -444,21 +368,6 @@ func (s *Server) servePrompt(msg agentwire.Message) {
 	}
 
 	turnCtx, cancel := context.WithCancel(s.ctx)
-	// The stream id rides the turn context so the approval gate, called from
-	// deep inside a tool invocation, knows which turn's stream to raise its
-	// request on. It is the only correlation available: an Approver is built
-	// per agent, not per turn.
-	//
-	// A HEADLESS turn deliberately gets none, and this omission is the whole
-	// mechanism. In process a delegated agent is built with no approver at all,
-	// so a job never asks; a node cannot do that, because it builds one gate per
-	// agent long before it knows which turns will have a thread. Withholding the
-	// stream reaches the same place through the branch that already exists:
-	// ToolGate.Approve sees no stream and runs ungated, and the gateway's own
-	// side sees a tool call naming no turn, resolves no TurnLocation, and lets
-	// `ask`, `present_plan` and the approver take their documented no-thread
-	// paths. A job that raised a card instead would block on an answer nobody
-	// can give until its timeout burned — the wedged-03:00-job failure.
 	if !s.isHeadless(body.SessionID) {
 		turnCtx = withStream(turnCtx, msg.ID)
 	}
@@ -594,10 +503,48 @@ func (s *Server) deliver(resp agentwire.PermissionResponse) {
 	}
 }
 
+func (s *Server) answerDisplay(msg agentwire.Message) {
+	var answer agentwire.DisplayAnswer
+	if err := msg.Into(&answer); err != nil {
+		s.log.Warn("nodeserve: read display answer", "error", err)
+		return
+	}
+	s.deliverDisplay(answer)
+}
+
+func (s *Server) deliverDisplay(answer agentwire.DisplayAnswer) {
+	s.mu.Lock()
+	pending := s.asks[answer.ID]
+	delete(s.asks, answer.ID)
+	s.mu.Unlock()
+	if pending == nil {
+		s.log.Debug("nodeserve: display answer for an unknown request", "id", answer.ID)
+		return
+	}
+	if err := s.enc.Answer(answer); err != nil {
+		s.log.Warn("nodeserve: deliver display answer", "error", err, "id", answer.ID)
+	}
+}
+
 // register records an outstanding permission request against its turn.
 func (s *Server) register(id, stream string, answer chan agentwire.PermissionResponse) {
 	s.mu.Lock()
 	s.asks[id] = &ask{stream: stream, answer: answer}
+	s.mu.Unlock()
+}
+
+func (s *Server) sessionOf(stream string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if t := s.turns[stream]; t != nil {
+		return t.sessionID
+	}
+	return ""
+}
+
+func (s *Server) registerDisplay(id, stream string) {
+	s.mu.Lock()
+	s.asks[id] = &ask{stream: stream, display: true}
 	s.mu.Unlock()
 }
 
@@ -617,8 +564,13 @@ func (s *Server) forget(id string) {
 func (s *Server) dismissTurnAsks(stream string) {
 	s.mu.Lock()
 	dismissals := make([]agentwire.PermissionResponse, 0, len(s.asks))
+	var displays []agentwire.DisplayAnswer
 	for id, pending := range s.asks {
 		if pending.stream != stream {
+			continue
+		}
+		if pending.display {
+			displays = append(displays, agentwire.DisplayAnswer{ID: id, Outcome: string(agent.DisplayDismissed)})
 			continue
 		}
 		resp := agentwire.PermissionResponse{ID: id}
@@ -633,6 +585,9 @@ func (s *Server) dismissTurnAsks(stream string) {
 	s.mu.Unlock()
 	for _, resp := range dismissals {
 		s.deliver(resp)
+	}
+	for _, answer := range displays {
+		s.deliverDisplay(answer)
 	}
 }
 
