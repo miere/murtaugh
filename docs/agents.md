@@ -298,9 +298,8 @@ a channel in off-thread mode is one shared rolling session (reset with `/clear`)
 **Streaming.** The reply streams into the thread using Slack's native streaming
 APIs, updated as chunks arrive — no polling. The cadence
 (`stream_append_interval`, `stream_min_chunk_chars`) comes from the runtime
-defaults (below). How tool progress renders is a per-agent choice:
-`--progress-display simplified` (the default one-line status) or `tasks` (the
-full plan cards).
+defaults (below). Tool progress always renders as task cards, in their own
+message alongside the reply, for every agent.
 
 **Pausing for you.** Mid-turn, a native agent may stop to **ask you** (`ask`),
 get **sign-off on a plan** (`present_plan`), or seek **approval to run a command**
@@ -338,7 +337,6 @@ session:
   background_idle_timeout: 15m  # same, for work that lands after the turn ended
   max_concurrent: 100
 rendering:
-  progress_display: simplified
   stream_min_chunk_chars: 96
   stream_append_interval: 750ms
 acp:                         # ACP child-process lifecycle (native ignores these)

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -485,6 +486,26 @@ func TestJobValidationAcceptsAgentPrompt(t *testing.T) {
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate returned error: %v", err)
+	}
+}
+
+// Rows written before task cards became the only view still carry
+// progress_display, and must keep loading whatever value they hold.
+func TestALeftoverProgressDisplayIsIgnored(t *testing.T) {
+	cfg, err := Parse(testConfig(""))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	var profile AgentProfile
+	if err := json.Unmarshal([]byte(`{"acp":{"command":"/bin/agent"},"progress_display":"verbose"}`), &profile); err != nil {
+		t.Fatalf("decode stored agent: %v", err)
+	}
+	if err := json.Unmarshal([]byte(`{"rendering":{"progress_display":"loud"}}`), &cfg.Defaults); err != nil {
+		t.Fatalf("decode stored defaults: %v", err)
+	}
+	cfg.Agents = map[string]AgentProfile{"coder": profile}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("a stored progress_display stopped the configuration loading: %v", err)
 	}
 }
 

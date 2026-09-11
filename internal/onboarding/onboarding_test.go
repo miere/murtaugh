@@ -102,13 +102,6 @@ func TestBuildProducesTwoProfilesWithDifferentTrust(t *testing.T) {
 	if len(out.Tweaker.ExportSkillsToFS) == 0 {
 		t.Error("the tweaker got no skills on disk; it cannot learn how Murtaugh is configured")
 	}
-
-	// Both report progress as a task list.
-	for name, profile := range map[string]config.AgentProfile{"default": out.Default, "tweaker": out.Tweaker} {
-		if profile.ProgressDisplay != string(config.ProgressDisplayTasks) {
-			t.Errorf("%s progress display = %q, want tasks", name, profile.ProgressDisplay)
-		}
-	}
 }
 
 // TestTweakerIsBoundToTheAdminAlone is the privilege-escalation guard. Routed

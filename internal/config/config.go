@@ -545,9 +545,6 @@ type SessionDefaults struct {
 
 // RenderingDefaults tune how a streaming turn renders in Slack (both backends).
 type RenderingDefaults struct {
-	// ProgressDisplay is the default rendering for tool/step progress across all
-	// agents. Empty means simplified. Per-agent profiles may override it.
-	ProgressDisplay      string `yaml:"progress_display" json:"progress_display"`
 	StreamMinChunkChars  int    `yaml:"stream_min_chunk_chars" json:"stream_min_chunk_chars"`
 	StreamAppendInterval string `yaml:"stream_append_interval" json:"stream_append_interval"`
 }
@@ -557,20 +554,6 @@ type ACPDefaults struct {
 	StartupTimeout    string `yaml:"startup_timeout" json:"startup_timeout"`
 	CancelGracePeriod string `yaml:"cancel_grace_period" json:"cancel_grace_period"`
 }
-
-// ProgressDisplay selects how an agent's tool/step progress renders in Slack
-// while a turn is streaming.
-type ProgressDisplay string
-
-const (
-	// ProgressDisplaySimplified collapses progress into a single, last-write-wins
-	// status line that resolves to a check when the turn ends. It is the default:
-	// non-intrusive, ideal when only the outcome matters.
-	ProgressDisplaySimplified ProgressDisplay = "simplified"
-	// ProgressDisplayTasks keeps the full multi-card task list grouped under a
-	// Plan block — useful for coding sessions where watching the plan is the point.
-	ProgressDisplayTasks ProgressDisplay = "tasks"
-)
 
 // AgentKind selects which backend drives an agent profile.
 type AgentKind string
@@ -742,9 +725,6 @@ type AgentProfile struct {
 	// terminal gate for native, request answering for ACP). Empty defaults to
 	// allowlist (native gating on) / ask (ACP).
 	Approval ApprovalConfig `yaml:"approval" json:"approval"`
-	// ProgressDisplay overrides the global rendering default for this agent.
-	// Empty inherits it (which itself defaults to simplified).
-	ProgressDisplay string `yaml:"progress_display" json:"progress_display"`
 	// Sandbox confines the spawned process for a kind:acp or kind:claude_code
 	// agent. Empty (the default) leaves the agent unconfined. Unused by native
 	// agents, which hold their toolset in-process — never an error.
@@ -1254,9 +1234,6 @@ func (c Config) Validate() error {
 		errs = append(errs, err)
 	}
 	for name, profile := range c.Agents {
-		if err := validateProgressDisplay(fmt.Sprintf("agents[%s].progress_display", name), profile.ProgressDisplay); err != nil {
-			errs = append(errs, err)
-		}
 		if err := validateAgentIcon(fmt.Sprintf("agents[%s].icon", name), profile.Icon); err != nil {
 			errs = append(errs, err)
 		}
@@ -1536,9 +1513,6 @@ func (c RuntimeDefaults) Validate() error {
 	if c.Rendering.StreamMinChunkChars < 0 {
 		errs = append(errs, errors.New("defaults.rendering.stream_min_chunk_chars must be greater than or equal to zero"))
 	}
-	if err := validateProgressDisplay("defaults.rendering.progress_display", c.Rendering.ProgressDisplay); err != nil {
-		errs = append(errs, err)
-	}
 	return errors.Join(errs...)
 }
 
@@ -1638,22 +1612,6 @@ type MCPServerConfig struct {
 	URL     string            `yaml:"url" json:"url"`
 }
 
-// EffectiveProgressDisplay resolves how the given agent's progress renders:
-// the agent profile's setting wins, then the global rendering default, then
-// simplified. Unknown values are rejected at load time (Validate), so this
-// only ever observes valid or empty strings.
-func (c Config) EffectiveProgressDisplay(agent string) ProgressDisplay {
-	if p, ok := c.Agents[agent]; ok {
-		if m := normalizeProgressDisplay(p.ProgressDisplay); m != "" {
-			return m
-		}
-	}
-	if m := normalizeProgressDisplay(c.Defaults.Rendering.ProgressDisplay); m != "" {
-		return m
-	}
-	return ProgressDisplaySimplified
-}
-
 // EffectiveApproval resolves an agent's approval policy: each field of the
 // per-agent block wins when set, falling back to the global defaults.approval.
 func (c Config) EffectiveApproval(profile AgentProfile) ApprovalConfig {
@@ -1671,31 +1629,6 @@ func (c Config) EffectiveApproval(profile AgentProfile) ApprovalConfig {
 		out.KeepResolved = profile.Approval.KeepResolved
 	}
 	return out
-}
-
-// normalizeProgressDisplay maps a raw config string to a known mode, or "" when
-// it is blank/unrecognised (callers treat "" as "inherit"/"default").
-func normalizeProgressDisplay(s string) ProgressDisplay {
-	switch ProgressDisplay(strings.ToLower(strings.TrimSpace(s))) {
-	case ProgressDisplaySimplified:
-		return ProgressDisplaySimplified
-	case ProgressDisplayTasks:
-		return ProgressDisplayTasks
-	default:
-		return ""
-	}
-}
-
-// validateProgressDisplay rejects a non-empty progress_display value that is
-// not one of the known modes. Empty is always allowed (it means "inherit").
-func validateProgressDisplay(field, value string) error {
-	if strings.TrimSpace(value) == "" {
-		return nil
-	}
-	if normalizeProgressDisplay(value) == "" {
-		return fmt.Errorf("%s must be %q or %q", field, ProgressDisplaySimplified, ProgressDisplayTasks)
-	}
-	return nil
 }
 
 func (c RuntimeDefaults) EffectiveStartupTimeout() time.Duration {

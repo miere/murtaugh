@@ -25,7 +25,6 @@ func agentSchema(typeRequired bool) *jsonschema.Schema {
 		"tools":                  {Type: "array", Items: &jsonschema.Schema{Type: "string"}, Description: "tool group to expose (repeatable)"},
 		"mcp_servers":            {Type: "array", Items: &jsonschema.Schema{Type: "string"}, Description: "extra MCP server to attach (repeatable)"},
 		"export_skills_to_fs":    {Type: "array", Items: &jsonschema.Schema{Type: "string"}, Description: "bundled skill to export to the workdir (repeatable; 'all' for every one)"},
-		"progress_display":       {Type: "string", Description: "simplified | tasks"},
 		"soul_file":              {Type: "string", Description: "persona file override (native/claude_code); default searches <workdir>/SOUL.md then <workspace>/SOUL.md"},
 		"approval_terminal":      {Type: "string", Description: "native terminal gate: allowlist | prompt | off"},
 		"approval_requests":      {Type: "string", Description: "acp permission answering: ask | auto-allow | auto-deny"},
@@ -165,9 +164,6 @@ func buildAgentProfile(existing *config.AgentProfile, args map[string]any) (conf
 	}
 	if v, ok := arrayArg(args, "export_skills_to_fs"); ok {
 		p.ExportSkillsToFS = v
-	}
-	if v, ok := stringArg(args, "progress_display"); ok {
-		p.ProgressDisplay = v
 	}
 	if v, ok := stringArg(args, "soul_file"); ok {
 		p.SoulFile = v
