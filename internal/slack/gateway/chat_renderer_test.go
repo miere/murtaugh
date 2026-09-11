@@ -15,7 +15,7 @@ func newTestSectionRenderer(api, cards *fakeStreamAPI) *sectionRenderer {
 	return newSectionRenderer(
 		func() SlackSink { return NewStreamWriter(api, "C1", opts) },
 		func() toolBlock { return newCardToolBlock(cards, "C1", opts, discardLogger()) },
-		nil, nil, "C1", "100.0",
+		nil, nil, nil, "C1", "100.0",
 		discardLogger(),
 	)
 }

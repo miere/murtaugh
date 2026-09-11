@@ -56,7 +56,7 @@ Persistent ACP chat session logs.
 
 | kind | level | meaning / payload |
 |------|-------|-------------------|
-| `session.turn` | info / warn / error | One completed chat turn. keys: `session_id` + channel/thread/user. payload: `agent`, `source`, `outcome` (`completed`/`interrupted`/`timed_out`/`errored`), `stop_reason` (the agent's reported reason, e.g. `end_turn`/`max_tokens`/`refusal`), `duration_ms`, `chunks`, `bytes`. Level follows the outcome (timeout → warn, error → error). **The full prompt/response text is not in the row** — it lives in the transcript file at `blob_ref` (NDJSON under the journal `blob_dir`). |
+| `session.turn` | info / warn / error | One completed chat turn. keys: `session_id` + channel/thread/user. payload: `agent`, `source`, `outcome` (`completed`/`interrupted`/`timed_out`/`node_unavailable`/`errored`), `stop_reason` (the agent's reported reason, e.g. `end_turn`/`max_tokens`/`refusal`), `duration_ms`, `chunks`, `bytes`. Level follows the outcome (timeout and node_unavailable → warn, error → error). **The full prompt/response text is not in the row** — it lives in the transcript file at `blob_ref` (NDJSON under the journal `blob_dir`). |
 
 | `session.evicted` | info / warn | One cached session dropped by the manager. keys: `session_id` + channel/thread. payload: `agent`, `reason` (`idle`/`busy_timeout`/`capacity`), `age_ms` (time in the state that condemned it), `dm`, `live` (sessions still held), `mid_run`. Only `busy_timeout` is a warning — it is the one that interrupted a turn in flight; `idle` and `capacity` are expected housekeeping and are never surfaced in Slack. |
 

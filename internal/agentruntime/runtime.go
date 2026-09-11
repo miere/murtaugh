@@ -5,6 +5,7 @@ package agentruntime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/miere/murtaugh/internal/agent"
@@ -88,6 +89,27 @@ type Runtime struct {
 // ErrNotPinned is refused rather than answered with some other node, because
 // signing in a machine the conversation does not run on fixes nothing.
 var ErrNotPinned = errors.New("this conversation is not running on any runtime node yet")
+
+// Declared here rather than in nodehost so the gateway can tell a missing machine
+// from a fault without linking the node host.
+var ErrNoNode = errors.New("no runtime node is connected")
+
+// Separate from ErrNoNode: nothing connected is the admin's problem, while
+// none of the user's own nodes connected is the user's.
+var ErrNoFleet = errors.New("no runtime node of yours is connected, and you hold no grant on another")
+
+// NodeOfflineError keeps the pinned node with the refusal, so the user is told
+// which machine went away rather than only that none is left.
+type NodeOfflineError struct {
+	Node NodeRef
+	Err  error
+}
+
+func (e *NodeOfflineError) Error() string {
+	return fmt.Sprintf("node %s, which this conversation runs on, is not connected: %v", e.Node.NodeID, e.Err)
+}
+
+func (e *NodeOfflineError) Unwrap() error { return e.Err }
 
 // NodeRef carries the owner with the node, because only they or the admin may
 // have a sign-in run on it.

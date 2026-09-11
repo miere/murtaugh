@@ -46,9 +46,10 @@ to see the transcript — it is NDJSON, one object per turn:
 | `interrupted` | info | A new message or `/stop` cut the turn short (not a failure). |
 | `timed_out` | warn | The agent went silent past the idle timeout and was asked to stop. |
 | `errored` | error | The agent or transport failed mid-turn. |
+| `node_unavailable` | warn | No runtime node could run the turn; `error` names the machine a pinned conversation was on. |
 
-Filter for `--level warn` to surface the turns worth reviewing (timeouts +
-errors); `--level error` for failures only.
+Filter for `--level warn` to surface the turns worth reviewing (timeouts,
+missing machines and errors); `--level error` for failures only.
 
 ## Retention & privacy
 

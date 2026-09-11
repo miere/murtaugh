@@ -12,10 +12,11 @@ import (
 
 // Turn outcomes recorded on the acp_session stream.
 const (
-	turnCompleted   = "completed"
-	turnErrored     = "errored"
-	turnTimedOut    = "timed_out"
-	turnInterrupted = "interrupted"
+	turnCompleted       = "completed"
+	turnErrored         = "errored"
+	turnTimedOut        = "timed_out"
+	turnInterrupted     = "interrupted"
+	turnNodeUnavailable = "node_unavailable"
 )
 
 // sessionLogger persists ACP chat turns to the journal's acp_session stream:
@@ -89,7 +90,7 @@ func (s *sessionLogger) record(ctx context.Context, t sessionTurn) {
 	switch t.outcome {
 	case turnErrored:
 		level = journal.LevelError
-	case turnTimedOut:
+	case turnTimedOut, turnNodeUnavailable:
 		level = journal.LevelWarn
 	}
 

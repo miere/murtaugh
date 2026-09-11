@@ -104,7 +104,7 @@ func TestHeadlessWorkNeedsNoUserAndDoesNotTouchTheFleet(t *testing.T) {
 	manager := rig.sessions["default"]
 	key := agent.ConversationKey{TeamID: "T1", ChannelID: "C1", ThreadTS: "1.1"}
 	_, err := manager.Prompt(context.Background(), key, agent.SessionMetadata{ChannelID: "C1"}, agent.PromptRequest{Text: "hello"})
-	if err == nil || !errors.Is(err, nodehost.ErrNoFleet) {
+	if err == nil || !errors.Is(err, agentruntime.ErrNoFleet) {
 		t.Fatalf("a chat turn with no user was served anyway: %v", err)
 	}
 

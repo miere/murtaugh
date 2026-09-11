@@ -84,9 +84,11 @@ type nodeClient struct {
 	host *Host
 }
 
-func (c *nodeClient) Initialize(context.Context) error {
-	_, err := c.host.anyClient()
-	return err
+func (c *nodeClient) Initialize(ctx context.Context) error {
+	if _, err := c.host.anyClient(); err != nil {
+		return c.host.stranded(ctx, err)
+	}
+	return nil
 }
 
 func (c *nodeClient) NewSession(ctx context.Context, meta agent.SessionMetadata) (agent.Session, error) {

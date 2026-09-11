@@ -956,6 +956,54 @@ func TestAConversationWhoseNodeIsGoneMovesAndTheModelIsToldInsideTheTurn(t *test
 	}
 }
 
+// The e2e gap behind spec #170, both ways a turn meets it: the manager that ran
+// the conversation, and one rebuilt by a reload that must initialize again.
+func TestAConversationWhoseNodeIsGoneWithNowhereToGoNamesTheMachine(t *testing.T) {
+	pins, err := configstore.OpenConversationPins(context.Background(),
+		config.DatabaseConfig{Backend: config.BackendSQLite,
+			SQLite: config.SQLiteConfig{Path: filepath.Join(t.TempDir(), "config.db")}}, "", "")
+	if err != nil {
+		t.Fatalf("open pins: %v", err)
+	}
+	t.Cleanup(func() { _ = pins.Close() })
+
+	rig := dialLoopback(t, newScriptedAgent(func(turn *scriptedTurn) {
+		turn.emit(agent.Event{Type: agent.EventText, Text: "the first node"})
+	}), pinning(pins))
+	key := agent.ConversationKey{TeamID: "T1", ChannelID: "C1", ThreadTS: "123.4"}
+	meta := agent.SessionMetadata{TeamID: "T1", ChannelID: "C1", ThreadTS: "123.4", UserID: nodeOwner}
+	running := rig.sessions["default"]
+	drainPrompt(t, running, key, meta, "turn one")
+
+	if err := rig.host.CloseCredential(context.Background(), rig.selector); err != nil {
+		t.Fatalf("close credential: %v", err)
+	}
+	waitFor(t, "the conversation's node to go", func() bool { return len(rig.host.Nodes()) == 0 })
+	reloaded := rig.reload(t, config.AccessConfig{})
+
+	for _, tc := range []struct {
+		name    string
+		manager *agent.SessionManager
+	}{
+		{"the running manager", running},
+		{"a manager rebuilt by a reload", reloaded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := tc.manager.Prompt(context.Background(), key, meta, agent.PromptRequest{Text: "still there?"})
+			if !errors.Is(err, agentruntime.ErrNoNode) {
+				t.Fatalf("got %v, want ErrNoNode", err)
+			}
+			var offline *agentruntime.NodeOfflineError
+			if !errors.As(err, &offline) {
+				t.Fatalf("the refusal does not say which machine the conversation was on: %v", err)
+			}
+			if offline.Node.NodeID != "node-1" || offline.Node.Owner != nodeOwner {
+				t.Fatalf("the refusal names %+v, want node-1 owned by %s", offline.Node, nodeOwner)
+			}
+		})
+	}
+}
+
 // The other grant tests call host.setAccess directly, so only this one catches
 // the runtime builder dropping that call.
 func TestAGrantInTheGatewaysConfigurationReachesAnElection(t *testing.T) {
@@ -967,7 +1015,7 @@ func TestAGrantInTheGatewaysConfigurationReachesAnElection(t *testing.T) {
 	key := agent.ConversationKey{ChannelID: "C1", ThreadTS: "123.4"}
 	meta := agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4", UserID: guest}
 	if _, err := rig.sessions["default"].Prompt(context.Background(), key, meta,
-		agent.PromptRequest{Text: "before the grant"}); !errors.Is(err, nodehost.ErrNoFleet) {
+		agent.PromptRequest{Text: "before the grant"}); !errors.Is(err, agentruntime.ErrNoFleet) {
 		t.Fatalf("a guest with no grant got %v, want ErrNoFleet", err)
 	}
 

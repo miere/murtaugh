@@ -2,9 +2,14 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync"
+	"time"
 
 	"github.com/miere/murtaugh/internal/agent"
+	"github.com/miere/murtaugh/internal/agentruntime"
+	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/providerfail"
 	"github.com/miere/murtaugh/internal/slack/alertcard"
 	slackclient "github.com/miere/murtaugh/internal/slack/client"
@@ -105,7 +110,7 @@ func updateAlertCard(ctx context.Context, api alertMessageEditor, cards *alertca
 // Either way the unabridged error goes in Detail. That is affordable now in a
 // way it was not when this was inline text: the card arrives collapsed, so the
 // full diagnostic costs nothing until somebody opens it.
-func failSpec(err error) alertcard.Spec {
+func failSpec(ctx context.Context, err error, owner ownerRef) alertcard.Spec {
 	spec := alertcard.Spec{Level: alertcard.LevelError}
 	if err != nil {
 		spec.Detail = err.Error()
@@ -123,6 +128,10 @@ func failSpec(err error) alertcard.Spec {
 		return spec
 	}
 
+	if nodeUnavailable(err) {
+		return noNodeSpec(ctx, err, owner)
+	}
+
 	if failure, ok := providerfail.Classify(err); ok {
 		spec.Subtitle = "The agent is not available."
 		spec.Reason = failure.String()
@@ -138,6 +147,111 @@ func failSpec(err error) alertcard.Spec {
 	// and somebody's problem if it repeats.
 	spec.NextSteps = "Try again. If it keeps happening, notify your admin user."
 	return spec
+}
+
+func nodeUnavailable(err error) bool {
+	return errors.Is(err, agentruntime.ErrNoNode) || errors.Is(err, agentruntime.ErrNoFleet)
+}
+
+func noNodeSpec(ctx context.Context, err error, owner ownerRef) alertcard.Spec {
+	spec := alertcard.Spec{
+		Level:     alertcard.LevelWarn,
+		Title:     "No machine available",
+		Subtitle:  "No machine is available to run this conversation.",
+		NextSteps: "Start your runtime node (`murtaugh-runtime`) and try again, or ask the gateway admin for a grant on theirs.",
+		Detail:    err.Error(),
+	}
+	var offline *agentruntime.NodeOfflineError
+	if errors.As(err, &offline) {
+		spec.Title = "Machine offline"
+		spec.Subtitle = "The machine this conversation was running on is offline."
+		machine := "`" + sanitizeSlackInline(offline.Node.NodeID) + "`"
+		if who := ownerPhrase(ctx, owner, offline.Node); who != "" {
+			machine += ", " + who + "'s machine,"
+		}
+		spec.Reason = machine + " is not connected, and no machine of yours can take the conversation over."
+		return spec
+	}
+	if errors.Is(err, agentruntime.ErrNoFleet) {
+		spec.Reason = "None of your machines is connected, and you hold no grant on anyone else's."
+	} else {
+		spec.Reason = "No machine is connected to Murtaugh right now."
+	}
+	return spec
+}
+
+// ownerRef renders how an offline node's owner is named on the card. A nil ref
+// mentions them every time — the headless default, with no gateway to ask.
+type ownerRef func(ctx context.Context, node agentruntime.NodeRef) string
+
+func ownerPhrase(ctx context.Context, owner ownerRef, node agentruntime.NodeRef) string {
+	if owner != nil {
+		return owner(ctx, node)
+	}
+	// An owner that is not a Slack user id would render as a broken mention.
+	if config.IsSlackUserID(node.Owner) {
+		return "<@" + node.Owner + ">"
+	}
+	return ""
+}
+
+// newOfflineOwnerRef mentions the owner once a window and names them plainly in
+// between, so a repeat card still says whose machine it is without pinging them.
+func newOfflineOwnerRef(window *ownerNotifyWindow, names *userNameCache) ownerRef {
+	return func(ctx context.Context, node agentruntime.NodeRef) string {
+		if !config.IsSlackUserID(node.Owner) {
+			return ""
+		}
+		if window.claim(node.NodeID) {
+			return "<@" + node.Owner + ">"
+		}
+		// A name that will not resolve leaves the owner out rather than putting a
+		// raw user id on the card.
+		return sanitizeSlackInline(names.Name(ctx, node.Owner))
+	}
+}
+
+// ownerNotifyBackoff leaves an offline machine's owner in peace after one
+// mention: every failed turn draws the card, and a sleeping laptop stays asleep.
+const ownerNotifyBackoff = 24 * time.Hour
+
+// ownerNotifyWindow is the credential alert's "once per outage" shape, keyed by
+// node because that is the machine the owner would have to go and wake.
+type ownerNotifyWindow struct {
+	every time.Duration
+	now   func() time.Time
+
+	mu       sync.Mutex
+	notified map[string]time.Time
+}
+
+func newOwnerNotifyWindow(every time.Duration, now func() time.Time) *ownerNotifyWindow {
+	if now == nil {
+		now = time.Now
+	}
+	return &ownerNotifyWindow{every: every, now: now, notified: make(map[string]time.Time)}
+}
+
+// claim reports whether nodeID's owner may be mentioned now, and records it when
+// they may. Lapsed entries are swept as it goes so old nodes cost no memory.
+func (w *ownerNotifyWindow) claim(nodeID string) bool {
+	if w == nil {
+		return true
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	now := w.now()
+	for id, at := range w.notified {
+		if now.Sub(at) >= w.every {
+			delete(w.notified, id)
+		}
+	}
+	if _, within := w.notified[nodeID]; within {
+		return false
+	}
+	w.notified[nodeID] = now
+	return true
 }
 
 // emptyReplySpec is the alert shown when a turn genuinely produced no reply: it

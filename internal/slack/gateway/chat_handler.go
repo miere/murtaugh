@@ -113,6 +113,9 @@ type ChatHandler struct {
 	// instead — the same fallback a failed post takes.
 	alertCards *alertcard.Renderer
 	alertAPI   alertMessagePoster
+	// offlineOwners holds the machine-offline card's mention backoff across turns.
+	// A gateway restart forgets it, which costs the owner one more mention.
+	offlineOwners *ownerNotifyWindow
 	// credRepair asks the admin to re-authenticate when a claude_code turn fails
 	// because its credential was rejected. It covers the case auth.request
 	// structurally cannot: that tool is called by an agent from inside a turn, but
@@ -170,7 +173,11 @@ func NewChatHandler(api StreamAPI, sessions map[string]ChatSessionManager, resol
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &ChatHandler{api: api, sessions: sessions, resolver: resolver, interval: interval, minChars: minChars, logger: logger, statusRefreshInterval: defaultStatusRefreshInterval}
+	return &ChatHandler{
+		api: api, sessions: sessions, resolver: resolver, interval: interval, minChars: minChars,
+		logger: logger, statusRefreshInterval: defaultStatusRefreshInterval,
+		offlineOwners: newOwnerNotifyWindow(ownerNotifyBackoff, time.Now),
+	}
 }
 
 // WithCredentialRepair attaches the path that asks the admin to re-authenticate
@@ -351,6 +358,7 @@ func (h *ChatHandler) newChatRenderer(channelID, threadTS string, opts StreamWri
 		newBlock,
 		h.uploader,
 		newAlertPoster(h.alertAPI, h.alertCards, channelID, threadTS),
+		newOfflineOwnerRef(h.offlineOwners, h.userNames),
 		channelID,
 		threadTS,
 		h.logger,
@@ -522,6 +530,8 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest, route ChatRou
 				outcome = turnInterrupted
 			case timedOut:
 				outcome = turnTimedOut
+			case nodeUnavailable(turnErr):
+				outcome = turnNodeUnavailable
 			case turnErr != nil || retErr != nil:
 				outcome = turnErrored
 			}
@@ -531,7 +541,7 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest, route ChatRou
 			// daemon stderr. turnErr is the agent-reported cause; retErr covers a
 			// delivery failure that Fail surfaced.
 			errText := ""
-			if outcome == turnErrored {
+			if outcome == turnErrored || outcome == turnNodeUnavailable {
 				switch {
 				case turnErr != nil:
 					errText = turnErr.Error()

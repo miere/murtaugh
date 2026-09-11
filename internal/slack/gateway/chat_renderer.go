@@ -127,6 +127,9 @@ type sectionRenderer struct {
 	// sealed reply. nil falls back to painting the alert as text on the reply
 	// surface — see postAlert.
 	alert alertPoster
+	// owner names the owner of an offline machine on the failure card, and holds
+	// the mention backoff. nil mentions them on every failed turn.
+	owner ownerRef
 
 	mode  sectionMode
 	text  SlackSink
@@ -145,12 +148,12 @@ type sectionRenderer struct {
 	planRendered bool
 }
 
-func newSectionRenderer(newText func() SlackSink, newBlock func() toolBlock, uploader attachmentUploader, alert alertPoster, channelID, threadTS string, logger *slog.Logger) *sectionRenderer {
+func newSectionRenderer(newText func() SlackSink, newBlock func() toolBlock, uploader attachmentUploader, alert alertPoster, owner ownerRef, channelID, threadTS string, logger *slog.Logger) *sectionRenderer {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &sectionRenderer{
-		newText: newText, newBlock: newBlock, uploader: uploader, alert: alert,
+		newText: newText, newBlock: newBlock, uploader: uploader, alert: alert, owner: owner,
 		channelID: channelID, threadTS: threadTS, logger: logger,
 		seenTools: map[string]bool{}, planIndex: map[string]int{},
 	}
@@ -281,7 +284,7 @@ func (r *sectionRenderer) Finish(ctx context.Context, closing *alertcard.Spec) e
 func (r *sectionRenderer) Fail(ctx context.Context, err error) error {
 	r.closeText(ctx)
 	r.closeBlock(ctx)
-	return r.postAlert(ctx, failSpec(err))
+	return r.postAlert(ctx, failSpec(ctx, err, r.owner))
 }
 
 // postAlert delivers an alert as its own message below the sealed reply, and

@@ -2,18 +2,14 @@ package nodehost
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/miere/murtaugh/internal/agent"
+	"github.com/miere/murtaugh/internal/agentruntime"
 	"github.com/miere/murtaugh/internal/agentwire"
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/journal"
 )
-
-// Separate from ErrNoNode: nothing connected is the admin's problem, while
-// none of the user's own nodes connected is the user's.
-var ErrNoFleet = errors.New("no runtime node of yours is connected, and you hold no grant on another")
 
 type delegation struct {
 	node     *attached
@@ -24,12 +20,10 @@ type delegation struct {
 func (h *Host) delegate(ctx context.Context, meta agent.SessionMetadata) (delegation, error) {
 	nodes := h.connected()
 	if len(nodes) == 0 {
-		return delegation{}, ErrNoNode
+		return delegation{}, h.stranded(ctx, agentruntime.ErrNoNode)
 	}
 
-	key, keyed := agent.ConversationFromContext(ctx)
-	ref := config.ConversationRef{TeamID: key.TeamID, ChannelID: key.ChannelID, ThreadTS: key.ThreadTS, DM: key.DM}
-	pinnable := keyed && ref.Valid() && h.pins != nil
+	ref, pinnable := h.conversationRef(ctx)
 
 	var previous string
 	if pinnable {
@@ -49,7 +43,7 @@ func (h *Host) delegate(ctx context.Context, meta agent.SessionMetadata) (delega
 
 	fleet := h.fleetFor(nodes, meta.UserID)
 	if len(fleet) == 0 {
-		return delegation{}, ErrNoFleet
+		return delegation{}, h.offline(ctx, previous, agentruntime.ErrNoFleet)
 	}
 	elected := h.elect(fleet, meta.ChannelID, meta.ChannelName)
 
@@ -90,6 +84,54 @@ func (h *Host) delegate(ctx context.Context, meta agent.SessionMetadata) (delega
 	h.log.Info("delegated a conversation to a runtime node", "node_id", elected.nodeID,
 		"user_id", meta.UserID, "channel", meta.ChannelID, "thread", meta.ThreadTS, "fleet", len(fleet))
 	return delegation{node: elected}, nil
+}
+
+func (h *Host) conversationRef(ctx context.Context) (config.ConversationRef, bool) {
+	key, keyed := agent.ConversationFromContext(ctx)
+	ref := config.ConversationRef{TeamID: key.TeamID, ChannelID: key.ChannelID, ThreadTS: key.ThreadTS, DM: key.DM}
+	return ref, keyed && ref.Valid() && h.pins != nil
+}
+
+func (h *Host) stranded(ctx context.Context, cause error) error {
+	ref, pinnable := h.conversationRef(ctx)
+	if !pinnable {
+		return cause
+	}
+	pin, found, err := h.pins.Get(ctx, ref)
+	if err != nil {
+		h.log.Warn("could not read this conversation's node pin, so its user is not told which machine went away",
+			"error", err, "channel", ref.ChannelID, "thread", ref.ThreadTS)
+		return cause
+	}
+	if !found {
+		return cause
+	}
+	return h.offline(ctx, pin.NodeID, cause)
+}
+
+func (h *Host) offline(ctx context.Context, nodeID string, cause error) error {
+	if nodeID == "" {
+		return cause
+	}
+	return &agentruntime.NodeOfflineError{
+		Node: agentruntime.NodeRef{NodeID: nodeID, Owner: h.ownerOf(ctx, nodeID)},
+		Err:  cause,
+	}
+}
+
+func (h *Host) ownerOf(ctx context.Context, nodeID string) string {
+	tokens, err := h.tokens.List(ctx, nodeID)
+	if err != nil {
+		h.log.Warn("could not look up the owner of an offline node", "error", err, "node_id", nodeID)
+		return ""
+	}
+	var newest config.NodeToken
+	for _, token := range tokens {
+		if newest.UserID == "" || token.CreatedAt.After(newest.CreatedAt) {
+			newest = token
+		}
+	}
+	return newest.UserID
 }
 
 func (h *Host) fleetFor(nodes []*attached, userID string) []*attached {
