@@ -93,10 +93,6 @@ func (a *acpAggregator) Close() error {
 	return nil
 }
 
-// RegisterSession registers this session's toolset under a fresh token and
-// returns the stdio bridge server to advertise. The session's Slack location is
-// injected into every tool-call context so the approver posts in the right
-// thread.
 func (a *acpAggregator) RegisterSession(meta agent.SessionMetadata, emit agent.TurnEmitter) (agent.MCPServerSpec, func(), error) {
 	served, err := a.resolvedToolset()
 	if err != nil {

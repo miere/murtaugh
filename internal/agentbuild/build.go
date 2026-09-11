@@ -58,12 +58,7 @@ type Deps struct {
 	// auto-continuing. The gateway renders them into the originating Slack thread.
 	// nil (CLI/delegate paths, other backends) drops them. Ignored by acp/native.
 	BackgroundSink func(sessionID string, ev agent.Event)
-	// NodeTokenPath is the bearer token this process authenticates to the
-	// gateway with (nodetoken.PathFor of the config dir). A confined agent is
-	// blinded to it unconditionally — see sandbox.Spec.NodeTokenPath, which also
-	// records the two cases where the sandbox cannot help. Empty on the CLI
-	// path, which is not a node.
-	NodeTokenPath string
+	NodeTokenPath  string
 }
 
 // Client builds the backend for a resolved agent. It does no network/process I/O

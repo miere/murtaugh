@@ -76,18 +76,8 @@ type Server struct {
 
 	mu       sync.Mutex
 	sessions map[string]Session
-	// listener is the CURRENT run's listener, or nil when the server is not
-	// serving. Registered sessions outlive a run: the gateway keeps its session
-	// managers across a demotion, so their agents must find the same aggregator
-	// on the same socket path when it comes back.
 	listener net.Listener
-	// run counts Start calls. Each run's context watcher captures the number it
-	// was started with and tears down only that run, so a promotion that lands
-	// while the previous demotion is still unwinding is not killed by the
-	// predecessor's watcher. Without it, "the server is closed" is a state the
-	// server never leaves and every acp/claude_code agent loses Murtaugh's tools
-	// for the rest of the process.
-	run uint64
+	run      uint64
 }
 
 // NewServer creates a Server that will listen on socketPath. The socket's parent
@@ -102,27 +92,13 @@ func NewServer(socketPath string, log *slog.Logger) *Server {
 
 // Start binds the socket and runs the accept loop until ctx is cancelled or
 // Close is called. It returns once the listener stops.
-//
-// It is called once per leader promotion, so it must work the second time as
-// well as the first. Each call is a numbered *run*: it supersedes whatever run
-// was current (closing that listener, which unblocks its accept loop) and is
-// itself superseded by the next. Tearing down is therefore always
-// run-specific — a stopping run never closes a socket a newer run has bound,
-// which is the whole difficulty of a demotion and a promotion landing back to
-// back.
 func (s *Server) Start(ctx context.Context) error {
 	if err := os.MkdirAll(filepath.Dir(s.socketPath), 0o700); err != nil {
 		return fmt.Errorf("create socket dir: %w", err)
 	}
 
-	// Bind under the lock, so two runs cannot interleave their unlink-and-bind
-	// on the one socket path and leave the surviving run's socket removed. There
-	// is no call back into this type in here, and Register/Unregister are rare.
 	s.mu.Lock()
 	if prev := s.listener; prev != nil {
-		// A previous run is still up — its context has ended but its watcher has
-		// not got there yet, or it never had one. Close it here rather than
-		// orphaning a listener on an unlinked inode that nothing can reach.
 		_ = prev.Close()
 	}
 	// A stale socket from a previous run would make Listen fail with "address
@@ -133,12 +109,6 @@ func (s *Server) Start(ctx context.Context) error {
 		s.mu.Unlock()
 		return fmt.Errorf("listen on %s: %w", s.socketPath, err)
 	}
-	// The SERVER owns the socket file, not the listener. Go's default is to
-	// os.Remove the path when a UnixListener closes, which is wrong here: a
-	// superseded run closing its own listener would unlink whatever is at that
-	// path, and after a fast demote/promote that is its SUCCESSOR's socket —
-	// leaving a server that believes it is listening and an agent that gets
-	// ENOENT. The run-aware unlink in stop replaces it.
 	ln.SetUnlinkOnClose(false)
 	if err := os.Chmod(s.socketPath, 0o600); err != nil {
 		_ = ln.Close()
@@ -150,10 +120,6 @@ func (s *Server) Start(ctx context.Context) error {
 	s.listener = ln
 	s.mu.Unlock()
 
-	// Stop THIS run when its context ends, so Accept unblocks. It closes the
-	// listener it was started with and clears the server's state only while this
-	// run is still the current one; a watcher that wakes up after a newer
-	// promotion has taken over touches nothing but its own dead listener.
 	go func() {
 		<-ctx.Done()
 		s.stop(run, ln)
@@ -173,16 +139,6 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 }
 
-// stop tears down one run: it always closes that run's listener, and removes the
-// socket file only while the run is still the current one — otherwise the file
-// belongs to a newer run and removing it would silently strand every agent that
-// has yet to connect.
-//
-// "Still the current one" is re-tested under the lock immediately before the
-// unlink, not once at the top. The two are separated by ln.Close(), and a
-// promotion landing in that gap is precisely the case this method exists for:
-// deciding first and unlinking afterwards would delete the successor's socket
-// while believing it had deleted its own.
 func (s *Server) stop(run uint64, ln net.Listener) error {
 	s.mu.Lock()
 	if run == s.run {
@@ -225,19 +181,8 @@ func (s *Server) Unregister(token string) {
 // SocketPath is where the server listens; the value to give the bridge.
 func (s *Server) SocketPath() string { return s.socketPath }
 
-// Close stops the current run's listener and removes the socket file. It is
-// idempotent, and a no-op when nothing is running.
-//
-// Closing does NOT retire the server: a later Start serves again. That is
-// deliberate — the caller is the gateway's leader lifecycle, where standing down
-// and being promoted again is ordinary, and a Server that could only ever run
-// once turned one demotion into a permanent loss of every agent's tools.
-// Registered sessions are untouched, because their agents outlive a demotion and
-// will look for the aggregator on the same path when it returns.
-//
-// It goes through stop, so an explicit Close racing a promotion is bound by the
-// same rule as a context watcher: it tears down the run it saw, and never the
-// one that replaced it.
+// Does not retire the server: a later Start serves again, because stepping down
+// and being promoted again is routine for a gateway leader.
 func (s *Server) Close() error {
 	s.mu.Lock()
 	ln, run := s.listener, s.run

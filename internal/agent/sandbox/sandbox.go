@@ -102,28 +102,8 @@ type Spec struct {
 	// counts as a write, so it needs an explicit carve-out. Empty when the agent
 	// has no bridge (CLI/delegate paths).
 	BridgeSocket string
-	// NodeTokenPath is the runtime node's bearer-token file (#190). It is denied
-	// UNCONDITIONALLY — not merged into DenyRead — because DenyRead is a
-	// profile-supplied REPLACEMENT for defaultDenyRead, so any agent that sets
-	// `deny_read:` at all, including `deny_read: []`, would otherwise drop it. An
-	// agent that can read this file can impersonate its own node.
-	//
-	// WRITES are denied on the same terms, and that is not belt-and-braces.
-	// nodetoken.PathFor puts the credential in the config directory, which is
-	// also the workdir an agent with no `workdir:` of its own resolves onto
-	// (agentbuild.Resolve falls back to the runtime base dir) — and the workdir
-	// is in the always-on WRITE carve-out. Without the write rule a boxed agent
-	// could delete or replace its node's credential without ever reading it.
-	//
-	// Two limits, stated here rather than implied. Resolve returns no plan at all
-	// for ModeOff, which is the default sandbox mode, and seatbelt exists only on
-	// macOS — so for a default-configured agent, and for every non-darwin host,
-	// nothing here denies anything and any agent the node spawns can read the
-	// token. Nothing else takes over in those cases: 0600 keeps OTHER users out,
-	// and the agent is not another user — it runs as the daemon's own uid. The
-	// sandbox is the whole of the mitigation, and where it is off there is none.
-	//
-	// Empty emits no rule, which is right for a process that is not a node.
+	// Kept out of DenyRead because a profile's deny_read replaces the defaults and
+	// would drop it; writes are denied too, since the token can sit in the workdir.
 	NodeTokenPath string
 }
 
