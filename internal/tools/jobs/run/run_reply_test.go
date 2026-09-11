@@ -43,8 +43,6 @@ func TestInvoke_AgentJob_CarriesTheReplyBack(t *testing.T) {
 	}
 }
 
-// A delegator that cannot hand a reply back still runs the job; the result
-// simply has nothing to report, rather than an empty reply that reads as one.
 func TestInvoke_AgentJob_WithoutAReplyingDelegatorHasNoReply(t *testing.T) {
 	tl := New(lookupFrom(digestJobs())).WithDelegator(&fakeDelegator{})
 

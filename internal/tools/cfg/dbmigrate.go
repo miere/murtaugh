@@ -105,17 +105,6 @@ func (t *dbMigrateTool) Invoke(ctx context.Context, args map[string]any) (any, e
 		return nil, fmt.Errorf("the config store is already using the %s backend", to)
 	}
 
-	// Refused BEFORE anything is written, and under THIS process's role.
-	//
-	// Both halves matter. The role, because a broker gateway is allowed to name
-	// an agent profile whose body lives on a node — that is #198's behavioural
-	// change, and `validationBase` alone holds the write to the combined rules,
-	// so a broker gateway accepted `chat.defaults.agent` at write time and was
-	// then refused by the migration, every time, with no way through. And the
-	// order, because the only other place to find out is after Restore has
-	// copied the whole store into the target and before config.yaml has been
-	// rewritten — which leaves a fully populated store nothing points at, and
-	// an operator who runs the command again gets a second one.
 	if _, err := src.Load(ctx, validationBaseFor()); err != nil {
 		return nil, fmt.Errorf("this config store is not valid for a %s install, so copying it would only move the problem: %w", role, err)
 	}
@@ -133,9 +122,6 @@ func (t *dbMigrateTool) Invoke(ctx context.Context, args map[string]any) (any, e
 	if err := target.Restore(ctx, snap); err != nil {
 		return nil, fmt.Errorf("copy into target: %w", err)
 	}
-	// A failure here is the copy, not the configuration — the source passed the
-	// same rules a moment ago. Say where the half-finished store is: it is
-	// populated, config.yaml does not point at it, and nothing else names it.
 	if _, err := target.Load(ctx, validationBaseFor()); err != nil {
 		return nil, fmt.Errorf("the copy into the %s backend did not survive being read back, so config.yaml was NOT changed and still points at %s; the %s store now holds a copy that nothing uses: %w",
 			to, src.Backend(), to, err)
