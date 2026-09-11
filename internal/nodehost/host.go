@@ -310,7 +310,7 @@ func (h *Host) serveLink(w http.ResponseWriter, r *http.Request) {
 	}
 	client := remote.New(conn, remote.Options{
 		Logger:     log,
-		Background: h.deliverBackground,
+		Background: func(sessionID string, ev agent.Event) { h.deliverBackground(node, sessionID, ev) },
 		Approve:    h.askApproval,
 		// What this node says it can serve. Bound per connection because that
 		// is what the claim belongs to: a node holding two live credentials
@@ -570,7 +570,12 @@ func (h *Host) setBackground(sink func(sessionID string, ev agent.Event)) {
 // synchronously — the gateway's background router queues per session for
 // exactly that reason. One stretch's Slack write would otherwise stall frame
 // delivery for every conversation on the link, not just its own.
-func (h *Host) deliverBackground(sessionID string, ev agent.Event) {
+func (h *Host) deliverBackground(from *attached, sessionID string, ev agent.Event) {
+	if owner, err := h.sessionNode(sessionID); err != nil || owner.nodeID != from.nodeID {
+		h.log.Warn("dropped a background event naming a session this node is not serving",
+			"node_id", from.nodeID, "session_id", sessionID)
+		return
+	}
 	h.mu.Lock()
 	sink := h.background
 	h.mu.Unlock()

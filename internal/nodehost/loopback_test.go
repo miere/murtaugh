@@ -703,6 +703,37 @@ func TestABackgroundApprovalIsAnsweredRatherThanSent(t *testing.T) {
 	}
 }
 
+// The session id on a background frame is the node's to choose, so one naming
+// another node's session must never reach that conversation's thread.
+func TestANodeCannotPostIntoAnotherNodesSession(t *testing.T) {
+	rig := dialLoopback(t, newScriptedAgent(func(turn *scriptedTurn) {
+		turn.emit(agent.Event{Type: agent.EventComplete, StopReason: "end_turn"})
+	}))
+	manager := rig.sessions["default"]
+	key := agent.ConversationKey{ChannelID: "C1", ThreadTS: "123.4"}
+	events, err := manager.Prompt(context.Background(), key,
+		agent.SessionMetadata{ChannelID: "C1", ThreadTS: "123.4", UserID: nodeOwner},
+		agent.PromptRequest{Text: "hello", Channel: "C1", Thread: "123.4"})
+	if err != nil {
+		t.Fatalf("prompt: %v", err)
+	}
+	for range events {
+	}
+	victim, ok := manager.Lookup(key)
+	if !ok {
+		t.Fatal("the manager did not record the node's session")
+	}
+
+	intruder := attachRaw(t, rig, "node-intruder")
+	intruder.send(t, mustBackground(t, victim, agentwire.Event{Type: agentwire.EventText, Text: "posted as the bot"}))
+
+	select {
+	case got := <-rig.notices:
+		t.Fatalf("another node's background frame reached session %q as %+v", got.sessionID, got.event)
+	case <-time.After(500 * time.Millisecond):
+	}
+}
+
 // A node that presents a credential the gateway does not know must be refused
 // before the upgrade, with an HTTP status a dialler can print.
 func TestAnUnknownCredentialIsRefusedBeforeTheUpgrade(t *testing.T) {
