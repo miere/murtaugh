@@ -91,16 +91,16 @@ type Flow struct {
 	cards   *Renderer
 	admin   string
 	isAdmin func(string) bool
+	allowed func(string) bool
 	now     nowFunc
 	urlWait time.Duration
 
 	mu       sync.Mutex
-	sessions map[string]*session
+	sessions map[string]*Card
 }
 
-// New builds a Flow. adminUser is the configured admin (the only person who may
-// answer a request); isAdmin is the authorization predicate re-checked on every
-// inbound click — nil falls back to comparing against adminUser.
+// New takes adminUser as the fallback recipient, because a sign-in the gateway
+// runs itself has no node owner to send it to.
 func New(client *slacklib.LazyClient, cards *Renderer, adminUser string, isAdmin func(string) bool) *Flow {
 	return &Flow{
 		client:   client,
@@ -109,31 +109,7 @@ func New(client *slacklib.LazyClient, cards *Renderer, adminUser string, isAdmin
 		isAdmin:  isAdmin,
 		now:      time.Now,
 		urlWait:  DefaultURLWait,
-		sessions: make(map[string]*session),
-	}
-}
-
-// session is the per-request rendezvous the gateway resolves clicks into.
-type session struct {
-	toolName  string
-	needsCode bool
-
-	primary     chan struct{}
-	primaryOnce sync.Once
-	denied      chan struct{}
-	deniedOnce  sync.Once
-	code        chan string
-}
-
-func (s *session) markPrimary() { s.primaryOnce.Do(func() { close(s.primary) }) }
-func (s *session) deny()        { s.deniedOnce.Do(func() { close(s.denied) }) }
-
-func (s *session) submitCode(code string) error {
-	select {
-	case s.code <- code:
-		return nil
-	default:
-		return errors.New("authcard: a verification code is already being processed")
+		sessions: make(map[string]*Card),
 	}
 }
 
@@ -182,64 +158,30 @@ func commandSpec(req Request) (proc.Spec, func(), error) {
 // cancelled turn — all of them return a non-authenticated Outcome (or an
 // error), never a hopeful one. Success requires the process to exit cleanly.
 func (f *Flow) Run(ctx context.Context, req Request) (Outcome, error) {
-	admin := f.adminUser()
-	if admin == "" {
+	if f.adminUser() == "" {
 		return Outcome{}, errors.New("authcard: no admin user is configured, so nobody can approve an authentication request")
 	}
-	api, err := f.client.Get()
-	if err != nil {
-		return Outcome{}, err
-	}
-	corr, err := newCorrelationID()
-	if err != nil {
-		return Outcome{}, err
-	}
-
 	timeout := req.Timeout
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
-	attemptAt := f.now().Format(attemptFormat)
-
-	// Collapse to a single card when the requester IS the admin, or when there
-	// is no requesting thread at all (CLI/MCP). Telling someone their own
-	// request has been forwarded to themselves is noise.
-	collapsed := strings.TrimSpace(req.Requester.ChannelID) == "" || f.isAdminUser(req.RequesterUserID)
-
-	var reqChannel, reqTS string
-	if !collapsed {
-		blocks, err := f.cards.render(RequesterTemplate, f.data(req, corr, "", attemptAt, StatePending, "", false, false))
-		if err != nil {
-			return Outcome{}, err
-		}
-		posted, err := api.PostMessage(ctx, slacklib.PostMessageParams{
-			ChannelID: req.Requester.ChannelID,
-			ThreadTS:  req.Requester.ThreadTS,
-			Text:      fallbackText(req.ToolName),
-			Blocks:    blocks,
-		})
-		if err != nil {
-			// An undeliverable notice is not fatal on its own — the admin can
-			// still authenticate — but the requester would be left staring at a
-			// silent turn, so fail rather than proceed invisibly.
-			return Outcome{}, fmt.Errorf("authcard: post requester notice: %w", err)
-		}
-		reqChannel, reqTS = posted.Channel, posted.TS
+	card, err := f.open(ctx, Showing{
+		ToolName:        req.ToolName,
+		ProfileName:     req.Profile.Name,
+		NeedsCode:       req.Profile.NeedsCode,
+		Requester:       req.Requester,
+		RequesterUserID: req.RequesterUserID,
+	})
+	if card == nil {
+		return Outcome{}, err
 	}
-
-	// state carries what the cards currently show, so the closer can render the
-	// right terminal card wherever it is called from.
-	var adminChannel, adminTS, url string
 	finish := func(o Outcome, state State, reason string) (Outcome, error) {
 		o.Reason = reason
-		f.settle(req, corr, url, attemptAt, state, reason,
-			api, reqChannel, reqTS, adminChannel, adminTS)
+		card.Settle(state, reason)
 		return o, nil
 	}
-
-	adminChannel, err = api.OpenDM(ctx, admin)
 	if err != nil {
-		return finish(Outcome{}, StateFailed, "could not open a DM with the admin: "+err.Error())
+		return finish(Outcome{}, StateFailed, err.Error())
 	}
 
 	spec, cleanupSpec, err := commandSpec(req)
@@ -247,7 +189,6 @@ func (f *Flow) Run(ctx context.Context, req Request) (Outcome, error) {
 	if err != nil {
 		return finish(Outcome{}, StateFailed, "could not prepare the authentication command: "+err.Error())
 	}
-
 	h, err := proc.Start(ctx, spec)
 	if err != nil {
 		return finish(Outcome{}, StateFailed, "could not start the authentication command: "+err.Error())
@@ -256,64 +197,29 @@ func (f *Flow) Run(ctx context.Context, req Request) (Outcome, error) {
 	// leave the auth command parked on stdin forever.
 	defer h.Kill()
 
-	url, err = f.waitForURL(ctx, h, req.Profile)
+	url, err := f.waitForURL(ctx, h, req.Profile)
 	if err != nil {
 		return finish(Outcome{}, StateFailed, err.Error())
 	}
-
-	// Register before the card is posted, never after. The corr id is already
-	// baked into the buttons, so the instant Slack has the message an admin can
-	// click it — and a click that arrives before this map entry exists is
-	// rejected with "no authentication request is waiting", silently losing a
-	// decision the admin believes they made.
-	s := &session{
-		toolName:  req.ToolName,
-		needsCode: req.Profile.NeedsCode,
-		primary:   make(chan struct{}),
-		denied:    make(chan struct{}),
-		code:      make(chan string, 1),
-	}
-	f.register(corr, s)
-	defer f.unregister(corr)
-
-	adminBlocks, err := f.cards.render(AdminTemplate, f.data(req, corr, url, attemptAt, StatePending, "", true, false))
-	if err != nil {
+	if err := card.post(ctx, url); err != nil {
 		return finish(Outcome{}, StateFailed, err.Error())
 	}
-	postedAdmin, err := api.PostMessage(ctx, slacklib.PostMessageParams{
-		ChannelID: adminChannel,
-		Text:      fallbackText(req.ToolName),
-		Blocks:    adminBlocks,
-	})
-	if err != nil {
-		return finish(Outcome{}, StateFailed, "could not deliver the authentication card to the admin: "+err.Error())
-	}
-	adminChannel, adminTS = postedAdmin.Channel, postedAdmin.TS
 
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
-
-	// primary is nil-ed after it fires: a closed channel is always ready, so
-	// leaving it in the select would spin the loop.
-	primary := s.primary
-
 	for {
 		select {
-		case <-primary:
-			primary = nil
-			// The single attempt has been spent: retire the whole actions bar
-			// and reveal the footer, but keep waiting — the flow is not over
-			// until the process says so.
-			f.updateAdmin(ctx, api, adminChannel, adminTS,
-				f.data(req, corr, url, attemptAt, StateWorking, "", false, true), req.ToolName)
-
-		case code := <-s.code:
-			if err := h.WriteLine(code); err != nil {
-				return finish(Outcome{}, StateFailed, "could not hand the verification code to the authentication command: "+err.Error())
+		case r := <-card.Replies():
+			switch r.Kind {
+			case ReplyCode:
+				if err := h.WriteLine(r.Code); err != nil {
+					return finish(Outcome{}, StateFailed, "could not hand the verification code to the authentication command: "+err.Error())
+				}
+			case ReplyDenied:
+				return finish(Outcome{Denied: true}, StateDenied, "the admin denied the authentication request")
+			default:
+				return finish(Outcome{Cancelled: true}, StateFailed, r.Reason)
 			}
-
-		case <-s.denied:
-			return finish(Outcome{Denied: true}, StateDenied, "the admin denied the authentication request")
 
 		case <-h.Exited():
 			if auth.Succeeded(h.Wait()) {
@@ -360,67 +266,6 @@ func (f *Flow) waitForURL(ctx context.Context, h *proc.Handle, p auth.Profile) (
 	}
 }
 
-// settle writes the terminal card to both destinations. Best-effort and on a
-// fresh context: the ctx that drove Run may already be cancelled on the
-// interrupt path, and a card left showing live buttons would be worse than a
-// missed update.
-func (f *Flow) settle(req Request, corr, url, attemptAt string, state State, reason string,
-	api slacklib.SlackAPI, reqChannel, reqTS, adminChannel, adminTS string) {
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if adminChannel != "" {
-		data := f.data(req, corr, url, attemptAt, state, reason, false, true)
-		if adminTS == "" {
-			// The request died BEFORE the admin card existed — the command would
-			// not start, or never printed a sign-in link. There is nothing to
-			// update, and until now nothing was posted either, so the whole
-			// failure reached the operator as silence: on the credential-repair
-			// path the outcome is discarded, and an unprompted repair has no
-			// requesting thread to fall back on. Post the terminal card instead.
-			// It carries the reason, which is where the captured command output
-			// and any CLI version drift are.
-			f.postAdmin(ctx, api, adminChannel, data, req.ToolName)
-		} else {
-			f.updateAdmin(ctx, api, adminChannel, adminTS, data, req.ToolName)
-		}
-	}
-	if reqChannel == "" || reqTS == "" {
-		return
-	}
-	// The requester never sees the failure detail: it may quote command output,
-	// which is not theirs to read. Their card carries the state alone.
-	blocks, err := f.cards.render(RequesterTemplate, f.data(req, corr, "", attemptAt, state, "", false, false))
-	if err != nil {
-		return
-	}
-	_, _ = api.UpdateMessage(ctx, slacklib.UpdateMessageParams{
-		ChannelID: reqChannel,
-		TS:        reqTS,
-		Text:      fallbackText(req.ToolName),
-		Blocks:    blocks,
-	})
-}
-
-// postAdmin posts a fresh admin card. Used only for a terminal state reached
-// before the pending card existed; the happy path posts once in Run and updates
-// thereafter, so this cannot leave two live cards for one request.
-func (f *Flow) postAdmin(ctx context.Context, api slacklib.SlackAPI, channel string, data cardData, toolName string) {
-	if channel == "" {
-		return
-	}
-	blocks, err := f.cards.render(AdminTemplate, data)
-	if err != nil {
-		return
-	}
-	_, _ = api.PostMessage(ctx, slacklib.PostMessageParams{
-		ChannelID: channel,
-		Text:      fallbackText(toolName),
-		Blocks:    blocks,
-	})
-}
-
 // driftSuffix renders the profile's CLI version drift as a trailing clause, or
 // "" when there is nothing to say. Only ever called on a failure path — the
 // probe spawns a process, and the happy path has no use for it.
@@ -429,98 +274,6 @@ func driftSuffix(ctx context.Context, p auth.Profile) string {
 		return " (" + note + ")"
 	}
 	return ""
-}
-
-func (f *Flow) updateAdmin(ctx context.Context, api slacklib.SlackAPI, channel, ts string, data cardData, toolName string) {
-	if channel == "" || ts == "" {
-		return
-	}
-	blocks, err := f.cards.render(AdminTemplate, data)
-	if err != nil {
-		return
-	}
-	_, _ = api.UpdateMessage(ctx, slacklib.UpdateMessageParams{
-		ChannelID: channel,
-		TS:        ts,
-		Text:      fallbackText(toolName),
-		Blocks:    blocks,
-	})
-}
-
-func (f *Flow) data(req Request, corr, url, attemptAt string, state State, reason string, showActions, showFooter bool) cardData {
-	return cardData{
-		ToolName:        req.ToolName,
-		ProfileName:     req.Profile.Name,
-		URL:             url,
-		NeedsCode:       req.Profile.NeedsCode,
-		RequesterUserID: req.RequesterUserID,
-		AttemptAt:       attemptAt,
-		State:           string(state),
-		Reason:          reason,
-		ShowActions:     showActions,
-		ShowFooter:      showFooter,
-		ShowRequester:   strings.TrimSpace(req.RequesterUserID) != "",
-		ActionPrimary:   ActionID(corr, ActionPrimary),
-		ActionOpen:      ActionID(corr, ActionOpen),
-		ActionDeny:      ActionID(corr, ActionDeny),
-	}
-}
-
-// HandleClick routes an admin click into the waiting request.
-//
-// Authorization is re-checked here rather than trusted from the router: the
-// card lives in a DM, but an action_id is guessable and Slack will deliver a
-// crafted callback from anyone the gateway admits. Only the admin can answer.
-func (f *Flow) HandleClick(ctx context.Context, corr string, action Action, userID, triggerID string) error {
-	if !f.isAdminUser(userID) {
-		return fmt.Errorf("authcard: user %s is not the admin; auth click ignored", userID)
-	}
-	s, ok := f.session(corr)
-	if !ok {
-		return fmt.Errorf("authcard: no authentication request is waiting for %q", corr)
-	}
-
-	switch action {
-	case ActionDeny:
-		s.deny()
-		return nil
-
-	case ActionPrimary:
-		s.markPrimary()
-		if !s.needsCode {
-			// Browser-only: Slack has opened the link, and the flow completes
-			// when the process exits. Nothing further to do here.
-			return nil
-		}
-		api, err := f.client.Get()
-		if err != nil {
-			return err
-		}
-		return api.OpenView(ctx, triggerID, CodeModal(corr, s.toolName))
-
-	case ActionOpen:
-		// The secondary link on a code flow. Slack already opened the URL, and
-		// this is explicitly NOT the single attempt — the admin still has to
-		// come back and enter the code.
-		return nil
-	}
-	return fmt.Errorf("authcard: unknown auth action %q", action)
-}
-
-// HandleCodeSubmission routes a verification code from the modal into the
-// waiting request. Admin-only, for the same reason as HandleClick.
-func (f *Flow) HandleCodeSubmission(corr, code, userID string) error {
-	if !f.isAdminUser(userID) {
-		return fmt.Errorf("authcard: user %s is not the admin; code submission ignored", userID)
-	}
-	if strings.TrimSpace(code) == "" {
-		return errors.New("authcard: the verification code was empty")
-	}
-	s, ok := f.session(corr)
-	if !ok {
-		return fmt.Errorf("authcard: no authentication request is waiting for %q", corr)
-	}
-	return s.submitCode(strings.TrimSpace(code))
 }
 
 // SetAdmin installs the resolved admin identity.
@@ -564,7 +317,25 @@ func (f *Flow) isAdminUser(userID string) bool {
 	return userID == admin
 }
 
-func (f *Flow) register(corr string, s *session) {
+// SetAuthorised installs who may use the gateway at all. It is asked on every
+// click, so access withdrawn while a card is open stops the sign-in.
+func (f *Flow) SetAuthorised(allowed func(string) bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.allowed = allowed
+}
+
+func (f *Flow) authorised(userID string) bool {
+	f.mu.Lock()
+	allowed := f.allowed
+	f.mu.Unlock()
+	if allowed != nil {
+		return allowed(strings.TrimSpace(userID))
+	}
+	return f.isAdminUser(userID)
+}
+
+func (f *Flow) register(corr string, s *Card) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sessions[corr] = s
@@ -576,7 +347,7 @@ func (f *Flow) unregister(corr string) {
 	delete(f.sessions, corr)
 }
 
-func (f *Flow) session(corr string) (*session, bool) {
+func (f *Flow) card(corr string) (*Card, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	s, ok := f.sessions[corr]

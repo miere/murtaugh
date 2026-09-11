@@ -316,6 +316,7 @@ func (h *Host) serveLink(w http.ResponseWriter, r *http.Request) {
 		// is what the claim belongs to: a node holding two live credentials
 		// through a rotation advertises on each of them.
 		Advertise:   remote.AdvertiserFunc(func(ad agentwire.Advertisement) { h.advertise(node, ad) }),
+		Owner:       record.UserID,
 		WindowBytes: window,
 		AckInterval: h.opts.AckInterval,
 	})
@@ -369,6 +370,9 @@ func (h *Host) attach(node *attached) {
 	h.log.Info("runtime node attached", "node_id", node.nodeID, "user_id", node.userID, "selector", node.selector,
 		"profiles", len(ad.Profiles), "claims", len(ad.Claims), "connected", count)
 	h.record(journal.LevelInfo, "attached", "A runtime node attached", node, ad)
+	if !config.IsSlackUserID(node.userID) {
+		h.flagOwner(node)
+	}
 	// After the entry is published, never before: the fleet-scoped check below
 	// reads the registry, and a node reviewing its own arrival before it is in
 	// there would be told its own profiles are not served.
@@ -438,6 +442,20 @@ func (h *Host) record(level journal.Level, state, summary string, node *attached
 		Summary: summary,
 		Keys:    journal.Keys{UserID: node.userID},
 		Payload: payload,
+	})
+}
+
+func (h *Host) flagOwner(node *attached) {
+	const fix = "re-mint this node's token with --user U… (the owner's Slack user ID)"
+	h.log.Warn("a runtime node's token names an owner that is not a Slack user ID, so its sign-ins can reach nobody; "+fix,
+		"node_id", node.nodeID, "user_id", node.userID, "selector", node.selector)
+	h.rec.Record(context.Background(), journal.Event{
+		Stream:  journal.StreamGateway,
+		Kind:    "node",
+		Level:   journal.LevelWarn,
+		Summary: "A runtime node's token names an owner that is not a Slack user ID",
+		Keys:    journal.Keys{UserID: node.userID},
+		Payload: map[string]any{"state": "owner_not_a_slack_user", "node_id": node.nodeID, "selector": node.selector, "fix": fix},
 	})
 }
 

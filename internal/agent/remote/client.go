@@ -72,6 +72,9 @@ type Options struct {
 	// failing its push would make the node's own logs blame it for the
 	// gateway's shape.
 	Advertise Advertiser
+	// Owner is the Slack user this node's credential was minted for. Every
+	// sign-in the node raises is drawn for them, whatever the node says.
+	Owner string
 	// EventBuffer is a turn's channel depth. Zero takes defaultEventBuffer.
 	EventBuffer int
 	// WindowBytes, AckThreshold, AckInterval and Epoch are passed through to
@@ -92,6 +95,7 @@ type Client struct {
 	background func(sessionID string, ev agent.Event)
 	approve    func(ctx context.Context, toolName, summary string) (bool, string)
 	advertiser Advertiser
+	owner      string
 	transfers  *transfers
 	buffer     int
 
@@ -133,6 +137,7 @@ func New(conn nodelink.Conn, opts Options) *Client {
 		background: opts.Background,
 		approve:    opts.Approve,
 		advertiser: opts.Advertise,
+		owner:      opts.Owner,
 		transfers:  incoming,
 		buffer:     buffer,
 		closes:     make(chan string, closeQueueDepth),
@@ -501,11 +506,19 @@ func (c *Client) decode(msg agentwire.Message, s *stream) (agent.Event, bool, er
 		return ev, false, nil
 	}
 	if ev.SignIn != nil {
+		if c.owner == "" {
+			c.decoder.ForgetSignIn(pending.ID)
+			c.log.Warn("remote: refusing a sign-in from a node whose token names no owner", "id", pending.ID)
+			go c.sendDisplayAnswer(agentwire.DisplayAnswer{ID: pending.ID, Outcome: string(agent.DisplayUnavailable),
+				Note: "this machine's token names no owner, so nobody can be asked to sign in"})
+			return agent.Event{}, true, nil
+		}
 		if s == nil || s.location.ChannelID == "" {
 			c.decoder.ForgetSignIn(pending.ID)
 			go c.sendDisplayAnswer(agentwire.DisplayAnswer{ID: pending.ID, Outcome: string(agent.DisplayNoConversation)})
 			return agent.Event{}, true, nil
 		}
+		ev.SignIn.Owner = c.owner
 		settled := make(chan struct{})
 		c.mu.Lock()
 		c.signIns[pending.ID] = settled

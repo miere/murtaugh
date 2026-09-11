@@ -422,8 +422,8 @@ func TestNoAdminConfiguredFailsClosed(t *testing.T) {
 	}
 }
 
-// When the requester IS the admin, the two cards collapse into one.
-func TestCollapsesWhenRequesterIsTheAdmin(t *testing.T) {
+// The admin asking in a thread still gets the thread notice as well as the card.
+func TestTheAdminRequesterStillGetsTwoCards(t *testing.T) {
 	api := newSyncAPI()
 	f := newTestFlow(api)
 	p := script(t, false, `echo "Open https://example.com/auth?x=1"; sleep 0.2`)
@@ -435,11 +435,8 @@ func TestCollapsesWhenRequesterIsTheAdmin(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	posts, _, _ := api.snapshot()
-	if len(posts) != 1 {
-		t.Fatalf("expected a single collapsed card, got %d", len(posts))
-	}
-	if posts[0].ChannelID != "D-"+adminID {
-		t.Fatalf("the collapsed card should go to the admin DM, got %q", posts[0].ChannelID)
+	if len(posts) != 2 || posts[0].ChannelID != "C1" || posts[1].ChannelID != "D-"+adminID {
+		t.Fatalf("expected the thread notice and the admin's DM card, got %d posts", len(posts))
 	}
 }
 
@@ -460,8 +457,8 @@ func TestCollapsesWithNoRequesterThread(t *testing.T) {
 	}
 }
 
-// Only the admin may answer. A click from anyone else is refused even though
-// the action_id is valid.
+// Only the person the card was sent to may answer. A click from anyone else is
+// refused even though the action_id is valid.
 func TestNonAdminCannotResolve(t *testing.T) {
 	api := newSyncAPI()
 	f := newTestFlow(api)

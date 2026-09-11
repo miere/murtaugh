@@ -459,7 +459,10 @@ type PlanPrompt struct {
 // still be followed by a cancel until the sign-in settles.
 type SignInPrompt struct {
 	Request SignInRequest
-	Answer  chan DisplayAnswer
+	// Owner is stamped by the gateway from the node's credential and never read
+	// off the wire; empty means the sign-in is for the gateway admin.
+	Owner  string
+	Answer chan DisplayAnswer
 }
 
 // SignInSettled names its prompt so whoever drew two sign-ins can tell which

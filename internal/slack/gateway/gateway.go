@@ -598,7 +598,7 @@ func New(cfg config.Config, logger *slog.Logger, recorder journal.Recorder, brok
 			WithFileFetcher(api).
 			WithUploader(slackAttachmentUploader{api: api}).
 			WithPermissionAskers(acpPermissionAskers).
-			WithDisplay(display.New(broker, askFlow)).
+			WithDisplay(display.New(broker, askFlow).WithSignIns(authFlow, logger)).
 			WithReplyBlocks(cfg.BaseDir, api).
 			WithAlerts(cfg.BaseDir, alertAPI).
 			WithCredentialRepair(credRepair).
@@ -1183,6 +1183,9 @@ func (a *Gateway) handleInteractive(event socketmode.Event) {
 	}
 
 	a.ack(event)
+	if a.routeAuthCard(interaction) {
+		return
+	}
 	// Fast path: an allowlisted clicker needs no channel context, so the common
 	// case keeps running inline — this matters for the modal path below, whose
 	// trigger_id expires in seconds.
@@ -1206,6 +1209,35 @@ func (a *Gateway) handleInteractive(event socketmode.Event) {
 	}()
 }
 
+func (a *Gateway) routeAuthCard(interaction slack.InteractionCallback) bool {
+	if a.auth == nil {
+		return false
+	}
+	if corr, action, ok := authcard.IsAuthInteraction(interaction); ok {
+		triggerID := interaction.TriggerID
+		user := interaction.User.ID
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := a.auth.HandleClick(ctx, corr, action, user, triggerID); err != nil {
+				a.logger.Warn("auth card click not applied", "error", err, "correlation", corr, "action", string(action))
+			}
+		}()
+		return true
+	}
+	if interaction.Type != slack.InteractionTypeViewSubmission {
+		return false
+	}
+	corr, code, ok := authcard.ParseCodeSubmission(interaction)
+	if !ok {
+		return false
+	}
+	if err := a.auth.HandleCodeSubmission(corr, code, interaction.User.ID); err != nil {
+		a.logger.Warn("auth code submission not applied", "error", err, "correlation", corr)
+	}
+	return true
+}
+
 // dispatchInteractive routes an already-authorized callback. admission decides
 // how much of the surface is reachable; see interactionAdmission.
 func (a *Gateway) dispatchInteractive(event socketmode.Event, interaction slack.InteractionCallback, admission interactionAdmission) {
@@ -1221,36 +1253,6 @@ func (a *Gateway) dispatchInteractive(event socketmode.Event, interaction slack.
 			return
 		}
 	}
-	// Authentication cards. Routed before the broker because the namespaces are
-	// distinct and this one is admin-only: the Flow re-checks IsAdminUser itself
-	// rather than trusting the router, so a guest reaching this branch is
-	// rejected there rather than here.
-	if a.auth != nil {
-		if corr, action, ok := authcard.IsAuthInteraction(interaction); ok {
-			triggerID := interaction.TriggerID
-			user := interaction.User.ID
-			// The primary button may need to open a modal, and Slack expires a
-			// trigger_id within seconds, so this runs promptly on its own
-			// goroutine rather than behind the rest of the dispatch.
-			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer cancel()
-				if err := a.auth.HandleClick(ctx, corr, action, user, triggerID); err != nil {
-					a.logger.Warn("auth card click not applied", "error", err, "correlation", corr, "action", string(action))
-				}
-			}()
-			return
-		}
-		if interaction.Type == slack.InteractionTypeViewSubmission {
-			if corr, code, ok := authcard.ParseCodeSubmission(interaction); ok {
-				if err := a.auth.HandleCodeSubmission(corr, code, interaction.User.ID); err != nil {
-					a.logger.Warn("auth code submission not applied", "error", err, "correlation", corr)
-				}
-				return
-			}
-		}
-	}
-
 	// Broker prompts — the `ask` tool AND the tool-approval gates (both the ACP
 	// PermissionGate and the native approver post through this same broker). This
 	// is the one surface a channel guest reaches: it is the agent asking a

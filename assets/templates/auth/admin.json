@@ -30,12 +30,27 @@
 							"elements": [
 								{
 									"type": "text",
-									"text": {{ if eq .State "pending" }}{{ if .NeedsCode }}"Open the link, approve the request, then paste the verification code back here."{{ else }}"Open the link and finish signing in. This card completes on its own once the browser flow is done."{{ end }}{{ else if eq .State "working" }}{{ if .NeedsCode }}"Waiting for the verification code."{{ else }}"Waiting for the browser sign-in to complete."{{ end }}{{ else if eq .State "success" }}"Authentication succeeded."{{ else if eq .State "denied" }}"You declined this authentication request."{{ else if eq .State "timeout" }}"This request expired before it was completed."{{ else }}"The authentication attempt failed."{{ end }}
+									"text": {{ if eq .State "approval" }}"This sign-in has to run the command below on the machine the agent runs on. Approve it only if you expected it; nothing runs until you do."{{ else if eq .State "starting" }}"Approved. Waiting for the command to offer a sign-in link."{{ else if eq .State "pending" }}{{ if .NeedsCode }}"Open the link, approve the request, then paste the verification code back here."{{ else }}"Open the link and finish signing in. This card completes on its own once the browser flow is done."{{ end }}{{ else if eq .State "working" }}{{ if .NeedsCode }}"Waiting for the verification code."{{ else }}"Waiting for the browser sign-in to complete."{{ end }}{{ else if eq .State "success" }}"Authentication succeeded."{{ else if eq .State "denied" }}"You declined this authentication request."{{ else if eq .State "timeout" }}"This request expired before it was completed."{{ else if eq .State "cancelled" }}"This request was cancelled before it was completed."{{ else }}"The authentication attempt failed."{{ end }}
 								}
 							]
 						}
 					]
-				}{{ if .ShowRequester }},
+				}{{ if .Command }},
+				{
+					"type": "rich_text",
+					"block_id": "murtaugh_auth_admin_command",
+					"elements": [
+						{
+							"type": "rich_text_preformatted",
+							"elements": [
+								{
+									"type": "text",
+									"text": {{ json .Command }}
+								}
+							]
+						}
+					]
+				}{{ end }}{{ if .ShowRequester }},
 				{
 					"type": "context",
 					"block_id": "murtaugh_auth_admin_requester",
@@ -53,6 +68,32 @@
 						{
 							"type": "mrkdwn",
 							"text": {{ json .Reason }}
+						}
+					]
+				}{{ end }}{{ if .ShowApproval }},
+				{
+					"type": "actions",
+					"block_id": "murtaugh_auth",
+					"elements": [
+						{
+							"type": "button",
+							"action_id": {{ json .ActionApprove }},
+							"style": "primary",
+							"text": {
+								"type": "plain_text",
+								"text": "Approve"
+							},
+							"value": "approve"
+						},
+						{
+							"type": "button",
+							"action_id": {{ json .ActionDeny }},
+							"style": "danger",
+							"text": {
+								"type": "plain_text",
+								"text": "Deny"
+							},
+							"value": "deny"
 						}
 					]
 				}{{ end }}{{ if .ShowActions }},

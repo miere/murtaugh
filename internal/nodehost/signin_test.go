@@ -2,12 +2,15 @@ package nodehost_test
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/miere/murtaugh/internal/agent"
 	"github.com/miere/murtaugh/internal/agentwire"
 	"github.com/miere/murtaugh/internal/config"
+	"github.com/miere/murtaugh/internal/journal"
 )
 
 func signInPrompt() *agent.SignInPrompt {
@@ -28,8 +31,8 @@ func awaitAnswer(t *testing.T, answers <-chan agent.DisplayAnswer, what string) 
 	}
 }
 
-// The code the owner types crosses to the node, and the node's word on how the
-// sign-in ended reaches the gateway before the reply that follows it.
+// The sign-in is drawn for the owner the credential names, and the node's word
+// on how it ended arrives before the reply that follows it.
 func TestASignInCarriesTheCodeToTheNodeAndSettlesInOrder(t *testing.T) {
 	codes := make(chan agent.DisplayAnswer, 1)
 	script := newScriptedAgent(func(turn *scriptedTurn) {
@@ -58,6 +61,9 @@ func TestASignInCarriesTheCodeToTheNodeAndSettlesInOrder(t *testing.T) {
 			drawn = ev.SignIn
 			if ev.SignIn.Request != signInPrompt().Request {
 				t.Fatalf("the sign-in crossed as %+v", ev.SignIn.Request)
+			}
+			if ev.SignIn.Owner != nodeOwner {
+				t.Fatalf("the sign-in is for %q, want the node's owner %q", ev.SignIn.Owner, nodeOwner)
 			}
 			ev.SignIn.Answer <- agent.DisplayAnswer{Outcome: agent.DisplayAnswered, Code: "4/0Ab-code", UserID: "U9"}
 		case agent.EventSignInSettled:
@@ -248,5 +254,61 @@ func TestAnApprovedSignInStaysOpenForItsLinkAndCode(t *testing.T) {
 	}
 	if got := awaitAnswer(t, codes, "the code"); got.Code != "123-456" {
 		t.Fatalf("the code after an approval reached the node as %+v", got)
+	}
+}
+
+// Revoking a node's credential mid-sign-in wins: the node is told to stop its
+// sign-in, and the gateway's turn ends, which is what withdraws its cards.
+func TestRevokingTheNodeMidSignInStopsIt(t *testing.T) {
+	answers := make(chan agent.DisplayAnswer, 1)
+	script := newScriptedAgent(func(turn *scriptedTurn) {
+		prompt := signInPrompt()
+		if !turnEmitter(turn)(agent.Event{Type: agent.EventSignIn, SignIn: prompt}) {
+			return
+		}
+		select {
+		case got := <-prompt.Answer:
+			answers <- got
+		case <-time.After(10 * time.Second):
+		}
+	})
+	rig := dialLoopback(t, script)
+
+	events := promptDefault(t, rig)
+	for ev := range events {
+		if ev.Type == agent.EventSignIn {
+			break
+		}
+	}
+	if err := rig.host.CloseCredential(context.Background(), rig.selector); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	ended := make(chan struct{})
+	go func() {
+		defer close(ended)
+		for range events {
+		}
+	}()
+	select {
+	case <-ended:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the gateway's turn outlived the node's revocation; its cards would stay live")
+	}
+	if got := awaitAnswer(t, answers, "the cancel"); got.Outcome != agent.DisplayDismissed {
+		t.Fatalf("a revoked node's sign-in was answered with %+v", got)
+	}
+}
+
+// A token minted for a handle before owners had to be Slack IDs can never reach
+// anyone, so its node's arrival says how to fix it.
+func TestANodeWhoseOwnerIsNotASlackIDIsFlagged(t *testing.T) {
+	rec := &recordingJournal{}
+	dialLoopback(t, newScriptedAgent(func(*scriptedTurn) {}), journalling(rec))
+	flagged := rec.find("owner_not_a_slack_user")
+	if flagged.Kind == "" || flagged.Level != journal.LevelWarn {
+		t.Fatalf("a node owned by %q attached without a warning in the journal", nodeOwner)
+	}
+	if !strings.Contains(fmt.Sprint(flagged.Payload["fix"]), "--user U") {
+		t.Fatalf("the warning does not say how to fix it: %+v", flagged.Payload)
 	}
 }
