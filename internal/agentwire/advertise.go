@@ -14,34 +14,8 @@ import (
 // there was anywhere to put it. Every LATER change travels as a node-initiated
 // MethodAdvertise request, which is why the gateway does not have to poll.
 
-// Advertisement is what one node claims: the agent profile NAMES it serves and
-// the channels it asserts an assignment rule for.
-//
-// It is a FULL SNAPSHOT and it replaces whatever the gateway held for that
-// connection, never merges with it. There is no resume across a reconnect and
-// the link drops a duplicate silently, so a delta protocol would need ordering
-// guarantees against the connect-time state that nothing here provides.
-// Replace-the-whole-claim-set makes a duplicated or re-sent advertisement
-// harmless, which is the property that lets the node re-advertise whenever it
-// is unsure.
-//
-// Two things are deliberately NOT on it.
-//
-// There is no node id. internal/nodetoken's rule is that a node never asserts
-// its own identity — inside a fleet, a node that announces who it is can
-// announce somebody else. The gateway keys the registry from the credential it
-// verified at the handshake, which is the only identity it has any reason to
-// trust.
-//
-// There is nothing that GRANTS. A node admin owns their node's configuration,
-// so anything on this type is written by somebody the gateway has not
-// authorised to make gateway-level decisions. `allow_anyone` is the case in
-// point: it waives the gateway's own access list for a channel's chat surface,
-// and accepting it here would let any node owner open the gateway to the whole
-// workspace by editing a file on their laptop. The claims below carry a match
-// pattern and a profile name and nothing else, which is the same rule
-// internal/toolset/partition.go states for tools: enforcement is gateway-side
-// because a node cannot be trusted to filter itself.
+// Advertisement is written by a node admin, so it carries no node id and grants
+// nothing: a node cannot be trusted to decide either for the gateway.
 type Advertisement struct {
 	// Profiles is the agent profile names this node actually serves, sorted.
 	//

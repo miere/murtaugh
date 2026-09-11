@@ -205,6 +205,12 @@ the forbidden list drift apart.
 keeps its local agent on purpose, so `murtaugh jobs run x` works with no gateway
 and no node. A check that cannot demonstrate a failure is not a check.
 
+**The runtime reachability rule** is the mirror image: `cmd/murtaugh-runtime`
+must not reach `internal/slack/...`, `internal/tools/slack/...` or
+`github.com/slack-go/slack`, so a node cannot talk to Slack even by accident. It
+matches whole subtrees rather than exact names, runs in CI as "Runtime
+reachability rule", and uses `cmd/murtaugh` as its positive control too.
+
 Three consequences are load-bearing and easy to undo by accident:
 
 - The gateway wants the *words* for a provider failure without the machinery
@@ -960,8 +966,8 @@ itself. Choosing between them is delegation, below.
 channel's chat surface; the second decides the conversation key a pin is keyed
 by. Both are written by a node admin — possibly a guest holding a grant — so
 accepting either would let a node owner make a gateway decision by editing a
-file on their laptop. Same rule as the tool partition: enforcement is
-gateway-side because a node cannot be trusted to filter itself.
+file on their laptop. Enforcement is gateway-side because a node cannot be
+trusted to filter itself.
 
 **A node advertises what it SERVES, not what it has configured.**
 `internal/nodeclaim` derives the claim from the node's own configuration and the
@@ -1120,20 +1126,17 @@ builds every agent with its gate long before it knows which turns have a thread.
 It cannot be inferred on the far side either: "no `TurnLocation` on the context"
 is the in-process test and is false over the link, where the location is set from
 the prompt's channel on every turn. `nodeserve` serves a headless turn with **no
-stream on its context**, which routes the existing branches: `ToolGate.Approve`
-runs ungated, and the gateway sees a tool call naming no turn so `ask`,
-`present_plan` and the approver take their documented no-thread paths. Without
-it a 03:00 job raises a card nobody can answer and blocks until its timeout
-burns. The gateway half of the same rule: `remote.Client` records a stream's
-location only when the prompt names a channel, so a headless turn's location is
-the zero value. There is no second flag saying "this one happens nowhere":
+stream on its context**, so `ToolGate.Approve` runs ungated, and `ask` and
+`present_plan` refuse because the turn has no location. Without it a 03:00 job
+raises a card nobody can answer and blocks until its timeout burns. The gateway
+half of the same rule: `remote.Client` records a stream's location only when the
+prompt names a channel, so a headless turn's location is the zero value, and a
+question or plan raised on it anyway is answered `no_conversation` by the gateway
+itself. There is no second flag saying "this one happens nowhere":
 `agent.TurnLocationFromContext` already answers presence as
 `ok && loc.ChannelID != ""`, so a zero location reads as ABSENT to every
 consumer, and the in-process native client stamps its location unconditionally
-for the same reason. `Client.StreamLocation` therefore answers "is this stream
-KNOWN", which is a different question — `nodehost.locate` warns about a tool
-call naming a turn this gateway has never heard of, and a job, an unfurl or a
-workflow trigger is not one.
+for the same reason.
 
 **Jobs stay gateway-scheduled and become broker-EXECUTED.** Moving the scheduler
 node-side is explicitly deferred by #199 — shipping a split scheduler and a split
@@ -1157,105 +1160,35 @@ builds an agent in process with no gateway and no node. #170 is explicit: when
 the broker is broken there must be a way to run an agent that does not go
 through it.
 
-### The tool channel (`internal/toolset` partition, `internal/nodehost`, `internal/nodeserve`)
+### Tools live on the node; only display lives on the gateway (`internal/agentwire`, `internal/slack/display`)
 
-Murtaugh's own tools live on the gateway and hold the gateway's credentials. A
-node's agent reaches them over the connection the node already dialled — the
-gateway still never dials out — as `tool.list` and `tool.call`, the only
-direction a node initiates a call in.
+Every tool a node's agent calls runs on the node. The runtime builds its own
+registry — `ping`, `version`, `help`, `ask`, `present_plan`, plus the
+workdir-rooted native groups — and the gateway runs no tool for a node at all,
+so `slack.send_msg` is not reachable from one. The gateway alone talks to Slack,
+and "The runtime reachability rule" keeps it that way.
 
-**It is a per-call proxy, not a tunnel of the MCP stream, and that is what makes
-it small.** #170 Concern 5 describes the hard version: move the MCP byte stream
-across and the gateway end becomes a server session whose entire state IS that
-stream, so a reconnected pipe is dead rather than degraded and the node has to
-own initialise replay and request-id rewriting. Keeping the MCP session local —
-between the agent's own subprocess and the node's aggregator socket — removes
-that problem rather than solving it. It also reaches the backend a tunnel would
-have missed: the **native** backend, the default one, never touches the
-aggregator at all, so a tunnel would have restored tools for `acp` and
-`claude_code` and left native silently tool-less.
+What crosses the link for tools is a small closed set of **display requests** on
+the turn's own event stream: an approval, a question (`ask`) and a plan
+(`present_plan`). None of them names a Slack destination, and a test in
+`internal/agentwire` fails if one grows a channel, thread or user field. The
+gateway draws the card in the conversation the turn belongs to and sends the
+answer back under the id the node minted, the way a permission answer travels,
+so a node can never make the bot post somewhere else.
 
-**All three backends reach the channel, and getting the other two there took a
-change to the aggregator.** The proxy alone is not enough: `acp` and
-`claude_code` reach the registry through `agentbuild`'s aggregator, which used to
-resolve the agent's built-ins when the agent was *constructed*. On a node that is
-before any gateway connection exists, so it snapshotted an empty registry and
-served nothing for the life of the process — the very regression this channel is
-for, in the two backends it was written for, while `native` looked fine because
-it resolves inside its own `Initialize`. The aggregator now resolves on its first
-session instead, which is after the handshake on a node and makes no difference
-in the gateway process, where the registry is built once in `app.New` before any
-agent.
+**A turn with no conversation is refused twice.** The tool on the node refuses
+before anything is sent, with the same words it used on the gateway, and the
+gateway answers `no_conversation` itself for a turn it holds no location for,
+because nothing consumes a headless turn's cards and the tool would otherwise
+wait for its turn to be torn down.
 
-**The partition is a table in `internal/toolset` and is enforced in exactly one
-place, gateway-side.** `Reach` has three values and its zero value denies, so an
-unclassified family is refused rather than assumed harmless. A node reaches
-`ping`, `version`, `ask`, `present_plan` and — the one per-TOOL exception —
-`slack.send_msg`; `slack` otherwise, plus `jobs`, `cfg`, `setup`,
-`node`, `journal`, `troubleshoot` and `restart` are the gateway's alone; the
-workdir-rooted native groups and `auth.request` are meaningless remotely —
-`auth.request` because it writes the granted credential into the environment of
-the process that asked, which gateway-side is the wrong process. `nodehost`
-applies it on **both** verbs: `tool.list` never names a tool a node may not have,
-and `tool.call` re-checks before looking anything up, because a node admin owns
-their node's configuration and a node cannot be trusted to filter itself. The
-drift guard is in `internal/app`, the only package that can build the real
-registry.
-
-**`slack.send_msg` is the exception, and `toolset.Tools` is where exceptions
-live.** A headless job's whole output mechanism is the agent posting for itself
-— `RunAndForget` discards the text deliberately — so a broker-executed job whose
-prompt ends "post the result to #ops" would otherwise do its work and tell
-nobody. The family's stated reason for refusing is two things, and only one is
-about the credential: the bot token is not an argument and does not cross, since
-the call executes gateway-side like every other `ReachNode` tool, exactly the
-trade `ask` and `present_plan` already make. The other half does go: `attachment`
-and `blocks` take unrooted GATEWAY filesystem paths the tool reads and uploads,
-so they are **denied by name and stripped from the schema the node is offered** —
-stripped as well as refused, because a model handed an argument it may not use
-will use it, be refused, and try again until the job's timeout is gone. The rest
-of the family stays gateway-only: reading a workspace's history, editing somebody
-else's message and creating channels are all wider than reporting a result. This
-IS a widening of what a node's agent can ask the gateway to do, taken knowingly
-under #199.
-
-**Two things a proxied call must carry that an in-process one gets for free.**
-The turn's `agent.TurnLocation` is re-injected gateway-side from the stream id
-the call names — without it the approval gate short-circuits to *allowed* with no
-card and `ask`/`present_plan` go non-interactive, a silent ungating rather than a
-failure. And the descriptor carries the tool's `MCPName` override, so `ask`
-republishes as `AskUserQuestion` and a Claude Code agent still reaches for it.
-What does **not** cross is `agent.TurnEnv`: a gateway-executed tool runs with the
-gateway's environment.
-
-Only a **native** call names its stream today. An `acp`/`claude_code` call
-reaches the proxy through the node's local MCP aggregator, whose context is
-decorated once per session and cannot name a turn, so those two backends call
-with an empty stream: `ping` and `version` are unaffected, `ask` and
-`present_plan` fail gateway-side for want of a thread. Carrying a per-turn id
-onto the aggregator's per-call context is its own item; it is written down here
-rather than left to be discovered as "`ask` works on one backend".
-
-**The abort policy is forced by an absence, and it is enforced by cancellation
-rather than by wording.** Nothing in the tool surface says whether a call may be
-retried — `tools.Tool` is `Name`/`Description`/`InputSchema`/`Invoke` — so when a
-link dies, every in-flight call fails and none is retried. What makes that
-stick is that the node ends every turn before it fails that turn's calls, so an
-agent whose call was dropped is already cancelled; the note it would have read —
-the action may or may not have taken effect, do not retry — is the backstop for
-a caller whose context is not a turn's. The gateway cancels its side too, so a
-drop mid-approval cannot fire a side effect for an agent that has gone. That gap
-is closed **on this path only**: the in-process MCP frontend cannot be fixed the
-same way, because the MCP SDK wraps a connection's context in a type whose
-`Done()` returns nil forever, so no ancestor context reaches a tool handler. See
-`internal/nodehost`'s package doc.
-
-The tool set is fetched at the handshake, immediately before the node's agent is
-initialised, because both backend families latch: `native` on its first
-`Initialize`, `acp`/`claude_code` when their aggregator registers its first
-session. A gateway that cannot answer fails the handshake; the node's redial loop
-retries. The set is then frozen for the process — descriptions and schemas
-refresh on reconnect, membership does not.
+**All three backends reach it the same way.** `ask` and `present_plan` are a
+contract with no Slack in it plus a display: in process the display is
+`internal/slack/display`, on a node it is `agent.TurnDisplay`, which raises the
+request as an agent event through the turn's `TurnEmitter`. `acp` and
+`claude_code` tools already had an emitter through the MCP bridge; the native
+client now installs one on every turn, so the request lands on the stream in
+order with the reply around it.
 
 ### Node failover: only the leader accepts, a standby redirects (`internal/nodehost/leader.go`, `cmd/murtaugh-runtime/gateways.go`)
 
