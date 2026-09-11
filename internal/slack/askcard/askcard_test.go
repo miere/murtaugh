@@ -465,3 +465,21 @@ func TestOptionText(t *testing.T) {
 		}
 	}
 }
+
+func TestSubtitlesAgreeWithHowManyQuestionsThereAre(t *testing.T) {
+	for _, tc := range []struct {
+		state   State
+		n       int
+		missing int
+		want    string
+	}{
+		{StateCancelled, 1, 0, "The question was dismissed before being answered."},
+		{StateCancelled, 3, 0, "The 3 questions were dismissed before being answered."},
+		{StatePending, 2, 1, "1 question still needs an answer."},
+		{StatePending, 3, 2, "2 questions still need an answer."},
+	} {
+		if got := subtitleFor(tc.state, tc.n, tc.missing); got != tc.want {
+			t.Errorf("subtitleFor(%s, %d, %d) = %q, want %q", tc.state, tc.n, tc.missing, got, tc.want)
+		}
+	}
+}

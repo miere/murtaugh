@@ -14,6 +14,8 @@ import (
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/mcpbridge"
 	"github.com/miere/murtaugh/internal/nodeserve"
+	jobsrun "github.com/miere/murtaugh/internal/tools/jobs/run"
+	"github.com/miere/murtaugh/internal/toolset"
 )
 
 // The kind is defaulted rather than stored, so printing the raw field would show
@@ -120,13 +122,13 @@ func TestTheBridgeSubcommandIsDispatchedOnANode(t *testing.T) {
 }
 
 func TestANodeServesItsOwnTools(t *testing.T) {
-	registry := nodeTools(nodeserve.NewSignIns(nil))
+	registry := nodeTools(config.Config{}, nodeserve.NewSignIns(nil))
 	var names []string
 	for _, tool := range registry.All() {
 		names = append(names, tool.Name())
 	}
 	sort.Strings(names)
-	want := []string{"ask", "auth.request", "help", "ping", "present_plan", "version"}
+	want := []string{"ask", "auth.request", "help", "jobs.run", "ping", "present_plan", "version"}
 	if !slices.Equal(names, want) {
 		t.Fatalf("the node registers %v, want %v", names, want)
 	}
@@ -143,8 +145,67 @@ func TestANodeServesItsOwnTools(t *testing.T) {
 	}
 }
 
+// A node runs the same allowlist as an in-process agent, and toolset.Resolve
+// drops an entry it cannot match, so a missing tool looks exactly like a typo.
+func TestAnAgentOnANodeGetsJobsOnlyWhenItListsThem(t *testing.T) {
+	cfg := config.Config{Jobs: map[string]config.JobProfile{
+		"nightly": {Command: "/bin/echo", Args: []string{"nightly"}},
+	}}
+	registry := nodeTools(cfg, nodeserve.NewSignIns(nil))
+
+	for _, tc := range []struct {
+		allow []string
+		want  bool
+	}{
+		{allow: []string{"jobs"}, want: true},
+		{allow: []string{"jobs.run"}, want: true},
+		{allow: []string{"ask", "present_plan"}, want: false},
+		{allow: nil, want: false},
+	} {
+		resolved, problems, err := toolset.Resolve(tc.allow, nil, toolset.Deps{Registry: registry})
+		if err != nil {
+			t.Fatalf("Resolve(%v): %v", tc.allow, err)
+		}
+		if len(problems) != 0 {
+			t.Fatalf("Resolve(%v): unexpected problems %v", tc.allow, problems)
+		}
+		var got bool
+		for _, tool := range resolved {
+			if tool.Name() == "jobs.run" {
+				got = true
+			}
+		}
+		if got != tc.want {
+			t.Errorf("an agent listing %v got jobs.run = %v, want %v", tc.allow, got, tc.want)
+		}
+	}
+}
+
+// The lookup is a closure over this node's own configuration; wired to an empty
+// one it would answer "not found" for every job the node was given.
+func TestTheNodesJobsToolRunsTheNodesOwnJobs(t *testing.T) {
+	cfg := config.Config{Jobs: map[string]config.JobProfile{"nightly": {Command: "/bin/echo", Args: []string{"ran"}}}}
+	registry := nodeTools(cfg, nodeserve.NewSignIns(nil))
+
+	tool, ok := registry.Get("jobs.run")
+	if !ok {
+		t.Fatal("the node registers no jobs.run")
+	}
+	out, err := tool.Invoke(context.Background(), map[string]any{"name": "nightly"})
+	if err != nil {
+		t.Fatalf("jobs.run nightly: %v", err)
+	}
+	result, ok := out.(jobsrun.Result)
+	if !ok {
+		t.Fatalf("jobs.run returned %T, want jobsrun.Result", out)
+	}
+	if result.ExitCode != 0 || !strings.Contains(result.Stdout, "ran") {
+		t.Errorf("jobs.run nightly returned %+v, want the node's own job to have run", result)
+	}
+}
+
 func TestANodesSignInWithNoConversationGoesToItsOwner(t *testing.T) {
-	registry := nodeTools(nodeserve.NewSignIns(nil))
+	registry := nodeTools(config.Config{}, nodeserve.NewSignIns(nil))
 	tool, ok := registry.Get("auth.request")
 	if !ok {
 		t.Fatal("the node registers no auth.request")

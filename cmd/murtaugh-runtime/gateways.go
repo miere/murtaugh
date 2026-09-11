@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 
@@ -14,10 +15,11 @@ const (
 )
 
 type gatewayList struct {
-	seeds   []string
-	learned []string
-	at      string
-	hops    int
+	seeds      []string
+	learned    []string
+	at         string
+	hops       int
+	credential string
 }
 
 func newGatewayList(seeds ...string) *gatewayList {
@@ -133,7 +135,8 @@ func (g *gatewayList) refusal(address string, err error, logger *slog.Logger) (h
 		return g.hop(redirect.Addresses, logger)
 
 	case errors.Is(err, nodesocket.ErrCredentialRejected):
-		logger.Error("the gateway rejected this node's credential: it is unknown, revoked, or not the one this gateway holds. Redialling will not fix it — mint a new one with `murtaugh node token`",
+		logger.Error(fmt.Sprintf("the gateway rejected this node's credential: it is unknown, revoked, or not the one this gateway holds. "+
+			"Mint a new one on the gateway with `murtaugh node token mint` and write it to %s; the node picks it up on its next attempt, no restart needed", g.credential),
 			"gateway", address, "error", err)
 		g.advance()
 		return false

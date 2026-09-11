@@ -11,6 +11,7 @@ import (
 
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/config/store"
+	"github.com/miere/murtaugh/internal/nodetoken"
 	"github.com/miere/murtaugh/internal/tools"
 )
 
@@ -83,8 +84,9 @@ func (t *nodeSplitTool) Invoke(ctx context.Context, args map[string]any) (any, e
 	}
 
 	return okResult{Message: fmt.Sprintf(
-		"copied %d rows into %s (%s); kept on the gateway: %s. Nothing here changed — install a node credential with `murtaugh node token install` and start murtaugh-runtime.",
-		report.Total(), target, describe(report.Copied), describe(report.Kept))}, nil
+		"copied %d rows into %s (%s); kept on the gateway: %s. Nothing here changed — mint the node's credential with "+
+			"`murtaugh node token mint --node <id> --user <U…> --token-file %s`, then start murtaugh-runtime.",
+		report.Total(), target, describe(report.Copied), describe(report.Kept), nodetoken.PathFor(filepath.Dir(target)))}, nil
 }
 
 func nodeSeed(args map[string]any) (*config.NodeConfig, error) {

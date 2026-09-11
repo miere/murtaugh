@@ -380,8 +380,11 @@ func templateFor(state State) string {
 func subtitleFor(state State, n int, missing int) string {
 	switch state {
 	case StatePending:
-		if missing > 0 {
-			return fmt.Sprintf("%s still need an answer.", plural(missing, "question", "questions"))
+		if missing == 1 {
+			return "1 question still needs an answer."
+		}
+		if missing > 1 {
+			return fmt.Sprintf("%d questions still need an answer.", missing)
 		}
 		return fmt.Sprintf("We need your input on the following %s.", plural(n, "question", "questions"))
 	case StateAnswered:
@@ -391,7 +394,10 @@ func subtitleFor(state State, n int, missing int) string {
 	case StateTimeout:
 		return fmt.Sprintf("No answer to the %s asked.", plural(n, "question", "questions"))
 	default:
-		return fmt.Sprintf("The %s were dismissed before being answered.", plural(n, "question", "questions"))
+		if n == 1 {
+			return "The question was dismissed before being answered."
+		}
+		return fmt.Sprintf("The %d questions were dismissed before being answered.", n)
 	}
 }
 

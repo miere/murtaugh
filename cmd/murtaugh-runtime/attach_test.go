@@ -2,20 +2,27 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/miere/murtaugh/internal/nodesocket"
+	"github.com/miere/murtaugh/internal/nodetoken"
 )
 
 type loopHarness struct {
 	t *testing.T
 
-	mu      sync.Mutex
-	dialled []string
-	waits   []time.Duration
+	mu        sync.Mutex
+	dialled   []string
+	presented []string
+	waits     []time.Duration
 
+	tokenFile string
+	onWait    func()
 	answer    func(n int, address string) error
 	stopAfter int
 }
@@ -24,13 +31,18 @@ func (h *loopHarness) run() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	if h.tokenFile == "" {
+		h.tokenFile = writeToken(h.t, filepath.Join(h.t.TempDir(), nodetoken.FileName), "mrtg_node_0123456789abcdef_first")
+	}
 	done := make(chan error, 1)
 	go func() {
 		done <- attach(ctx, quietLogger(), attachment{
-			gateways: []string{seed},
-			dial: func(_ context.Context, address string) (*nodesocket.Conn, error) {
+			gateways:  []string{seed},
+			tokenFile: h.tokenFile,
+			dial: func(_ context.Context, address, token string) (*nodesocket.Conn, error) {
 				h.mu.Lock()
 				h.dialled = append(h.dialled, address)
+				h.presented = append(h.presented, token)
 				n := len(h.dialled)
 				h.mu.Unlock()
 				if n >= h.stopAfter {
@@ -42,6 +54,9 @@ func (h *loopHarness) run() {
 				h.mu.Lock()
 				h.waits = append(h.waits, d)
 				h.mu.Unlock()
+				if h.onWait != nil {
+					h.onWait()
+				}
 				fired := make(chan time.Time, 1)
 				fired <- time.Now()
 				return fired
@@ -123,4 +138,72 @@ func TestTheLoopKeepsRedialling(t *testing.T) {
 	if got := h.waitCount(); got < 3 {
 		t.Errorf("the loop waited %d times over 4 failed dials, want one per dial", got)
 	}
+}
+
+func writeToken(t *testing.T, path, token string) string {
+	t.Helper()
+	if err := nodetoken.WriteFile(path, token); err != nil {
+		t.Fatalf("write the node token: %v", err)
+	}
+	return path
+}
+
+// Without this, an operator who replaced a rejected credential would still
+// have to restart the node before the new one was ever presented.
+func TestEachDialPresentsTheCredentialOnDiskNow(t *testing.T) {
+	path := writeToken(t, filepath.Join(t.TempDir(), nodetoken.FileName), "mrtg_node_0123456789abcdef_old")
+	h := &loopHarness{t: t, tokenFile: path, stopAfter: 2}
+	h.answer = func(n int, _ string) error {
+		if n == 1 {
+			if err := os.Remove(path); err != nil {
+				t.Errorf("remove the old token: %v", err)
+			}
+			writeToken(t, path, "mrtg_node_0123456789abcdef_new")
+		}
+		return nodesocket.ErrCredentialRejected
+	}
+	h.run()
+
+	presented := h.tokensPresented()
+	want := []string{"mrtg_node_0123456789abcdef_old", "mrtg_node_0123456789abcdef_new"}
+	if len(presented) < 2 || !slices.Equal(presented[:2], want) {
+		t.Errorf("the node presented %v over two dials, want %v", presented, want)
+	}
+}
+
+// The mode check is the only guard on a file that is the node's whole identity,
+// so re-reading it must not become a way around it.
+func TestADialIsSkippedWhileTheCredentialIsReadableByOthers(t *testing.T) {
+	path := writeToken(t, filepath.Join(t.TempDir(), nodetoken.FileName), "mrtg_node_0123456789abcdef_old")
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatalf("loosen the token's mode: %v", err)
+	}
+	h := &loopHarness{t: t, tokenFile: path, stopAfter: 1}
+	h.answer = func(int, string) error { return errNoAnswer() }
+	var once sync.Once
+	dialsBeforeFix := -1
+	h.onWait = func() {
+		once.Do(func() {
+			h.mu.Lock()
+			dialsBeforeFix = len(h.dialled)
+			h.mu.Unlock()
+			if err := os.Chmod(path, nodetoken.FileMode); err != nil {
+				t.Errorf("restore the token's mode: %v", err)
+			}
+		})
+	}
+	h.run()
+
+	if dialsBeforeFix != 0 {
+		t.Errorf("the node dialled %d times with a credential others could read, want 0", dialsBeforeFix)
+	}
+	if presented := h.tokensPresented(); len(presented) == 0 || presented[0] != "mrtg_node_0123456789abcdef_old" {
+		t.Errorf("the node presented %v, want the token once its mode was fixed", presented)
+	}
+}
+
+func (h *loopHarness) tokensPresented() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return slices.Clone(h.presented)
 }

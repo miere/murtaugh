@@ -2,12 +2,15 @@ package claudecode
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -446,6 +449,40 @@ func abortedResultMsg() map[string]any {
 		"is_error":    true,
 		"stop_reason": "tool_use",
 		"result":      nil,
+	}
+}
+
+// A new conversation is first tried as a resume, which the CLI refuses with this result before any
+// turn opens; a warning there fired on every new conversation and hid the aborts that matter.
+func TestAnAbortedResultWarnsOnlyWhenItEndsATurn(t *testing.T) {
+	raw, err := json.Marshal(abortedResultMsg())
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	msg, err := decodeMessage(raw)
+	if err != nil || msg == nil {
+		t.Fatalf("decode the aborted result: %v", err)
+	}
+
+	var logs bytes.Buffer
+	s := newProcSession("s1", Options{Logger: slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))})
+	s.dispatch(msg)
+	if strings.Contains(logs.String(), "level=WARN") {
+		t.Errorf("an aborted result with no turn in flight was logged as a warning:\n%s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "level=DEBUG") {
+		t.Errorf("an aborted result with no turn in flight left no trace at all:\n%s", logs.String())
+	}
+
+	logs.Reset()
+	sub := &subscription{events: make(chan agent.Event, 1)}
+	s.active = sub
+	s.dispatch(msg)
+	if !strings.Contains(logs.String(), "level=WARN") {
+		t.Errorf("an aborted turn was not logged as a warning:\n%s", logs.String())
+	}
+	if ev := <-sub.events; ev.Type != agent.EventError {
+		t.Errorf("the aborted turn ended with %q, want an error", ev.Type)
 	}
 }
 

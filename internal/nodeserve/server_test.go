@@ -41,7 +41,10 @@ func TestACancelReachesANodeThatIsBusyStartingATurn(t *testing.T) {
 	close(client.release)
 }
 
-type pipePeer struct{ link *nodelink.Link }
+type pipePeer struct {
+	link      *nodelink.Link
+	responses chan agentwire.Message
+}
 
 func (p *pipePeer) request(t *testing.T, id string, method agentwire.Method, body any) {
 	t.Helper()
@@ -60,28 +63,98 @@ func (p *pipePeer) request(t *testing.T, id string, method agentwire.Method, bod
 	}
 }
 
+func (p *pipePeer) response(t *testing.T) agentwire.Message {
+	t.Helper()
+	select {
+	case msg := <-p.responses:
+		return msg
+	case <-time.After(10 * time.Second):
+		t.Fatal("the node never answered")
+		return agentwire.Message{}
+	}
+}
+
 func serveOverPipe(t *testing.T, client agent.Client) *pipePeer {
+	t.Helper()
+	return serveOverPipeWith(t, client, Options{})
+}
+
+func serveOverPipeWith(t *testing.T, client agent.Client, opts Options) *pipePeer {
 	t.Helper()
 	gatewayConn, nodeConn := nodelink.Pipe(8)
 	ctx, cancel := context.WithCancel(context.Background())
 
+	opts.Logger = discardLogger()
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
-		_ = Serve(ctx, nodeConn, client, Options{Logger: discardLogger()})
+		_ = Serve(ctx, nodeConn, client, opts)
 	}()
 
+	responses := make(chan agentwire.Message, 16)
 	link := nodelink.New(gatewayConn, nodelink.Options{
-		Handler: func([]byte) error { return nil },
-		Logger:  discardLogger(),
+		Handler: func(raw []byte) error {
+			if msg, err := agentwire.DecodeMessage(raw); err == nil && msg.Kind == agentwire.MessageResponse {
+				select {
+				case responses <- msg:
+				default:
+				}
+			}
+			return nil
+		},
+		Logger: discardLogger(),
 	})
 	t.Cleanup(func() {
 		cancel()
 		_ = link.Close()
 		<-stopped
 	})
-	return &pipePeer{link: link}
+	return &pipePeer{link: link, responses: responses}
 }
+
+// A blank answer makes the gateway warn and guess, and an override the node ignored would let a
+// profile that says "never interrupt" be interrupted anyway.
+func TestANodeAlwaysSaysWhetherItsAgentCanBeInterrupted(t *testing.T) {
+	no, yes := false, true
+	for _, tc := range []struct {
+		name     string
+		client   agent.Client
+		override *bool
+		want     bool
+	}{
+		{"nothing to go on", &blockingClient{}, nil, true},
+		{"the agent is asked", &probingClient{cancels: false}, nil, false},
+		{"the override beats the agent", &probingClient{cancels: false}, &yes, true},
+		{"the override with nothing to ask", &blockingClient{}, &no, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			peer := serveOverPipeWith(t, tc.client, Options{Interruptible: tc.override})
+			peer.request(t, "i1", agentwire.MethodInitialize, agentwire.Empty{})
+
+			msg := peer.response(t)
+			if fault := msg.Fault(); fault != nil {
+				t.Fatalf("initialize failed: %v", fault)
+			}
+			var result agentwire.InitializeResult
+			if err := msg.Into(&result); err != nil {
+				t.Fatalf("read the initialize result: %v", err)
+			}
+			if result.Interruptible == nil {
+				t.Fatal("the node did not say whether its agent can be interrupted")
+			}
+			if *result.Interruptible != tc.want {
+				t.Errorf("the node said interruptible=%v, want %v", *result.Interruptible, tc.want)
+			}
+		})
+	}
+}
+
+type probingClient struct {
+	blockingClient
+	cancels bool
+}
+
+func (c *probingClient) SupportsCancel(context.Context) bool { return c.cancels }
 
 type blockingClient struct {
 	entered   chan struct{}

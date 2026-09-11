@@ -1196,10 +1196,19 @@ through it.
 ### Tools live on the node; only display lives on the gateway (`internal/agentwire`, `internal/slack/display`)
 
 Every tool a node's agent calls runs on the node. The runtime builds its own
-registry — `ping`, `version`, `help`, `ask`, `present_plan`, plus the
-workdir-rooted native groups — and the gateway runs no tool for a node at all,
-so `slack.send_msg` is not reachable from one. The gateway alone talks to Slack,
-and "The runtime reachability rule" keeps it that way.
+registry — `ping`, `version`, `help`, `ask`, `present_plan`, `auth.request`,
+`jobs.run`, plus the workdir-rooted native groups — and the gateway runs no tool
+for a node at all, so `slack.send_msg` is not reachable from one. The gateway
+alone talks to Slack, and "The runtime reachability rule" keeps it that way.
+
+`jobs.run` is on a node for the same reason the split copies the job rows to it:
+a job is work, and work happens on nodes. It is still the agent's `tools:` list
+that decides — an agent that does not list `jobs` does not get it. Only the
+**reply** stays with the gateway. A job's `report_to` is read nowhere on a node;
+the gateway reads its own copy after a run it scheduled, and withholds the reply
+unless the node that ran it belongs to the gateway admin (`withholdReason` in
+`internal/slack/gateway/job_report.go`). A node calling `jobs.run` itself gets
+the reply as its own tool result, which posts nothing anywhere.
 
 What crosses the link for tools is a small closed set of **display requests** on
 the turn's own event stream: an approval, a question (`ask`) and a plan
