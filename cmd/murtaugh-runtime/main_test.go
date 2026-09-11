@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"path/filepath"
 	"reflect"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 
@@ -146,5 +149,31 @@ func TestTheBridgeSubcommandIsDispatchedOnANode(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), mcpbridge.EnvSocket) {
 		t.Fatalf("mcp-bridge failed for some reason other than its missing environment: %v", err)
+	}
+}
+
+// The node's tools run here and nothing of the gateway's is offered, so `help`
+// describes exactly what this node's agent can call.
+func TestANodeServesItsOwnTools(t *testing.T) {
+	registry := nodeTools()
+	var names []string
+	for _, tool := range registry.All() {
+		names = append(names, tool.Name())
+	}
+	sort.Strings(names)
+	want := []string{"ask", "help", "ping", "present_plan", "version"}
+	if !slices.Equal(names, want) {
+		t.Fatalf("the node registers %v, want %v", names, want)
+	}
+
+	help, _ := registry.Get("help")
+	out, err := help.Invoke(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("help: %v", err)
+	}
+	for _, name := range want {
+		if !strings.Contains(out.(string), name) {
+			t.Errorf("help does not list %q:\n%s", name, out)
+		}
 	}
 }

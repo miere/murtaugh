@@ -137,8 +137,9 @@ type turn struct {
 // every approval belonging to this turn" a single loop rather than two
 // bookkeeping schemes that drift.
 type ask struct {
-	stream string
-	answer chan agentwire.PermissionResponse
+	stream  string
+	answer  chan agentwire.PermissionResponse
+	display bool
 }
 
 // Serve runs one connection to completion and returns why it ended.
@@ -239,6 +240,8 @@ func (s *Server) consume(payload []byte) error {
 		go s.serve(msg)
 	case agentwire.MessagePermission:
 		s.answer(msg)
+	case agentwire.MessageAnswer:
+		s.answerDisplay(msg)
 	case agentwire.MessageResponse:
 		// The tool channel's answers. Applied on the read loop because it is a
 		// buffered channel send that cannot block — exactly as a permission
@@ -594,10 +597,48 @@ func (s *Server) deliver(resp agentwire.PermissionResponse) {
 	}
 }
 
+func (s *Server) answerDisplay(msg agentwire.Message) {
+	var answer agentwire.DisplayAnswer
+	if err := msg.Into(&answer); err != nil {
+		s.log.Warn("nodeserve: read display answer", "error", err)
+		return
+	}
+	s.deliverDisplay(answer)
+}
+
+func (s *Server) deliverDisplay(answer agentwire.DisplayAnswer) {
+	s.mu.Lock()
+	pending := s.asks[answer.ID]
+	delete(s.asks, answer.ID)
+	s.mu.Unlock()
+	if pending == nil {
+		s.log.Debug("nodeserve: display answer for an unknown request", "id", answer.ID)
+		return
+	}
+	if err := s.enc.Answer(answer); err != nil {
+		s.log.Warn("nodeserve: deliver display answer", "error", err, "id", answer.ID)
+	}
+}
+
 // register records an outstanding permission request against its turn.
 func (s *Server) register(id, stream string, answer chan agentwire.PermissionResponse) {
 	s.mu.Lock()
 	s.asks[id] = &ask{stream: stream, answer: answer}
+	s.mu.Unlock()
+}
+
+func (s *Server) sessionOf(stream string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if t := s.turns[stream]; t != nil {
+		return t.sessionID
+	}
+	return ""
+}
+
+func (s *Server) registerDisplay(id, stream string) {
+	s.mu.Lock()
+	s.asks[id] = &ask{stream: stream, display: true}
 	s.mu.Unlock()
 }
 
@@ -617,8 +658,13 @@ func (s *Server) forget(id string) {
 func (s *Server) dismissTurnAsks(stream string) {
 	s.mu.Lock()
 	dismissals := make([]agentwire.PermissionResponse, 0, len(s.asks))
+	var displays []agentwire.DisplayAnswer
 	for id, pending := range s.asks {
 		if pending.stream != stream {
+			continue
+		}
+		if pending.display {
+			displays = append(displays, agentwire.DisplayAnswer{ID: id, Outcome: string(agent.DisplayDismissed)})
 			continue
 		}
 		resp := agentwire.PermissionResponse{ID: id}
@@ -633,6 +679,9 @@ func (s *Server) dismissTurnAsks(stream string) {
 	s.mu.Unlock()
 	for _, resp := range dismissals {
 		s.deliver(resp)
+	}
+	for _, answer := range displays {
+		s.deliverDisplay(answer)
 	}
 }
 

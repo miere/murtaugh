@@ -463,6 +463,7 @@ func (c *Client) deliverEvent(msg agentwire.Message) {
 	if s == nil {
 		// A trailing event for a turn already torn down. Not an error: the
 		// consumer walked away and the node had frames in flight.
+		c.dismissOrphanDisplay(msg)
 		return
 	}
 	// End may ride along with a final event, so the payload is delivered before
@@ -495,11 +496,31 @@ func (c *Client) deliverBackground(msg agentwire.Message) {
 		c.log.Warn("remote: background event with no router bound", "session_id", msg.SessionID)
 		return
 	}
-	ev, _, err := c.decode(msg, nil)
+	ev, handled, err := c.decode(msg, nil)
+	if handled {
+		return
+	}
 	if err != nil {
 		ev = agent.Event{Type: agent.EventError, Error: err}
 	}
 	c.background(msg.SessionID, ev)
+}
+
+func (c *Client) dismissOrphanDisplay(msg agentwire.Message) {
+	var wire agentwire.Event
+	if len(msg.Body) == 0 || msg.Into(&wire) != nil {
+		return
+	}
+	id := ""
+	switch {
+	case wire.Question != nil:
+		id = wire.Question.ID
+	case wire.Plan != nil:
+		id = wire.Plan.ID
+	default:
+		return
+	}
+	go c.sendDisplayAnswer(agentwire.DisplayAnswer{ID: id, Outcome: string(agent.DisplayDismissed)})
 }
 
 // decode turns an event frame into the agent event the renderer consumes, and
@@ -518,6 +539,14 @@ func (c *Client) decode(msg agentwire.Message, s *stream) (agent.Event, bool, er
 		return agent.Event{}, false, err
 	}
 	if pending == nil {
+		return ev, false, nil
+	}
+	if answers := displayAnswers(ev); answers != nil {
+		if s == nil || s.location.ChannelID == "" {
+			go c.sendDisplayAnswer(agentwire.DisplayAnswer{ID: pending.ID, Outcome: string(agent.DisplayNoConversation)})
+			return agent.Event{}, true, nil
+		}
+		go c.answerDisplay(pending.ID, answers, s)
 		return ev, false, nil
 	}
 	if pending.Gate == agentwire.GateTool {
@@ -598,6 +627,44 @@ func (c *Client) answerPermission(pending *agentwire.PendingDecision) {
 	defer cancel()
 	if err := c.send(ctx, msg); err != nil {
 		c.log.Warn("remote: deliver permission answer", "error", err, "id", pending.ID)
+	}
+}
+
+func displayAnswers(ev agent.Event) chan agent.DisplayAnswer {
+	switch {
+	case ev.Question != nil:
+		return ev.Question.Answer
+	case ev.Plan != nil:
+		return ev.Plan.Answer
+	}
+	return nil
+}
+
+func (c *Client) answerDisplay(id string, answers <-chan agent.DisplayAnswer, s *stream) {
+	select {
+	case answer := <-answers:
+		c.sendDisplayAnswer(agentwire.EncodeDisplayAnswer(id, answer))
+	case <-s.quit:
+		select {
+		case answer := <-answers:
+			c.sendDisplayAnswer(agentwire.EncodeDisplayAnswer(id, answer))
+		default:
+			c.sendDisplayAnswer(agentwire.DisplayAnswer{ID: id, Outcome: string(agent.DisplayDismissed)})
+		}
+	case <-c.link.Done():
+	}
+}
+
+func (c *Client) sendDisplayAnswer(answer agentwire.DisplayAnswer) {
+	msg, err := agentwire.AnswerDisplay(answer)
+	if err != nil {
+		c.log.Warn("remote: encode display answer", "error", err, "id", answer.ID)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), abandonTimeout)
+	defer cancel()
+	if err := c.send(ctx, msg); err != nil && !errors.Is(err, nodelink.ErrLinkClosed) {
+		c.log.Warn("remote: deliver display answer", "error", err, "id", answer.ID)
 	}
 }
 

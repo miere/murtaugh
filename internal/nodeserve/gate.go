@@ -7,7 +7,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/miere/murtaugh/internal/agent"
 	"github.com/miere/murtaugh/internal/agentruntime"
 	"github.com/miere/murtaugh/internal/agentwire"
 )
@@ -82,9 +81,7 @@ func (g *ToolGate) Approve(ctx context.Context, toolName, summary string) (bool,
 	server.register(id, stream, answer)
 
 	request := agentwire.NativeApproval(id, toolName, summary)
-	if loc, ok := agent.TurnLocationFromContext(ctx); ok {
-		request.SessionID = loc.ThreadTS
-	}
+	request.SessionID = server.sessionOf(stream)
 	msg, err := agentwire.StreamEvent(stream, agentwire.Event{
 		Type:       agentwire.EventPermission,
 		Permission: &request,
