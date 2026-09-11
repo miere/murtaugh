@@ -790,7 +790,7 @@ later.
 | Flag           | Required | Type     | Notes                                                                                  |
 |----------------|----------|----------|----------------------------------------------------------------------------------------|
 | `--node`       | yes      | string   | Node id this credential identifies.                                                    |
-| `--user`       | yes      | string   | Murtaugh user the node acts for.                                                       |
+| `--user`       | yes      | string   | Slack user ID (`U…` or `W…`) of the node's owner. A handle or a name is refused.       |
 | `--label`      | no       | string   | Free-text note about where the credential lives (`mac mini`, `rotation 2026-09`).      |
 | `--expires-in` | no       | duration | Go duration (e.g. `720h`). Omitted means the credential lasts until it is revoked.      |
 | `--token-file` | no       | string   | Write the token to this file (mode `0600`) instead of printing it. Refuses to overwrite.|

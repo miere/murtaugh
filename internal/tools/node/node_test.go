@@ -147,8 +147,8 @@ func TestMintRequiresANodeAndAUser(t *testing.T) {
 	for name, args := range map[string]map[string]any{
 		"no args":       {},
 		"no user":       {"node": "mac-mini"},
-		"no node":       {"user": "U1"},
-		"blank node":    {"node": "   ", "user": "U1"},
+		"no node":       {"user": "U012ABCDEF"},
+		"blank node":    {"node": "   ", "user": "U012ABCDEF"},
 		"blank user":    {"node": "mac-mini", "user": " "},
 		"wrong types":   {"node": 7, "user": true},
 		"empty strings": {"node": "", "user": ""},
@@ -161,6 +161,31 @@ func TestMintRequiresANodeAndAUser(t *testing.T) {
 	}
 }
 
+// A node's owner is who its sign-ins are sent to and whose clicks are checked,
+// and both match Slack user IDs only, so any other name would reach nobody.
+func TestMintRefusesAnOwnerThatIsNotASlackUserID(t *testing.T) {
+	store, m, _, _ := toolsFor(t)
+	for _, user := range []string{"@miere", "miere", "u012abcdef", "C012ABCDEF", "U1", "U012-ABCDEF"} {
+		t.Run(user, func(t *testing.T) {
+			_, err := m.Invoke(context.Background(), map[string]any{"node": "mac-mini", "user": user})
+			if err == nil {
+				t.Fatalf("mint issued a credential for owner %q", user)
+			}
+			if !strings.Contains(err.Error(), "Slack user ID") || !strings.Contains(err.Error(), user) {
+				t.Fatalf("the refusal does not say what was wrong: %v", err)
+			}
+		})
+	}
+	if len(store.records) != 0 {
+		t.Fatalf("a refused mint stored %d credentials", len(store.records))
+	}
+	for _, user := range []string{"U012ABCDEF", "W012ABCDEF", " U012ABCDEF "} {
+		if _, err := m.Invoke(context.Background(), map[string]any{"node": "mac-mini", "user": user}); err != nil {
+			t.Fatalf("mint refused the Slack user ID %q: %v", user, err)
+		}
+	}
+}
+
 // TestMintExpiryIsAppliedAndValidated. Expiry is optional, but a value that was
 // accepted and quietly ignored would leave an operator believing a credential
 // dies on its own when nothing will ever end it but revocation.
@@ -168,7 +193,7 @@ func TestMintExpiryIsAppliedAndValidated(t *testing.T) {
 	store, m, _, _ := toolsFor(t)
 
 	before := time.Now().UTC()
-	res := mint(t, m, map[string]any{"node": "n1", "user": "U1", "expires_in": "24h"})
+	res := mint(t, m, map[string]any{"node": "n1", "user": "U012ABCDEF", "expires_in": "24h"})
 	stored := store.records[res.Selector]
 	if stored.ExpiresAt.IsZero() {
 		t.Fatal("--expires-in was accepted but no expiry was stored")
@@ -191,7 +216,7 @@ func TestMintExpiryIsAppliedAndValidated(t *testing.T) {
 		"bare digit": "24",
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := m.Invoke(context.Background(), map[string]any{"node": "n1", "user": "U1", "expires_in": raw}); err == nil {
+			if _, err := m.Invoke(context.Background(), map[string]any{"node": "n1", "user": "U012ABCDEF", "expires_in": raw}); err == nil {
 				t.Fatalf("mint accepted --expires-in %q", raw)
 			}
 		})
@@ -206,7 +231,7 @@ func TestMintToTokenFileKeepsThePlaintextOutOfTheResult(t *testing.T) {
 	store, m, _, _ := toolsFor(t)
 	path := filepath.Join(t.TempDir(), "node-token")
 
-	res := mint(t, m, map[string]any{"node": "n1", "user": "U1", "token_file": path})
+	res := mint(t, m, map[string]any{"node": "n1", "user": "U012ABCDEF", "token_file": path})
 	if res.Token != "" {
 		t.Fatal("the result carries the plaintext even though it was written to a file")
 	}
@@ -244,7 +269,7 @@ func TestMintToTokenFileKeepsThePlaintextOutOfTheResult(t *testing.T) {
 // expecting to look it up later.
 func TestMintTellsTheOperatorTheTokenIsShownOnce(t *testing.T) {
 	_, m, _, _ := toolsFor(t)
-	rendered := mint(t, m, map[string]any{"node": "n1", "user": "U1"}).String()
+	rendered := mint(t, m, map[string]any{"node": "n1", "user": "U012ABCDEF"}).String()
 	if !strings.Contains(rendered, "last time it can be shown") {
 		t.Fatalf("the CLI rendering does not warn that the token cannot be shown again:\n%s", rendered)
 	}
@@ -259,7 +284,7 @@ func TestMintAndRevokeRequireApproval(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s does not implement tools.ApprovalClassifier, so an agent holding it can issue or revoke credentials unattended", tool.Name())
 		}
-		if !classifier.RequiresApproval(map[string]any{"node": "n1", "user": "U1"}) {
+		if !classifier.RequiresApproval(map[string]any{"node": "n1", "user": "U012ABCDEF"}) {
 			t.Errorf("%s does not require approval", tool.Name())
 		}
 	}
@@ -275,7 +300,7 @@ func TestMintAndRevokeRequireApproval(t *testing.T) {
 // pasted as one.
 func TestListNeverShowsATokenOrAHash(t *testing.T) {
 	store, m, l, _ := toolsFor(t)
-	res := mint(t, m, map[string]any{"node": "mac-mini", "user": "U1", "label": "desk"})
+	res := mint(t, m, map[string]any{"node": "mac-mini", "user": "U012ABCDEF", "label": "desk"})
 	hash := store.records[res.Selector].SecretHash
 
 	listed, err := l.Invoke(context.Background(), map[string]any{})
@@ -308,12 +333,12 @@ func TestListNeverShowsATokenOrAHash(t *testing.T) {
 // to re-enrol a node.
 func TestListFiltersByNodeAndReportsState(t *testing.T) {
 	_, m, l, r := toolsFor(t)
-	live := mint(t, m, map[string]any{"node": "a", "user": "U1"})
-	revoked := mint(t, m, map[string]any{"node": "a", "user": "U1"})
+	live := mint(t, m, map[string]any{"node": "a", "user": "U012ABCDEF"})
+	revoked := mint(t, m, map[string]any{"node": "a", "user": "U012ABCDEF"})
 	// The shortest lifetime the tool accepts: --expires-in must be positive, so a
 	// credential can only be aged past its expiry by waiting out a real one.
-	expired := mint(t, m, map[string]any{"node": "a", "user": "U1", "expires_in": "1ms"})
-	other := mint(t, m, map[string]any{"node": "b", "user": "U1"})
+	expired := mint(t, m, map[string]any{"node": "a", "user": "U012ABCDEF", "expires_in": "1ms"})
+	other := mint(t, m, map[string]any{"node": "b", "user": "U012ABCDEF"})
 
 	if _, err := r.Invoke(context.Background(), map[string]any{"selector": revoked.Selector}); err != nil {
 		t.Fatalf("revoke: %v", err)
@@ -351,7 +376,7 @@ func TestListFiltersByNodeAndReportsState(t *testing.T) {
 // the more informative answer than the clock running out on it afterwards.
 func TestRevocationOutranksExpiryInTheListing(t *testing.T) {
 	_, m, l, r := toolsFor(t)
-	res := mint(t, m, map[string]any{"node": "a", "user": "U1", "expires_in": "1ms"})
+	res := mint(t, m, map[string]any{"node": "a", "user": "U012ABCDEF", "expires_in": "1ms"})
 	if _, err := r.Invoke(context.Background(), map[string]any{"selector": res.Selector}); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
@@ -378,8 +403,8 @@ func TestTwoCredentialsForOneNodeThenRevokeTheOlder(t *testing.T) {
 	store, m, _, r := toolsFor(t)
 	ctx := context.Background()
 
-	old := mint(t, m, map[string]any{"node": "mac-mini", "user": "U1", "label": "old"})
-	fresh := mint(t, m, map[string]any{"node": "mac-mini", "user": "U1", "label": "new"})
+	old := mint(t, m, map[string]any{"node": "mac-mini", "user": "U012ABCDEF", "label": "old"})
+	fresh := mint(t, m, map[string]any{"node": "mac-mini", "user": "U012ABCDEF", "label": "new"})
 
 	at := time.Now()
 	for name, token := range map[string]string{"the old credential": old.Token, "the new credential": fresh.Token} {
@@ -409,9 +434,9 @@ func TestRevokeByNodeTakesEveryLiveCredential(t *testing.T) {
 	store, m, _, r := toolsFor(t)
 	ctx := context.Background()
 
-	first := mint(t, m, map[string]any{"node": "mac-mini", "user": "U1"})
-	second := mint(t, m, map[string]any{"node": "mac-mini", "user": "U1"})
-	bystander := mint(t, m, map[string]any{"node": "other", "user": "U1"})
+	first := mint(t, m, map[string]any{"node": "mac-mini", "user": "U012ABCDEF"})
+	second := mint(t, m, map[string]any{"node": "mac-mini", "user": "U012ABCDEF"})
+	bystander := mint(t, m, map[string]any{"node": "other", "user": "U012ABCDEF"})
 
 	res, err := r.Invoke(ctx, map[string]any{"node": "mac-mini"})
 	if err != nil {
@@ -463,7 +488,7 @@ func TestRevokeArgumentErrors(t *testing.T) {
 // (#193). An operator who believed otherwise would stop investigating too early.
 func TestRevokeReportsTheLimitationItCannotYetFix(t *testing.T) {
 	_, m, _, r := toolsFor(t)
-	minted := mint(t, m, map[string]any{"node": "n1", "user": "U1"})
+	minted := mint(t, m, map[string]any{"node": "n1", "user": "U012ABCDEF"})
 
 	res, err := r.Invoke(context.Background(), map[string]any{"selector": minted.Selector})
 	if err != nil {
@@ -482,12 +507,12 @@ func TestAnUnavailableStoreFailsCleanly(t *testing.T) {
 		return nil, errors.New("no config directory resolved")
 	})
 	for _, tool := range All(down) {
-		if _, err := tool.Invoke(context.Background(), map[string]any{"node": "n1", "user": "U1", "selector": "abc"}); err == nil {
+		if _, err := tool.Invoke(context.Background(), map[string]any{"node": "n1", "user": "U012ABCDEF", "selector": "abc"}); err == nil {
 			t.Errorf("%s succeeded with no store", tool.Name())
 		}
 	}
 	for _, tool := range All(nil) {
-		if _, err := tool.Invoke(context.Background(), map[string]any{"node": "n1", "user": "U1", "selector": "abc"}); err == nil {
+		if _, err := tool.Invoke(context.Background(), map[string]any{"node": "n1", "user": "U012ABCDEF", "selector": "abc"}); err == nil {
 			t.Errorf("%s succeeded with a nil provider", tool.Name())
 		}
 	}
@@ -503,7 +528,7 @@ func TestMintDoesNotOverwriteAnExistingTokenFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := m.Invoke(context.Background(), map[string]any{"node": "n1", "user": "U1", "token_file": path}); err == nil {
+	if _, err := m.Invoke(context.Background(), map[string]any{"node": "n1", "user": "U012ABCDEF", "token_file": path}); err == nil {
 		t.Fatal("mint overwrote an existing credential file")
 	}
 	raw, err := os.ReadFile(path)
