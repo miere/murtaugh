@@ -1,5 +1,12 @@
 package agentwire
 
+import (
+	"encoding/json"
+	"fmt"
+
+	"github.com/miere/murtaugh/internal/agent"
+)
+
 // EventType is the wire's own vocabulary of event kinds.
 //
 // The strings match agent.EventType's today, and are re-declared rather than
@@ -19,6 +26,8 @@ const (
 	EventTask       EventType = "task"
 	EventAttachment EventType = "attachment"
 	EventPermission EventType = "permission"
+	EventQuestion   EventType = "question"
+	EventPlan       EventType = "plan"
 )
 
 // Event is the serialisable form of agent.Event: one item on the ordered stream
@@ -43,6 +52,8 @@ type Event struct {
 	// agent.PermissionPrompt's channel. The answer is not an Event at all; it
 	// comes back as its own PermissionResponse frame.
 	Permission *PermissionRequest `json:"permission,omitempty"`
+	Question   *QuestionRequest   `json:"question,omitempty"`
+	Plan       *PlanRequest       `json:"plan,omitempty"`
 }
 
 // TaskStatus mirrors agent.TaskStatus.
@@ -88,3 +99,109 @@ type Task struct {
 // package does no framing — but the attachment decision was made against it,
 // and TestTransferChunkRoundTrip holds the chunk size to it.
 const maxFrameBytes = 8 << 20
+
+const MessageAnswer MessageKind = "answer"
+
+// QuestionRequest has no destination field by design: the gateway draws it in
+// the conversation the turn belongs to, so a node cannot aim a card anywhere.
+type QuestionRequest struct {
+	ID        string     `json:"id"`
+	Title     string     `json:"title,omitempty"`
+	Questions []Question `json:"questions"`
+}
+
+type Question struct {
+	Key         string           `json:"key"`
+	Header      string           `json:"header,omitempty"`
+	Question    string           `json:"question"`
+	Options     []QuestionOption `json:"options,omitempty"`
+	MultiSelect bool             `json:"multi_select,omitempty"`
+}
+
+type QuestionOption struct {
+	Label       string `json:"label"`
+	Description string `json:"description,omitempty"`
+}
+
+// PlanRequest has no destination field, for the same reason QuestionRequest has none.
+type PlanRequest struct {
+	ID    string `json:"id"`
+	Title string `json:"title,omitempty"`
+	Plan  string `json:"plan"`
+}
+
+// DisplayAnswer travels gateway to node under the id the node minted, like a
+// PermissionResponse, because it answers an event rather than a call.
+type DisplayAnswer struct {
+	ID      string              `json:"id"`
+	Outcome string              `json:"outcome"`
+	Answers map[string][]string `json:"answers,omitempty"`
+	Choice  string              `json:"choice,omitempty"`
+	UserID  string              `json:"user_id,omitempty"`
+	Note    string              `json:"note,omitempty"`
+}
+
+func AnswerDisplay(a DisplayAnswer) (Message, error) {
+	encoded, err := json.Marshal(a)
+	if err != nil {
+		return Message{}, fmt.Errorf("agentwire: encode display answer: %w", err)
+	}
+	return Message{Kind: MessageAnswer, ID: a.ID, Body: encoded}, nil
+}
+
+func EncodeDisplayAnswer(id string, a agent.DisplayAnswer) DisplayAnswer {
+	return DisplayAnswer{
+		ID:      id,
+		Outcome: string(a.Outcome),
+		Answers: a.Answers,
+		Choice:  a.Choice,
+		UserID:  a.UserID,
+		Note:    a.Note,
+	}
+}
+
+func (a DisplayAnswer) Decode() agent.DisplayAnswer {
+	return agent.DisplayAnswer{
+		Outcome: agent.DisplayOutcome(a.Outcome),
+		Answers: a.Answers,
+		Choice:  a.Choice,
+		UserID:  a.UserID,
+		Note:    a.Note,
+	}
+}
+
+func encodeQuestion(id string, r agent.QuestionRequest) QuestionRequest {
+	questions := make([]Question, 0, len(r.Questions))
+	for _, q := range r.Questions {
+		var options []QuestionOption
+		for _, o := range q.Options {
+			options = append(options, QuestionOption{Label: o.Label, Description: o.Description})
+		}
+		questions = append(questions, Question{
+			Key:         q.Key,
+			Header:      q.Header,
+			Question:    q.Question,
+			Options:     options,
+			MultiSelect: q.MultiSelect,
+		})
+	}
+	return QuestionRequest{ID: id, Title: r.Title, Questions: questions}
+}
+
+func decodeQuestion(w QuestionRequest) agent.QuestionRequest {
+	questions := make([]agent.Question, 0, len(w.Questions))
+	for _, q := range w.Questions {
+		var options []agent.QuestionOption
+		for _, o := range q.Options {
+			options = append(options, agent.QuestionOption{Label: o.Label, Description: o.Description})
+		}
+		questions = append(questions, agent.Question{
+			Key:         q.Key,
+			Header:      q.Header,
+			Question:    q.Question,
+			Options:     options,
+			MultiSelect: q.MultiSelect,
+		})
+	}
+	return agent.QuestionRequest{Title: w.Title, Questions: questions}
+}

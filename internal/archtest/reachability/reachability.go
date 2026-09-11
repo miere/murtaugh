@@ -29,6 +29,8 @@ const Module = "github.com/miere/murtaugh"
 // GatewayBinary is the package the rule is about.
 const GatewayBinary = "./cmd/murtaugh-gateway"
 
+const RuntimeBinary = "./cmd/murtaugh-runtime"
+
 // Forbidden lists the packages the Slack gateway binary must not reach.
 //
 // It is #170's list verbatim, and the exclusions are as deliberate as the
@@ -52,6 +54,14 @@ var Forbidden = []string{
 	"internal/agent/claudecode",
 }
 
+// RuntimeForbidden bans whole subtrees, not single packages: tools run on the
+// node, and any Slack client there would let a node post as the bot.
+var RuntimeForbidden = []string{
+	Module + "/internal/slack",
+	Module + "/internal/tools/slack",
+	"github.com/slack-go/slack",
+}
+
 // Pattern renders Forbidden as the extended regular expression the CI step
 // greps `go list -deps` output with.
 //
@@ -63,11 +73,25 @@ var Forbidden = []string{
 // though it were the forbidden package — a guard that cries wolf gets disabled,
 // which is the same failure mode the `if` form exists to avoid.
 func Pattern() string {
-	quoted := make([]string, 0, len(Forbidden))
+	paths := make([]string, 0, len(Forbidden))
 	for _, p := range Forbidden {
-		quoted = append(quoted, strings.ReplaceAll(Module+"/"+p, ".", `\.`))
+		paths = append(paths, Module+"/"+p)
 	}
-	return "^(" + strings.Join(quoted, "|") + ")$"
+	return "^(" + alternatives(paths) + ")$"
+}
+
+// RuntimePattern stops at a path separator so a sibling such as
+// internal/slackish is not mistaken for part of internal/slack.
+func RuntimePattern() string {
+	return "^(" + alternatives(RuntimeForbidden) + ")(/.*)?$"
+}
+
+func alternatives(paths []string) string {
+	quoted := make([]string, 0, len(paths))
+	for _, p := range paths {
+		quoted = append(quoted, strings.ReplaceAll(p, ".", `\.`))
+	}
+	return strings.Join(quoted, "|")
 }
 
 // Check reports which of Forbidden the given package can reach, transitively.
@@ -78,6 +102,25 @@ func Pattern() string {
 // directory, so a test living several packages deep asks about the same package
 // CI does.
 func Check(pkg string) ([]string, error) {
+	banned := make(map[string]bool, len(Forbidden))
+	for _, p := range Forbidden {
+		banned[Module+"/"+p] = true
+	}
+	return reached(pkg, func(dep string) bool { return banned[dep] })
+}
+
+func CheckRuntime(pkg string) ([]string, error) {
+	return reached(pkg, func(dep string) bool {
+		for _, p := range RuntimeForbidden {
+			if dep == p || strings.HasPrefix(dep, p+"/") {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+func reached(pkg string, banned func(string) bool) ([]string, error) {
 	target := pkg
 	if rel, ok := strings.CutPrefix(pkg, "./"); ok {
 		target = Module + "/" + rel
@@ -90,15 +133,10 @@ func Check(pkg string) ([]string, error) {
 		}
 		return nil, fmt.Errorf("go list -deps %s: %w", target, err)
 	}
-
-	banned := make(map[string]bool, len(Forbidden))
-	for _, p := range Forbidden {
-		banned[Module+"/"+p] = true
-	}
 	var found []string
 	for _, line := range strings.Split(string(out), "\n") {
 		dep := strings.TrimSpace(line)
-		if banned[dep] {
+		if banned(dep) {
 			found = append(found, dep)
 		}
 	}

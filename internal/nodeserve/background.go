@@ -104,6 +104,15 @@ func (s *Server) sendBackground(sessionID string, ev agent.Event) {
 		return
 	}
 
+	if answers := displayAnswers(ev); answers != nil {
+		select {
+		case answers <- agent.DisplayAnswer{Outcome: agent.DisplayNoConversation}:
+		default:
+		}
+		s.log.Warn("nodeserve: refusing a question or plan raised with no turn to answer it", "session_id", sessionID)
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(s.ctx, sendTimeout)
 	defer cancel()
 
@@ -138,3 +147,13 @@ func (s *Server) sendBackground(sessionID string, ev agent.Event) {
 // cannot tell whether the thread its notice lands in is one process away or one
 // network away. The method value is never called — it only has to typecheck.
 var _ = agentruntime.Hooks{BackgroundEvents: (*BackgroundSink)(nil).Handle}
+
+func displayAnswers(ev agent.Event) chan agent.DisplayAnswer {
+	switch {
+	case ev.Question != nil:
+		return ev.Question.Answer
+	case ev.Plan != nil:
+		return ev.Plan.Answer
+	}
+	return nil
+}

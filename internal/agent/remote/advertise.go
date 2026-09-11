@@ -1,17 +1,13 @@
 package remote
 
 import (
-	"github.com/miere/murtaugh/internal/agentwire"
-)
+	"context"
+	"errors"
+	"fmt"
 
-// This file is the gateway's half of the advertisement: the node saying what it
-// serves, on the two paths it says it on.
-//
-// Like the tool channel, this package carries the frames and owns their
-// lifetime and nothing else. What an advertisement MEANS — which node it
-// belongs to, whether it may be believed, what is done with it — is
-// internal/nodehost's, because that is where the credential was verified and
-// where the registry lives.
+	"github.com/miere/murtaugh/internal/agentwire"
+	"github.com/miere/murtaugh/internal/nodelink"
+)
 
 // Advertiser receives what one node claims.
 //
@@ -84,4 +80,32 @@ func (c *Client) applyAdvertisement(ad agentwire.Advertisement, opening bool) {
 		return
 	}
 	advertiser.Advertise(ad.Clone())
+}
+
+func (c *Client) serveRequest(msg agentwire.Message) {
+	switch msg.Method {
+	case agentwire.MethodAdvertise:
+		c.serveAdvertise(msg)
+	default:
+		c.rejectRequest(msg)
+	}
+}
+
+func (c *Client) answer(id string, body any, failure error) {
+	var msg agentwire.Message
+	if failure != nil {
+		msg = agentwire.Fault(id, failure)
+	} else {
+		encoded, err := agentwire.Result(id, body)
+		if err != nil {
+			msg = agentwire.Fault(id, fmt.Errorf("remote: encode answer: %w", err))
+		} else {
+			msg = encoded
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), answerTimeout)
+	defer cancel()
+	if err := c.send(ctx, msg); err != nil && !errors.Is(err, nodelink.ErrLinkClosed) {
+		c.log.Warn("remote: deliver answer to the node", "error", err, "id", id)
+	}
 }

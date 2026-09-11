@@ -51,11 +51,13 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/miere/murtaugh/internal/agentruntime"
 	"github.com/miere/murtaugh/internal/app"
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/config/migrate"
 	configstore "github.com/miere/murtaugh/internal/config/store"
 	"github.com/miere/murtaugh/internal/nodehost"
+	"github.com/miere/murtaugh/internal/tools"
 )
 
 var version = "dev"
@@ -156,7 +158,10 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		agents.Runtime = nodehost.Runtime(host)
+		nodeRuntime := nodehost.Runtime(host)
+		agents.Runtime = func(cfg config.Config, _ *tools.Registry, logger *slog.Logger) agentruntime.Builder {
+			return nodeRuntime(cfg, logger)
+		}
 		// Bound at process start, accepting only while elected. #170 says only
 		// the elected gateway accepts nodes, and a listener that came and went
 		// with leadership would have to re-acquire its port at exactly the

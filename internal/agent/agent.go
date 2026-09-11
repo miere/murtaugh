@@ -173,6 +173,8 @@ type Event struct {
 	// coordination the native loop gets for free by gating a tool call inline.
 	// nil except on EventPermission.
 	Permission *PermissionPrompt
+	Question   *QuestionPrompt
+	Plan       *PlanPrompt
 }
 
 type EventType string
@@ -185,6 +187,8 @@ const (
 	EventTask       EventType = "task"
 	EventAttachment EventType = "attachment"
 	EventPermission EventType = "permission"
+	EventQuestion   EventType = "question"
+	EventPlan       EventType = "plan"
 )
 
 // AttachmentEvent is a file the agent is sending to the user as part of its
@@ -326,8 +330,8 @@ func WithTurnEmitter(ctx context.Context, emit TurnEmitter) context.Context {
 	return context.WithValue(ctx, turnEmitterKey{}, emit)
 }
 
-// TurnEmitterFromContext is absent for the native loop, which reads events straight
-// from tool results instead.
+// TurnEmitterFromContext is present on every backend's tool calls, so a tool that
+// needs the user reaches them the same way wherever it runs.
 func TurnEmitterFromContext(ctx context.Context) (TurnEmitter, bool) {
 	emit, ok := ctx.Value(turnEmitterKey{}).(TurnEmitter)
 	return emit, ok
@@ -428,4 +432,44 @@ type PermissionAsker interface {
 type PermissionPrompt struct {
 	Request  PermissionRequest
 	Decision chan string
+}
+
+// QuestionPrompt travels with its answer channel, as PermissionPrompt does, so
+// every stream that already routes approvals routes questions too.
+type QuestionPrompt struct {
+	Request QuestionRequest
+	Answer  chan DisplayAnswer
+}
+
+// PlanPrompt travels with its answer channel for the same reason QuestionPrompt does.
+type PlanPrompt struct {
+	Request PlanRequest
+	Answer  chan DisplayAnswer
+}
+
+// TurnDisplay leaves where to draw to whoever renders the turn, which is how a
+// node asks without ever naming a Slack destination.
+type TurnDisplay struct{}
+
+func (TurnDisplay) Question(ctx context.Context, _ TurnLocation, req QuestionRequest) (DisplayAnswer, error) {
+	answer := make(chan DisplayAnswer, 1)
+	return awaitDisplay(ctx, answer, Event{Type: EventQuestion, Question: &QuestionPrompt{Request: req, Answer: answer}}), nil
+}
+
+func (TurnDisplay) Plan(ctx context.Context, _ TurnLocation, req PlanRequest) (DisplayAnswer, error) {
+	answer := make(chan DisplayAnswer, 1)
+	return awaitDisplay(ctx, answer, Event{Type: EventPlan, Plan: &PlanPrompt{Request: req, Answer: answer}}), nil
+}
+
+func awaitDisplay(ctx context.Context, answer <-chan DisplayAnswer, ev Event) DisplayAnswer {
+	emit, ok := TurnEmitterFromContext(ctx)
+	if !ok || !emit(ev) {
+		return DisplayAnswer{Outcome: DisplayUnavailable}
+	}
+	select {
+	case a := <-answer:
+		return a
+	case <-ctx.Done():
+		return DisplayAnswer{Outcome: DisplayDismissed}
+	}
 }

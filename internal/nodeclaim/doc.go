@@ -20,13 +20,8 @@
 //
 // # What the advertisement deliberately does not carry
 //
-// **`allow_anyone`.** It waives the gateway's own access.allowed_users list for
-// a channel's chat surface. That is a GATEWAY access decision, and the person
-// who writes a node's configuration is a node admin — possibly a guest holding
-// a grant. Letting it cross would mean any node owner could open the gateway to
-// the whole workspace by editing a file on their laptop. The same rule
-// internal/toolset/partition.go states for tools applies here: enforcement is
-// gateway-side because a node cannot be trusted to filter itself.
+// **`allow_anyone`.** It waives the gateway's own access list, and a node admin
+// writing it could open the gateway to the whole workspace from their laptop.
 //
 // **`reply_on_thread`.** It decides whether a channel's messages thread, which
 // decides the conversation key, which is what a pin is keyed by. It belongs to

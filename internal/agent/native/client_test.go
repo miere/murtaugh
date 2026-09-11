@@ -8,7 +8,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/jsonschema-go/jsonschema"
+
 	"github.com/miere/murtaugh/internal/agent"
+	"github.com/miere/murtaugh/internal/llm"
+	"github.com/miere/murtaugh/internal/tools"
 )
 
 // newTestClient builds a Client wired to a fake provider, bypassing Build (which
@@ -194,5 +198,59 @@ func TestClient_SystemStaticAcrossTurns(t *testing.T) {
 	last1 := prov.requests[1].Messages[len(prov.requests[1].Messages)-1].Text
 	if !strings.Contains(last0, "18:51") || !strings.Contains(last1, "19:30") {
 		t.Errorf("per-turn timestamps not on the user turn:\nturn0=%q\nturn1=%q", last0, last1)
+	}
+}
+
+type emittingTool struct {
+	emitted chan bool
+}
+
+func (t *emittingTool) Name() string                    { return "raise" }
+func (t *emittingTool) Description() string             { return "raises an event on the turn" }
+func (t *emittingTool) InputSchema() *jsonschema.Schema { return &jsonschema.Schema{Type: "object"} }
+func (t *emittingTool) Invoke(ctx context.Context, _ map[string]any) (any, error) {
+	emit, ok := agent.TurnEmitterFromContext(ctx)
+	t.emitted <- ok && emit(agent.Event{Type: agent.EventStatus, Text: "from the tool"})
+	return "done", nil
+}
+
+// A native tool reaches the user through the turn's own stream, as a bridged
+// tool does on acp and claude_code, so ask and present_plan work the same on all three.
+func TestClient_ToolsCanRaiseEventsOnTheirTurn(t *testing.T) {
+	prov := &fakeProvider{turns: []scriptedTurn{
+		{toolCalls: []llm.ToolCall{{ID: "c1", Name: "raise", Arguments: rawArgs(t, map[string]any{})}}},
+		{text: "ok", stopReason: "end_turn"},
+	}}
+	c := newTestClient(prov)
+	ctx := context.Background()
+	if err := c.Initialize(ctx); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	tool := &emittingTool{emitted: make(chan bool, 1)}
+	c.loop = NewLoop(prov, "test-model", []tools.Tool{tool}, 10)
+	sess, err := c.NewSession(ctx, agent.SessionMetadata{})
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	ch, err := c.Prompt(ctx, sess.ID, agent.PromptRequest{Text: "hi"})
+	if err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	evs := drain(ch)
+
+	if !<-tool.emitted {
+		t.Fatal("the tool found no emitter on its context, or its event was refused")
+	}
+	raised, completed := -1, -1
+	for i, ev := range evs {
+		if ev.Type == agent.EventStatus && ev.Text == "from the tool" {
+			raised = i
+		}
+		if ev.Type == agent.EventTask && ev.Task.ID == "c1" && ev.Task.Status == agent.TaskStatusComplete {
+			completed = i
+		}
+	}
+	if raised < 0 || completed < 0 || raised > completed {
+		t.Fatalf("the tool's event is at %d and its completion at %d; it must reach the stream while the tool runs", raised, completed)
 	}
 }

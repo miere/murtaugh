@@ -67,6 +67,23 @@ func (d *Decoder) Decode(ctx context.Context, w Event) (agent.Event, *PendingDec
 		}
 		ev, pending := decodePermission(*w.Permission)
 		return ev, pending, nil
+	case EventQuestion:
+		if w.Question == nil {
+			return agent.Event{}, nil, fmt.Errorf("agentwire: question event carries no request")
+		}
+		answer := make(chan agent.DisplayAnswer, 1)
+		ev := agent.Event{Type: agent.EventQuestion, Question: &agent.QuestionPrompt{Request: decodeQuestion(*w.Question), Answer: answer}}
+		return ev, &PendingDecision{ID: w.Question.ID}, nil
+	case EventPlan:
+		if w.Plan == nil {
+			return agent.Event{}, nil, fmt.Errorf("agentwire: plan event carries no request")
+		}
+		answer := make(chan agent.DisplayAnswer, 1)
+		ev := agent.Event{Type: agent.EventPlan, Plan: &agent.PlanPrompt{
+			Request: agent.PlanRequest{Title: w.Plan.Title, Plan: w.Plan.Plan},
+			Answer:  answer,
+		}}
+		return ev, &PendingDecision{ID: w.Plan.ID}, nil
 	default:
 		return agent.Event{}, nil, fmt.Errorf("agentwire: unknown event kind %q", w.Type)
 	}

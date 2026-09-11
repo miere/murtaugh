@@ -29,6 +29,7 @@ import (
 	"github.com/miere/murtaugh/internal/slack/authcard"
 	slackclient "github.com/miere/murtaugh/internal/slack/client"
 	"github.com/miere/murtaugh/internal/slack/configcard"
+	"github.com/miere/murtaugh/internal/slack/display"
 	askbroker "github.com/miere/murtaugh/internal/slack/interaction"
 	"github.com/miere/murtaugh/internal/toolset"
 	"github.com/miere/murtaugh/internal/unfurl"
@@ -590,6 +591,7 @@ func New(cfg config.Config, logger *slog.Logger, recorder journal.Recorder, brok
 			WithFileFetcher(api).
 			WithUploader(slackAttachmentUploader{api: api}).
 			WithPermissionAskers(acpPermissionAskers).
+			WithDisplay(display.New(broker, askFlow)).
 			WithReplyBlocks(cfg.BaseDir, api).
 			WithAlerts(cfg.BaseDir, alertAPI).
 			WithCredentialRepair(credRepair).
