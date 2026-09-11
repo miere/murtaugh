@@ -75,6 +75,8 @@ type Options struct {
 	// Owner is the Slack user this node's credential was minted for. Every
 	// sign-in the node raises is drawn for them, whatever the node says.
 	Owner string
+
+	SignIns func(ctx context.Context, prompt *agent.SignInPrompt, settled <-chan agent.SignInSettled, shown func(error))
 	// EventBuffer is a turn's channel depth. Zero takes defaultEventBuffer.
 	EventBuffer int
 	// WindowBytes, AckThreshold, AckInterval and Epoch are passed through to
@@ -96,6 +98,7 @@ type Client struct {
 	approve    func(ctx context.Context, toolName, summary string) (bool, string)
 	advertiser Advertiser
 	owner      string
+	signIn     func(ctx context.Context, prompt *agent.SignInPrompt, settled <-chan agent.SignInSettled, shown func(error))
 	transfers  *transfers
 	buffer     int
 
@@ -108,6 +111,7 @@ type Client struct {
 	streams       map[string]*stream
 	answers       map[string]*agentwire.PendingDecision
 	signIns       map[string]chan struct{}
+	headless      map[string]*headlessSignIn
 	interruptible *bool
 	resolved      bool
 	// advertisedOnce is set by the first claim to land, whichever path it came
@@ -138,6 +142,7 @@ func New(conn nodelink.Conn, opts Options) *Client {
 		approve:    opts.Approve,
 		advertiser: opts.Advertise,
 		owner:      opts.Owner,
+		signIn:     opts.SignIns,
 		transfers:  incoming,
 		buffer:     buffer,
 		closes:     make(chan string, closeQueueDepth),
@@ -145,6 +150,7 @@ func New(conn nodelink.Conn, opts Options) *Client {
 		streams:    make(map[string]*stream),
 		answers:    make(map[string]*agentwire.PendingDecision),
 		signIns:    make(map[string]chan struct{}),
+		headless:   make(map[string]*headlessSignIn),
 	}
 	c.link = nodelink.New(conn, nodelink.Options{
 		Handler:      c.consume,

@@ -48,6 +48,8 @@ type Options struct {
 	// indistinguishable to the gateway from a node that has never been
 	// configured.
 	Advertise *Advertiser
+
+	SignIns *SignIns
 	// Configure applies the agent profiles a Slack onboarding form produced for
 	// this node's owner, into this node's OWN store.
 	//
@@ -176,6 +178,10 @@ func Serve(ctx context.Context, conn nodelink.Conn, client agent.Client, opts Op
 	if opts.Advertise != nil {
 		opts.Advertise.bind(s)
 		defer opts.Advertise.unbind(s)
+	}
+	if opts.SignIns != nil {
+		opts.SignIns.bind(s)
+		defer opts.SignIns.unbind(s)
 	}
 
 	select {
@@ -637,6 +643,7 @@ func (s *Server) shutdown() {
 		// down. The gateway's own failAll is what tells the user.
 		s.endTurn(id, false)
 	}
+	s.dismissTurnAsks("")
 	s.failCalls()
 	s.cancel()
 }

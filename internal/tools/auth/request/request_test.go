@@ -139,6 +139,35 @@ func TestRefusedOutsideAConversation(t *testing.T) {
 	}
 }
 
+func TestWithNoConversationTheOwnerIsAskedDirectly(t *testing.T) {
+	marker, command := marked(t)
+	turn := &fakeDisplay{}
+	owner := &fakeDisplay{answers: approvedThen(agent.DisplayAnswer{Outcome: agent.DisplayAnswered, Code: "GOOD"})}
+	out, err := New(turn).WithoutConversation(owner).Invoke(context.Background(),
+		map[string]any{"tool": "vendor-mcp", "profile": "custom", "command": command, "needs_code": true})
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if r, ok := out.(Result); !ok || !r.Authenticated || !exists(marker) {
+		t.Fatalf("result = %+v", out)
+	}
+	if len(turn.raised) != 0 || len(owner.raised) != 1 || owner.raised[0].Command != command || owner.raised[0].URL != "" {
+		t.Fatalf("raised %+v on the turn and %+v with the owner; want only the owner asked, to approve the command", turn.raised, owner.raised)
+	}
+	if got := owner.states(); got[0] != agent.SignInReady || got[len(got)-1] != agent.SignInSuccess {
+		t.Fatalf("settled %v with the owner, want ready first and success last", got)
+	}
+
+	inTurn := &fakeDisplay{refuse: true}
+	unused := &fakeDisplay{}
+	if _, err := New(inTurn).WithoutConversation(unused).Invoke(inConversation(), codeFlow("read code")); err == nil {
+		t.Fatal("a sign-in the conversation could not show succeeded")
+	}
+	if len(unused.raised) != 0 {
+		t.Fatal("a sign-in raised in a conversation went to the owner's DM instead")
+	}
+}
+
 func approvedThen(answers ...agent.DisplayAnswer) []agent.DisplayAnswer {
 	return append([]agent.DisplayAnswer{{Outcome: agent.DisplayApproved, UserID: "UOWNER"}}, answers...)
 }

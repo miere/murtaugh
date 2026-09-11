@@ -506,9 +506,16 @@ func New(cfg config.Config, logger *slog.Logger, recorder journal.Recorder, brok
 	// nil builder is a gateway that cannot run an agent at all, which is where
 	// #170 is going; every consumer below already handles the empty runtime,
 	// because it is also what a deployment with no agents configured produces.
+	cards := display.New(broker, askFlow).WithSignIns(authFlow, logger)
 	var runtime agentruntime.Runtime
 	if buildRuntime != nil {
-		hooks := agentruntime.Hooks{Chat: cfg.Chat.Enabled, Approvers: approvers}
+		hooks := agentruntime.Hooks{
+			Chat:      cfg.Chat.Enabled,
+			Approvers: approvers,
+			SignIn: func(ctx context.Context, prompt *agent.SignInPrompt, settled <-chan agent.SignInSettled, shown func(error)) {
+				cards.ShowSignIn(ctx, agent.TurnLocation{}, prompt, settled, shown)
+			},
+		}
 		if bgRouter != nil {
 			hooks.BackgroundEvents = bgRouter.Handle
 		}
@@ -598,7 +605,7 @@ func New(cfg config.Config, logger *slog.Logger, recorder journal.Recorder, brok
 			WithFileFetcher(api).
 			WithUploader(slackAttachmentUploader{api: api}).
 			WithPermissionAskers(acpPermissionAskers).
-			WithDisplay(display.New(broker, askFlow).WithSignIns(authFlow, logger)).
+			WithDisplay(cards).
 			WithReplyBlocks(cfg.BaseDir, api).
 			WithAlerts(cfg.BaseDir, alertAPI).
 			WithCredentialRepair(credRepair).

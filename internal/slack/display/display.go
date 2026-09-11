@@ -36,6 +36,15 @@ func (s *Slack) WithSignIns(flow *authcard.Flow, log *slog.Logger) *Slack {
 // SignIn answers the prompt when ctx ends, because the process running the
 // sign-in stops only when it is told to.
 func (s *Slack) SignIn(ctx context.Context, loc agent.TurnLocation, prompt *agent.SignInPrompt, settled <-chan agent.SignInSettled) {
+	s.ShowSignIn(ctx, loc, prompt, settled, nil)
+}
+
+// ShowSignIn reports whether the card was drawn before any answer can arrive,
+// so a node never claims its owner was asked when nobody was.
+func (s *Slack) ShowSignIn(ctx context.Context, loc agent.TurnLocation, prompt *agent.SignInPrompt, settled <-chan agent.SignInSettled, shown func(error)) {
+	if shown == nil {
+		shown = func(error) {}
+	}
 	answer := func(a agent.DisplayAnswer) {
 		select {
 		case prompt.Answer <- a:
@@ -43,6 +52,7 @@ func (s *Slack) SignIn(ctx context.Context, loc agent.TurnLocation, prompt *agen
 		}
 	}
 	if s == nil || s.signIns == nil {
+		shown(errors.New("sign-ins are not available in this context"))
 		answer(agent.DisplayAnswer{Outcome: agent.DisplayUnavailable, Note: "Error: sign-ins are not available in this context"})
 		return
 	}
@@ -63,9 +73,11 @@ func (s *Slack) SignIn(ctx context.Context, loc agent.TurnLocation, prompt *agen
 		if errors.Is(err, authcard.ErrNotAllowed) {
 			note = "the owner of this machine may not use this gateway, so nobody was asked to sign in"
 		}
+		shown(errors.New(note))
 		answer(agent.DisplayAnswer{Outcome: agent.DisplayUnavailable, Note: note})
 		return
 	}
+	shown(nil)
 	for {
 		select {
 		case reply := <-card.Replies():

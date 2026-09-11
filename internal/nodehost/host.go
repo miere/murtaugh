@@ -154,6 +154,7 @@ type Host struct {
 	access     config.AccessConfig
 	approve    func(ctx context.Context, toolName, summary string) (bool, string)
 	background func(sessionID string, ev agent.Event)
+	signIns    func(ctx context.Context, prompt *agent.SignInPrompt, settled <-chan agent.SignInSettled, shown func(error))
 }
 
 // New builds a Host. It listens for nothing until Listen or Handler is used.
@@ -317,6 +318,7 @@ func (h *Host) serveLink(w http.ResponseWriter, r *http.Request) {
 		// through a rotation advertises on each of them.
 		Advertise:   remote.AdvertiserFunc(func(ad agentwire.Advertisement) { h.advertise(node, ad) }),
 		Owner:       record.UserID,
+		SignIns:     h.drawSignIn,
 		WindowBytes: window,
 		AckInterval: h.opts.AckInterval,
 	})
@@ -602,6 +604,23 @@ func (h *Host) deliverBackground(from *attached, sessionID string, ev agent.Even
 		return
 	}
 	sink(sessionID, ev)
+}
+
+func (h *Host) setSignIns(draw func(ctx context.Context, prompt *agent.SignInPrompt, settled <-chan agent.SignInSettled, shown func(error))) {
+	h.mu.Lock()
+	h.signIns = draw
+	h.mu.Unlock()
+}
+
+func (h *Host) drawSignIn(ctx context.Context, prompt *agent.SignInPrompt, settled <-chan agent.SignInSettled, shown func(error)) {
+	h.mu.Lock()
+	draw := h.signIns
+	h.mu.Unlock()
+	if draw == nil {
+		shown(errors.New("this gateway cannot show a sign-in outside a conversation"))
+		return
+	}
+	draw(ctx, prompt, settled, shown)
 }
 
 func (h *Host) askApproval(ctx context.Context, toolName, summary string) (bool, string) {

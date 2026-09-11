@@ -85,6 +85,8 @@ type Hooks struct {
 	// claude_code background subagent completing after its turn ended. nil drops
 	// them.
 	BackgroundEvents func(sessionID string, ev agent.Event)
+
+	SignIn func(ctx context.Context, prompt *agent.SignInPrompt, settled <-chan agent.SignInSettled, shown func(error))
 }
 
 // Runtime is one built set of agents plus the shared surfaces they need. It is a

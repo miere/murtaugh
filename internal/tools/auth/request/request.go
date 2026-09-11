@@ -23,15 +23,23 @@ type Display interface {
 
 // Tool is the `auth.request` capability.
 type Tool struct {
-	display Display
-	timeout time.Duration
-	urlWait time.Duration
+	display  Display
+	headless Display
+	timeout  time.Duration
+	urlWait  time.Duration
 }
 
 // New leaves the tool registered but inert with a nil display, which is right
 // wherever nothing can draw a card.
 func New(display Display) *Tool {
 	return &Tool{display: display, timeout: auth.DefaultTimeout, urlWait: auth.DefaultURLWait}
+}
+
+// WithoutConversation exists because a machine's owner can be reached by DM
+// even from work nobody is chatting in, such as a scheduled job.
+func (t *Tool) WithoutConversation(display Display) *Tool {
+	t.headless = display
+	return t
 }
 
 // Name returns the registry key.
@@ -54,7 +62,8 @@ func (t *Tool) Description() string {
 		"The sign-in runs on the machine you run on, and that machine's owner is sent a direct " +
 		"message to complete it — not whoever you are talking to. Returns an error if the owner " +
 		"declines it, it times out, or authentication fails — treat any error as a hard stop and " +
-		"do not retry the original call. Only works inside a Slack conversation."
+		"do not retry the original call. Outside a Slack conversation it only works on a runtime " +
+		"node, where the owner is always reached by direct message."
 }
 
 // InputSchema declares the profile selector plus the two custom-only arguments.
@@ -114,8 +123,8 @@ func (r Result) String() string {
 	return fmt.Sprintf("Signed in for %s (profile: %s). Retry the call that failed.", r.Tool, r.Profile)
 }
 
-// Invoke refuses before starting anything when there is no conversation,
-// because a sign-in nobody can be shown would run until it timed out.
+// Invoke refuses before starting anything when there is no conversation and no
+// owner to message, because a sign-in nobody can be shown would run until it timed out.
 func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 	if t.display == nil {
 		return nil, fmt.Errorf("Error: authentication requests are not available in this context")
@@ -128,8 +137,12 @@ func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("Error: %s", err.Error())
 	}
+	display := t.display
 	if _, ok := agent.TurnLocationFromContext(ctx); !ok {
-		return nil, errNoConversation()
+		if t.headless == nil {
+			return nil, errNoConversation()
+		}
+		display = t.headless
 	}
 
 	timer := time.NewTimer(t.timeout)
@@ -137,7 +150,7 @@ func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 	req := agent.SignInRequest{Tool: toolName, Profile: profile.Name, NeedsCode: profile.NeedsCode, Command: profile.ApprovalCommand()}
 	var prompt *agent.SignInPrompt
 	settle := func(state agent.SignInState, reason string) {
-		t.display.SettleSignIn(context.WithoutCancel(ctx), agent.SignInSettled{Prompt: prompt, State: state, Reason: reason})
+		display.SettleSignIn(context.WithoutCancel(ctx), agent.SignInSettled{Prompt: prompt, State: state, Reason: reason})
 	}
 	start := func() (*auth.Login, string, error) {
 		login, url, err := auth.StartLogin(ctx, profile, agent.TurnEnvFromContext(ctx), t.urlWait)
@@ -150,7 +163,7 @@ func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 	var login *auth.Login
 	if req.Command != "" {
 		var ok bool
-		if prompt, ok = t.display.SignIn(ctx, req); !ok {
+		if prompt, ok = display.SignIn(ctx, req); !ok {
 			return nil, fmt.Errorf("Error: the sign-in for %s could not be shown to anyone, so its command was not run", toolName)
 		}
 		if err := t.awaitApproval(ctx, prompt, timer, settle, toolName); err != nil {
@@ -162,7 +175,7 @@ func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 			return nil, err
 		}
 		login = l
-		t.display.SettleSignIn(context.WithoutCancel(ctx), agent.SignInSettled{Prompt: prompt, State: agent.SignInReady, URL: url})
+		display.SettleSignIn(context.WithoutCancel(ctx), agent.SignInSettled{Prompt: prompt, State: agent.SignInReady, URL: url})
 	} else {
 		l, url, err := start()
 		if err != nil {
@@ -171,7 +184,7 @@ func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 		login = l
 		req.URL = url
 		var ok bool
-		if prompt, ok = t.display.SignIn(ctx, req); !ok {
+		if prompt, ok = display.SignIn(ctx, req); !ok {
 			login.Stop()
 			return nil, fmt.Errorf("Error: the sign-in for %s could not be shown to anyone, so it was stopped", toolName)
 		}

@@ -54,6 +54,7 @@ type loopback struct {
 	// background is the NODE's sink — what a backend on the node calls when it
 	// emits outside a turn.
 	background *nodeserve.BackgroundSink
+	signIns    *nodeserve.SignIns
 	approved   chan approval
 	// notices is what the GATEWAY's background hook received. It is the far end
 	// of the same path.
@@ -115,7 +116,8 @@ type rigConfig struct {
 	// restart is what the NODE does after applying a configuration whose answer
 	// said it would restart. nil is a node that applies and keeps running, which
 	// is only useful to a test.
-	restart func()
+	restart    func()
+	drawSignIn func(context.Context, *agent.SignInPrompt, <-chan agent.SignInSettled, func(error))
 	// logs, when set, is where the GATEWAY's own logger writes. Some of what
 	// this Host does is only observable there — a WARN about a turn it does not
 	// recognise has no other output — and a warning nothing asserts is a warning
@@ -167,6 +169,10 @@ func configurable(apply func(context.Context, agentwire.NodeConfiguration) (agen
 // configuration whose answer said it would restart.
 func restarting(restart func()) rigOption {
 	return func(c *rigConfig) { c.restart = restart }
+}
+
+func drawingSignIns(draw func(context.Context, *agent.SignInPrompt, <-chan agent.SignInSettled, func(error))) rigOption {
+	return func(c *rigConfig) { c.drawSignIn = draw }
 }
 
 // logging captures what the GATEWAY logs, at WARN and above.
@@ -251,10 +257,12 @@ func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *lo
 		BackgroundEvents: func(sessionID string, ev agent.Event) {
 			notices <- notice{sessionID: sessionID, event: ev}
 		},
+		SignIn: cfg.drawSignIn,
 	})
 
 	gate := nodeserve.NewToolGate(testLogger())
 	background := nodeserve.NewBackgroundSink(testLogger())
+	signIns := nodeserve.NewSignIns(testLogger())
 	claim := nodeserve.NewAdvertiser(testLogger())
 	// Set while unbound, exactly as cmd/murtaugh-runtime sets it before its
 	// first dial: the value is held and the handshake answer carries it.
@@ -273,6 +281,7 @@ func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *lo
 			Logger:      testLogger(),
 			Gate:        gate,
 			Background:  background,
+			SignIns:     signIns,
 			Advertise:   claim,
 			Configure:   cfg.configure,
 			Restart:     cfg.restart,
@@ -302,6 +311,7 @@ func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *lo
 		agent:      script,
 		gate:       gate,
 		background: background,
+		signIns:    signIns,
 		approved:   approved,
 		notices:    notices,
 		claim:      claim,
