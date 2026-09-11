@@ -54,8 +54,7 @@ func (l *Login) SendCode(code string) error { return l.h.WriteLine(code) }
 
 func (l *Login) Exited() <-chan struct{} { return l.h.Exited() }
 
-// Result reads the finished process; its detail quotes the command's output,
-// which only the person completing the sign-in should see.
+// Result's detail quotes the command's output, which only the person completing the sign-in should see.
 func (l *Login) Result() (ok bool, detail string) {
 	if Succeeded(l.h.Wait()) {
 		return true, ""

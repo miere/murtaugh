@@ -321,15 +321,8 @@ func TestBootstrapIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestANodeRootIsSeededWithNoSlackVariables is #198's own argument applied to
-// the file beside the one it was made about.
-//
-// BootstrapNode exists because node-config.yaml has no `oauth:` block — seeding
-// a node from the gateway's skeleton would put a file advertising
-// ${SLACK_APP_TOKEN} and ${SLACK_BOT_TOKEN} on every laptop in the fleet. The
-// shared plan then seeded env.example verbatim, which carries both of them
-// under a heading saying they are required to run the gateway: the invitation
-// removed from one file and re-created in the file beside it.
+// Seeding env.example on a node would re-create, beside the config file, the Slack token
+// invitation that node-config.yaml was written to remove.
 func TestANodeRootIsSeededWithNoSlackVariables(t *testing.T) {
 	dir := t.TempDir()
 	if err := BootstrapNode(filepath.Join(dir, "config.yaml")); err != nil {
@@ -343,22 +336,16 @@ func TestANodeRootIsSeededWithNoSlackVariables(t *testing.T) {
 			}
 		}
 	}
-	// And the bootstrap file still has no oauth BLOCK, which is what
-	// BootstrapNode was written for in the first place.
 	if cfg, err := LoadBootstrap(filepath.Join(dir, "config.yaml")); err != nil {
 		t.Fatalf("load the seeded node bootstrap: %v", err)
 	} else if cfg.OAuth != (OAuthConfig{}) {
 		t.Errorf("a node's bootstrap file carries an oauth block: %+v", cfg.OAuth)
 	}
-	// And what a node DOES need is still there, or the swap traded one problem
-	// for a laptop with no provider credentials file at all.
 	if env := readSeeded(t, filepath.Join(dir, EnvFileName)); !strings.Contains(env, "ANTHROPIC_API_KEY") {
 		t.Errorf("a node's %s carries no provider variables:\n%s", EnvFileName, env)
 	}
 }
 
-// readSeeded returns a bootstrapped file's contents, failing the test if it is
-// not there at all.
 func readSeeded(t *testing.T, path string) string {
 	t.Helper()
 	body, err := os.ReadFile(path)

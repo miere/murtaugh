@@ -7,10 +7,6 @@ import (
 	"testing"
 )
 
-// The envelope's whole job is to be dumb about what it carries. These tests are
-// the two halves of that claim: the payload comes back byte for byte, and the
-// package cannot see a single Murtaugh type.
-
 func TestEnvelopeRoundTrip(t *testing.T) {
 	cases := []struct {
 		name string
@@ -22,8 +18,6 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 		{"a standalone ack", Ack(12)},
 		{"a resume request", Envelope{V: Version, Kind: KindResume, Resume: &Resume{LastSeen: 4, Epoch: 7}}},
 		{"a refused resume", Envelope{V: Version, Kind: KindResumed, Resume: &Resume{LastSeen: 4, Epoch: 7, Reason: "released"}}},
-		// A payload that speaks the envelope's own vocabulary proves the two
-		// layers cannot bleed into each other: an inner "seq" is data.
 		{"a payload wearing the envelope's field names", Message(3, 2, json.RawMessage(`{"v":99,"k":"ack","seq":1000,"ack":1000}`))},
 	}
 	for _, tc := range cases {
@@ -52,10 +46,6 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 	}
 }
 
-// The invariants are encoded in the type, not left as a convention, because the
-// one that matters most is easy to get wrong in an obvious way: if an ack
-// consumed a sequence number then two idle peers would acknowledge each other's
-// acknowledgements forever.
 func TestEnvelopeInvariants(t *testing.T) {
 	cases := []struct {
 		name string
@@ -81,14 +71,8 @@ func TestEnvelopeInvariants(t *testing.T) {
 	}
 }
 
-// A rule that only holds while somebody remembers it is not a rule. Reliability
-// lives outside the payload because this package cannot reach the payload's
-// vocabulary at all.
-//
-// Direct imports are a complete proof, not a shortcut: every Murtaugh package
-// here is internal to this module, so no third-party dependency can reach one.
-// A transitive Murtaugh import therefore requires a direct one, and there is
-// none.
+// Checking direct imports is enough: Murtaugh packages are internal to this module, so no
+// third-party dependency can import one on our behalf.
 func TestEnvelopeKnowsNothingOfMurtaugh(t *testing.T) {
 	pkg, err := build.ImportDir(".", 0)
 	if err != nil {

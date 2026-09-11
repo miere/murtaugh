@@ -14,8 +14,7 @@ import (
 
 const signInCallTimeout = 30 * time.Second
 
-// SignIns reaches the node's owner for work with no conversation, such as a
-// scheduled job; it outlives connections, so it is bound to whichever serves.
+// It outlives connections, so it is bound to whichever one is currently serving.
 type SignIns struct {
 	log *slog.Logger
 
@@ -24,8 +23,7 @@ type SignIns struct {
 	raisedOn map[*agent.SignInPrompt]*Server
 }
 
-// NewSignIns refuses every sign-in until a gateway is attached, because until
-// then nobody could be asked.
+// Refuses every sign-in until a gateway is attached, because until then nobody could be asked.
 func NewSignIns(log *slog.Logger) *SignIns {
 	if log == nil {
 		log = slog.Default()
@@ -65,8 +63,8 @@ func (r *SignIns) SignIn(ctx context.Context, req agent.SignInRequest) (*agent.S
 	return prompt, true
 }
 
-// SettleSignIn goes to the connection the sign-in was raised on, because a
-// gateway reached later has never heard of it.
+// Goes to the connection the sign-in was raised on, because a gateway reached later has never
+// heard of it.
 func (r *SignIns) SettleSignIn(ctx context.Context, update agent.SignInSettled) {
 	r.mu.Lock()
 	server := r.raisedOn[update.Prompt]

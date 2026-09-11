@@ -7,15 +7,8 @@ import (
 	"github.com/miere/murtaugh/internal/agent"
 )
 
-// EventType is the wire's own vocabulary of event kinds.
-//
-// The strings match agent.EventType's today, and are re-declared rather than
-// aliased on purpose: these are a published contract between two independently
-// deployed processes, while the internal enum must stay free to change. Encoder
-// and Decoder are the only places the two meet, and the exhaustiveness test in
-// roundtrip_test.go is what notices when a kind is added to one and not the
-// other: it reads internal/agent's constants out of that package's source, so
-// it cannot itself drift into agreeing with a stale copy of the enum.
+// EventType re-declares agent.EventType's strings instead of aliasing them: they are a
+// contract between separately deployed processes, and the internal enum must stay free to change.
 type EventType string
 
 const (
@@ -34,27 +27,15 @@ const (
 	EventSignInSettled EventType = "sign_in_settled"
 )
 
-// Event is the serialisable form of agent.Event: one item on the ordered stream
-// a turn emits.
-//
-// JSON naming follows the house convention for Murtaugh-owned wire shapes —
-// snake_case with omitempty (see internal/journal). agent.SessionMetadata's
-// camelCase tags are not a precedent: nothing marshals it anywhere, so they
-// have never been a contract with anything.
-//
-// The payload fields are pointers so an absent one is absent from the JSON
-// rather than present and empty, which keeps a frame legible in a log and keeps
-// "no task on this event" distinguishable from "an empty task".
+// Event's payload fields are pointers so an absent one is left out of the JSON, keeping
+// "no task" distinct from "an empty task".
 type Event struct {
-	Type       EventType   `json:"type"`
-	Text       string      `json:"text,omitempty"`
-	StopReason string      `json:"stop_reason,omitempty"`
-	Error      *Error      `json:"error,omitempty"`
-	Task       *Task       `json:"task,omitempty"`
-	Attachment *Attachment `json:"attachment,omitempty"`
-	// Permission is the request half of the request/response pair that replaces
-	// agent.PermissionPrompt's channel. The answer is not an Event at all; it
-	// comes back as its own PermissionResponse frame.
+	Type          EventType          `json:"type"`
+	Text          string             `json:"text,omitempty"`
+	StopReason    string             `json:"stop_reason,omitempty"`
+	Error         *Error             `json:"error,omitempty"`
+	Task          *Task              `json:"task,omitempty"`
+	Attachment    *Attachment        `json:"attachment,omitempty"`
 	Permission    *PermissionRequest `json:"permission,omitempty"`
 	Question      *QuestionRequest   `json:"question,omitempty"`
 	Plan          *PlanRequest       `json:"plan,omitempty"`
@@ -62,7 +43,6 @@ type Event struct {
 	SignInSettled *SignInSettled     `json:"sign_in_settled,omitempty"`
 }
 
-// TaskStatus mirrors agent.TaskStatus.
 type TaskStatus string
 
 const (
@@ -73,10 +53,8 @@ const (
 	TaskStatusCancelled  TaskStatus = "cancelled"
 )
 
-// TaskKind mirrors agent.TaskKind: a tool invocation (the zero value) or an
-// entry in the agent's plan snapshot. The renderer seals differently for the
-// two, so losing it would shred streaming prose on a remote node exactly as it
-// would in process.
+// TaskKind must survive the wire because the renderer seals tool calls and plan entries
+// differently; losing it would break streaming prose.
 type TaskKind string
 
 const (
@@ -84,12 +62,8 @@ const (
 	TaskKindPlan TaskKind = "plan"
 )
 
-// Task is the serialisable form of agent.TaskEvent.
-//
-// Description carries even though no consumer reads it today: two backends
-// populate it, and dropping a field that live producers write is a separate
-// decision from making the abstraction serialisable. A wire that silently
-// narrows the abstraction is not a translation of it.
+// Task carries Description though nothing reads it yet: two backends write it, and dropping
+// it is a separate decision from making the event serialisable.
 type Task struct {
 	ID          string     `json:"id,omitempty"`
 	Title       string     `json:"title,omitempty"`
@@ -99,11 +73,6 @@ type Task struct {
 	Kind        TaskKind   `json:"kind,omitempty"`
 }
 
-// maxFrameBytes is the single-frame ceiling this repository already applies to
-// both of its agent protocols (the ACP transport's and claude_code's NDJSON
-// scanners are both built with an 8 MiB cap). It is not enforced here — this
-// package does no framing — but the attachment decision was made against it,
-// and TestTransferChunkRoundTrip holds the chunk size to it.
 const maxFrameBytes = 8 << 20
 
 const MessageAnswer MessageKind = "answer"

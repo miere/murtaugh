@@ -11,15 +11,12 @@ import (
 	"github.com/miere/murtaugh/internal/config"
 )
 
-// sqlNodeTokens holds issued node credentials in a relational store, serving
-// both SQLite and Postgres through the Dialect seam.
 type sqlNodeTokens struct {
 	db     *sql.DB
 	d      Dialect
 	ownsDB bool
 }
 
-// openSQLNodeTokens prepares the credential store over an existing handle.
 func openSQLNodeTokens(ctx context.Context, db *sql.DB, d Dialect, ownsDB bool) (config.NodeTokenStore, error) {
 	if err := runMigrations(ctx, db, d); err != nil {
 		return nil, fmt.Errorf("migrate node-token schema: %w", err)
@@ -27,7 +24,6 @@ func openSQLNodeTokens(ctx context.Context, db *sql.DB, d Dialect, ownsDB bool) 
 	return &sqlNodeTokens{db: db, d: d, ownsDB: ownsDB}, nil
 }
 
-// openPostgresNodeTokens opens a dedicated Postgres connection for credentials.
 func openPostgresNodeTokens(ctx context.Context, dsn string) (config.NodeTokenStore, error) {
 	if dsn == "" {
 		return nil, errors.New("database.postgres.dsn is required for the postgres backend")
@@ -57,18 +53,12 @@ func (s *sqlNodeTokens) Close() error {
 	return s.db.Close()
 }
 
-// nodeTokenColumns is the read projection, in the order scanNodeToken expects.
 const nodeTokenColumns = `selector, secret_hash, node_id, user_id, label, created_at, expires_at, revoked_at`
 
 func (s *sqlNodeTokens) Put(ctx context.Context, token config.NodeToken) error {
 	if err := token.Validate(); err != nil {
 		return err
 	}
-	// A plain INSERT, with no ON CONFLICT clause: a selector collision must
-	// surface as an error rather than overwrite whatever was there. The
-	// selector is 64 random bits, so a genuine collision is not a case worth
-	// designing for — but a bug that reused one is, and silently replacing a
-	// live node's credential is the worst possible way to find out.
 	stmt := fmt.Sprintf(
 		`INSERT INTO node_tokens (%s) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)`,
 		nodeTokenColumns,
@@ -78,8 +68,6 @@ func (s *sqlNodeTokens) Put(ctx context.Context, token config.NodeToken) error {
 		token.Selector, token.SecretHash, token.NodeID, token.UserID, token.Label,
 		stampKey(token.CreatedAt), stampKey(token.ExpiresAt), stampKey(token.RevokedAt))
 	if err != nil {
-		// The selector is not a secret, but the error travels to logs and to a
-		// possibly-unauthenticated caller, so it names the node instead.
 		return fmt.Errorf("store node token for %q: %w", token.NodeID, err)
 	}
 	return nil
@@ -122,17 +110,11 @@ func (s *sqlNodeTokens) List(ctx context.Context, nodeID string) ([]config.NodeT
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("list node tokens: %w", err)
 	}
-	// Ordered in Go rather than in SQL so all three backends produce the same
-	// listing; the Firestore implementation cannot ORDER BY alongside its
-	// equality filter without a hand-created composite index.
 	sortNodeTokens(out)
 	return out, nil
 }
 
 func (s *sqlNodeTokens) Revoke(ctx context.Context, selector string, at time.Time) (config.NodeToken, bool, error) {
-	// Conditional on the credential still being live, so a second revocation
-	// leaves the original timestamp alone: when a credential stopped being
-	// trusted is an audit fact, and the first answer is the true one.
 	stmt := fmt.Sprintf(
 		`UPDATE node_tokens SET revoked_at = %s WHERE selector = %s AND revoked_at = %s`,
 		s.d.Placeholder(1), s.d.Placeholder(2), s.d.Placeholder(3))
@@ -142,7 +124,6 @@ func (s *sqlNodeTokens) Revoke(ctx context.Context, selector string, at time.Tim
 	return s.BySelector(ctx, selector)
 }
 
-// rowScanner is the shape *sql.Row and *sql.Rows share.
 type rowScanner interface{ Scan(dest ...any) error }
 
 func scanNodeToken(row rowScanner) (config.NodeToken, error) {
@@ -169,13 +150,8 @@ func scanNodeToken(row rowScanner) (config.NodeToken, error) {
 	return token, nil
 }
 
-// stampLayout is the fixed textual form of a node-token timestamp: UTC, fixed
-// width, and sortable, so a column of them orders the same way the instants do.
 const stampLayout = "2006-01-02T15:04:05.000Z"
 
-// stampKey renders a timestamp for storage. The zero time becomes the empty
-// string, which is how "never expires" and "not revoked" are spelled — a
-// sentinel date would eventually be reached.
 func stampKey(at time.Time) string {
 	if at.IsZero() {
 		return ""
@@ -183,7 +159,6 @@ func stampKey(at time.Time) string {
 	return at.UTC().Format(stampLayout)
 }
 
-// parseStamp is stampKey's inverse.
 func parseStamp(raw string) (time.Time, error) {
 	if raw == "" {
 		return time.Time{}, nil
@@ -195,8 +170,6 @@ func parseStamp(raw string) (time.Time, error) {
 	return at.UTC(), nil
 }
 
-// sortNodeTokens orders a listing newest first, with the selector breaking ties
-// so the order is total and the same on every backend.
 func sortNodeTokens(tokens []config.NodeToken) {
 	sort.Slice(tokens, func(i, j int) bool {
 		if tokens[i].CreatedAt.Equal(tokens[j].CreatedAt) {

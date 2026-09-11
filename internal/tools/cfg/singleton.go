@@ -135,13 +135,6 @@ func (t *accessSetTool) Invoke(ctx context.Context, args map[string]any) (any, e
 	if v, ok := boolArg(args, "debug"); ok {
 		cfg.Debug = v
 	}
-	// Designating the main node is the gateway admin writing down which machine
-	// serves work that has no user to fleet on. It is here, on the gateway's own
-	// access block, and not on the node's configuration, because a node that
-	// could declare itself main would be granting itself the right to serve
-	// every user's unfurls and every scheduled job — the thing #170's item 4
-	// settled a node may never do. An empty value clears the designation, which
-	// is the only way to un-designate and has to be reachable.
 	if v, ok := stringArg(args, "main_node"); ok {
 		cfg.MainNode = strings.TrimSpace(v)
 	}
@@ -220,13 +213,6 @@ func SingletonTools(p Provider) []tools.Tool {
 	}
 }
 
-// nodeSetTool updates the node singleton: where a runtime node dials.
-//
-// It is a set tool rather than a bootstrap-file field because the address is
-// ordinary configuration that an operator edits when a gateway moves, and the
-// bootstrap file is deliberately credentials-and-store only. It is also the one
-// block whose CONTENTS are about the gateway and whose OWNER is the node — see
-// internal/config/node.go.
 type nodeSetTool struct{ p Provider }
 
 func (t *nodeSetTool) Name() string { return "cfg.node.set" }
@@ -262,9 +248,6 @@ func (t *nodeSetTool) Invoke(ctx context.Context, args map[string]any) (any, err
 	if v, ok := arrayArg(args, "gateway"); ok {
 		cfg.Gateway = v
 	}
-	// Checked here as well as by the store's own validation, because the store's
-	// runs under whichever role opened it and this tool is reachable from a
-	// combined install where nothing else would look at the block.
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}

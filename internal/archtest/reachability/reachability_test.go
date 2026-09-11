@@ -10,13 +10,8 @@ import (
 	"github.com/miere/murtaugh/internal/archtest/reachability"
 )
 
-// The rule itself: cmd/murtaugh-gateway must not be able to reach any package
-// that can run a model, by any import path.
-//
-// The failure this prevents is not somebody writing `import
-// "internal/agentbuild"` in main.go — that is obvious in review. It is a gateway
-// file importing something ordinary that turns out to reach a backend three hops
-// down, which is how all five of the sites cut in this change got there.
+// The real risk is not a direct import but an ordinary one that reaches an agent
+// backend a few hops down.
 func TestTheGatewayBinaryReachesNoAgentBackend(t *testing.T) {
 	reached, err := reachability.Check(reachability.GatewayBinary)
 	if err != nil {
@@ -27,14 +22,8 @@ func TestTheGatewayBinaryReachesNoAgentBackend(t *testing.T) {
 	}
 }
 
-// The control, and the reason it is not a fixture: cmd/murtaugh MUST reach these
-// packages — the CLI keeps its local agent, deliberately (#170 Change E), so
-// `murtaugh jobs run x` works with no gateway and no node. That makes it a
-// positive control nobody can quietly delete without also deleting the feature,
-// which is exactly what a check for "can this check fail?" needs.
-//
-// Without it, the test above passes just as happily against a Check that always
-// returns nothing.
+// Positive control: without it the gateway test would pass just as happily
+// against a Check that always returns nothing.
 func TestTheCheckReportsABinaryThatMayRunAgents(t *testing.T) {
 	reached, err := reachability.Check("./cmd/murtaugh")
 	if err != nil {
@@ -50,10 +39,8 @@ func TestTheCheckReportsABinaryThatMayRunAgents(t *testing.T) {
 	}
 }
 
-// Pattern must match a forbidden package on a line of its own and nothing else.
-// The anchoring is what stops a future sibling — internal/llmcache, say — being
-// reported as internal/llm, and a guard that fires when nothing is wrong is one
-// that gets deleted.
+// A guard that fires when nothing is wrong ends up deleted, so a sibling such as
+// internal/llmcache must not match internal/llm.
 func TestPatternMatchesWholeLinesOnly(t *testing.T) {
 	re, err := regexp.Compile(reachability.Pattern())
 	if err != nil {
@@ -79,8 +66,8 @@ func TestPatternMatchesWholeLinesOnly(t *testing.T) {
 	}
 }
 
-// The shell copy of each rule is the one CI runs, so it must be exactly the
-// script the Go rule implies; any edit to it, however small, fails here.
+// The shell copy of each rule is the one CI actually runs, so it must match the
+// Go rule exactly.
 func TestTheCommittedCIStepMatchesTheRule(t *testing.T) {
 	const workflow = "../../../.github/workflows/ci.yml"
 	raw, err := os.ReadFile(workflow)

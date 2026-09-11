@@ -10,8 +10,6 @@ import (
 	"github.com/miere/murtaugh/internal/nodelink"
 )
 
-// Credentials tells the attached gateway how this node's credentials are doing,
-// so their owner hears of a failure without anyone having to ask the node.
 type Credentials struct {
 	log     *slog.Logger
 	current func() []agentwire.CredentialHealth

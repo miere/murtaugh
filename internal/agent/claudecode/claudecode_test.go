@@ -556,8 +556,6 @@ func appendedSystemPrompt(t *testing.T, args []string) string {
 	return values[0]
 }
 
-// With no persona Murtaugh has nothing to add to the CLI's own system prompt,
-// and an empty --append-system-prompt would only be noise on the command line.
 func TestDefaultArgsWithoutAPersonaAppendNothing(t *testing.T) {
 	if slices.Contains(defaultArgs(""), "--append-system-prompt") {
 		t.Fatalf("defaultArgs appended a system prompt with no persona to carry: %v", defaultArgs(""))

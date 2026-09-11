@@ -11,17 +11,6 @@ import (
 // resolveSandbox turns an agent's `sandbox:` block into the confinement its
 // process backend applies. It returns a nil agent.Sandbox for a native agent (no
 // process to confine) and for mode off.
-//
-// Two runtime facts the profile cannot know are threaded in from deps, for the
-// same reason: getting either wrong is silent.
-//
-//   - The bridge socket. A confined agent's `murtaugh mcp-bridge` grandchild
-//     dials it to serve Murtaugh's own tools, and connecting to a unix socket is
-//     a write. Miss it and the whole slack.*/jobs surface goes dark with no error
-//     naming the sandbox.
-//   - The node token path. An agent that can read its node's bearer token can
-//     impersonate the node and inherit everything the gateway grants it. Miss it
-//     and nothing is denied and nothing complains.
 func resolveSandbox(profile config.AgentProfile, resolved ResolvedAgent, deps Deps) (agent.Sandbox, error) {
 	if resolved.Kind == config.AgentKindNative {
 		return nil, nil

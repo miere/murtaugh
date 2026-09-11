@@ -126,8 +126,6 @@ func (f *fakeChatSessions) Prompt(_ context.Context, key agent.ConversationKey, 
 	return ch, nil
 }
 
-// metadata returns the last SessionMetadata the manager was handed, safe to
-// read while the startChat goroutine may still be invoking Prompt.
 func (f *fakeChatSessions) metadata() agent.SessionMetadata {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -1292,8 +1290,6 @@ func (f *fakeChatSessionsSigningIn) Prompt(_ context.Context, _ agent.Conversati
 func (f *fakeChatSessionsSigningIn) Lookup(agent.ConversationKey) (string, bool) { return "", false }
 func (f *fakeChatSessionsSigningIn) Cancel(context.Context, string) error        { return nil }
 
-// A sign-in is drawn against the turn's conversation for the owner it carries,
-// and the node's progress reaches the drawing before the reply that follows it.
 func TestChatHandlerDrawsASignInForItsOwnerAndSettlesIt(t *testing.T) {
 	drawn := &signInDisplayer{done: make(chan struct{})}
 	f := &fakeChatSessionsSigningIn{owner: "UOWNER", answers: make(chan agent.DisplayAnswer, 1)}

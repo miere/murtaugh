@@ -130,42 +130,20 @@ type Application struct {
 	approvedCfg    config.Snapshot
 	approvedCfgSet bool
 	approvedCfgMu  sync.Mutex
-	// agentRefs is every agent profile NAME the running configuration mentions,
-	// republished on every reload.
-	//
-	// Atomic rather than mutex-guarded because it is read from a node's own
-	// connection goroutine at the moment that node attaches, which can be any
-	// moment at all — including the middle of a reload. See node_setup.go.
-	agentRefs atomic.Pointer[[]config.AgentReference]
+	agentRefs      atomic.Pointer[[]config.AgentReference]
 	// jobRuns is the shared scheduled-run claim store, retained only so
 	// shutdown can close it. nil when no job is scheduled.
-	jobRuns config.JobRunStore
-	// agents is the agent machinery this binary was built with. The zero value
-	// is a process that cannot run an agent at all.
-	agents Agents
-	// nodeEndpoint is the inbound runtime-node listener, when this binary opened
-	// one. The zero value is a gateway that accepts no nodes.
+	jobRuns      config.JobRunStore
+	agents       Agents
 	nodeEndpoint NodeEndpoint
 }
 
-// Agents is the agent machinery an entry point is willing to link into its
-// binary. It is injected rather than imported because this package is shared by
-// every binary, and one of them — cmd/murtaugh-gateway — must be provably unable
-// to reach an agent backend (#170 Change E). A package-level import here would
-// put that backend in the gateway binary no matter which fields it left unset.
-//
-// The zero Agents is a process with no agent machinery: chat has no session
-// managers and every delegate-to-agent surface reports that delegation is
-// unavailable. internal/agentruntime/local supplies both fields for the binaries
-// that may run agents.
+// Injected rather than imported: cmd/murtaugh-gateway shares this package and must not
+// link an agent backend, which a package-level import here would force into it.
 type Agents struct {
-	// Runtime builds the gateway's in-process agent runtime for one
-	// configuration. It takes cfg rather than closing over it because a
-	// configuration reload builds a whole new Gateway from a new config.
+	// Takes cfg rather than closing over it because a configuration reload builds a new Gateway.
 	Runtime func(config.Config, *tools.Registry, *slog.Logger) agentruntime.Builder
-	// Delegator builds the CLI/MCP one-shot delegate runner — the unbridged one,
-	// since outside the daemon no aggregator is listening. It must return a nil
-	// interface, never a typed nil, when no agents are configured.
+	// Must return a nil interface, never a typed nil, when no agents are configured.
 	Delegator func(config.Config, *tools.Registry) agentruntime.Delegator
 }
 
@@ -321,70 +299,33 @@ func (a *Application) WithResumeMarkerPath(path string) *Application {
 	return a
 }
 
-// LeaderView is what the inbound node listener needs from the election: may I
-// accept, and where should I send a node I cannot. *election.Runner satisfies
-// it, and nothing here has to know that.
 type LeaderView interface {
 	Allow(ctx context.Context) bool
 	Leader(ctx context.Context) (config.LeaderAddress, bool)
 }
 
-// NodeEndpoint is the gateway's inbound listener for runtime nodes, as the
-// election needs to see it.
-//
-// It is a struct of functions rather than an import of internal/nodehost
-// because the wiring runs the other way round: the listener belongs to
-// cmd/murtaugh-gateway and starts with the process, while the election is built
-// in here and cannot exist until the Slack identity has been resolved. The
-// binary owns both ends and hands over the three points where they meet.
+// Functions rather than an import of internal/nodehost: the binary owns the listener,
+// while the election is only built here once the Slack identity is resolved.
 type NodeEndpoint struct {
-	// Address reports where nodes reach this gateway. Called on every election
-	// tick, so a listener that binds late or an address that moves is published
-	// without anything having to notice.
+	// Called on every election tick, so a listener that binds late or moves is still published.
 	Address func() config.LeaderAddress
-	// Follow is handed the election once it exists. It is what makes accepting
-	// a node leader-only, which is #170's Change H and the premise the whole
-	// redirect design rests on.
-	Follow func(LeaderView)
-	// Detach drops every attached node, and is called on demotion. A node whose
-	// gateway stood down cannot discover that for itself: it holds a socket
-	// nothing will ever route a conversation over again, and it would keep
-	// holding it. Dropping it is what makes it redial into the redirect.
-	Detach func(reason string)
-	// Onboard is handed the two gateway-side answers the node registry needs
-	// and cannot work out: what this gateway's configuration NAMES, and who to
-	// offer the setup form to when a node attaches with nothing configured.
-	//
-	// It is called once, with closures that reach the CURRENT gateway through
-	// the holder, so a configuration reload does not have to re-register
-	// anything. See #170 Change I and internal/nodehost/onboard.go.
-	Onboard func(NodeOnboarding)
-	// Configure hands one node the profiles a completed setup form produced.
-	// It is the return path of Onboard's trigger.
+	Follow  func(LeaderView)
+	// Called on demotion: a node cannot tell its gateway stopped leading, and only a dropped
+	// socket makes it redial into the redirect.
+	Detach    func(reason string)
+	Onboard   func(NodeOnboarding)
 	Configure func(ctx context.Context, nodeID string, cfg agentwire.NodeConfiguration) (agentwire.NodeConfigured, error)
 }
 
-// NodeOnboarding is what the gateway supplies to the node registry.
 type NodeOnboarding struct {
-	// References is every agent profile name this gateway's configuration
-	// mentions, re-read on each call so a reload is picked up.
-	//
-	// This is #198's behavioural change in one field: those names used to be
-	// resolved against profile bodies at write time, and a gateway no longer
-	// holds bodies to resolve them against.
-	References func() []config.AgentReference
-	// Unconfigured is called when a node attaches claiming nothing.
+	// Re-read on every call so a configuration reload is picked up.
+	References   func() []config.AgentReference
 	Unconfigured func(ctx context.Context, nodeID, userID string)
-	// Settled is called when a node stops being one with nothing configured —
-	// it advertised something, or it disconnected — so the invitation its owner
-	// is holding can be withdrawn. Without it an administrator who once plugged
-	// in an unconfigured node is routed to that node for the life of the
-	// process. See internal/slack/gateway.WithdrawNodeSetup.
+	// Without it, an admin who once plugged in an unconfigured node stays routed to that
+	// node's setup form for the life of the process.
 	Settled func(nodeID, userID string)
 }
 
-// WithNodeEndpoint attaches the inbound node listener to the election. Returns
-// the receiver for fluent wiring.
 func (a *Application) WithNodeEndpoint(ep NodeEndpoint) *Application {
 	a.nodeEndpoint = ep
 	return a
@@ -526,13 +467,6 @@ func buildRegistry(cfg config.Config, cfgStore config.Store, configPath, version
 	}
 	reg.Register(troubleshootbundle.New(troubleshootSources, func() []string { return effectiveTroubleshootProviders(cfg) }))
 
-	// `node token …` administers the bearer credentials runtime nodes will
-	// authenticate with (#190). The store is opened per invocation rather than
-	// held: these are rare administrative acts, and a handle kept open for the
-	// daemon's lifetime would be a connection every gateway pays for whether or
-	// not it ever enrols a node. It is deliberately NOT the config store — node
-	// credentials are a side table like job_runs and leader_locks, outside the
-	// Config every process loads (see config.NodeTokenStore).
 	nodeTokens := func(ctx context.Context) (config.NodeTokenStore, error) {
 		base := baseDirFor(cfg, configPath)
 		if base == "" {
@@ -560,12 +494,6 @@ func effectiveTroubleshootProviders(cfg config.Config) []string {
 	return troubleshoot.KnownProviders()
 }
 
-// localDelegator builds the agent runner that backs agent-delegated jobs (jobs
-// with `agent`/`prompt` instead of `command`). It returns a nil interface when
-// this binary carries no agent machinery, or when no agents are configured,
-// leaving such jobs to fail with a clear error; config validation already
-// guarantees a job's agent is defined when one is set.
-//
 // This is the CLI/MCP runner: it has no MCP aggregator, because outside the
 // daemon there is none to connect to. Inside the daemon the gateway's own
 // bridged runner is used instead (see newScheduledRunner).

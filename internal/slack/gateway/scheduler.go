@@ -130,30 +130,6 @@ func (a *Gateway) runScheduledJob(ctx context.Context, name string) {
 	a.settleJobReply(ctx, name, reply)
 }
 
-// notifyJobFailure tells the admin that a scheduled run failed, once per run of
-// failures rather than once per occurrence.
-//
-// This exists because until now the only thing a failed scheduled run did was
-// write a line to slack.err.log, and the one detector that alerts —
-// reportMissedJobs — cannot see it: the occurrence claim is taken BEFORE the run
-// and is never released, so a job that claimed its slot and then failed is
-// indistinguishable from one that succeeded, and the miss report actively says
-// all-clear. #170's split makes that worse rather than better, because "agent
-// delegation is unavailable" is now a way for every job on the gateway to fail
-// at once. A cron that stops working and tells nobody is the failure this whole
-// item exists to prevent.
-//
-// It reports rather than replays and it does not release the claim, both to stay
-// with the policy already written down in internal/app/missed_jobs.go: whether a
-// late run is wanted depends on the job and only the admin knows, and the claim
-// IS the mutual exclusion between two gateways — releasing it on failure would
-// let the next leader run a job whose side effects already happened.
-//
-// The alert fires on the EDGE into failure. A per-minute job that starts failing
-// would otherwise DM the admin fourteen hundred times a day, which is a way of
-// telling them nothing; the first failure is the one that carries the
-// information, and every subsequent one is still logged and still journalled by
-// the run itself.
 func (a *Gateway) notifyJobFailure(ctx context.Context, name string, runErr error) {
 	if a.alreadyFailing(name) {
 		return
@@ -167,12 +143,6 @@ func (a *Gateway) notifyJobFailure(ctx context.Context, name string, runErr erro
 	}
 }
 
-// jobFailureAlert renders the warning.
-//
-// A WARNING and not an ERROR, for the same reason a missed occurrence is: the
-// gateway is fine, and something the operator asked for did not happen. The next
-// step names `jobs.run` because that is what a missed-occurrence alert says and
-// the two must not offer different remedies for the same situation.
 func jobFailureAlert(name string, runErr error) alertcard.Spec {
 	return alertcard.Spec{
 		Level:     alertcard.LevelWarn,
@@ -184,8 +154,6 @@ func jobFailureAlert(name string, runErr error) alertcard.Spec {
 	}
 }
 
-// alreadyFailing reports whether the previous run of this job also failed, and
-// records that this one did.
 func (a *Gateway) alreadyFailing(name string) bool {
 	a.confirmedJobsMu.Lock()
 	defer a.confirmedJobsMu.Unlock()
@@ -197,9 +165,6 @@ func (a *Gateway) alreadyFailing(name string) bool {
 	return was
 }
 
-// markJobHealthy re-arms the alert after a successful run, so the NEXT failure
-// is reported. Without it a job that fails, is fixed, and fails again for a
-// different reason a month later is never mentioned.
 func (a *Gateway) markJobHealthy(name string) {
 	a.confirmedJobsMu.Lock()
 	defer a.confirmedJobsMu.Unlock()

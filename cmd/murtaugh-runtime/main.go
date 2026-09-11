@@ -43,16 +43,9 @@ import (
 
 var version = "dev"
 
-// errNoGateway is what this binary exits with when it is given nothing to dial.
-// It is an error rather than a clean exit so a supervisor pointed at a node
-// that was never told where its gateway is reports a failure instead of
-// flapping a process that silently does nothing.
 var errNoGateway = errors.New("no gateway address: set one with `murtaugh cfg node set --gateway wss://host:port` or pass -gateway (a node dials in; the gateway never dials out)")
 
 const (
-	// reconnectFloor and reconnectCeiling bound the redial backoff. Jittered,
-	// because every node discovers a dead gateway at the same moment and an
-	// unjittered fleet redials in lockstep.
 	reconnectFloor   = 1 * time.Second
 	reconnectCeiling = 30 * time.Second
 )
@@ -65,14 +58,6 @@ func main() {
 }
 
 func run(args []string) error {
-	// `murtaugh-runtime mcp-bridge` is the transparent stdio↔socket proxy an
-	// acp/claude_code agent spawns to reach this node's MCP aggregator. The
-	// aggregator advertises os.Executable() as the command, which on a node is
-	// THIS binary — so without this branch the agent spawns a subprocess that
-	// exits immediately with "unexpected argument", every session, and the
-	// symptom is an agent with no Murtaugh tools and nothing in any log that
-	// names the cause. Dispatched before any config or logging is wired,
-	// because stdout belongs to MCP.
 	if len(args) > 0 && args[0] == mcpbridge.Subcommand {
 		return runMCPBridge()
 	}
@@ -95,10 +80,6 @@ func run(args []string) error {
 		return fmt.Errorf("unexpected argument %q: this binary takes no subcommands", fs.Arg(0))
 	}
 
-	// A node's own configuration ROOT, not the gateway's. Two roles in one
-	// directory share a .env, a store and a node-token — and share
-	// internal/config/migrate's backup/restore, which reverts every top-level
-	// file in the directory it runs in. See config.DefaultNodePath.
 	path := *configPath
 	if path == "" {
 		defaultPath, err := config.DefaultNodePath()
@@ -113,8 +94,6 @@ func run(args []string) error {
 	} else if len(applied) > 0 {
 		fmt.Fprintf(os.Stderr, "murtaugh-runtime: migrated config to schema v%d\n", applied[len(applied)-1])
 	}
-	// The node's skeleton, which unlike the gateway's carries no `oauth:` block:
-	// a node has no Slack connection and must never hold the workspace's tokens.
 	if err := config.BootstrapNode(path); err != nil {
 		return err
 	}
@@ -122,17 +101,12 @@ func run(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// RoleNode, which is what lets this load at all: a node's configuration is
-	// validated without the Slack credentials it must not hold. See
-	// internal/config/role.go.
 	cfg, cfgStore, err := configstore.BootstrapRole(ctx, path, config.RoleNode, false)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = cfgStore.Close() }()
 
-	// The seed addresses: the flag, or the node's own configuration. The flag
-	// wins so an operator can point a node somewhere once without editing it.
 	seeds := cfg.Node.Seeds()
 	if flagged := strings.TrimSpace(*gatewayURL); flagged != "" {
 		seeds = []string{flagged}
@@ -153,10 +127,6 @@ func run(args []string) error {
 	}
 
 	logger := newLogger(cfg.Access.Debug)
-	// The process context, which the configuration applier below can end. A node
-	// that has just been given its first agent profiles restarts into them —
-	// both backend families latch their toolset at construction, so a process
-	// built with nothing cannot grow an agent. See configure.go.
 	runCtx, restart := context.WithCancel(ctx)
 	defer restart()
 
@@ -171,16 +141,6 @@ func run(args []string) error {
 	}
 	repair := newRepairer(cfg, name, served.signIns, logger)
 
-	// What this node claims, set BEFORE the first dial so the handshake answer
-	// carries it. A node that advertised after attaching would be attached and
-	// mute for a window, and the gateway builds its registry entry inside that
-	// window.
-	//
-	// A node with nothing configured advertises NOTHING, and that empty claim is
-	// the signal: #170 Change I makes it the trigger for onboarding the node's
-	// owner through Slack, which the gateway drives because this process has no
-	// Slack of its own. It is why such a node attaches at all rather than
-	// refusing to start — an unpublished node has no owner the gateway can ask.
 	var serving []string
 	if name != "" {
 		serving = []string{name}
@@ -191,15 +151,6 @@ func run(args []string) error {
 	}
 	served.claim.Publish(ctx, nodeclaim.Advertise(cfg, serving))
 
-	// And the only reason a node ever changes its claim afterwards. Nothing
-	// else on this binary notices a configuration edit at all: the agent is
-	// built once from the snapshot above and stays built, because both backend
-	// families latch their toolset and the redial loop reuses the client it
-	// captured. This re-reads the claim and nothing else.
-	//
-	// A watcher that cannot be built is reported and skipped rather than fatal:
-	// a node that cannot notice an edit still serves every conversation it is
-	// given, and one that refused to start serves none.
 	if watcher, err := nodeclaim.NewWatcher(ctx, nodeclaim.Options{
 		Store:   cfgStore,
 		Base:    cfg,
@@ -232,9 +183,7 @@ func run(args []string) error {
 		signIns:    served.signIns,
 		claim:      served.claim,
 		configure:  configure.apply,
-		// Fired by nodeserve AFTER the answer is on the wire, never by the
-		// applier: it cancels the context this very connection is served on.
-		restart: restart,
+		restart:    restart,
 
 		credentials: credentials,
 		failed:      repair.failed,
@@ -242,27 +191,15 @@ func run(args []string) error {
 	})
 }
 
-// servedAgent is the one agent this node offers, the gate its tool calls go
-// through, and the sink its background events leave by.
 type servedAgent struct {
 	client     agent.Client
 	gate       *nodeserve.ToolGate
 	background *nodeserve.BackgroundSink
 	signIns    *nodeserve.SignIns
 	claim      *nodeserve.Advertiser
-	// serveTools binds this node's LOCAL aggregator socket, the one an
-	// acp/claude_code agent's bridge subprocess dials. nil when there is nothing
-	// to serve.
 	serveTools func(context.Context) error
 }
 
-// serveAgent builds the node's in-process runtime and picks the agent it will
-// serve.
-//
-// One agent, because the protocol carries no agent name: a link IS an agent.
-// That is #193's deliberate simplification — the registry that lets a node
-// advertise what it can serve is item 9 — and it is named here rather than
-// discovered later from a confusing failure.
 func serveAgent(cfg config.Config, logger *slog.Logger, requested string) (servedAgent, string, error) {
 	name, err := chooseAgent(cfg, requested)
 	if err != nil {
@@ -315,19 +252,7 @@ func helpDocs(registry *tools.Registry) []help.Doc {
 	return docs
 }
 
-// nodeHooks is everything a node contributes to its own in-process runtime.
-//
-// These are the collaborators only a Slack-facing process can supply, which on
-// a node means: reached over the link instead of in memory. Both must be
-// present or the corresponding feature fails SILENTLY, one hop before the
-// protocol could carry it — an unset Approver runs side-effecting tools
-// unprompted, and an unset BackgroundEvents makes claude_code drop a background
-// stretch's events at the backend, so the gateway's "went quiet" notice never
-// appears with nothing logged on the side anyone would debug.
 func nodeHooks(cfg config.Config, gate *nodeserve.ToolGate, background *nodeserve.BackgroundSink) agentruntime.Hooks {
-	// Every agent gets the gate: which one this node serves is decided
-	// elsewhere, and an agent built with no gate would run side-effecting tools
-	// unprompted if that choice changed.
 	approvers := make(map[string]agentruntime.Approver, len(cfg.Agents))
 	for agentName := range cfg.Agents {
 		approvers[agentName] = gate
@@ -357,14 +282,6 @@ func chooseAgent(cfg config.Config, requested string) (string, error) {
 		}
 	}
 	if len(cfg.Agents) == 0 {
-		// The empty name, not an error. A node that has never been configured
-		// must be able to attach, because the gateway learns who OWNS it from
-		// the credential the connection presents and learns it has nothing from
-		// the empty advertisement — and #170 Change I makes those two facts
-		// together the trigger for onboarding the owner through Slack. Refusing
-		// to start, which is what this did before, made that trigger unreachable
-		// by construction: the one node that needs onboarding was the one node
-		// that could never connect to ask for it.
 		return "", nil
 	}
 	return "", errors.New("this node has several agents and no default: pass -agent to say which one it serves")
@@ -386,20 +303,10 @@ type attachment struct {
 	failed      func(error) error
 	renew       func(context.Context) (agentwire.CredentialRenewal, error)
 
-	// dial and wait are the loop's two seams, nil in every binary and set only
-	// by the loop's own test.
-	//
-	// They exist because two of the behaviours #197 headlines are properties of
-	// the LOOP rather than of gatewayList: that a hop costs no backoff, and
-	// that paying a backoff returns the hop budget. Both are invisible to a
-	// test that drives gatewayList directly — it reaches past the caller — and
-	// unreachable through the real ones, which need a gateway on a socket and a
-	// wall clock willing to spend thirty seconds.
 	dial func(ctx context.Context, address string) (*nodesocket.Conn, error)
 	wait func(d time.Duration) <-chan time.Time
 }
 
-// dialer is the real dial, closing over the credential this node presents.
 func (a attachment) dialer() func(context.Context, string) (*nodesocket.Conn, error) {
 	if a.dial != nil {
 		return a.dial
@@ -412,7 +319,6 @@ func (a attachment) dialer() func(context.Context, string) (*nodesocket.Conn, er
 	}
 }
 
-// waiter is the real backoff wait.
 func (a attachment) waiter() func(time.Duration) <-chan time.Time {
 	if a.wait != nil {
 		return a.wait
@@ -420,16 +326,6 @@ func (a attachment) waiter() func(time.Duration) <-chan time.Time {
 	return time.After
 }
 
-// attach dials the gateway and serves it, redialling until the process is
-// stopped.
-//
-// A dropped connection is not fatal and is not announced: a laptop that sleeps
-// at six o'clock disconnects every evening, and a node that gave up on the
-// first refusal would need a human to restart it every morning.
-//
-// Which address it dials is gatewayList's business, and why it waited — or did
-// not — is gatewayList.refusal's. Both live in gateways.go, because the loop
-// below is the part that must stay obvious.
 func attach(ctx context.Context, logger *slog.Logger, a attachment) error {
 	gateways := newGatewayList(a.gateways...)
 	dial, wait := a.dialer(), a.waiter()
@@ -439,9 +335,6 @@ func attach(ctx context.Context, logger *slog.Logger, a attachment) error {
 		conn, err := dial(ctx, address)
 		if err != nil {
 			if gateways.refusal(address, err, logger) {
-				// A redirect, and somewhere to go. Hop now: the fleet answered
-				// and named the leader, so waiting out a backoff earned by
-				// unrelated failures would idle a healthy node for nothing.
 				select {
 				case <-ctx.Done():
 					return nil
@@ -454,8 +347,6 @@ func attach(ctx context.Context, logger *slog.Logger, a attachment) error {
 				return nil
 			case <-wait(jitter(backoff)):
 			}
-			// The wait is what the hop budget was protecting against spending;
-			// having paid it, the node may follow redirects again.
 			gateways.waited()
 			backoff = nextBackoff(backoff)
 			continue
@@ -493,7 +384,6 @@ func attach(ctx context.Context, logger *slog.Logger, a attachment) error {
 	}
 }
 
-// nextBackoff doubles the wait, up to the ceiling.
 func nextBackoff(backoff time.Duration) time.Duration {
 	backoff *= 2
 	if backoff > reconnectCeiling {
@@ -513,8 +403,6 @@ func runMCPBridge() error {
 	return mcpbridge.RunBridge(ctx, socket, token, os.Stdin, os.Stdout)
 }
 
-// jitter spreads a fleet's reconnections over the window rather than firing
-// them together.
 func jitter(d time.Duration) time.Duration {
 	if d <= 0 {
 		return 0
@@ -530,10 +418,6 @@ func newLogger(debug bool) *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 }
 
-// reportAgents prints what this node would serve, and where the credential it
-// presents lives. It is printed before anything is dialled, because "is this
-// machine configured to be a node at all?" is the first question an operator
-// asks and the one a connection failure does not answer.
 func reportAgents(out io.Writer, cfg config.Config, seeds []string) {
 	fmt.Fprintf(out, "murtaugh-runtime %s\n", version)
 	fmt.Fprintf(out, "config: %s\n", cfg.BaseDir)

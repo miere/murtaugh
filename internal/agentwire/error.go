@@ -8,52 +8,16 @@ import (
 	"github.com/miere/murtaugh/internal/providerfail"
 )
 
-// ErrorKind is the wire's discriminant vocabulary: the condition an error
-// names, decided once by the producer and mapped back to a sentinel by the
-// consumer.
-//
-// It exists because the gateway compares Event.Error by IDENTITY, and
-// serialisation preserves an error's text and destroys its identity without
-// anything failing loudly. A user interrupt would start rendering as a failure
-// card; a wedged session would stop being dropped. Every consumer on this path
-// was enumerated before this list was written:
-//
-//   - errors.Is(err, context.Canceled) — three separate decisions in
-//     gateway/chat_handler.go (return-as-interrupt, the deferred "_interrupted_"
-//     marker, the deferred session-log outcome) → ErrorCancelled. A fourth site
-//     in refreshAssistantStatus tests a Slack API error, which never comes off
-//     this wire, so it is not a consumer of this vocabulary.
-//   - errors.Is(err, agent.ErrToolCeiling) — drops the session binding when a
-//     backend cannot stop a wedged tool → ErrorToolCeiling.
-//   - providerfail.Classify(err) — gateway/alert.go's failSpec, reached from
-//     every renderer.Fail on both the foreground and background paths. It does
-//     not merely branch: it reads five structured fields off the failure to
-//     build the user-facing card → ErrorProvider.
-//   - acp.IsMethodNotFound-shaped reads of a JSON-RPC code → ErrorRPC.
-//   - errors.Is(err, agent.ErrCredentialRejected) — set by a node whose owner
-//     has a sign-in open → ErrorCredential.
-//
-// The vocabulary is closed and small on purpose. An unrecognised Kind degrades
-// to exactly today's generic behaviour — the full text, no sentinel — rather
-// than losing information, and nodes cannot invent discriminants the gateway
-// does not understand.
+// ErrorKind exists because the gateway compares errors by identity, which serialisation
+// destroys. An unknown Kind degrades to the plain text rather than losing information.
 type ErrorKind string
 
 const (
-	// ErrorUnknown — no discriminant applies. The text is all there is, which
-	// is what an in-process consumer would have had anyway.
-	ErrorUnknown ErrorKind = "unknown"
-	// ErrorCancelled — the turn was interrupted. Decodes to an error that
-	// satisfies errors.Is(err, context.Canceled).
-	ErrorCancelled ErrorKind = "cancelled"
-	// ErrorToolCeiling — a tool ran past its execution ceiling. Decodes to an
-	// error that satisfies errors.Is(err, agent.ErrToolCeiling).
+	ErrorUnknown     ErrorKind = "unknown"
+	ErrorCancelled   ErrorKind = "cancelled"
 	ErrorToolCeiling ErrorKind = "tool_ceiling"
-	// ErrorProvider — the model provider failed, already classified into the
-	// providerfail.Failure vocabulary. Carries Provider.
-	ErrorProvider ErrorKind = "provider"
-	// ErrorRPC — a JSON-RPC fault from an external agent process. Carries RPC.
-	ErrorRPC ErrorKind = "rpc"
+	ErrorProvider    ErrorKind = "provider"
+	ErrorRPC         ErrorKind = "rpc"
 	// ErrorCredential lets the gateway tell the user the owner already has a
 	// sign-in in front of them, instead of starting one itself.
 	ErrorCredential ErrorKind = "credential"
@@ -68,9 +32,8 @@ type Error struct {
 	RPC      *RPCFailure      `json:"rpc,omitempty"`
 }
 
-// ProviderFailure is providerfail.Failure on the wire: the classification the
-// producer already derived, carried so the consumer does not have to re-derive
-// it from a third-party error type that cannot survive serialisation.
+// ProviderFailure carries the producer's classification because the third-party error it came
+// from cannot survive serialisation.
 type ProviderFailure struct {
 	Kind       string `json:"kind"`
 	Provider   string `json:"provider,omitempty"`
@@ -86,30 +49,13 @@ type RPCFailure struct {
 	Code   int    `json:"code"`
 }
 
-// RPCFaulter is an error that can describe its JSON-RPC fault in structured
-// form. The ACP backend's *RPCError satisfies it; the decoded form of an
-// ErrorRPC satisfies it too, so a consumer reads the code the same way on
-// either side of the wire.
-//
-// It is declared here, and matched structurally, so this package never imports
-// an agent backend — the gateway has to be able to import the protocol while
-// remaining incapable of running an agent.
+// RPCFaulter is matched structurally so this package never imports an agent backend: the
+// gateway must import the protocol yet stay unable to run an agent.
 type RPCFaulter interface {
 	error
-	// RPCFault returns the faulting method and the JSON-RPC error code.
 	RPCFault() (method string, code int)
 }
 
-// encodeError reads the discriminants off err and records them.
-//
-// The order matters and mirrors the gateway's own branching: chat_handler tests
-// cancellation before the tool ceiling, so an error that somehow satisfied both
-// is a cancellation to the consumer and must be one on the wire too.
-//
-// The provider arm reads a classification the BACKEND already attached
-// (internal/agent/native's eventError, via llm.CarryFailure); it does not derive
-// one. Deriving it here would mean matching litellm's concrete error type, and
-// this package must stay importable by a gateway that links no provider client.
 func encodeError(err error) *Error {
 	if err == nil {
 		return nil
@@ -151,9 +97,6 @@ func encodeError(err error) *Error {
 	return w
 }
 
-// decodeError rebuilds an error that answers the consumer's identity
-// comparisons the way the original would have, while reading — to a log, to a
-// card's detail block, to the journal — exactly like the original.
 func decodeError(w *Error) error {
 	if w == nil {
 		return nil
@@ -187,34 +130,19 @@ func decodeError(w *Error) error {
 	return &wireError{msg: w.Message}
 }
 
-// wireError is a decoded Event.Error: the producer's exact message with the
-// sentinel its Kind names re-attached underneath.
-//
-// Both halves are load-bearing. Returning the bare sentinel would satisfy
-// errors.Is and throw away the prose — and the prose is the whole diagnostic
-// value of a tool ceiling ("terminal ran for 5m0s with no result") and what
-// lands in the alert card and the journal. Returning errors.New(msg) would keep
-// the prose and silently turn a user's interrupt into a failure card.
 type wireError struct {
-	msg string
-	// sentinel is what errors.Is must find, or nil when the Kind names none.
+	msg      string
 	sentinel error
 }
 
 func (e *wireError) Error() string { return e.msg }
 
-// Unwrap exposes the sentinel to errors.Is. A nil sentinel simply ends the
-// chain, which is the right answer for an error that carried no discriminant.
 func (e *wireError) Unwrap() error { return e.sentinel }
 
-// rpcError is a decoded ErrorRPC: a wireError that can still be asked for its
-// JSON-RPC code.
 type rpcError struct {
 	wireError
 	method string
 	code   int
 }
 
-// RPCFault satisfies RPCFaulter, so a consumer reading the code does the same
-// errors.As on a decoded fault as on a locally produced one.
 func (e *rpcError) RPCFault() (string, int) { return e.method, e.code }

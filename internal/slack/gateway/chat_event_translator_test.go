@@ -11,17 +11,11 @@ import (
 	"github.com/miere/murtaugh/internal/agent"
 )
 
-// newTestEventTranslator wires a translator to a recording renderer with a
-// liveness window long enough that it never fires by accident. The timing tests
-// pass their own window.
 func newTestEventTranslator() (*eventTranslator, *recordingRenderer) {
 	r := &recordingRenderer{}
 	return newEventTranslator(r, time.Hour, discardLogger()), r
 }
 
-// drive feeds events through the translator and returns the terminal step,
-// failing the test if a delivery error or a second terminal shows up. It mirrors
-// what a caller's loop does, minus the policy.
 func drive(t *testing.T, tr *eventTranslator, events ...agent.Event) turnStep {
 	t.Helper()
 	ctx := context.Background()
@@ -37,24 +31,10 @@ func drive(t *testing.T, tr *eventTranslator, events ...agent.Event) turnStep {
 	return tr.Closed()
 }
 
-// TestEventTranslatorStatusKeepsTurnAliveWithoutRendering is the demonstration
-// #188 asks for: the outbound layer cannot observe anything the inbound layer has
-// not handed it.
-//
-// A status heartbeat is a real event that is deliberately NEVER rendered. Here a
-// stream of nothing but heartbeats runs for well over the liveness window and the
-// turn stays alive — while the renderer is driven exactly once, by the terminal.
-// A detector living on the write path would have seen no calls at all for that
-// whole stretch and declared the turn dead; the one at the event edge saw eight
-// frames. That is the concrete failure the layering makes structurally
-// unavailable (#170 Concern 4), and the mechanical half of the same rule is the
-// renderclock analyzer, which forbids a chatRenderer from importing a clock at
-// all.
+// A heartbeat is never rendered, so a liveness check on the write path would call
+// this turn dead; the one at the event edge keeps it alive.
 func TestEventTranslatorStatusKeepsTurnAliveWithoutRendering(t *testing.T) {
 	r := &recordingRenderer{}
-	// 8 heartbeats 10ms apart (~80ms) under a 60ms window: no single gap
-	// approaches the window, so it must never elapse — the same shape as
-	// TestChatHandlerIdleTimerResetsOnActivity.
 	tr := newEventTranslator(r, 60*time.Millisecond, discardLogger())
 	defer tr.StopLiveness()
 	ctx := context.Background()
@@ -84,9 +64,6 @@ func TestEventTranslatorStatusKeepsTurnAliveWithoutRendering(t *testing.T) {
 	}
 }
 
-// TestEventTranslatorTextTurnRendersInOrderAndFinishesClean covers the ordinary
-// turn: text goes to the renderer as it arrives, the terminal is a plain Finish,
-// and no empty-reply note is raised because the turn plainly produced a reply.
 func TestEventTranslatorTextTurnRendersInOrderAndFinishesClean(t *testing.T) {
 	tr, r := newTestEventTranslator()
 	step := drive(t, tr,
@@ -116,9 +93,7 @@ func TestEventTranslatorTextTurnRendersInOrderAndFinishesClean(t *testing.T) {
 	}
 }
 
-// TestEventTranslatorAttachmentOnlyTurnIsNotEmpty guards the case that looks like
-// a failure and is not: the agent answered with a file and no prose. The
-// empty-reply note must be suppressed, or an attachment-only reply reads as a
+// A reply that is only a file must not get the empty-reply note, or it reads as a
 // turn that did nothing.
 func TestEventTranslatorAttachmentOnlyTurnIsNotEmpty(t *testing.T) {
 	tr, r := newTestEventTranslator()
@@ -140,16 +115,13 @@ func TestEventTranslatorAttachmentOnlyTurnIsNotEmpty(t *testing.T) {
 	}
 }
 
-// TestEventTranslatorSilentTurnSaysWhatItDid covers the genuinely empty turn: no
-// text, no file, only tool calls. The note must state what the turn ran, and the
-// plan entry must not be counted as work — it is the agent's to-do list, not
-// something it executed.
+// The plan entry is not counted as work because it is the agent's to-do list, not
+// something it ran.
 func TestEventTranslatorSilentTurnSaysWhatItDid(t *testing.T) {
 	tr, r := newTestEventTranslator()
 	step := drive(t, tr,
 		agent.Event{Type: agent.EventTask, Task: &agent.TaskEvent{ID: "p1", Kind: agent.TaskKindPlan, Title: "plan"}},
 		agent.Event{Type: agent.EventTask, Task: &agent.TaskEvent{ID: "t1", Title: "read"}},
-		// The same tool ticking again is one tool, not two.
 		agent.Event{Type: agent.EventTask, Task: &agent.TaskEvent{ID: "t1", Title: "read", Status: agent.TaskStatusComplete}},
 		agent.Event{Type: agent.EventTask, Task: &agent.TaskEvent{ID: "t2", Title: "write"}},
 		agent.Event{Type: agent.EventComplete},
@@ -168,9 +140,8 @@ func TestEventTranslatorSilentTurnSaysWhatItDid(t *testing.T) {
 	}
 }
 
-// TestEventTranslatorClosedStreamFinishesLikeComplete: a backend that simply
-// stops talking still gets its reply sealed. Losing this is a message left open
-// forever, which is the failure the whole liveness concern exists around.
+// A backend that stops talking without a terminal event would otherwise leave its
+// message open forever.
 func TestEventTranslatorClosedStreamFinishesLikeComplete(t *testing.T) {
 	tr, r := newTestEventTranslator()
 	step := drive(t, tr, agent.Event{Type: agent.EventText, Text: "half an answer"})
@@ -185,12 +156,8 @@ func TestEventTranslatorClosedStreamFinishesLikeComplete(t *testing.T) {
 	}
 }
 
-// TestEventTranslatorCancellationIsAnInterruptNotAFailure is the identity check
-// #187 warns about: a cancellation that renders as a failure card tells the user
-// their turn broke when they stopped it themselves. Both shapes must map to the
-// interrupt marker — the agent's own aborted-turn error, and a context whose
-// cause is a cancellation (the interrupt closure cancels only after a grace
-// period, so either can win the race).
+// A cancellation drawn as a failure tells users their turn broke when they stopped
+// it. Either shape can win, since the interrupt cancels only after a grace period.
 func TestEventTranslatorCancellationIsAnInterruptNotAFailure(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -237,11 +204,8 @@ func TestEventTranslatorCancellationIsAnInterruptNotAFailure(t *testing.T) {
 	}
 }
 
-// TestEventTranslatorFailurePreservesErrorIdentity is the other half of the same
-// concern. The error the caller is handed, and the one the renderer is handed,
-// must be the producer's own value: the credential-repair path matches its prose,
-// the alert card classifies it, and the tool ceiling is matched by sentinel. Any
-// of those breaks the moment the error is re-wrapped or re-worded here.
+// Credential repair matches the error's text, the alert card classifies it and the
+// tool ceiling matches its sentinel, so it must never be re-wrapped.
 func TestEventTranslatorFailurePreservesErrorIdentity(t *testing.T) {
 	tr, r := newTestEventTranslator()
 	wrapped := fmt.Errorf("tool bash exceeded its ceiling: %w", agent.ErrToolCeiling)
@@ -267,11 +231,8 @@ func TestEventTranslatorFailurePreservesErrorIdentity(t *testing.T) {
 	}
 }
 
-// TestEventTranslatorCallerMaySubstituteTheRenderedError proves the seam the
-// two-call shape (Event then Settle) exists for: the credential-repair path
-// replaces the backend's "run /login" prose — advice the user cannot act on —
-// with something addressed to them, and it does that between noticing the failure
-// and rendering it.
+// Event and Settle are separate calls so credential repair can swap the backend's
+// "run /login" advice for text the user can act on.
 func TestEventTranslatorCallerMaySubstituteTheRenderedError(t *testing.T) {
 	tr, r := newTestEventTranslator()
 	step, err := tr.Event(context.Background(), agent.Event{
@@ -290,11 +251,8 @@ func TestEventTranslatorCallerMaySubstituteTheRenderedError(t *testing.T) {
 	}
 }
 
-// TestEventTranslatorStallSealsWithoutPaintingFailure: the liveness window
-// elapsing is not a failure. Nothing broke — the agent went quiet and we stopped
-// waiting — so the open sections are sealed and no error card is posted. The
-// caller's own policy (cancel the session, drop the binding, post the aside) runs
-// off the returned step, not in here.
+// A stall is not a failure: nothing broke, the agent went quiet and we stopped
+// waiting.
 func TestEventTranslatorStallSealsWithoutPaintingFailure(t *testing.T) {
 	r := &recordingRenderer{}
 	tr := newEventTranslator(r, 20*time.Millisecond, discardLogger())
@@ -317,11 +275,8 @@ func TestEventTranslatorStallSealsWithoutPaintingFailure(t *testing.T) {
 	}
 }
 
-// TestEventTranslatorPermissionSettlesTheReplyFirst: an approval card posted
-// while the reply is still streaming makes the reply look truncated. The
-// translator settles the open text before handing the prompt back — ordering is a
-// rendering decision — but it never answers it: who may approve is gateway
-// policy, and a permission is not a terminal.
+// An approval card posted while the reply is still streaming makes the reply look
+// cut off.
 func TestEventTranslatorPermissionSettlesTheReplyFirst(t *testing.T) {
 	tr, r := newTestEventTranslator()
 	prompt := &agent.PermissionPrompt{
@@ -346,10 +301,7 @@ func TestEventTranslatorPermissionSettlesTheReplyFirst(t *testing.T) {
 	}
 }
 
-// TestEventTranslatorDeliveryFailureIsNotATerminal separates the two errors that
-// look alike: Slack refusing a write is the caller's to return (its deferred
-// EnsureStopped seals whatever is open), while a failure the agent reported comes
-// back as a terminal step. Conflating them would have a Slack outage render as
+// Treating a failed Slack write as a terminal step would draw a Slack outage as
 // "the agent failed".
 func TestEventTranslatorDeliveryFailureIsNotATerminal(t *testing.T) {
 	r := &recordingRenderer{textErr: errors.New("channel_type_not_supported")}
@@ -367,10 +319,8 @@ func TestEventTranslatorDeliveryFailureIsNotATerminal(t *testing.T) {
 	}
 }
 
-// TestEventTranslatorIgnoresAnUnknownEventKind: a node on a newer build must not
-// be able to abort a live conversation by emitting a kind this gateway has not
-// learnt yet. The wire codec is where an unknown kind IS an error, because there
-// it is still recoverable.
+// A node on a newer build must not abort a live conversation by sending a kind
+// this gateway does not know yet.
 func TestEventTranslatorIgnoresAnUnknownEventKind(t *testing.T) {
 	tr, r := newTestEventTranslator()
 	step, err := tr.Event(context.Background(), agent.Event{Type: agent.EventType("telemetry")})
@@ -385,9 +335,7 @@ func TestEventTranslatorIgnoresAnUnknownEventKind(t *testing.T) {
 	}
 }
 
-// TestEventTranslatorSettleRejectsANonTerminal guards the one misuse the shape
-// allows: settling on a step that has not ended the turn would close the reply
-// mid-stream and leave the rest of it homeless.
+// Settling a step that has not ended the turn would close the reply mid-stream.
 func TestEventTranslatorSettleRejectsANonTerminal(t *testing.T) {
 	tr, r := newTestEventTranslator()
 	if err := tr.Settle(context.Background(), turnStep{Kind: stepContinue}); err == nil {

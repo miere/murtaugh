@@ -16,19 +16,12 @@ import (
 	"github.com/miere/murtaugh/internal/nodeserve"
 )
 
-// The report is this binary's whole output today, and its job is to answer one
-// question before the node link exists: would this machine serve anything, and
-// as what? A node enrolled against a gateway that then serves nothing is the
-// failure it is here to make visible, so a configured agent must appear by name
-// AND by resolved kind — the kind is what decides which backend the node would
-// start, and it is defaulted rather than stored, so printing the raw field would
-// show a blank for every agent that never set one.
+// The kind is defaulted rather than stored, so printing the raw field would show
+// a blank for every agent that never set one.
 func TestReportNamesEachAgentAndItsResolvedKind(t *testing.T) {
 	cfg := config.Config{
 		BaseDir: "/tmp/murtaugh-runtime-test",
 		Agents: map[string]config.AgentProfile{
-			// The kind is not stored: it is derived from which backend
-			// sub-block is present, and absent means native.
 			"zeta":    {ClaudeCode: &config.ClaudeCodeProfile{}},
 			"default": {},
 		},
@@ -47,15 +40,12 @@ func TestReportNamesEachAgentAndItsResolvedKind(t *testing.T) {
 			t.Errorf("report does not contain %q; got:\n%s", want, got)
 		}
 	}
-	// Sorted, because this is read by a human comparing two machines and map
-	// order would make that a diff of nothing.
 	if strings.Index(got, "default (") > strings.Index(got, "zeta (") {
 		t.Errorf("agents are not listed in name order; got:\n%s", got)
 	}
 }
 
-// An unconfigured machine must say so rather than printing an empty list that
-// reads like a successful enrolment.
+// An empty list would read like a successful enrolment.
 func TestReportSaysSoWhenNoAgentIsConfigured(t *testing.T) {
 	var out strings.Builder
 	reportAgents(&out, config.Config{BaseDir: "/tmp/murtaugh-runtime-test"}, nil)
@@ -65,15 +55,8 @@ func TestReportSaysSoWhenNoAgentIsConfigured(t *testing.T) {
 	}
 }
 
-// Both hooks a node contributes have to be set, and neither failure is
-// visible: an agent built with no Approver runs side-effecting tools
-// unprompted, and one built with no BackgroundEvents has claude_code drop a
-// background stretch's events at the backend — so the gateway's "went quiet"
-// notice never appears, with no error anywhere near the gateway.
-//
-// The identity check is the point rather than a nil check: a hook wired to
-// something other than the connection-bound sink would typecheck, pass a nil
-// check, and still never reach the link.
+// A missing hook fails silently, and a hook wired to the wrong sink still passes a
+// nil check, so this compares identities.
 func TestANodeContributesBothOfItsHooks(t *testing.T) {
 	cfg := config.Config{Agents: map[string]config.AgentProfile{
 		"default": {},
@@ -102,14 +85,8 @@ func TestANodeContributesBothOfItsHooks(t *testing.T) {
 
 func funcPointer(fn any) uintptr { return reflect.ValueOf(fn).Pointer() }
 
-// A node with nowhere to dial must FAIL rather than idle: a supervisor pointed
-// at this binary before it was told where its gateway is has to see a non-zero
-// exit, not a process that starts cleanly and serves nothing.
-//
-// It drives run() rather than reading the sentinel, because the sentinel is
-// worth nothing if some later edit forgets to return it. Everything before that
-// point is real — migration, config bootstrap, opening the store — so this also
-// pins that the startup itself works against a fresh config directory.
+// A supervisor must see a non-zero exit, not a clean start that serves nothing.
+// It drives run() because the sentinel is worthless if a later edit stops returning it.
 func TestRunRefusesToStartWithNoGatewayToDial(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 
@@ -118,23 +95,13 @@ func TestRunRefusesToStartWithNoGatewayToDial(t *testing.T) {
 	if !errors.Is(err, errNoGateway) {
 		t.Fatalf("run() = %v, want errNoGateway — the binary must not exit 0 having served nothing", err)
 	}
-	// The direction is the part an operator gets wrong, so the error says it.
 	if !strings.Contains(err.Error(), "a node dials in") {
 		t.Errorf("run() = %q, want it to say which end dials", err)
 	}
 }
 
-// The bridge subcommand has to exist on THIS binary, not only on `murtaugh`.
-//
-// An acp or claude_code agent reaches Murtaugh's tools through a subprocess the
-// aggregator advertises as os.Executable() with argv `mcp-bridge` — and on a
-// node that executable is murtaugh-runtime. Without this branch the flag parser
-// rejects the positional argument, the agent spawns a process that exits
-// instantly, every session, and the only symptom is an agent with no Murtaugh
-// tools and nothing in any log naming the cause.
-//
-// The assertion is on the error, because reaching the environment check proves
-// the dispatch happened: the flag parser's refusal has different words.
+// On a node os.Executable() is murtaugh-runtime, so without this branch every
+// acp/claude_code agent silently loses its Murtaugh tools.
 func TestTheBridgeSubcommandIsDispatchedOnANode(t *testing.T) {
 	t.Setenv(mcpbridge.EnvSocket, "")
 	t.Setenv(mcpbridge.EnvToken, "")
@@ -152,8 +119,6 @@ func TestTheBridgeSubcommandIsDispatchedOnANode(t *testing.T) {
 	}
 }
 
-// The node's tools run here and nothing of the gateway's is offered, so `help`
-// describes exactly what this node's agent can call.
 func TestANodeServesItsOwnTools(t *testing.T) {
 	registry := nodeTools(nodeserve.NewSignIns(nil))
 	var names []string

@@ -11,27 +11,6 @@ import (
 	"github.com/miere/murtaugh/internal/agentwire"
 )
 
-// transfers collects attachment side transfers into files on the gateway's own
-// disk and hands the finished path to the decoder.
-//
-// # Why this is not a pulling deliverer
-//
-// The obvious shape — a deliverer that reads chunks when asked — deadlocks. The
-// decoder calls DeliverAttachment from inside Decoder.Decode, which runs on the
-// link's read loop, and the chunks it would pull arrive on that same read loop.
-// The node therefore sends every chunk BEFORE the event that references them,
-// and this type is a place to put them until it does: by the time the event is
-// decoded the file is complete and DeliverAttachment is a map lookup.
-//
-// # The temp files outlive the turn
-//
-// A delivered file is removed when the connection ends, not when the turn does.
-// Nothing here can know when the uploader has finished with the path — the
-// renderer takes a path precisely so a 100 MiB file is never buffered — and
-// deleting it underneath a Slack upload would turn a working feature into an
-// intermittent one. The bound is therefore one connection's worth of delivered
-// attachments, which is honest but not free; giving the path an owner that can
-// release it belongs with the uploader, not here.
 type transfers struct {
 	log *slog.Logger
 
@@ -61,7 +40,6 @@ func newTransfers(log *slog.Logger) *transfers {
 	}
 }
 
-// accept applies one chunk. It runs on the read loop and does one file write.
 func (t *transfers) accept(msg agentwire.Message) {
 	var chunk agentwire.TransferChunk
 	if err := msg.Into(&chunk); err != nil {
@@ -88,11 +66,8 @@ func (t *transfers) accept(msg agentwire.Message) {
 
 	switch {
 	case chunk.Error != "":
-		// The producer gave up. Recorded rather than ignored, or the turn waits
-		// for bytes that will never come and the user is told nothing.
 		in.err = fmt.Errorf("the node could not read the file: %s", chunk.Error)
 	case in.err != nil:
-		// Already failed; keep draining the stream without writing.
 	case chunk.Seq != in.next:
 		in.err = fmt.Errorf("transfer %s: expected chunk %d, received %d", chunk.TransferID, in.next, chunk.Seq)
 	default:
@@ -117,8 +92,6 @@ func (t *transfers) accept(msg agentwire.Message) {
 	t.done[chunk.TransferID] = finished{path: in.path}
 }
 
-// createLocked opens the file one transfer's bytes land in, making the
-// per-connection directory on first use.
 func (t *transfers) createLocked(id string) (*os.File, error) {
 	if t.dir == "" {
 		dir, err := os.MkdirTemp("", "murtaugh-node-transfer-")
@@ -134,12 +107,6 @@ func (t *transfers) createLocked(id string) (*os.File, error) {
 	return file, nil
 }
 
-// DeliverAttachment hands the decoder the finished file.
-//
-// An absent transfer is an error, never a wait. The chunks precede the event by
-// construction, so "not here" means they were lost or the node sent the event
-// without them — and blocking the read loop hoping otherwise would stop the
-// very frames it is waiting for.
 func (t *transfers) DeliverAttachment(_ context.Context, a agentwire.Attachment) (string, []byte, error) {
 	t.mu.Lock()
 	result, ok := t.done[a.TransferID]
@@ -159,7 +126,6 @@ func (t *transfers) DeliverAttachment(_ context.Context, a agentwire.Attachment)
 	}
 }
 
-// close releases every file this connection received.
 func (t *transfers) close() {
 	t.mu.Lock()
 	for _, in := range t.open {

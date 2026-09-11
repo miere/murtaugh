@@ -102,8 +102,6 @@ func TestNameAndSchema(t *testing.T) {
 	}
 }
 
-// The description is a contract with the model: it names the affected
-// capability rather than the helper binary, and says who is asked.
 func TestDescriptionCarriesTheToolNamingGuidance(t *testing.T) {
 	d := New(nil).Description()
 	for _, want := range []string{"DIRECTLY affected", "gcloud", "owner"} {
@@ -139,7 +137,6 @@ func TestRejectsBadArguments(t *testing.T) {
 	}
 }
 
-// Outside a conversation nobody can be shown the card, so nothing is started.
 func TestRefusedOutsideAConversation(t *testing.T) {
 	display := &fakeDisplay{}
 	_, err := New(display).Invoke(context.Background(), codeFlow("read code"))
@@ -234,8 +231,6 @@ func TestAWrongCodeFailsClosed(t *testing.T) {
 	}
 }
 
-// Every way the gateway can end a sign-in stops the process and is a hard stop
-// for the model, each in words that say what happened.
 func TestTheGatewayEndingASignInStopsIt(t *testing.T) {
 	for _, tc := range []struct {
 		answer agent.DisplayAnswer
@@ -305,8 +300,6 @@ func exists(path string) bool {
 	return err == nil
 }
 
-// An agent-chosen command is shown to the owner and does not run, even in
-// part, until they approve it; its link follows and the sign-in completes.
 func TestACustomCommandRunsOnlyOnceItsOwnerApproves(t *testing.T) {
 	marker, command := marked(t)
 	display := &fakeDisplay{prompts: make(chan *agent.SignInPrompt, 1)}
@@ -350,7 +343,6 @@ func TestACustomCommandRunsOnlyOnceItsOwnerApproves(t *testing.T) {
 	}
 }
 
-// Anything short of the owner's approval leaves the command unrun.
 func TestACustomCommandThatIsNotApprovedNeverRuns(t *testing.T) {
 	for name, tc := range map[string]struct {
 		display *fakeDisplay

@@ -14,18 +14,6 @@ import (
 	"github.com/miere/murtaugh/internal/nodesocket"
 )
 
-// These are #193's unproven part: what the node's WebSocket does on write when
-// the gateway stops reading. It decides whether the hop costs a round trip or
-// silently grows an unbounded queue with the pacing signal gone.
-//
-// They are written against a REAL deaf gorilla peer — a server that upgrades
-// and then never calls ReadMessage — and not against nodelink.Pipe. The pipe
-// cannot pose this failure: its write unblocks on either side's close, so "the
-// peer is alive and simply not reading" is a state it has no way to be in, and
-// a test written over it would pass for the wrong reason.
-
-// deafPeer upgrades and then never reads. It is what a gateway whose renderer
-// is stuck inside a Slack upload looks like from the node.
 func deafPeer(t *testing.T) string {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -33,7 +21,6 @@ func deafPeer(t *testing.T) string {
 		if err != nil {
 			return
 		}
-		// Held open, never read. Closed when the test's server shuts down.
 		t.Cleanup(func() { _ = conn.Close() })
 		<-r.Context().Done()
 	}))
@@ -53,10 +40,7 @@ func dialDeaf(t *testing.T, writeTimeout time.Duration) *nodesocket.Conn {
 	return conn
 }
 
-// THE MEASUREMENT. gorilla's WriteMessage blocks; it does not queue. The bound
-// is the two kernel socket buffers and nothing else — there is no goroutine and
-// no backlog inside the library, so the pacing signal survives the hop instead
-// of being absorbed by an invisible queue.
+// The design relies on gorilla blocking rather than queueing, so backpressure survives the socket hop.
 func TestWriteBlocksRatherThanQueueingWithoutBound(t *testing.T) {
 	conn := dialDeaf(t, 3*time.Second)
 
@@ -84,9 +68,6 @@ func TestWriteBlocksRatherThanQueueingWithoutBound(t *testing.T) {
 	t.Logf("MEASURED: a deaf peer absorbed %d bytes (%d KiB) in 4 KiB frames before the write blocked; "+
 		"the blocked write then failed with %v", bytes, bytes/1024, err)
 
-	// The number itself is the kernel's business and varies by host. What must
-	// hold is that it is BOUNDED and small enough that nodelink's window — which
-	// is what makes the block cancellable — is the binding constraint first.
 	if bytes <= 0 {
 		t.Fatal("nothing was written at all")
 	}
@@ -99,24 +80,16 @@ func TestWriteBlocksRatherThanQueueingWithoutBound(t *testing.T) {
 			bytes, nodesocket.DefaultWindowBytes)
 	}
 
-	// A timed-out write is fatal to the connection, not to the frame: gorilla
-	// latches the error and every later write returns it. Anything that treated
-	// it as retryable would believe it was still delivering.
 	if second := conn.WriteMessage(payload); second == nil {
 		t.Fatal("a connection that timed out mid-write accepted another frame")
 	}
 }
 
-// The window is what makes a stalled peer a cancellable wait instead of a wedge.
-// nodelink.Send parks in awaitRoom, which honours the context; the transport
-// write does not take one at all.
 func TestTheWindowBindsBeforeTheSocketDoes(t *testing.T) {
 	conn := dialDeaf(t, 30*time.Second)
 	link := nodelink.New(conn, nodelink.Options{WindowBytes: nodesocket.DefaultWindowBytes})
 	t.Cleanup(func() { _ = link.Close() })
 
-	// A link payload is carried as JSON inside the envelope, so it has to BE
-	// JSON. The padding is what makes the frame the size the window counts.
 	payload := jsonPadding(4 << 10)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -145,19 +118,11 @@ func TestTheWindowBindsBeforeTheSocketDoes(t *testing.T) {
 	}
 }
 
-// The contrast, and the reason DefaultWindowBytes exists. nodelink's own 4 MiB
-// default is larger than the socket buffers, so the socket fills first and the
-// block lands in Link.write — which takes no context. The caller's deadline is
-// then simply ignored, and only the transport's write deadline ends the wait.
-//
-// This is asserted rather than described because it is the failure a later
-// change would reintroduce by "tidying up" an explicit window back to the
-// default.
+// Guards DefaultWindowBytes: with nodelink's 4 MiB default the socket fills first and the block lands
+// in Link.write, which takes no context. Tidying back to the default must fail here.
 func TestTheDefaultWindowLetsTheBlockLandWhereNoContextReaches(t *testing.T) {
 	writeTimeout := 3 * time.Second
 	conn := dialDeaf(t, writeTimeout)
-	// No WindowBytes: nodelink's 4 MiB default, which is larger than the
-	// socket buffers this transport actually has.
 	link := nodelink.New(conn, nodelink.Options{})
 	t.Cleanup(func() { _ = link.Close() })
 
@@ -185,7 +150,6 @@ func TestTheDefaultWindowLetsTheBlockLandWhereNoContextReaches(t *testing.T) {
 	}
 }
 
-// jsonPadding is a valid JSON object of about n bytes.
 func jsonPadding(n int) []byte {
 	return []byte(`{"pad":"` + strings.Repeat("a", n-11) + `"}`)
 }

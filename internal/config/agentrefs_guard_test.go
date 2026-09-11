@@ -9,43 +9,10 @@ import (
 	"testing"
 )
 
-// The invariant agentrefs.go rests on is symmetric — "this list and the
-// name→body checks in Validate are the same set" — and until this file only one
-// half of it was guarded.
-//
-// TestAgentReferencesNamesEveryNameToBodySite compares the list against a
-// hard-coded seven, so REMOVING a site from AgentReferences fails. ADDING an
-// eighth check to Validate and not adding it here changed nothing any test
-// observed — and that is the direction a contributor actually takes, because
-// Validate is where checks live. The cost of missing it is stated in the commit
-// that introduced the split: a reference added to Validate and not here is a
-// name whose typo the gateway silently never reports.
-//
-// So both halves are guarded here, by two different means, because they are two
-// different questions:
-//
-//   - The sites that exist today are checked BEHAVIOURALLY, by running Validate
-//     under both roles over a configuration that names a different agent at
-//     every one of them.
-//   - A site that does not exist yet cannot be run, so it is caught in the
-//     SOURCE: every role-gated name→body check in this package is counted, and
-//     the count is pinned.
-
-// roleGatedChecks is how many places in this package defer a name→body lookup
-// on the process's role.
-//
-// There are exactly two ways to write one — the `resolvesNames` flag inside
-// Validate, and agentSet.unknown, which is that flag carried into the helpers —
-// so counting both counts all of them.
-//
-// If you are here because this number is wrong: you added or removed a check
-// that resolves an agent NAME against a profile BODY. Add or remove the matching
-// site in Config.AgentReferences, extend everyDistinctReferenceConfig below so
-// the behavioural test covers it, and then update this number. A check that is
-// deferred on a gateway and not carried by AgentReferences is never made
-// anywhere.
 const roleGatedChecks = 8
 
+// If this count changed, you added or removed an agent-name check in Validate: update
+// Config.AgentReferences and everyDistinctReferenceConfig to match before bumping it.
 func TestEveryRoleGatedCheckIsAccountedFor(t *testing.T) {
 	fset := token.NewFileSet()
 	pkgs, err := parser.ParseDir(fset, ".", func(f fs.FileInfo) bool {
@@ -59,8 +26,6 @@ func TestEveryRoleGatedCheckIsAccountedFor(t *testing.T) {
 		t.Fatal("the config package did not parse; this guard reads its own source")
 	}
 
-	// The flag's own declaration is not a check, so its identifier is located
-	// first and skipped by position when the uses are counted.
 	declared := map[token.Pos]bool{}
 	for _, file := range pkg.Files {
 		ast.Inspect(file, func(n ast.Node) bool {
@@ -100,15 +65,10 @@ func TestEveryRoleGatedCheckIsAccountedFor(t *testing.T) {
 		t.Fatalf("this package has %d role-gated name→body checks, want %d (%v).\n"+
 			"Config.AgentReferences must name every one of them: it is the only thing that carries "+
 			"these names to internal/nodehost, which is where a gateway resolves them now. "+
-			"See the note on roleGatedChecks.", found, roleGatedChecks, where)
+			"See the note on this test.", found, roleGatedChecks, where)
 	}
 }
 
-// everyDistinctReferenceConfig names a DIFFERENT agent at every reference site,
-// so a name found in Validate's output can only have come from one of them.
-//
-// everyReferenceConfig reuses names across sites, which is right for the list
-// test next door and useless here.
 func everyDistinctReferenceConfig() Config {
 	cfg := everyReferenceConfig()
 	cfg.Chat.Defaults.Agent = "site-chat-default"
@@ -133,19 +93,13 @@ func everyDistinctReferenceConfig() Config {
 			Unfurl: UnfurlActionConfig{DelegateToAgent: &DelegateToAgentConfig{Agent: "site-unfurl", Prompt: "summarise"}},
 		},
 	}
-	// No bodies at all, so every one of those names is unresolvable and the
-	// combined install has to complain about each.
 	cfg.Agents = map[string]AgentProfile{}
 	cfg.OAuth = OAuthConfig{AppToken: "x", BotToken: "x"}
 	return cfg
 }
 
-// TestTheTwoHalvesOfTheInvariantAgreeSiteBySite is the behavioural half.
-//
-// Every name AgentReferences reports must be one a combined install refuses and
-// a gateway defers. A site in the list that Validate never checked would be a
-// name a node's own configuration stopped rejecting; a site Validate checks that
-// the list omits would be a name the gateway never reports.
+// A name AgentReferences lists that Validate never checks stops being rejected on a node; one
+// Validate checks that the list omits is never reported by a gateway.
 func TestTheTwoHalvesOfTheInvariantAgreeSiteBySite(t *testing.T) {
 	cfg := everyDistinctReferenceConfig()
 

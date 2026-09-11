@@ -13,11 +13,6 @@ import (
 	"github.com/miere/murtaugh/internal/nodelink"
 )
 
-// The five methods of agent.Client, both optional surfaces the session manager
-// asserts for on the client, and the two liveness rules the gateway and the
-// delegate runner depend on. Every test drives a real envelope in both
-// directions.
-
 func TestInitializeResolvesInterruptibility(t *testing.T) {
 	yes, no := true, false
 	for _, tc := range []struct {
@@ -40,11 +35,6 @@ func TestInitializeResolvesInterruptibility(t *testing.T) {
 	}
 }
 
-// The degradation, proven to be visible. A node that says nothing about
-// interruptibility is treated as interruptible — the session manager's own
-// answer for an unresolved probe — and says so where an operator can see it.
-// The alternative, a plain bool decoding to false, would silently stop new
-// messages from interrupting an in-flight turn.
 func TestUnreportedInterruptibilityDegradesVisibly(t *testing.T) {
 	client, _, logs := dial(t, nodeConfig{interruptible: nil}, Options{})
 	if err := client.Initialize(context.Background()); err != nil {
@@ -84,9 +74,6 @@ func TestNewSessionCarriesTheMetadata(t *testing.T) {
 	}
 }
 
-// A node that answers new_session with no id is malformed, and passing the
-// empty id on would turn every later call into one naming a session that does
-// not exist — a turn that fails somewhere further away, with a worse message.
 func TestNewSessionRefusesANodeThatReturnsNoID(t *testing.T) {
 	client, _, _ := dial(t, nodeConfig{noSessionID: true}, Options{})
 	session, err := client.NewSession(context.Background(), agent.SessionMetadata{ChannelID: "C1"})
@@ -98,11 +85,8 @@ func TestNewSessionRefusesANodeThatReturnsNoID(t *testing.T) {
 	}
 }
 
-// The stream is registered BEFORE the request goes out. The node here emits its
-// first event before it accepts the prompt, which is legal and is what a node
-// that starts working immediately looks like. Register after the call returns
-// and deliverEvent finds no stream, drops the event on the floor, and the turn
-// silently loses its opening — with nothing failing anywhere.
+// A node may emit its first event before it accepts the prompt; registering the stream late
+// would drop that event silently.
 func TestPromptRegistersTheStreamBeforeTheRequestGoesOut(t *testing.T) {
 	eager := agentwire.Event{Type: agentwire.EventText, Text: "starting before I answered you"}
 	client, node, _ := dial(t, nodeConfig{eagerEvent: &eager}, Options{})
@@ -165,9 +149,6 @@ func TestPromptStreamsEventsInOrderAndEndsTheChannel(t *testing.T) {
 	}
 }
 
-// Both consumers read Prompt's error synchronously, before any rendering
-// starts, so a refusal must be the call's answer and not the first event on an
-// already-opened stream.
 func TestPromptRejectionIsReturnedSynchronously(t *testing.T) {
 	client, _, _ := dial(t, nodeConfig{rejectPrompt: errors.New("no session on this node")}, Options{})
 	events, err := client.Prompt(context.Background(), "session-42", agent.PromptRequest{Text: "hello"})
@@ -182,10 +163,8 @@ func TestPromptRejectionIsReturnedSynchronously(t *testing.T) {
 	}
 }
 
-// The contract chat_handler.go and delegate.go both depend on: `cancel(); for
-// range events {}` completes. Abandoning that channel would stall event
-// delivery for every other conversation, which is why they drain rather than
-// walk away — so the channel has to close.
+// Callers drain with `cancel(); for range events {}`, so the channel must close or event
+// delivery stalls for every other conversation.
 func TestCancelledContextClosesTheChannelAndStopsTheNode(t *testing.T) {
 	client, node, _ := dial(t, nodeConfig{}, Options{})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -209,8 +188,6 @@ func TestCancelledContextClosesTheChannelAndStopsTheNode(t *testing.T) {
 		t.Fatal("the turn's channel never closed; the consumer would be wedged")
 	}
 
-	// In process the cancelled context reaches the backend. Across a link it
-	// reaches nothing, so the turn has to be cancelled explicitly.
 	if got := receive(t, "the node to be told to stop", node.cancels); got != "session-42" {
 		t.Fatalf("node was told to cancel %q", got)
 	}
@@ -228,13 +205,9 @@ func TestCancelIsCarriedAndHonoursItsDeadline(t *testing.T) {
 	}
 }
 
-// A node that stops answering must not park the idle path: chat_handler cancels
-// under five seconds while holding a wedged turn open.
 func TestCancelReturnsWhenTheNodeDoesNotAnswer(t *testing.T) {
 	gatewaySide, nodeSide := nodelink.Pipe(32)
 	client := New(gatewaySide, Options{Logger: discardLogger()})
-	// The far end first: a transport with nobody on it never answers, and the
-	// goodbye in Close would otherwise sit out its whole timeout.
 	t.Cleanup(func() { _ = nodeSide.Close(); _ = client.Close() })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
@@ -249,17 +222,9 @@ func TestCancelReturnsWhenTheNodeDoesNotAnswer(t *testing.T) {
 	}
 }
 
-// CloseSession is called while SessionManager.mu is held, with no context and
-// no error return. If it waited for the wire, every conversation on this agent
-// would queue behind one network call.
 func TestCloseSessionReturnsWhileTheWriteIsBlocked(t *testing.T) {
-	// A pipe with no slack and nothing reading: the sender goroutine's write
-	// blocks on the first frame and stays blocked.
 	gatewaySide, nodeSide := nodelink.Pipe(0)
 	client := New(gatewaySide, Options{Logger: discardLogger()})
-	// The transport is released before the client, because a write parked on a
-	// wedged transport is unblocked by the transport, not by a context — see
-	// nodelink.Conn.
 	t.Cleanup(func() { _ = nodeSide.Close(); _ = client.Close() })
 
 	done := make(chan struct{})
@@ -295,9 +260,6 @@ func TestCloseSaysGoodbyeAndTearsDown(t *testing.T) {
 	}
 }
 
-// An event addressed to a session rather than to a request is the background
-// path: a subagent completing after its turn ended. It must reach the router
-// and never a turn's stream.
 func TestBackgroundEventsReachTheSinkNotTheStream(t *testing.T) {
 	type delivered struct {
 		sessionID string
@@ -326,14 +288,6 @@ func TestBackgroundEventsReachTheSinkNotTheStream(t *testing.T) {
 	}
 }
 
-// A permission request is the one event that is half of a request/response
-// pair. The answer has to travel back under the id the node minted, or the
-// goroutine blocked on it never wakes.
-//
-// The gate is GateAgent because that is the surface this path serves: the
-// agent's own harness asking, answered by the chat handler off the turn's event
-// stream. A GateTool request never reaches the stream at all — see
-// TestToolApprovalCarriesItsNoteBack.
 func TestPermissionAnswerTravelsBack(t *testing.T) {
 	client, node, _ := dial(t, nodeConfig{}, Options{})
 	events, err := client.Prompt(context.Background(), "session-42", agent.PromptRequest{Text: "rm -rf"})
@@ -363,10 +317,7 @@ func TestPermissionAnswerTravelsBack(t *testing.T) {
 	}
 }
 
-// The native loop's inline gate is answered by the gateway's tool approver, not
-// by the chat handler, and its note has to arrive verbatim: for a native tool
-// call the note IS the call's result, so a denial that loses it tells the model
-// nothing and renders an empty failure.
+// For a native tool call the note is the call's result, so losing it tells the model nothing.
 func TestToolApprovalCarriesItsNoteBack(t *testing.T) {
 	type asked struct {
 		tool     string
@@ -396,8 +347,6 @@ func TestToolApprovalCarriesItsNoteBack(t *testing.T) {
 	if got.tool != "terminal" || got.summary != "rm -rf /" {
 		t.Fatalf("gate was asked about %+v", got)
 	}
-	// Without the turn's location the gateway's real approver short-circuits to
-	// "allowed" and posts nothing, which would ungate every remote tool call.
 	if got.location.ChannelID != "C1" || got.location.ThreadTS != "123.4" || got.location.UserID != "U9" {
 		t.Fatalf("gate was asked with location %+v", got.location)
 	}
@@ -416,9 +365,6 @@ func TestToolApprovalCarriesItsNoteBack(t *testing.T) {
 	}
 }
 
-// A gateway with no tool gate wired must deny rather than allow: the request
-// exists because the call is side-effecting, and "nobody could be asked" is not
-// consent.
 func TestToolApprovalWithNoGateDenies(t *testing.T) {
 	client, node, _ := dial(t, nodeConfig{}, Options{})
 	events, err := client.Prompt(context.Background(), "session-42", agent.PromptRequest{Text: "rm -rf"})
@@ -439,8 +385,6 @@ func TestToolApprovalWithNoGateDenies(t *testing.T) {
 	}
 }
 
-// A node that dies mid-turn must produce a visible failure and a closed
-// channel, not a stream nobody ever closes.
 func TestLinkDeathFailsOpenTurns(t *testing.T) {
 	client, node, _ := dial(t, nodeConfig{}, Options{})
 	events, err := client.Prompt(context.Background(), "session-42", agent.PromptRequest{Text: "hello"})
@@ -466,9 +410,6 @@ func TestLinkDeathFailsOpenTurns(t *testing.T) {
 	}
 }
 
-// The loss-injection case, at the level a user would feel it: one event frame
-// never arrives. The turn must end with the gap named — comparable by identity,
-// not by prose — rather than with a hole in a sentence.
 func TestDroppedEventFailsTheTurnWithTheGap(t *testing.T) {
 	lost := func(payload []byte) bool {
 		msg, err := agentwire.DecodeMessage(payload)

@@ -38,11 +38,6 @@ type chatRenderer interface {
 	// event opens a fresh reply section after it. It does not disturb an open tool
 	// block — a tool awaiting approval stays visible, as it does for native.
 	BeginInterjection(ctx context.Context)
-	// Finish finalises a turn that did not error, closing every open section.
-	// closing, when non-nil, is posted as an alert below the sealed reply: the
-	// empty-reply card when the turn produced no reply text, or the stall notice
-	// when a background stretch is closed out for silence. It is the surface for
-	// anything that is not the agent failing — Fail is what paints an error.
 	Finish(ctx context.Context, closing *alertcard.Spec) error
 	// Fail finalises a turn that errored, posting err as an alert card below the
 	// sealed reply. It reports an error only when the alert reached the user by
@@ -98,7 +93,6 @@ func (b *cardToolBlock) UpdateFromEvent(ctx context.Context, ev *agent.TaskEvent
 	return nil
 }
 
-// A card left mid-spinner reads as work that never ended.
 func (b *cardToolBlock) Finish(ctx context.Context) error {
 	for id := range b.running {
 		if err := b.cards.Complete(ctx, id, ""); err != nil {

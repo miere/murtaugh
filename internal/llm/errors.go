@@ -10,19 +10,10 @@ import (
 	"github.com/miere/murtaugh/internal/providerfail"
 )
 
-// The failure vocabulary itself lives in internal/providerfail, a leaf that
-// links no provider client, because the Slack gateway and the node protocol both
-// paint these words and neither may reach litellm (#170 Change E). This package
-// keeps the half that cannot leave: the mapping from litellm's concrete error
-// onto that vocabulary.
-//
-// The aliases below are not a compatibility shim to be removed later — they are
-// how a caller that already imports this package (it is making provider calls)
-// spells the vocabulary without importing two packages to describe one failure.
+// Aliases of internal/providerfail, which lets the gateway name failures without
+// linking litellm; they stay so a caller making provider calls needs one import.
 type (
-	// Failure is providerfail.Failure. See that package for the contract.
-	Failure = providerfail.Failure
-	// FailureKind is providerfail.Kind.
+	Failure     = providerfail.Failure
 	FailureKind = providerfail.Kind
 )
 
@@ -39,9 +30,7 @@ const (
 	FailureProvider        = providerfail.Provider
 )
 
-// NewFailureError is providerfail.New: an error carrying an already-derived
-// classification, for the far side of a wire where the original error does not
-// exist.
+// For the far side of a wire, where the original litellm error no longer exists.
 func NewFailureError(f Failure, text string) error { return providerfail.New(f, text) }
 
 // Classify reduces any error returned by a Provider to a Failure. It reports
@@ -50,10 +39,7 @@ func NewFailureError(f Failure, text string) error { return providerfail.New(f, 
 // no provider vocabulary and callers should fall back to a generic message.
 //
 // It matches on litellm's typed *providers.LiteLLMError via errors.As, so the
-// fmt.Errorf wrapping every layer adds is transparent to it. It also matches an
-// error that already carries a Failure (providerfail.Classify), so a provider
-// failure classified once — on a runtime node, before serialisation — classifies
-// identically wherever it is read.
+// fmt.Errorf wrapping every layer adds is transparent to it.
 func Classify(err error) (Failure, bool) {
 	if f, ok := providerfail.Classify(err); ok {
 		return f, true
@@ -72,17 +58,8 @@ func Classify(err error) (Failure, bool) {
 	}, true
 }
 
-// CarryFailure classifies err and, when it is a provider failure, returns err
-// with that classification attached — same text, same unwrap chain, so nothing
-// downstream that compares by identity is disturbed. An error that is not a
-// provider failure, and a nil error, are returned unchanged.
-//
-// It is called at the seam where a provider error stops being litellm's and
-// becomes the agent layer's, and it is what lets every reader past that seam —
-// the Slack alert card, the wire encoder, a log — use providerfail.Classify
-// without linking a provider client. Classifying at the source is also the only
-// way the local and remote paths can agree: on the wire there is no
-// *providers.LiteLLMError left to classify.
+// Classify here, at the source: once the error has crossed the wire there is no
+// litellm error left, so every reader downstream relies on what this attaches.
 func CarryFailure(err error) error {
 	f, ok := Classify(err)
 	if !ok {

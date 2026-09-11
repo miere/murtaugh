@@ -15,28 +15,12 @@ import (
 	configstore "github.com/miere/murtaugh/internal/config/store"
 )
 
-// This file is #196's verification. It is an in-package test because what is
-// under test is the registry's own arithmetic — which of the connected nodes
-// takes a conversation — and the registry entry is a socket plus a claim. The
-// socket is the part that is not being tested here, so the entries below are
-// real *attached values with no client on them; nothing on the election path
-// touches one, which is itself a property worth having.
-//
-// The loopback rig next door covers the other half: a real connection, a real
-// handshake, a real turn.
-
-// nodeStub describes a connected node for a table row.
 type nodeStub struct {
 	id     string
 	owner  string
 	claims []string
 }
 
-// attachStubs publishes stub connections into a Host's registry.
-//
-// It goes through insert, so the entries are keyed and displaced exactly as a
-// real handshake's would be — a test that wrote h.nodes directly would not
-// notice if publication ever stopped being what makes a node electable.
 func attachStubs(h *Host, stubs ...nodeStub) map[string]*attached {
 	out := make(map[string]*attached, len(stubs))
 	for i, stub := range stubs {
@@ -59,9 +43,6 @@ func attachStubs(h *Host, stubs ...nodeStub) map[string]*attached {
 	return out
 }
 
-// newTestHost builds a Host with no listener and no credentials to verify. The
-// credential store is registry_internal_test.go's, because nothing in this file
-// authenticates: nothing in this file dials.
 func newTestHost(t *testing.T, pins config.ConversationPinStore, access config.AccessConfig) *Host {
 	t.Helper()
 	host, err := New(Options{
@@ -76,27 +57,18 @@ func newTestHost(t *testing.T, pins config.ConversationPinStore, access config.A
 	return host
 }
 
-// TestTheWorkedExampleFromTheSpec is #170's table, row for row.
-//
-// Node A claims channels beginning `nc-`; node B claims those beginning
-// `review-`. The pin store is deliberately absent, so each call is a fresh
-// election and the round robin is observable — with a pin in place the second
-// call would answer from the pin and prove nothing about step 3 or step 4.
+// No pin store on purpose: every call is then a fresh election, so the round
+// robin can be observed.
 func TestTheWorkedExampleFromTheSpec(t *testing.T) {
 	const owner = "U1"
 	for _, tc := range []struct {
 		name        string
 		channelID   string
 		channelName string
-		// want is successive elections. One entry asserts "that node takes it";
-		// two assert the rotation, which is the only way to tell a round robin
-		// from a node that simply always wins.
-		want []string
+		want        []string
 	}{
 		{
-			name: "nc-releases matches A only, so A takes it",
-			// The channel id is not claimed by anybody: the match is on the
-			// NAME, which is what the whole worked example is written in.
+			name:      "nc-releases matches A only, so A takes it",
 			channelID: "C100", channelName: "nc-releases",
 			want: []string{"node-a", "node-a"},
 		},
@@ -116,17 +88,12 @@ func TestTheWorkedExampleFromTheSpec(t *testing.T) {
 			want: []string{"node-a", "node-b", "node-a"},
 		},
 		{
-			name: "a DM claims nothing, so it round robins too",
-			// #170's algorithm already round-robins an unclaimed conversation,
-			// which is the intended DM behaviour: every node's chat defaults
-			// answer every DM, so a DM claim would select nothing.
+			name:      "a DM claims nothing, so it round robins too",
 			channelID: "D200", channelName: "",
 			want: []string{"node-a", "node-b"},
 		},
 		{
-			name: "an unresolved channel name can still match an exact id claim",
-			// The cold-cache case. Only an exact channel-id claim can match, and
-			// node B carries one.
+			name:      "an unresolved channel name can still match an exact id claim",
 			channelID: "C104", channelName: "",
 			want: []string{"node-b", "node-b"},
 		},
@@ -158,23 +125,14 @@ func TestTheWorkedExampleFromTheSpec(t *testing.T) {
 	}
 }
 
-// Step 3 round robins among the nodes that CLAIMED the channel, and the fleet's
-// other nodes take none of it.
-//
-// #170's worked example cannot express this: its fleet is two nodes and both
-// claim the shared channel, so `matching` and `fleet` are the same set in every
-// row that reaches this branch and step 3 is indistinguishable from step 4. A
-// third node that claims nothing is what separates them — and getting it wrong
-// sends a third of a claimed channel's traffic to a machine that never asked
-// for it, which reads as a node-side assignment bug rather than as a gateway
-// one.
+// The third node, which claims nothing, is what makes this test mean anything:
+// with only claiming nodes, the claimers and the whole fleet are the same set.
 func TestAClaimedChannelRoundRobinsOnlyAmongTheNodesThatClaimedIt(t *testing.T) {
 	const owner = "U1"
 	host := newTestHost(t, nil, config.AccessConfig{})
 	attachStubs(host,
 		nodeStub{id: "node-a", owner: owner, claims: []string{"nc-*"}},
 		nodeStub{id: "node-b", owner: owner, claims: []string{"nc-*"}},
-		// In the fleet, connected, and claiming something else entirely.
 		nodeStub{id: "node-c", owner: owner, claims: []string{"other-*"}},
 	)
 
@@ -190,11 +148,10 @@ func TestAClaimedChannelRoundRobinsOnlyAmongTheNodesThatClaimedIt(t *testing.T) 
 	}
 }
 
-// TestTheFleetIsOwnNodesOrGrantedNodesButNeverAMixture pins down the rule that
-// makes user choice and node claims incapable of conflicting.
+// Never mixing the two is what stops a user's choice and a node's claims from
+// conflicting.
 func TestTheFleetIsOwnNodesOrGrantedNodesButNeverAMixture(t *testing.T) {
 	access := config.AccessConfig{NodeGrants: map[string][]string{
-		// U2 lets U1 and U3 run on their node.
 		"node-b": {"U1", "U3"},
 	}}
 
@@ -204,9 +161,6 @@ func TestTheFleetIsOwnNodesOrGrantedNodesButNeverAMixture(t *testing.T) {
 			nodeStub{id: "node-a", owner: "U1"},
 			nodeStub{id: "node-b", owner: "U2"},
 		)
-		// Nobody claims this channel, so an unbounded fleet would round robin
-		// across both and land on node-b on the second call. It must not: U1
-		// owns node-a, so node-a IS the fleet.
 		for i := 0; i < 4; i++ {
 			got := elected(t, host, "C1", "anything", "U1")
 			if got != "node-a" {
@@ -221,7 +175,6 @@ func TestTheFleetIsOwnNodesOrGrantedNodesButNeverAMixture(t *testing.T) {
 			nodeStub{id: "node-a", owner: "U2"},
 			nodeStub{id: "node-b", owner: "U2"},
 		)
-		// node-a is U2's and carries no grant; node-b carries one for U3.
 		for i := 0; i < 4; i++ {
 			got := elected(t, host, "C1", "anything", "U3")
 			if got != "node-b" {
@@ -238,8 +191,6 @@ func TestTheFleetIsOwnNodesOrGrantedNodesButNeverAMixture(t *testing.T) {
 		if !errors.Is(err, ErrNoFleet) {
 			t.Fatalf("want ErrNoFleet, got %v", err)
 		}
-		// Not ErrNoNode: something IS connected, and telling this user that
-		// nothing is would send them to the wrong person.
 		if errors.Is(err, ErrNoNode) {
 			t.Fatal("a user with no fleet was told the gateway has no nodes at all")
 		}
@@ -255,12 +206,8 @@ func TestTheFleetIsOwnNodesOrGrantedNodesButNeverAMixture(t *testing.T) {
 	})
 }
 
-// TestAPinSurvivesAGatewayFailover is the property that makes turn two land
-// where turn one did even when the gateway serving turn one is gone.
-//
-// It uses the real SQLite pin store, opened twice: once by the gateway that
-// elects and once by the gateway that takes over. An in-memory fake would pass
-// this test without the pin ever reaching a disk.
+// Uses the real SQLite store, opened twice: an in-memory fake would pass
+// without the pin ever reaching disk.
 func TestAPinSurvivesAGatewayFailover(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.db")
 	openPins := func() config.ConversationPinStore {
@@ -280,8 +227,6 @@ func TestAPinSurvivesAGatewayFailover(t *testing.T) {
 		agent.ConversationKey{TeamID: "T1", ChannelID: "C1", ThreadTS: "1.1"})
 	meta := agent.SessionMetadata{TeamID: "T1", ChannelID: "C1", ThreadTS: "1.1", UserID: "U1"}
 
-	// The gateway that elects. Nobody claims C1, so this is a round robin and
-	// the outcome is genuinely a choice rather than the only option.
 	first := newTestHost(t, openPins(), config.AccessConfig{})
 	attachStubs(first, fleet...)
 	initial, err := first.delegate(ctx, meta)
@@ -289,8 +234,6 @@ func TestAPinSurvivesAGatewayFailover(t *testing.T) {
 		t.Fatalf("first election: %v", err)
 	}
 
-	// The gateway that was promoted after it died. Fresh Host, fresh cursor,
-	// fresh registry — everything except the store.
 	second := newTestHost(t, openPins(), config.AccessConfig{})
 	attachStubs(second, fleet...)
 	for i := 0; i < 3; i++ {
@@ -308,9 +251,8 @@ func TestAPinSurvivesAGatewayFailover(t *testing.T) {
 	}
 }
 
-// TestReElectionOverwritesTheStoredPin is the failure #170 names: a pin left
-// pointing at a machine that is gone re-elects on every turn, and every turn
-// lands somewhere new.
+// A pin left pointing at a node that is gone would re-elect on every turn,
+// moving the conversation each time.
 func TestReElectionOverwritesTheStoredPin(t *testing.T) {
 	pins := &memPins{}
 	host := newTestHost(t, pins, config.AccessConfig{})
@@ -329,7 +271,6 @@ func TestReElectionOverwritesTheStoredPin(t *testing.T) {
 	}
 	gone := first.node.nodeID
 
-	// The elected node disconnects.
 	host.remove(nodes[gone])
 
 	second, err := host.delegate(ctx, meta)
@@ -343,9 +284,6 @@ func TestReElectionOverwritesTheStoredPin(t *testing.T) {
 		t.Fatalf("the move was not reported as a takeover from %q: %+v", gone, second)
 	}
 
-	// The assertion that matters is on the STORE, not on the routing. Routing
-	// correctly while leaving the dead node's row behind is exactly the bug:
-	// the next turn would re-elect again, and the one after that, for ever.
 	stored, found, err := pins.Get(context.Background(), ref)
 	if err != nil || !found {
 		t.Fatalf("Get: found=%v err=%v", found, err)
@@ -354,8 +292,6 @@ func TestReElectionOverwritesTheStoredPin(t *testing.T) {
 		t.Fatalf("the stored pin still names %q; it should name %q", stored.NodeID, second.node.nodeID)
 	}
 
-	// And the conversation now STAYS there, which is the other half of "does
-	// not flap": a third turn must be answered from the pin, not re-elected.
 	third, err := host.delegate(ctx, meta)
 	if err != nil {
 		t.Fatalf("third turn: %v", err)
@@ -371,10 +307,8 @@ func TestReElectionOverwritesTheStoredPin(t *testing.T) {
 	}
 }
 
-// TestAPinnedConversationIsNotReFleeted covers the collision the conversation
-// key creates on purpose: it omits the user, so the channel's second speaker
-// rides the first speaker's node rather than dragging the conversation onto
-// their own.
+// The conversation key leaves out the user on purpose, so a second speaker in
+// a channel stays on the first speaker's node.
 func TestAPinnedConversationIsNotReFleeted(t *testing.T) {
 	host := newTestHost(t, &memPins{}, config.AccessConfig{})
 	attachStubs(host,
@@ -391,9 +325,6 @@ func TestAPinnedConversationIsNotReFleeted(t *testing.T) {
 	if first.node.nodeID != "node-a" {
 		t.Fatalf("U1's conversation went to %q, not their own node", first.node.nodeID)
 	}
-	// U2 speaks next in the same channel thread. Their own node is connected,
-	// and the conversation still does not move: a fleet decides an election, a
-	// pin decides a turn.
 	second, err := host.delegate(ctx, agent.SessionMetadata{ChannelID: "C1", ThreadTS: "1.1", UserID: "U2"})
 	if err != nil {
 		t.Fatalf("U2's turn: %v", err)
@@ -403,9 +334,6 @@ func TestAPinnedConversationIsNotReFleeted(t *testing.T) {
 	}
 }
 
-// TestAConversationWithNoKeyIsNotPinned covers the callers #170 defers to item
-// 13: a job, an unfurl or a workflow trigger has no conversation, and must not
-// have one invented for it.
 func TestAConversationWithNoKeyIsNotPinned(t *testing.T) {
 	pins := &memPins{}
 	host := newTestHost(t, pins, config.AccessConfig{})
@@ -420,9 +348,8 @@ func TestAConversationWithNoKeyIsNotPinned(t *testing.T) {
 	}
 }
 
-// TestAnUnreadablePinFailsTheTurnRatherThanMovingIt states the choice made when
-// the pin store is broken: a database hiccup must not look to the user like the
-// agent forgetting the conversation.
+// A database hiccup must not look to the user like the agent forgot the
+// conversation.
 func TestAnUnreadablePinFailsTheTurnRatherThanMovingIt(t *testing.T) {
 	boom := errors.New("the pin store is down")
 	host := newTestHost(t, &memPins{getErr: boom}, config.AccessConfig{})
@@ -434,9 +361,8 @@ func TestAnUnreadablePinFailsTheTurnRatherThanMovingIt(t *testing.T) {
 	}
 }
 
-// TestAnUnwritablePinStillServesTheTurn is the other side of that choice: the
-// node is chosen and the conversation is servable, so denying it over
-// bookkeeping would be the wrong trade.
+// The node is already chosen, so refusing the turn over bookkeeping would be
+// the wrong trade.
 func TestAnUnwritablePinStillServesTheTurn(t *testing.T) {
 	host := newTestHost(t, &memPins{putErr: errors.New("disk full")}, config.AccessConfig{})
 	attachStubs(host, nodeStub{id: "node-a", owner: "U1"})
@@ -451,18 +377,14 @@ func TestAnUnwritablePinStillServesTheTurn(t *testing.T) {
 	}
 }
 
-// TestARotatingNodeIsNotRoundRobinnedAgainstItself covers the registry's
-// connection-vs-node split from delegation's side: during a credential rotation
-// one machine holds two live connections, and a fleet that listed it twice
-// would give it two thirds of a two-node rotation and call that balance.
+// During a credential rotation one machine holds two connections; listing it
+// twice would give it double its share.
 func TestARotatingNodeIsNotRoundRobinnedAgainstItself(t *testing.T) {
 	host := newTestHost(t, nil, config.AccessConfig{})
 	attachStubs(host,
 		nodeStub{id: "node-a", owner: "U1"},
 		nodeStub{id: "node-b", owner: "U1"},
 	)
-	// node-a dials back in on its NEW credential while the old connection is
-	// still up. Different selector, so both connections stay.
 	host.insert(&attached{
 		connID: "node-a-conn-2", selector: "node-a-sel-2", nodeID: "node-a", userID: "U1",
 		attachedAt: time.Unix(2000, 0), closed: make(chan struct{}),
@@ -480,7 +402,6 @@ func TestARotatingNodeIsNotRoundRobinnedAgainstItself(t *testing.T) {
 	}
 }
 
-// elected runs one election and returns the node id.
 func elected(t *testing.T, host *Host, channelID, channelName, userID string) string {
 	t.Helper()
 	ctx := agent.WithConversation(context.Background(), agent.ConversationKey{ChannelID: channelID})
@@ -493,9 +414,6 @@ func elected(t *testing.T, host *Host, channelID, channelName, userID string) st
 	return got.node.nodeID
 }
 
-// memPins is the pin store as a map, with the failure injection the two error
-// tests need. The real store's behaviour is covered against all three backends
-// in internal/config/store.
 type memPins struct {
 	mu     sync.Mutex
 	rows   map[config.ConversationRef]config.ConversationPin
@@ -533,14 +451,8 @@ func (p *memPins) Put(_ context.Context, pin config.ConversationPin) error {
 
 func (p *memPins) Close() error { return nil }
 
-// TestTheTakeoverNoticeLandsInsideTheUserMessage is the placement assertion
-// #196 asks for.
-//
-// The invariant it protects is named assertNoConsecutiveUserAfterTool: a
-// standalone user message appended after a tool-result is the consecutive-user
-// empty-reply bug, and native.Conversation exposes no way to append per-turn
-// context as its own message precisely so nothing can do it by accident. The
-// notice therefore has to be part of the prompt text.
+// A separate user message after a tool result is the empty-reply bug
+// (assertNoConsecutiveUserAfterTool), so the notice must be in the prompt text.
 func TestTheTakeoverNoticeLandsInsideTheUserMessage(t *testing.T) {
 	req := agent.PromptRequest{
 		Text:    "what did we decide about the retry budget?",
@@ -558,14 +470,9 @@ func TestTheTakeoverNoticeLandsInsideTheUserMessage(t *testing.T) {
 	if !strings.HasSuffix(got.Text, req.Text) {
 		t.Fatalf("the user's own words are not the tail of the message:\n%s", got.Text)
 	}
-	// Not in History: a backend is free to emit History as its own content
-	// block, which would put the notice in exactly the standalone position the
-	// invariant forbids.
 	if got.History != req.History {
 		t.Fatal("the notice was folded into the thread transcript instead of the user message")
 	}
-	// Not <context>: native and ACP already emit a block by that name in the
-	// same message, and two would read as a malformed one.
 	if strings.Contains(got.Text, "<context>") {
 		t.Fatal("the notice reused the tag the backends already emit")
 	}
@@ -573,17 +480,14 @@ func TestTheTakeoverNoticeLandsInsideTheUserMessage(t *testing.T) {
 		t.Fatal("the notice does not say where the conversation came from")
 	}
 
-	// A caption-less upload is a real prompt with no text. The notice must
-	// still be the message rather than produce a leading blank line.
 	only := foldTakeover(agent.PromptRequest{}, "")
 	if strings.TrimSpace(only.Text) != only.Text || !strings.HasPrefix(only.Text, "<"+takeoverTag+">") {
 		t.Fatalf("an empty prompt produced a malformed message: %q", only.Text)
 	}
 }
 
-// TestTheTakeoverNoticeIsSentOnceAndOnlyOnce guards the other half of the
-// placement: a model told on every message that it has just arrived and can see
-// nothing behaves as though that were true.
+// A model told on every message that it just arrived and can see nothing
+// behaves as though that were true.
 func TestTheTakeoverNoticeIsSentOnceAndOnlyOnce(t *testing.T) {
 	host := newTestHost(t, nil, config.AccessConfig{})
 	host.markTakeover("session-1", "node-a")
@@ -596,16 +500,12 @@ func TestTheTakeoverNoticeIsSentOnceAndOnlyOnce(t *testing.T) {
 	if strings.Contains(second.Text, takeoverTag) {
 		t.Fatal("the notice was repeated on a later turn")
 	}
-	// A session that never moved carries nothing.
 	other := host.preparePrompt("session-2", agent.PromptRequest{Text: "hello"})
 	if other.Text != "hello" {
 		t.Fatalf("an untouched prompt was modified: %q", other.Text)
 	}
 }
 
-// TestASessionIsBoundToTheNodeThatMintedIt covers the binding that keeps a warm
-// turn on its node, and the error that starts the recovery when that node has
-// gone.
 func TestASessionIsBoundToTheNodeThatMintedIt(t *testing.T) {
 	host := newTestHost(t, nil, config.AccessConfig{})
 	nodes := attachStubs(host, nodeStub{id: "node-a", owner: "U1"})
@@ -619,8 +519,6 @@ func TestASessionIsBoundToTheNodeThatMintedIt(t *testing.T) {
 	}
 
 	host.remove(nodes["node-a"])
-	// ErrSessionGone, not ErrNoNode: this session cannot run and a new one can,
-	// which is what the session manager needs in order to re-elect.
 	_, err := host.sessionNode("s1")
 	if !errors.Is(err, agent.ErrSessionGone) {
 		t.Fatalf("a session whose node left gave %v, want ErrSessionGone", err)

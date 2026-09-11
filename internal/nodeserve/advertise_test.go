@@ -7,11 +7,6 @@ import (
 	"github.com/miere/murtaugh/internal/agentwire"
 )
 
-// An advertiser with no gateway attached DROPS the push and KEEPS the value.
-// Both halves matter: the next connection carries the whole claim on its
-// handshake answer, so queueing would replay a stale one on top of a current
-// one, and forgetting it would leave a node that reconnects claiming nothing it
-// had been configured with.
 func TestAnUnboundAdvertiserDropsThePushAndKeepsTheClaim(t *testing.T) {
 	a := NewAdvertiser(nil)
 	if !a.Current().Empty() {
@@ -22,7 +17,6 @@ func TestAnUnboundAdvertiserDropsThePushAndKeepsTheClaim(t *testing.T) {
 		Profiles: []string{"reviewer"},
 		Claims:   []agentwire.AssignmentClaim{{Match: "review-*", Profile: "reviewer"}},
 	}
-	// No server bound: this must not block, and must not panic.
 	a.Publish(context.Background(), ad)
 
 	got := a.Current()
@@ -31,9 +25,8 @@ func TestAnUnboundAdvertiserDropsThePushAndKeepsTheClaim(t *testing.T) {
 	}
 }
 
-// Current hands out a copy. The handshake reads it while the watcher may be
-// building the next one, and a shared slice header between those two is the
-// aliasing that looks safe and is not.
+// The handshake reads Current while the watcher may be building the next claim, so a shared slice
+// would race.
 func TestCurrentDoesNotShareItsSlices(t *testing.T) {
 	a := NewAdvertiser(nil)
 	a.Publish(context.Background(), agentwire.Advertisement{

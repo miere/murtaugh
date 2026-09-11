@@ -12,19 +12,8 @@ import (
 	"github.com/miere/murtaugh/internal/journal"
 )
 
-// The two helpers here are the daemon's startup, as opposed to the CLI's. They
-// live in this package rather than in a main package because there is now more
-// than one daemon binary — `murtaugh slack gateway` and cmd/murtaugh-gateway —
-// and a startup sequence copied into a second main is a startup sequence that
-// drifts.
-
-// OpenJournal opens the event journal and returns the store, a recorder, and a
-// cleanup that drains and closes them. The store is returned so the daemon can
-// reuse it for the retention sweep (it is the single writer that may delete).
-//
-// A store that cannot be opened degrades to a nil store and a no-op recorder
-// with a no-op cleanup, so journalling never blocks start. The caller must
-// invoke the returned cleanup before exit so buffered events flush.
+// Call the returned cleanup before exit or buffered events are lost. A store that fails to
+// open degrades to a no-op rather than an error, so journalling never blocks start.
 func OpenJournal(cfg config.Config, logger *slog.Logger) (*journal.Store, journal.Recorder, func()) {
 	path := cfg.Journal.EffectivePath(cfg.BaseDir, cfg.BaseName)
 	store, err := journal.Open(path, cfg.Journal.RetentionByStream(),
@@ -47,10 +36,7 @@ func OpenJournal(cfg config.Config, logger *slog.Logger) (*journal.Store, journa
 	return store, recorder, cleanup
 }
 
-// DefaultResumeMarkerPath resolves the on-disk location for the cross-restart
-// resume marker. It follows the XDG state convention (XDG_STATE_HOME overrides;
-// falls back to ~/.local/state/murtaugh) because the marker is runtime state,
-// not config.
+// Lives under XDG state rather than config because the marker is runtime state.
 func DefaultResumeMarkerPath() (string, error) {
 	if v := strings.TrimSpace(os.Getenv("XDG_STATE_HOME")); v != "" {
 		return filepath.Join(v, "murtaugh", "restart.json"), nil
@@ -62,11 +48,8 @@ func DefaultResumeMarkerPath() (string, error) {
 	return filepath.Join(home, ".local", "state", "murtaugh", "restart.json"), nil
 }
 
-// WithJournalRetentionSweep wires the retention sweeper over an open journal
-// store. The daemon is the single writer, so the sweep runs there, reusing the
-// recorder's store (Prune serialises with the writer on the one connection); the
-// `journal.prune` tool is the manual equivalent. A nil store leaves the sweeper
-// unwired.
+// The sweep runs in the daemon because it is the journal's only writer, and only the
+// writer may delete.
 func (a *Application) WithJournalRetentionSweep(store *journal.Store, cfg config.Config, logger *slog.Logger) *Application {
 	if store == nil {
 		return a

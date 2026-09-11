@@ -419,7 +419,6 @@ func TestNoAdminConfiguredFailsClosed(t *testing.T) {
 	}
 }
 
-// The admin asking in a thread still gets the thread notice as well as the card.
 func TestTheAdminRequesterStillGetsTwoCards(t *testing.T) {
 	api := newSyncAPI()
 	f := newTestFlow(api)
@@ -454,8 +453,6 @@ func TestCollapsesWithNoRequesterThread(t *testing.T) {
 	}
 }
 
-// Only the person the card was sent to may answer. A click from anyone else is
-// refused even though the action_id is valid.
 func TestNonAdminCannotResolve(t *testing.T) {
 	api := newSyncAPI()
 	f := newTestFlow(api)

@@ -7,16 +7,6 @@ import (
 	"github.com/miere/murtaugh/internal/nodelink"
 )
 
-// The ordering rule, which is the whole of what this package decides about
-// advertisements. Two paths deliver a claim — the handshake answer, on whoever
-// called Initialize, and a pushed change, on the link's request dispatch — and
-// they run on different goroutines, so wire order does not survive into
-// delivery order. The newest claim must win either way.
-
-// The claim is observed where production observes it — at the Advertiser. The
-// client keeps no copy of its own to read back, on purpose: the registry holds
-// the claim, and a second copy here would be a second answer to "what does this
-// node serve" that nothing reconciles.
 func newAdvertiseClient(t *testing.T) (*Client, *[]agentwire.Advertisement) {
 	t.Helper()
 	var seen []agentwire.Advertisement
@@ -29,7 +19,6 @@ func newAdvertiseClient(t *testing.T) (*Client, *[]agentwire.Advertisement) {
 	return client, &seen
 }
 
-// latest is the last claim the advertiser was handed — the registry's view.
 func latest(t *testing.T, seen *[]agentwire.Advertisement) agentwire.Advertisement {
 	t.Helper()
 	if len(*seen) == 0 {
@@ -38,9 +27,6 @@ func latest(t *testing.T, seen *[]agentwire.Advertisement) agentwire.Advertiseme
 	return (*seen)[len(*seen)-1]
 }
 
-// A pushed change that overtakes the handshake answer is not undone by it. This
-// is the failure the guard exists for: the older snapshot arrives second and,
-// applied, would silently roll the node's claim back to what it was at connect.
 func TestAnOpeningClaimYieldsToOneThatAlreadyLanded(t *testing.T) {
 	client, seen := newAdvertiseClient(t)
 
@@ -58,9 +44,6 @@ func TestAnOpeningClaimYieldsToOneThatAlreadyLanded(t *testing.T) {
 	}
 }
 
-// In the ordinary order the opening claim lands and a later push replaces it
-// wholesale — never merges with it, because there is no ordering guarantee a
-// merge could be made correct against.
 func TestALaterClaimReplacesTheOpeningOneWholesale(t *testing.T) {
 	client, seen := newAdvertiseClient(t)
 
@@ -79,9 +62,8 @@ func TestALaterClaimReplacesTheOpeningOneWholesale(t *testing.T) {
 	}
 }
 
-// The claim handed to the registry must not share slices with the caller's, or
-// a node re-advertising mutates the copy the registry is already holding — and
-// delegation reads that copy from another goroutine.
+// Shared slices would let a node that re-advertises mutate the copy delegation reads on
+// another goroutine.
 func TestTheAdvertiserIsHandedItsOwnCopy(t *testing.T) {
 	client, seen := newAdvertiseClient(t)
 	mine := agentwire.Advertisement{Profiles: []string{"reviewer"}}
@@ -93,13 +75,6 @@ func TestTheAdvertiserIsHandedItsOwnCopy(t *testing.T) {
 	}
 }
 
-// A gateway with no registry bound drops the claim rather than faulting on it.
-// The node cannot know whether the gateway keeps one, and failing its push
-// would make the node's own logs blame it for the gateway's shape.
-//
-// There is nothing else left to assert here, and that is the point of the
-// shape: with no advertiser there is no second copy of the claim to have
-// recorded it in.
 func TestAClientWithNoAdvertiserDropsTheClaimRatherThanFaulting(t *testing.T) {
 	gatewaySide, nodeSide := nodelink.Pipe(32)
 	client := New(gatewaySide, Options{Logger: discardLogger()})

@@ -126,9 +126,7 @@ func (r *Runner) buildDeps(logger *slog.Logger) agentbuild.Deps {
 		Logger:                 logger,
 		Bridge:                 r.bridge,
 		LongRunningToolTimeout: r.longRunningToolTimeout,
-		// A delegated agent is as capable of reading a file as a chat one, so it
-		// is blinded to the node credential on exactly the same terms.
-		NodeTokenPath: nodetoken.PathFor(r.baseDir),
+		NodeTokenPath:          nodetoken.PathFor(r.baseDir),
 	}
 }
 
@@ -211,11 +209,6 @@ func (r *Runner) Run(ctx context.Context, agentName, prompt string) (string, err
 	if err := client.Initialize(ctx); err != nil {
 		return "", fmt.Errorf("delegate-to-agent: initialize agent %q: %w", agentName, err)
 	}
-	// The drive loop itself is internal/oneshot, shared with the gateway-side
-	// headless delegator so a job behaves the same whether it ran in process or
-	// on the main node. What stays here is everything that BUILDS: the profile
-	// lookup, the client, and its teardown — which is exactly the part
-	// cmd/murtaugh-gateway may not link.
 	return oneshot.Drive(ctx, client, oneshot.Request{
 		Agent:       agentName,
 		Prompt:      prompt,

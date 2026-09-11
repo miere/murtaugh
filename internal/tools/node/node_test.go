@@ -15,9 +15,6 @@ import (
 	"github.com/miere/murtaugh/internal/tools"
 )
 
-// fakeStore is an in-memory config.NodeTokenStore. The three real backends are
-// held to the same contract in internal/config/store; here the store is a fake
-// so these tests are about the tools.
 type fakeStore struct {
 	records map[string]config.NodeToken
 	closes  int
@@ -69,7 +66,6 @@ func (s *fakeStore) Revoke(_ context.Context, selector string, at time.Time) (co
 
 func (s *fakeStore) Close() error { s.closes++; return nil }
 
-// toolsFor returns the three tools bound to one fake store.
 func toolsFor(t *testing.T) (*fakeStore, *mintTool, *listTool, *revokeTool) {
 	t.Helper()
 	store := newFake()
@@ -90,8 +86,8 @@ func mint(t *testing.T, tool *mintTool, args map[string]any) mintResult {
 	return out
 }
 
-// TestRegisteredNames pins the dotted names the CLI resolves `murtaugh node
-// token mint` to. Renaming one silently moves the command.
+// The CLI resolves `murtaugh node token mint` to these names, so renaming one silently
+// moves the command.
 func TestRegisteredNames(t *testing.T) {
 	_, m, l, r := toolsFor(t)
 	for tool, want := range map[tools.Tool]string{
@@ -108,9 +104,6 @@ func TestRegisteredNames(t *testing.T) {
 	}
 }
 
-// TestMintedTokenVerifiesAgainstWhatWasStored is the end-to-end statement of
-// #190's first property: the operator gets a token, the store gets a digest, and
-// presenting the token alone resolves to the node and user it was minted for.
 func TestMintedTokenVerifiesAgainstWhatWasStored(t *testing.T) {
 	store, m, _, _ := toolsFor(t)
 
@@ -130,7 +123,6 @@ func TestMintedTokenVerifiesAgainstWhatWasStored(t *testing.T) {
 		t.Errorf("label = %q, want desk", record.Label)
 	}
 
-	// What was stored is a digest of the secret and not the secret.
 	stored := store.records[res.Selector]
 	if strings.Contains(stored.SecretHash, res.Token) || strings.Contains(stored.SecretHash, nodetoken.Prefix) {
 		t.Fatalf("the stored hash carries the token: %q", stored.SecretHash)
@@ -140,8 +132,7 @@ func TestMintedTokenVerifiesAgainstWhatWasStored(t *testing.T) {
 	}
 }
 
-// TestMintRequiresANodeAndAUser: config.NodeToken.Validate demands both, and a
-// tool that let either through would create a credential resolving to nobody.
+// A credential missing either would resolve to nobody.
 func TestMintRequiresANodeAndAUser(t *testing.T) {
 	_, m, _, _ := toolsFor(t)
 	for name, args := range map[string]map[string]any{
@@ -186,9 +177,8 @@ func TestMintRefusesAnOwnerThatIsNotASlackUserID(t *testing.T) {
 	}
 }
 
-// TestMintExpiryIsAppliedAndValidated. Expiry is optional, but a value that was
-// accepted and quietly ignored would leave an operator believing a credential
-// dies on its own when nothing will ever end it but revocation.
+// An expiry accepted but ignored would leave an operator believing a credential dies on
+// its own, when only revocation will ever end it.
 func TestMintExpiryIsAppliedAndValidated(t *testing.T) {
 	store, m, _, _ := toolsFor(t)
 
@@ -204,7 +194,6 @@ func TestMintExpiryIsAppliedAndValidated(t *testing.T) {
 	if res.ExpiresAt == "" {
 		t.Error("the result does not report the expiry it just set")
 	}
-	// And it really stops verifying then.
 	if _, err := nodetoken.Verify(context.Background(), store, res.Token, stored.ExpiresAt); !errors.Is(err, nodetoken.ErrExpired) {
 		t.Fatalf("Verify at the expiry instant = %v, want ErrExpired", err)
 	}
@@ -223,10 +212,8 @@ func TestMintExpiryIsAppliedAndValidated(t *testing.T) {
 	}
 }
 
-// TestMintToTokenFileKeepsThePlaintextOutOfTheResult is what makes minting
-// through a non-CLI frontend safe: the credential lands in a 0600 file and the
-// returned value — which an MCP client would render into a transcript — carries
-// only metadata.
+// An MCP client renders the result into a transcript, so with a token file the result
+// must carry only metadata.
 func TestMintToTokenFileKeepsThePlaintextOutOfTheResult(t *testing.T) {
 	store, m, _, _ := toolsFor(t)
 	path := filepath.Join(t.TempDir(), "node-token")
@@ -254,7 +241,6 @@ func TestMintToTokenFileKeepsThePlaintextOutOfTheResult(t *testing.T) {
 	if perm := info.Mode().Perm(); perm != nodetoken.FileMode {
 		t.Fatalf("token file is mode %#o, want %#o", perm, nodetoken.FileMode)
 	}
-	// The file holds a credential that actually works.
 	token, err := nodetoken.ReadFile(path)
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
@@ -264,9 +250,8 @@ func TestMintToTokenFileKeepsThePlaintextOutOfTheResult(t *testing.T) {
 	}
 }
 
-// TestMintTellsTheOperatorTheTokenIsShownOnce. The plaintext cannot be recovered
-// from the store, so a rendering that did not say so would leave an operator
-// expecting to look it up later.
+// The store cannot give the plaintext back, so an operator not told this would expect
+// to look it up later.
 func TestMintTellsTheOperatorTheTokenIsShownOnce(t *testing.T) {
 	_, m, _, _ := toolsFor(t)
 	rendered := mint(t, m, map[string]any{"node": "n1", "user": "U012ABCDEF"}).String()
@@ -275,8 +260,7 @@ func TestMintTellsTheOperatorTheTokenIsShownOnce(t *testing.T) {
 	}
 }
 
-// TestMintAndRevokeRequireApproval. Both are registry tools, so an operator may
-// list them in an agent's toolset; neither may run on the agent's say-so alone.
+// Both can be put in an agent's toolset; neither may run on the agent's say-so alone.
 func TestMintAndRevokeRequireApproval(t *testing.T) {
 	_, m, l, r := toolsFor(t)
 	for _, tool := range []tools.Tool{m, r} {
@@ -288,16 +272,13 @@ func TestMintAndRevokeRequireApproval(t *testing.T) {
 			t.Errorf("%s does not require approval", tool.Name())
 		}
 	}
-	// Listing is read-only and deliberately ungated; asserted so that a later
-	// change to it is a deliberate one.
 	if _, gated := any(l).(tools.ApprovalClassifier); gated {
 		t.Error("node.token.list now requires approval; if that is intended, say so here")
 	}
 }
 
-// TestListNeverShowsATokenOrAHash. The store cannot produce a plaintext, so the
-// risk here is the digest: printed, it looks like a credential and invites being
-// pasted as one.
+// The store holds no plaintext, so the risk is the digest: printed, it looks like a
+// credential and invites being pasted as one.
 func TestListNeverShowsATokenOrAHash(t *testing.T) {
 	store, m, l, _ := toolsFor(t)
 	res := mint(t, m, map[string]any{"node": "mac-mini", "user": "U012ABCDEF", "label": "desk"})
@@ -325,18 +306,12 @@ func TestListNeverShowsATokenOrAHash(t *testing.T) {
 	}
 }
 
-// TestListFiltersByNodeAndReportsState covers ALL THREE states the CLI help
-// documents — live, expired, revoked — because two of them do not exercise
-// stateOf's middle branch: with `expired` untested, replacing `case
-// !t.Live(now)` with `case false` leaves this package green while every
-// timed-out credential reports itself as live to the operator deciding whether
-// to re-enrol a node.
+// Covers all three states, because without an expired credential a broken expiry check
+// still passes and timed-out credentials show as live.
 func TestListFiltersByNodeAndReportsState(t *testing.T) {
 	_, m, l, r := toolsFor(t)
 	live := mint(t, m, map[string]any{"node": "a", "user": "U012ABCDEF"})
 	revoked := mint(t, m, map[string]any{"node": "a", "user": "U012ABCDEF"})
-	// The shortest lifetime the tool accepts: --expires-in must be positive, so a
-	// credential can only be aged past its expiry by waiting out a real one.
 	expired := mint(t, m, map[string]any{"node": "a", "user": "U012ABCDEF", "expires_in": "1ms"})
 	other := mint(t, m, map[string]any{"node": "b", "user": "U012ABCDEF"})
 
@@ -371,9 +346,8 @@ func TestListFiltersByNodeAndReportsState(t *testing.T) {
 	}
 }
 
-// A revoked credential that has ALSO passed its expiry reports "revoked": the
-// operator's question is why it stopped working, and a deliberate withdrawal is
-// the more informative answer than the clock running out on it afterwards.
+// The operator is asking why it stopped working, and a deliberate revocation answers
+// that better than an expiry that came after it.
 func TestRevocationOutranksExpiryInTheListing(t *testing.T) {
 	_, m, l, r := toolsFor(t)
 	res := mint(t, m, map[string]any{"node": "a", "user": "U012ABCDEF", "expires_in": "1ms"})
@@ -395,10 +369,8 @@ func TestRevocationOutranksExpiryInTheListing(t *testing.T) {
 	}
 }
 
-// TestTwoCredentialsForOneNodeThenRevokeTheOlder is the rotation case as an
-// operator performs it: mint the replacement, both work, withdraw the old one.
-// Named for what it checks rather than for "rotation", which would promise a
-// transport this stage does not have.
+// Not named for rotation on purpose: that would promise a rotation mechanism that does
+// not exist yet.
 func TestTwoCredentialsForOneNodeThenRevokeTheOlder(t *testing.T) {
 	store, m, _, r := toolsFor(t)
 	ctx := context.Background()
@@ -428,8 +400,7 @@ func TestTwoCredentialsForOneNodeThenRevokeTheOlder(t *testing.T) {
 	}
 }
 
-// TestRevokeByNodeTakesEveryLiveCredential is the "the node is compromised"
-// case, where the operator does not know which credential leaked.
+// For a compromised node, when the operator does not know which credential leaked.
 func TestRevokeByNodeTakesEveryLiveCredential(t *testing.T) {
 	store, m, _, r := toolsFor(t)
 	ctx := context.Background()
@@ -454,7 +425,6 @@ func TestRevokeByNodeTakesEveryLiveCredential(t *testing.T) {
 		t.Errorf("another node's credential was revoked too: %v", err)
 	}
 
-	// A second sweep finds nothing live and says so rather than erroring.
 	again, err := r.Invoke(ctx, map[string]any{"node": "mac-mini"})
 	if err != nil {
 		t.Fatalf("a second revoke by node errored: %v", err)
@@ -464,8 +434,8 @@ func TestRevokeByNodeTakesEveryLiveCredential(t *testing.T) {
 	}
 }
 
-// TestRevokeArgumentErrors: a revoke that guessed which of two selectors the
-// operator meant, or that silently did nothing, is worse than one that refuses.
+// Guessing which selector the operator meant, or silently doing nothing, is worse than
+// refusing.
 func TestRevokeArgumentErrors(t *testing.T) {
 	_, _, _, r := toolsFor(t)
 	for name, args := range map[string]map[string]any{
@@ -483,9 +453,8 @@ func TestRevokeArgumentErrors(t *testing.T) {
 	}
 }
 
-// TestRevokeReportsTheLimitationItCannotYetFix. Revocation stops future
-// handshakes; nothing closes a connection already made, because nothing owns one
-// (#193). An operator who believed otherwise would stop investigating too early.
+// Revoking stops new handshakes but closes no open connection yet; an operator who
+// thought otherwise would stop investigating too early.
 func TestRevokeReportsTheLimitationItCannotYetFix(t *testing.T) {
 	_, m, _, r := toolsFor(t)
 	minted := mint(t, m, map[string]any{"node": "n1", "user": "U012ABCDEF"})
@@ -499,9 +468,8 @@ func TestRevokeReportsTheLimitationItCannotYetFix(t *testing.T) {
 	}
 }
 
-// TestAnUnavailableStoreFailsCleanly: the provider is a closure over a database
-// that a `setup` invocation may not have, and a nil dereference there would take
-// the whole CLI down instead of the one command.
+// A `setup` invocation may have no database, and a nil dereference there would take
+// the whole CLI down instead of one command.
 func TestAnUnavailableStoreFailsCleanly(t *testing.T) {
 	down := Provider(func(context.Context) (config.NodeTokenStore, error) {
 		return nil, errors.New("no config directory resolved")
@@ -518,9 +486,8 @@ func TestAnUnavailableStoreFailsCleanly(t *testing.T) {
 	}
 }
 
-// TestMintDoesNotOverwriteAnExistingTokenFile. The file is written before the
-// record is stored, so an overwrite would destroy a working credential in
-// exchange for one that may not even reach the store.
+// The file is written before the record is stored, so an overwrite could trade a
+// working credential for one that never reaches the store.
 func TestMintDoesNotOverwriteAnExistingTokenFile(t *testing.T) {
 	store, m, _, _ := toolsFor(t)
 	path := filepath.Join(t.TempDir(), "node-token")
@@ -543,9 +510,8 @@ func TestMintDoesNotOverwriteAnExistingTokenFile(t *testing.T) {
 	}
 }
 
-// TestEverySchemaDeclaresItsArguments: the CLI maps --kebab-case flags onto the
-// declared property names, so an argument missing from the schema is an argument
-// no operator can pass.
+// The CLI maps --kebab-case flags onto declared property names, so an argument missing
+// from the schema is one no operator can pass.
 func TestEverySchemaDeclaresItsArguments(t *testing.T) {
 	_, m, l, r := toolsFor(t)
 	want := map[string][]string{

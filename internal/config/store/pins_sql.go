@@ -9,15 +9,12 @@ import (
 	"github.com/miere/murtaugh/internal/config"
 )
 
-// sqlConversationPins holds delegated-conversation pins in a relational store,
-// serving both SQLite and Postgres through the Dialect seam.
 type sqlConversationPins struct {
 	db     *sql.DB
 	d      Dialect
 	ownsDB bool
 }
 
-// openSQLConversationPins prepares the pin store over an existing handle.
 func openSQLConversationPins(ctx context.Context, db *sql.DB, d Dialect, ownsDB bool) (config.ConversationPinStore, error) {
 	if err := runMigrations(ctx, db, d); err != nil {
 		return nil, fmt.Errorf("migrate conversation-pin schema: %w", err)
@@ -25,7 +22,6 @@ func openSQLConversationPins(ctx context.Context, db *sql.DB, d Dialect, ownsDB 
 	return &sqlConversationPins{db: db, d: d, ownsDB: ownsDB}, nil
 }
 
-// openPostgresConversationPins opens a dedicated Postgres connection for pins.
 func openPostgresConversationPins(ctx context.Context, dsn string) (config.ConversationPinStore, error) {
 	if dsn == "" {
 		return nil, errors.New("database.postgres.dsn is required for the postgres backend")
@@ -55,9 +51,6 @@ func (s *sqlConversationPins) Close() error {
 	return s.db.Close()
 }
 
-// dmFlag renders the DM bool as the 0/1 the key column holds. Written as a
-// helper rather than inline so the two statements that build the key cannot
-// disagree about which integer means which.
 func dmFlag(dm bool) int {
 	if dm {
 		return 1
@@ -90,11 +83,6 @@ func (s *sqlConversationPins) Put(ctx context.Context, pin config.ConversationPi
 	if err := pin.Validate(); err != nil {
 		return err
 	}
-	// ON CONFLICT DO UPDATE, not INSERT: overwriting is the operation. #170
-	// requires a re-election to REPLACE the stored pin rather than leave the
-	// dead node's row behind, and a delete-then-insert would leave a window in
-	// which a concurrent read saw the conversation as never delegated and
-	// elected a third node.
 	stmt := fmt.Sprintf(
 		`INSERT INTO conversation_pins (team_id, channel_id, thread_ts, dm, node_id, user_id, elected_at)
 		 VALUES (%s, %s, %s, %s, %s, %s, %s)

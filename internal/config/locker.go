@@ -100,11 +100,8 @@ type Lease struct {
 	// ExpiresAt is when the lease lapses, as measured by the STORE's clock, not
 	// this node's. Zero means the lease does not expire.
 	ExpiresAt time.Time
-	// Address is where the holder accepts runtime node connections, empty when
-	// it accepts none. It is written by the holder after acquisition and read by
-	// standbys, which is the whole of the redirect design: a standby is already
-	// contending for this lock, so learning where the leader is costs it a read
-	// it was making anyway rather than a discovery protocol of its own.
+	// Address lives on the lock record because standbys already read it, so they can redirect a
+	// node to the leader without a discovery protocol of their own.
 	Address LeaderAddress
 }
 
@@ -114,25 +111,12 @@ func (l Lease) Held() bool { return strings.TrimSpace(l.Key) != "" }
 // Expires reports whether this lease must be renewed to stay valid.
 func (l Lease) Expires() bool { return !l.ExpiresAt.IsZero() }
 
-// LeaderAddress is where a gateway accepts runtime node connections: an ORDERED
-// list of dial addresses, most durable first.
-//
-// It is a list rather than one string because #170 requires both a hostname and
-// an IP to be offered at handshake, and neither alone is enough. An IP moves
-// under DHCP, a changed network or a VPN; a hostname does not resolve from
-// every network a laptop wakes up on. Offering both lets the node fall through
-// to whichever one works from where it is, and putting the hostname first means
-// the durable form is tried first.
-//
-// An empty LeaderAddress is a legitimate value with a precise meaning: this
-// gateway leads and accepts no nodes at all. A standby holding one must say so
-// rather than redirect a node to a blank address, or to itself.
+// Hostname first, then IP: an IP moves between networks and a hostname does not resolve
+// everywhere. Empty means the leader accepts no nodes, so a standby must not redirect to it.
 type LeaderAddress []string
 
-// Empty reports whether there is no address to offer.
 func (a LeaderAddress) Empty() bool { return len(a) == 0 }
 
-// Primary is the address to try first, or "" when there is none.
 func (a LeaderAddress) Primary() string {
 	if len(a) == 0 {
 		return ""
@@ -140,13 +124,8 @@ func (a LeaderAddress) Primary() string {
 	return a[0]
 }
 
-// Encode renders the list for storage in one column, field or header.
-//
-// Space-separated, because a dial address cannot contain a space and one
-// encoding shared by all three backends is one parser to get right rather than
-// three. Entries that would break the round trip are dropped rather than
-// escaped: a malformed address is not worth carrying, and silently mangling one
-// would redirect a node somewhere that does not exist.
+// Entries containing whitespace are dropped, not escaped: a mangled address would redirect a
+// node somewhere that does not exist.
 func (a LeaderAddress) Encode() string {
 	fields := make([]string, 0, len(a))
 	for _, entry := range a {
@@ -159,9 +138,7 @@ func (a LeaderAddress) Encode() string {
 	return strings.Join(fields, " ")
 }
 
-// ParseLeaderAddress reads what Encode wrote, deduplicating while preserving
-// order. It tolerates anything: a record written by an older gateway carries no
-// address at all, and that must read as "accepts no nodes" rather than fail.
+// Never fails: records from older gateways carry no address and must read as "accepts no nodes".
 func ParseLeaderAddress(raw string) LeaderAddress {
 	fields := strings.Fields(raw)
 	if len(fields) == 0 {
@@ -179,8 +156,6 @@ func ParseLeaderAddress(raw string) LeaderAddress {
 	return addresses
 }
 
-// Equal reports whether two address lists say the same thing, order included.
-// The election uses it to decide whether a published address needs rewriting.
 func (a LeaderAddress) Equal(other LeaderAddress) bool {
 	if len(a) != len(other) {
 		return false
@@ -222,29 +197,12 @@ type Locker interface {
 	// lease that has already been lost.
 	Release(ctx context.Context, lease Lease) error
 
-	// Publish records where the holder of this lease accepts runtime node
-	// connections. It is a separate write from Acquire because the two know
-	// different things: acquisition happens in the election, while the address
-	// is only final once a listener has bound a port the kernel may have chosen.
-	//
-	// Acquisition therefore CLEARS the address, and Publish sets it. That order
-	// is deliberate: a standby reading the lock in the gap between them sees a
-	// leader with no address and says so, rather than redirecting a node to the
-	// machine that just lost the lock.
-	//
-	// It reports no error for a lease that is no longer held: losing the lock is
-	// the renewal loop's business, and failing to describe a lease we do not
-	// have is not a failure.
+	// Publish is separate from Acquire because the address is only final once the listener binds.
+	// Acquire clears it, so a standby in between sees "leader, no address" instead of a stale one.
 	Publish(ctx context.Context, lease Lease, addr LeaderAddress) error
 
-	// Holder reads the live claim WITHOUT contending for it, so a standby can
-	// answer "where is the leader?" for a node it is turning away.
-	//
-	// It reports ok=false for a lock that is absent, released or lapsed. That is
-	// the whole of its subtlety: every backend keeps the record after a release
-	// so the epoch survives a handover, so a naive read returns the address of a
-	// gateway that stood down seconds ago — and redirects the node straight back
-	// to the address it just came from.
+	// Holder must report ok=false for a released or lapsed record: backends keep the record after
+	// release, so a naive read redirects the node straight back to a gateway that just stood down.
 	Holder(ctx context.Context) (lease Lease, ok bool, err error)
 
 	// TTL is how long an acquired lease stays valid without renewal. Zero means

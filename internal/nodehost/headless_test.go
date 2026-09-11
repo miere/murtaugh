@@ -15,16 +15,6 @@ import (
 	"github.com/miere/murtaugh/internal/tools/jobs/run"
 )
 
-// HEADLESS DISPATCH (#199). Everything below is about work with no user behind
-// it: a scheduled job, a workflow trigger, a link unfurl. #170 puts all three on
-// the MAIN node, and the reason the tests are written against the real Runtime
-// builder rather than against the delegator directly is that "the gateway has no
-// delegator at all" was the state before this item and it failed by reporting
-// "agent delegation is unavailable" — a silence the wiring, not the algorithm,
-// is responsible for.
-
-// delegatorFor builds the runtime a broker gateway would, over an attached
-// loopback node, and returns the headless delegator off it.
 func delegatorFor(t *testing.T, rig *loopback, access config.AccessConfig, chat bool) agentruntime.Delegator {
 	t.Helper()
 	cfg := config.Config{
@@ -32,10 +22,6 @@ func delegatorFor(t *testing.T, rig *loopback, access config.AccessConfig, chat 
 		Chat:   config.ChatConfig{Enabled: chat, Defaults: config.ChatDefaults{Agent: "default"}},
 		Access: access,
 	}
-	// The gateway's approval gate is wired exactly as the rig wired it, so a
-	// card raised by a headless turn lands somewhere a test can see it. Building
-	// the runtime with no approver would have made "no card arrived" true for the
-	// wrong reason.
 	rt := nodehost.Runtime(rig.host)(cfg, testLogger())(agentruntime.Hooks{
 		Chat: chat,
 		Approvers: map[string]agentruntime.Approver{
@@ -53,7 +39,6 @@ func delegatorFor(t *testing.T, rig *loopback, access config.AccessConfig, chat 
 	return rt.Delegator
 }
 
-// answering is a scripted agent that replies with one body and completes.
 func answering(body string) func(*scriptedTurn) {
 	return func(turn *scriptedTurn) {
 		turn.emit(agent.Event{Type: agent.EventText, Text: body})
@@ -61,17 +46,13 @@ func answering(body string) func(*scriptedTurn) {
 	}
 }
 
-// #199's own acceptance: a job, a workflow trigger and an unfurl each executing
-// through the broker. The three are one test because they are one mechanism —
-// two verbs over one selection path — and splitting them would let a change
-// break the pairing without breaking either half.
+// One test because it is one mechanism: split up, a change could break the
+// pairing without failing either half.
 func TestAJobAWorkflowTriggerAndAnUnfurlAllRunOnTheMainNode(t *testing.T) {
 	script := newScriptedAgent(answering(`{"text":"done"}`))
 	rig := dialLoopback(t, script)
 	delegator := delegatorFor(t, rig, config.AccessConfig{MainNode: "node-1"}, true)
 
-	// A scheduled job. RunAndForget: the text is discarded and the agent is
-	// expected to have acted through its own tools.
 	if err := delegator.RunAndForget(context.Background(), "default", "run the nightly backup"); err != nil {
 		t.Fatalf("a scheduled job did not execute through the broker: %v", err)
 	}
@@ -79,8 +60,6 @@ func TestAJobAWorkflowTriggerAndAnUnfurlAllRunOnTheMainNode(t *testing.T) {
 		t.Fatalf("the job's prompt reached the node as %q", got)
 	}
 
-	// A workflow trigger's reply-to-slack arm. RunForJSON: the gateway renders
-	// what comes back, so it must be JSON and it must arrive.
 	out, err := delegator.RunForJSON(context.Background(), "default", "summarise this form submission")
 	if err != nil {
 		t.Fatalf("a workflow trigger did not execute through the broker: %v", err)
@@ -89,8 +68,6 @@ func TestAJobAWorkflowTriggerAndAnUnfurlAllRunOnTheMainNode(t *testing.T) {
 		t.Fatalf("the workflow trigger got back %q", out)
 	}
 
-	// A link unfurl. Same verb, different consumer — and the one #170 puts on
-	// the main node precisely because the sharer usually owns no node.
 	if _, err := delegator.RunForJSON(context.Background(), "default", "unfurl https://example.test/x"); err != nil {
 		t.Fatalf("an unfurl did not execute through the broker: %v", err)
 	}
@@ -100,8 +77,8 @@ func TestAJobAWorkflowTriggerAndAnUnfurlAllRunOnTheMainNode(t *testing.T) {
 	}
 }
 
-// The gateway can only judge a reply by whose machine wrote it, and a node is
-// never trusted to say, so the owner must come from its credential.
+// A node is never trusted to name itself, so the owner must come from its
+// credential.
 func TestAHeadlessJobHandsBackItsReplyAndTheNodeThatRanIt(t *testing.T) {
 	rig := dialLoopback(t, newScriptedAgent(answering("backups are green")))
 	delegator := delegatorFor(t, rig, config.AccessConfig{MainNode: "node-1"}, true)
@@ -120,17 +97,10 @@ func TestAHeadlessJobHandsBackItsReplyAndTheNodeThatRanIt(t *testing.T) {
 	}
 }
 
-// The whole reason headless dispatch needed building: none of these callers has
-// a user, and item 10's fleet is built from one. This asserts the two paths stay
-// apart — the delegation path still refuses an empty user id, and the headless
-// path does not care.
 func TestHeadlessWorkNeedsNoUserAndDoesNotTouchTheFleet(t *testing.T) {
 	rig := dialLoopback(t, newScriptedAgent(answering("ok")))
 	delegator := delegatorFor(t, rig, config.AccessConfig{MainNode: "node-1"}, true)
 
-	// A chat turn with no user still has no fleet, and says so. If this ever
-	// starts passing, fleetFor has been relaxed and headless work is silently
-	// borrowing whichever node is attached.
 	manager := rig.sessions["default"]
 	key := agent.ConversationKey{TeamID: "T1", ChannelID: "C1", ThreadTS: "1.1"}
 	_, err := manager.Prompt(context.Background(), key, agent.SessionMetadata{ChannelID: "C1"}, agent.PromptRequest{Text: "hello"})
@@ -138,15 +108,11 @@ func TestHeadlessWorkNeedsNoUserAndDoesNotTouchTheFleet(t *testing.T) {
 		t.Fatalf("a chat turn with no user was served anyway: %v", err)
 	}
 
-	// The same absent user is fine here, because the node was chosen by the
-	// gateway's designation and not by whose it is.
 	if err := delegator.RunAndForget(context.Background(), "default", "03:00"); err != nil {
 		t.Fatalf("headless work was refused for having no user: %v", err)
 	}
 }
 
-// The main node is a DESIGNATION, and it selects. A second attached node is not
-// a fallback and must not be reached.
 func TestOnlyTheDesignatedNodeServesHeadlessWork(t *testing.T) {
 	main := newScriptedAgent(answering("main"))
 	rig := dialLoopback(t, main)
@@ -164,9 +130,7 @@ func TestOnlyTheDesignatedNodeServesHeadlessWork(t *testing.T) {
 	}
 }
 
-// The failure this item exists to prevent is the SILENT one. Both refusals name
-// themselves, and both are journalled at ERROR — the log alone is what "jobs
-// stopped firing and nobody noticed for weeks" already looked like.
+// A silent failure here is "jobs stopped firing and nobody noticed for weeks".
 func TestHeadlessWorkThatCannotBeDispatchedIsLoud(t *testing.T) {
 	t.Run("no main node is designated", func(t *testing.T) {
 		rec := &recordingJournal{}
@@ -177,8 +141,6 @@ func TestHeadlessWorkThatCannotBeDispatchedIsLoud(t *testing.T) {
 		if !errors.Is(err, nodehost.ErrNoMainNode) {
 			t.Fatalf("a gateway with no main node reported %v", err)
 		}
-		// Named, not generic: an operator reading this has to be sent to the
-		// configuration and not to the machine.
 		if !strings.Contains(err.Error(), "access.main_node") {
 			t.Fatalf("the refusal did not say how to fix it: %v", err)
 		}
@@ -188,8 +150,6 @@ func TestHeadlessWorkThatCannotBeDispatchedIsLoud(t *testing.T) {
 	t.Run("the main node is asleep", func(t *testing.T) {
 		rec := &recordingJournal{}
 		rig := dialLoopback(t, newScriptedAgent(answering("ok")), journalling(rec))
-		// Designated, never attached — a laptop that is shut. Distinct from the
-		// case above because the remedy is a different person's.
 		delegator := delegatorFor(t, rig, config.AccessConfig{MainNode: "node-asleep"}, true)
 
 		err := delegator.RunAndForget(context.Background(), "default", "the job")
@@ -217,9 +177,8 @@ func assertHeadlessRefusal(t *testing.T, rec *recordingJournal, state string) {
 	}
 }
 
-// A gateway with chat disabled is exactly the deployment that exists to run
-// scheduled jobs, so the delegator has to be built ABOVE the chat check. This is
-// the one-line regression that would take jobs out again.
+// Chat-disabled gateways exist to run jobs, so the delegator must be built
+// before the chat check.
 func TestHeadlessWorkRunsOnAGatewayWithChatDisabled(t *testing.T) {
 	script := newScriptedAgent(answering("ok"))
 	rig := dialLoopback(t, script)
@@ -233,11 +192,8 @@ func TestHeadlessWorkRunsOnAGatewayWithChatDisabled(t *testing.T) {
 	}
 }
 
-// The wedged-03:00-job failure. In process a delegated agent is built with no
-// approver at all, so a job never asks; on a node every agent carries the gate,
-// and a job that raised a card would block on an answer nobody can give until
-// its timeout burned. A headless session is served with no stream, so the gate
-// takes its no-turn branch.
+// On a node every agent has an approval gate, and nobody can answer a job's
+// card, so it would block until its timeout.
 func TestAHeadlessTurnNeverWaitsForAnApprovalNobodyCanGive(t *testing.T) {
 	answers := make(chan approvalAnswer, 1)
 	script := newScriptedAgent(func(turn *scriptedTurn) {
@@ -272,7 +228,6 @@ func TestAHeadlessTurnNeverWaitsForAnApprovalNobodyCanGive(t *testing.T) {
 		t.Fatal("the headless run never returned")
 	}
 
-	// And nothing was asked of the gateway after the fact either.
 	select {
 	case ask := <-rig.approved:
 		t.Fatalf("a card arrived late for %q", ask.tool)
@@ -280,26 +235,10 @@ func TestAHeadlessTurnNeverWaitsForAnApprovalNobodyCanGive(t *testing.T) {
 	}
 }
 
-// headlessRuns is the probe size, and it is a hundred rather than two because
-// this failure is invisible at two. A leak of one session per run is a working
-// system for an afternoon.
 const headlessRuns = 100
 
-// TestEveryHeadlessRunClosesItsSessionOnTheNode is the leak guard.
-//
-// oneshot.Drive opens an EPHEMERAL session — a fresh id every call, by design,
-// so a claude_code backend does not resume the previous job's transcript — and
-// for the in-process runner that was the end of it: agentdelegate closes the
-// client and the process dies with it. Over the link the client IS the node's
-// long-lived connection, so nothing else will ever end that session. Left open
-// it is a retained session on the node, an aggregator registration whose release
-// only runs from CloseSession, and on the ACP backend a real subprocess — one
-// per scheduled job, per workflow trigger and per PASTED LINK, unbounded until
-// the node restarts.
-//
-// The count is taken on the NODE's agent, past the gateway, past the wire and
-// past nodeserve, because every one of those layers is somewhere the close can
-// be dropped.
+// Each run opens a fresh session on the node's long-lived link; unclosed they
+// pile up (an ACP subprocess per job) until the node restarts.
 func TestEveryHeadlessRunClosesItsSessionOnTheNode(t *testing.T) {
 	script := newScriptedAgent(answering(`{"text":"ok"}`))
 	rig := dialLoopback(t, script)
@@ -311,10 +250,6 @@ func TestEveryHeadlessRunClosesItsSessionOnTheNode(t *testing.T) {
 		}
 	}
 
-	// CloseSession is fire-and-forget by design — the gateway's session manager
-	// calls it under its own mutex, so it queues the frame rather than waiting
-	// for the node — which is why this waits for the count rather than reading
-	// it once.
 	deadline := time.Now().Add(10 * time.Second)
 	var opened, closed int
 	for {
@@ -333,8 +268,6 @@ func TestEveryHeadlessRunClosesItsSessionOnTheNode(t *testing.T) {
 	}
 }
 
-// And the same for a delegation that ENDS BADLY, because the ways a turn can end
-// outnumber the happy one and each was its own return statement.
 func TestAHeadlessRunThatFailsStillClosesItsSession(t *testing.T) {
 	script := newScriptedAgent(func(turn *scriptedTurn) {
 		turn.emit(agent.Event{Type: agent.EventError, Error: errors.New("the agent fell over")})

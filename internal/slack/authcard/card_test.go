@@ -38,8 +38,6 @@ func awaitReply(t *testing.T, c *Card) Reply {
 	}
 }
 
-// A sign-in drawn for a node goes to the node's owner by DM, with the notice in
-// the turn's own thread; the gateway admin is not involved.
 func TestShowSendsTheCardToItsRecipientNotTheAdmin(t *testing.T) {
 	api := newSyncAPI()
 	allowed := true
@@ -67,7 +65,6 @@ func TestShowSendsTheCardToItsRecipientNotTheAdmin(t *testing.T) {
 	}
 }
 
-// An owner who may not use the gateway is not sent a card at all.
 func TestShowRefusesARecipientWhoMayNotUseTheGateway(t *testing.T) {
 	api := newSyncAPI()
 	allowed := false
@@ -79,8 +76,6 @@ func TestShowRefusesARecipientWhoMayNotUseTheGateway(t *testing.T) {
 	}
 }
 
-// The owner's code comes back as a reply for the node, and neither the admin
-// nor the requester can answer in their place.
 func TestOnlyTheRecipientCanAnswerTheCard(t *testing.T) {
 	api := newSyncAPI()
 	allowed := true
@@ -116,8 +111,6 @@ func TestOnlyTheRecipientCanAnswerTheCard(t *testing.T) {
 	}
 }
 
-// Access withdrawn while the card is open wins: the submission is refused, the
-// code goes nowhere, and whoever runs the sign-in is told to stop.
 func TestARecipientWhoLostAccessIsRefusedAtSubmit(t *testing.T) {
 	api := newSyncAPI()
 	allowed := true
@@ -143,7 +136,6 @@ func TestARecipientWhoLostAccessIsRefusedAtSubmit(t *testing.T) {
 	}
 }
 
-// Settling closes both cards, and a click after that finds nothing to answer.
 func TestSettleClosesBothCards(t *testing.T) {
 	api := newSyncAPI()
 	allowed := true
@@ -176,8 +168,6 @@ func approvalShowing() Showing {
 	return s
 }
 
-// A command the owner must approve is shown to them exactly, with nothing to
-// open until they have approved it.
 func TestAnApprovalCardShowsTheCommandAndNoLink(t *testing.T) {
 	api := newSyncAPI()
 	allowed := true
@@ -201,8 +191,6 @@ func TestAnApprovalCardShowsTheCommandAndNoLink(t *testing.T) {
 	}
 }
 
-// Only the owner's approval starts the command, and only once; the link then
-// arrives on the same card.
 func TestOnlyTheOwnersApprovalStartsTheCommand(t *testing.T) {
 	api := newSyncAPI()
 	allowed := true
@@ -244,7 +232,6 @@ func TestOnlyTheOwnersApprovalStartsTheCommand(t *testing.T) {
 	}
 }
 
-// Access withdrawn before the owner approves wins: nothing is approved.
 func TestAnOwnerWhoLostAccessCannotApprove(t *testing.T) {
 	api := newSyncAPI()
 	allowed := true

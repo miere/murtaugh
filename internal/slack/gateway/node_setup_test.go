@@ -12,12 +12,6 @@ import (
 	"github.com/miere/murtaugh/internal/slack/agentcard"
 )
 
-// The gate this file replaces is the one every other route into the setup form
-// uses: only the gateway administrator. #170 Change I adds a second entitlement
-// — the owner of a node that just attached with nothing configured — and the
-// question is entirely about who may reach the form and what it configures when
-// they do.
-
 func nodeSetupLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
 }
@@ -30,8 +24,6 @@ func nodeSetupGateway(t *testing.T, admin string) *Gateway {
 	return gw
 }
 
-// The administrator configures the gateway: its own store, its own config dir,
-// the tweaker bound to them. Unchanged.
 func TestTheAdministratorStillConfiguresTheGatewayItself(t *testing.T) {
 	gw := nodeSetupGateway(t, "U0ADMIN01")
 
@@ -50,8 +42,6 @@ func TestTheAdministratorStillConfiguresTheGatewayItself(t *testing.T) {
 	}
 }
 
-// Somebody with no node and no admin rights is refused, exactly as before. This
-// is the property the new entitlement must not weaken.
 func TestAUserWithNothingToConfigureIsRefused(t *testing.T) {
 	gw := nodeSetupGateway(t, "U0ADMIN01")
 	if _, ok := gw.setupSubjectFor("U0STRNGR1"); ok {
@@ -62,13 +52,8 @@ func TestAUserWithNothingToConfigureIsRefused(t *testing.T) {
 	}
 }
 
-// A node owner is entitled while their node is waiting, and what they configure
-// is their NODE — not the gateway.
-//
-// The config dir is deliberately empty: the tweaker profile is rooted where the
-// configuration lives, that directory is on the node's machine, and only the
-// node can fill it in. Handing over the GATEWAY's config dir would root a node's
-// unsandboxed profile at a path that does not exist on it.
+// The config dir is empty because a node's configuration lives on its own machine,
+// where the gateway's config dir does not exist.
 func TestANodeOwnerConfiguresTheirNodeAndNotTheGateway(t *testing.T) {
 	gw := nodeSetupGateway(t, "U0ADMIN01")
 	gw.pendingNodes.offer("U0OWNER01", "node-7")
@@ -112,13 +97,8 @@ func TestANodeOwnerIsNotEntitledWithoutAWriter(t *testing.T) {
 	}
 }
 
-// An admin who ALSO owns an unconfigured node configures the node: what the
-// node's card offers must be the node, or the one person most likely to own both
-// would silently reconfigure the wrong half.
-//
-// The node branch is checked BEFORE the admin branch, which is what makes
-// withdrawing an invitation load-bearing rather than tidy — see
-// TestAnAdminGetsTheirGatewayBackWhenTheirNodeSettles.
+// The admin is the person most likely to own both, and the node's card must never
+// silently configure the gateway instead.
 func TestAnAdminWhoOwnsAnUnconfiguredNodeConfiguresTheNode(t *testing.T) {
 	gw := nodeSetupGateway(t, "U0ADMIN01")
 	gw.pendingNodes.offer("U0ADMIN01", "node-7")
@@ -132,17 +112,8 @@ func TestAnAdminWhoOwnsAnUnconfiguredNodeConfiguresTheNode(t *testing.T) {
 	}
 }
 
-// TestTwoUnconfiguredNodesGetOneCard is the DM storm.
-//
-// pendingNodes held one node id per user and called an invitation fresh whenever
-// the stored id differed, so two unconfigured nodes overwrote each other: a
-// laptop and a desktop, both freshly installed, both redialling on a
-// seconds-scale backoff, produce a card on very nearly every attach. That is the
-// "trains the admin to ignore it" failure #170 states for disconnects, landing
-// in the one conversation that most needs to be read.
-//
-// The entitlement still follows the newest node — a submission configures the
-// one whose card is most likely in front of the operator — but the CARD is once.
+// Two nodes redialling on a fast backoff would otherwise DM a card on nearly every
+// attach, which teaches the owner to ignore it.
 func TestTwoUnconfiguredNodesGetOneCard(t *testing.T) {
 	api := &recordingCardAPI{}
 	gw := nodeCardGateway(t, api)
@@ -159,15 +130,12 @@ func TestTwoUnconfiguredNodesGetOneCard(t *testing.T) {
 	if len(posts) != 1 {
 		t.Fatalf("%d setup cards posted over 20 alternating attaches of two unconfigured nodes, want 1", len(posts))
 	}
-	// And the entitlement is still live, pointing at the node that attached last.
 	if nodeID, ok := gw.pendingNodes.get("U0OWNER01"); !ok || nodeID != "node-B" {
 		t.Errorf("the invitation names %q (present=%v), want the most recent node", nodeID, ok)
 	}
 }
 
-// TestOneNodeRedialingGetsOneCard is the same rule for the ordinary case: a
-// single node whose owner is not at their desk keeps attaching all day, and the
-// card already sitting in their DM still opens the form.
+// An owner away from their desk would otherwise get a new card on every redial.
 func TestOneNodeRedialingGetsOneCard(t *testing.T) {
 	api := &recordingCardAPI{}
 	gw := nodeCardGateway(t, api)
@@ -180,13 +148,8 @@ func TestOneNodeRedialingGetsOneCard(t *testing.T) {
 	}
 }
 
-// TestAnAdminGetsTheirGatewayBackWhenTheirNodeSettles is the withdrawal.
-//
-// The invitation used to end in exactly one way — a completed form — so a node
-// configured in a terminal, or simply unplugged, left its owner routed at a node
-// id for the life of the process. For an administrator that is the expensive
-// case: setupSubjectFor checks the node branch first, so their own gateway's
-// setup form becomes unreachable, and there is no App Home route into it.
+// Without withdrawal, an admin whose node was configured by hand or unplugged could
+// never reach their own gateway's setup form again.
 func TestAnAdminGetsTheirGatewayBackWhenTheirNodeSettles(t *testing.T) {
 	gw := nodeSetupGateway(t, "U0ADMIN01")
 	gw.pendingNodes.offer("U0ADMIN01", "node-7")
@@ -205,9 +168,8 @@ func TestAnAdminGetsTheirGatewayBackWhenTheirNodeSettles(t *testing.T) {
 	}
 }
 
-// TestWithdrawingOneNodeLeavesTheOtherInvitationAlone is why withdraw checks the
-// node id. A user with two unconfigured nodes has the newest one recorded;
-// news about the other must not cancel an entitlement that is still true.
+// Only the newest of a user's unconfigured nodes is recorded, so news about the
+// other must not cancel an entitlement that is still true.
 func TestWithdrawingOneNodeLeavesTheOtherInvitationAlone(t *testing.T) {
 	gw := nodeSetupGateway(t, "U0ADMIN01")
 	gw.pendingNodes.offer("U0OWNER01", "node-A")
@@ -221,10 +183,8 @@ func TestWithdrawingOneNodeLeavesTheOtherInvitationAlone(t *testing.T) {
 	}
 }
 
-// TestAWithdrawnNodeIsOfferedAgainOnItsNextAttach keeps the withdrawal from
-// being a way to silence a node permanently: an unconfigured node that
-// disconnects and comes back is still unconfigured, and its owner has not been
-// told.
+// Withdrawal must not silence a node for good: one that reconnects is still
+// unconfigured and its owner has not been told.
 func TestAWithdrawnNodeIsOfferedAgainOnItsNextAttach(t *testing.T) {
 	api := &recordingCardAPI{}
 	gw := nodeCardGateway(t, api)
@@ -238,9 +198,6 @@ func TestAWithdrawnNodeIsOfferedAgainOnItsNextAttach(t *testing.T) {
 	}
 }
 
-// nodeCardGateway is nodeSetupGateway with the Slack surface a card actually
-// needs, so a test can count posts rather than trusting the gate in front of
-// them.
 func nodeCardGateway(t *testing.T, api *recordingCardAPI) *Gateway {
 	t.Helper()
 	gw := nodeSetupGateway(t, "U0ADMIN01")

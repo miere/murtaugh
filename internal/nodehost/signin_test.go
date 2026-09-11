@@ -31,8 +31,6 @@ func awaitAnswer(t *testing.T, answers <-chan agent.DisplayAnswer, what string) 
 	}
 }
 
-// The sign-in is drawn for the owner the credential names, and the node's word
-// on how it ended arrives before the reply that follows it.
 func TestASignInCarriesTheCodeToTheNodeAndSettlesInOrder(t *testing.T) {
 	codes := make(chan agent.DisplayAnswer, 1)
 	script := newScriptedAgent(func(turn *scriptedTurn) {
@@ -88,8 +86,6 @@ func TestASignInCarriesTheCodeToTheNodeAndSettlesInOrder(t *testing.T) {
 	}
 }
 
-// A sign-in still open when its turn ends is cancelled on the node even after
-// a code went through, so no sign-in process outlives the turn that started it.
 func TestASignInOpenWhenItsTurnEndsIsCancelledOnTheNode(t *testing.T) {
 	answers := make(chan agent.DisplayAnswer, 2)
 	script := newScriptedAgent(func(turn *scriptedTurn) {
@@ -134,8 +130,8 @@ func TestASignInOpenWhenItsTurnEndsIsCancelledOnTheNode(t *testing.T) {
 	}
 }
 
-// Nobody consumes a headless turn's cards, so the gateway refuses a sign-in on
-// one instead of leaving the node's sign-in process waiting for its timeout.
+// Nobody reads a headless turn's cards, so the node's sign-in would wait for
+// its timeout.
 func TestAHeadlessSignInIsRefusedByTheGateway(t *testing.T) {
 	answered := make(chan agent.DisplayAnswer, 1)
 	script := newScriptedAgent(func(turn *scriptedTurn) {
@@ -163,8 +159,7 @@ func TestAHeadlessSignInIsRefusedByTheGateway(t *testing.T) {
 	}
 }
 
-// Outside a turn a sign-in has no stream to be answered on, so the node refuses
-// it before anything is sent.
+// Outside a turn there is no stream to answer a sign-in on.
 func TestABackgroundSignInIsRefusedOnTheNode(t *testing.T) {
 	rig := dialLoopback(t, newScriptedAgent(func(*scriptedTurn) {}))
 
@@ -181,7 +176,6 @@ func TestABackgroundSignInIsRefusedOnTheNode(t *testing.T) {
 	}
 }
 
-// A node that sends a sign-in outside any turn anyway is refused by the gateway.
 func TestABackgroundSignInIsNotDrawnByTheGateway(t *testing.T) {
 	rig := dialLoopback(t, newScriptedAgent(func(*scriptedTurn) {}))
 	node := attachRaw(t, rig, "node-raw")
@@ -205,8 +199,7 @@ func TestABackgroundSignInIsNotDrawnByTheGateway(t *testing.T) {
 	}
 }
 
-// Approving a command does not end a sign-in: the link and the code still have
-// to cross afterwards.
+// The link and the code still have to cross after the approval.
 func TestAnApprovedSignInStaysOpenForItsLinkAndCode(t *testing.T) {
 	codes := make(chan agent.DisplayAnswer, 2)
 	script := newScriptedAgent(func(turn *scriptedTurn) {
@@ -257,8 +250,6 @@ func TestAnApprovedSignInStaysOpenForItsLinkAndCode(t *testing.T) {
 	}
 }
 
-// Revoking a node's credential mid-sign-in wins: the node is told to stop its
-// sign-in, and the gateway's turn ends, which is what withdraws its cards.
 func TestRevokingTheNodeMidSignInStopsIt(t *testing.T) {
 	answers := make(chan agent.DisplayAnswer, 1)
 	script := newScriptedAgent(func(turn *scriptedTurn) {
@@ -299,8 +290,8 @@ func TestRevokingTheNodeMidSignInStopsIt(t *testing.T) {
 	}
 }
 
-// A token minted for a handle before owners had to be Slack IDs can never reach
-// anyone, so its node's arrival says how to fix it.
+// Tokens minted for a handle, before owners had to be Slack IDs, can never
+// reach anyone.
 func TestANodeWhoseOwnerIsNotASlackIDIsFlagged(t *testing.T) {
 	rec := &recordingJournal{}
 	dialLoopback(t, newScriptedAgent(func(*scriptedTurn) {}), journalling(rec))

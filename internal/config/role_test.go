@@ -5,13 +5,6 @@ import (
 	"testing"
 )
 
-// The role decides which of Validate's rules apply, and these are the three
-// answers it can give. What they protect is stated in role.go; what they must
-// not do is change anything for the combined install that ships today, which is
-// the first test below.
-
-// combined is one process holding both halves, and it is the zero value of Role
-// precisely so nothing existing has to name a role to keep working.
 func combinedConfig() Config {
 	return Config{
 		OAuth: OAuthConfig{AppToken: "xapp-1", BotToken: "xoxb-1"},
@@ -22,8 +15,6 @@ func combinedConfig() Config {
 	}
 }
 
-// The shipping default must be untouched: tokens required, names resolved
-// against bodies, exactly as before this item.
 func TestCombinedRoleStillRequiresTokensAndResolvesNames(t *testing.T) {
 	cfg := combinedConfig()
 	if err := cfg.Validate(); err != nil {
@@ -44,9 +35,7 @@ func TestCombinedRoleStillRequiresTokensAndResolvesNames(t *testing.T) {
 	}
 }
 
-// A gateway holds Slack credentials and no profile bodies, so a name it uses can
-// only be checked when a node says what it serves. This is the whole of #198's
-// behavioural change, seen at the place it was removed from.
+// A gateway holds no profile bodies, so its name checks can only run when a node says what it serves.
 func TestGatewayRoleDefersEveryNameToBodyCheck(t *testing.T) {
 	cfg := Config{
 		Role:  RoleGateway,
@@ -74,15 +63,12 @@ func TestGatewayRoleDefersEveryNameToBodyCheck(t *testing.T) {
 		t.Fatalf("a broker gateway cannot validate its own configuration: %v", err)
 	}
 
-	// Everything that is NOT a name→body check still runs. A blank name needs no
-	// body to detect and is still an error for every role.
 	blank := cfg
 	blank.Chat.Defaults.Agent = ""
 	if err := blank.Validate(); err == nil {
 		t.Error("a gateway accepted a blank chat.defaults.agent; only the BODY lookup was supposed to move")
 	}
 
-	// And a malformed glob, which is likewise answerable without a body.
 	bad := cfg
 	bad.Chat.Channels = ChannelRules{{Match: "nc-[*", Agent: "code"}}
 	if err := bad.Validate(); err == nil {
@@ -90,19 +76,8 @@ func TestGatewayRoleDefersEveryNameToBodyCheck(t *testing.T) {
 	}
 }
 
-// TestABlankAgentNameIsRefusedAtEverySiteAndEveryRole is the same sentence as
-// the two blanks above, applied to the three sites that were only ever checked
-// by accident.
-//
-// A blank name used to be caught at those sites by the BODY lookup failing —
-// `dm_agents[U1] "  " not found in agents` — which is a name→body check, so
-// #198 deferred it along with the rest. AgentReferences then skips blanks on
-// purpose, to avoid naming the same problem twice, so nothing reported them at
-// connect time either: a blank fell through both halves and a combined install
-// silently stopped agreeing with a gateway about the same file.
-//
-// Every case here is one no body is needed to answer, which is the line the
-// split is drawn on.
+// A blank name used to be caught only by the deferred body lookup, and AgentReferences skips
+// blanks, so it fell through both halves; it needs no body, so every role must refuse it.
 func TestABlankAgentNameIsRefusedAtEverySiteAndEveryRole(t *testing.T) {
 	base := Config{
 		Agents: map[string]AgentProfile{
@@ -131,8 +106,6 @@ func TestABlankAgentNameIsRefusedAtEverySiteAndEveryRole(t *testing.T) {
 		}
 	}
 
-	// The blank must not be reported twice. AgentReferences skips it precisely so
-	// the connect-time check does not name a problem Validate already named.
 	cfg := base
 	cfg.Chat.Defaults.DMAgents = map[string]string{"U1": "   "}
 	for _, ref := range cfg.AgentReferences() {
@@ -142,9 +115,8 @@ func TestABlankAgentNameIsRefusedAtEverySiteAndEveryRole(t *testing.T) {
 	}
 }
 
-// A node has no Slack connection, so requiring the workspace's tokens of it
-// would mean handing them to every laptop that runs an agent. It DOES hold
-// bodies, so its own name checks keep running.
+// A node has no Slack connection, so requiring the workspace's tokens of it would hand them to
+// every laptop that runs an agent.
 func TestNodeRoleNeedsNoSlackCredentialsAndStillResolvesNames(t *testing.T) {
 	cfg := Config{
 		Role: RoleNode,
@@ -164,10 +136,8 @@ func TestNodeRoleNeedsNoSlackCredentialsAndStillResolvesNames(t *testing.T) {
 	}
 }
 
-// The seed addresses are validated where they are configured rather than at dial
-// time: the dialler's refusal arrives inside a redial loop designed to be
-// patient, so a bad scheme would back off forever with one log line explaining
-// why, scrolled past.
+// Checked at load, not dial time: the dialler's refusal lands inside a patient redial loop that
+// would back off forever with one log line explaining why.
 func TestNodeSeedAddressesAreCheckedAtLoad(t *testing.T) {
 	for _, address := range []string{"https://gateway.example.com", "gateway.example.com", "wss://"} {
 		cfg := Config{Role: RoleNode, Node: NodeConfig{Gateway: []string{address}}}

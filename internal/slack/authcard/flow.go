@@ -216,8 +216,8 @@ func (f *Flow) isAdminUser(userID string) bool {
 	return userID == admin
 }
 
-// SetAuthorised installs who may use the gateway at all. It is asked on every
-// click, so access withdrawn while a card is open stops the sign-in.
+// SetAuthorised's check runs on every click, so access withdrawn while a card is
+// open stops the sign-in.
 func (f *Flow) SetAuthorised(allowed func(string) bool) {
 	f.mu.Lock()
 	f.allowed = allowed

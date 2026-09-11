@@ -11,12 +11,6 @@ import (
 	"github.com/miere/murtaugh/internal/slack/alertcard"
 )
 
-// geminiOverload is the error a native agent hands the gateway when its provider
-// is overloaded: the original chain's text, carrying the classification the
-// backend derived at the point of failure (internal/agent/native's eventError,
-// via llm.CarryFailure — see TestEventErrorCarriesTheProviderClassification for
-// the producing half). The gateway classifies nothing itself; it links no
-// provider client and cannot.
 func geminiOverload() error {
 	return providerfail.New(providerfail.Failure{
 		Kind:       providerfail.Overloaded,
