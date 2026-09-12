@@ -1,18 +1,5 @@
-// Package mcpbridge connects an external ACP agent to Murtaugh's own tools
-// without leaking credentials or duplicating logic into the agent's process.
-//
-// The long-running gateway hosts a Server on a private unix socket. Each ACP
-// session is Registered with the resolved toolset it should see (built-ins plus
-// proxied external MCP tools) and the approver that gates them; Register returns
-// an unguessable token. The gateway hands the agent a stdio MCP server in
-// session/new whose command is `murtaugh mcp-bridge` with that token in its
-// env. The agent spawns it; RunBridge dials the socket, presents the token, and
-// then byte-pipes its stdio to the connection. The gateway runs the real MCP
-// server (over the same socket connection) bound to that session's toolset.
-//
-// So: agent ⇄ (stdio) ⇄ bridge subprocess ⇄ (unix socket) ⇄ gateway aggregator.
-// Third-party MCP credentials and the approval broker stay in the gateway; the
-// agent only ever sees Murtaugh's curated tool surface.
+// Package mcpbridge pipes an agent's stdio to a socket the runtime owns, so
+// third-party MCP credentials and the approval broker never enter its process.
 package mcpbridge
 
 import (
@@ -36,12 +23,11 @@ import (
 	"github.com/miere/murtaugh/internal/tools"
 )
 
-// Subcommand is the argv[1] that runs the bridge: `murtaugh mcp-bridge`.
+// Subcommand is the argv[1] that runs the bridge: `murtaugh-runtime mcp-bridge`.
 const Subcommand = "mcp-bridge"
 
-// EnvSocket and EnvToken name the environment variables the gateway sets on the
-// Stdio McpServer it hands the agent, and that the bridge subcommand reads. Both
-// sides reference these constants so the contract stays in one place.
+// Both sides reference EnvSocket and EnvToken, so the contract between the
+// runtime and the bridge subcommand stays in one place.
 const (
 	EnvSocket = "MURTAUGH_BRIDGE_SOCKET"
 	EnvToken  = "MURTAUGH_BRIDGE_TOKEN"
@@ -68,7 +54,7 @@ type Session struct {
 	Aliases map[string]string
 }
 
-// Server is the gateway-side aggregator: a unix-socket listener that serves each
+// Server is the runtime-side aggregator: a unix-socket listener that serves each
 // registered session's toolset as an MCP server.
 type Server struct {
 	socketPath string
@@ -182,7 +168,7 @@ func (s *Server) Unregister(token string) {
 func (s *Server) SocketPath() string { return s.socketPath }
 
 // Does not retire the server: a later Start serves again, because stepping down
-// and being promoted again is routine for a gateway leader.
+// and being promoted again is routine for a leader.
 func (s *Server) Close() error {
 	s.mu.Lock()
 	ln, run := s.listener, s.run
@@ -230,8 +216,18 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 		Writer: conn,
 	}
 	server := mcp.NewFromTools(sess.Tools, sess.Approver, sess.Aliases).Server()
-	if err := server.Run(runCtx, transport); err != nil && !errors.Is(err, io.EOF) {
-		s.log.Warn("mcp aggregator session ended", "error", err)
+	s.logSessionEnd(server.Run(runCtx, transport))
+}
+
+// Every new conversation is tried as a resume first, and the process torn down
+// when that fails takes its bridge with it — a teardown, not a fault.
+func (s *Server) logSessionEnd(err error) {
+	switch {
+	case err == nil:
+	case errors.Is(err, io.EOF), errors.Is(err, net.ErrClosed), errors.Is(err, context.Canceled):
+		s.log.Debug("mcp aggregator session ended", "error", err)
+	default:
+		s.log.Warn("mcp aggregator session ended unexpectedly", "error", err)
 	}
 }
 
@@ -245,11 +241,8 @@ type connReader struct {
 func (cr connReader) Read(p []byte) (int, error) { return cr.r.Read(p) }
 func (cr connReader) Close() error               { return cr.c.Close() }
 
-// RunBridge is the `murtaugh mcp-bridge` subcommand body. It dials the gateway
-// socket, presents token, and byte-pipes in (the agent's stdin) and out (the
-// agent's stdout) to the connection until either side closes. It speaks no MCP
-// itself — it is a transparent pipe, so the gateway's MCP server and the agent's
-// MCP client talk directly.
+// RunBridge speaks no MCP itself — it is a transparent pipe, so the runtime's
+// MCP server and the agent's MCP client talk directly.
 func RunBridge(ctx context.Context, socketPath, token string, in io.Reader, out io.Writer) error {
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "unix", socketPath)
@@ -273,16 +266,13 @@ func RunBridge(ctx context.Context, socketPath, token string, in io.Reader, out 
 	}()
 
 	errc := make(chan error, 2)
-	go func() { _, err := io.Copy(conn, in); errc <- err }()  // agent -> gateway
-	go func() { _, err := io.Copy(out, conn); errc <- err }() // gateway -> agent
+	go func() { _, err := io.Copy(conn, in); errc <- err }()  // agent -> runtime
+	go func() { _, err := io.Copy(out, conn); errc <- err }() // runtime -> agent
 	// Return as soon as either direction ends; the deferred Close tears down the
 	// other copy.
 	err = <-errc
-	// Propagate the upstream close downstream: when the gateway drops the
-	// connection (e.g. it rejects the token, or shuts down), close out so a
-	// downstream MCP client reading the bridge's stdout sees EOF instead of
-	// blocking forever. In production out is os.Stdout and the process exits right
-	// after this returns, so the close is a harmless no-op there.
+	// Propagate the upstream close downstream, so an MCP client reading the
+	// bridge's stdout sees EOF instead of blocking forever.
 	if c, ok := out.(io.Closer); ok {
 		_ = c.Close()
 	}

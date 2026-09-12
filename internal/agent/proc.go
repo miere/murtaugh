@@ -5,12 +5,8 @@ import (
 	"syscall"
 )
 
-// SetProcessGroup makes cmd start in its own process group, so its whole
-// descendant tree can be torn down together with KillProcessGroup. External agent
-// backends spawn grandchildren the gateway never sees — an ACP adapter forks the
-// `murtaugh mcp-bridge` and a `claude` CLI; the claude_code backend's `claude`
-// process forks its own MCP servers. Without a dedicated group, killing only the
-// direct child leaves those orphaned when the gateway shuts down or restarts.
+// SetProcessGroup exists because an agent backend forks grandchildren nobody
+// tracks; without a group of its own, killing the child orphans them.
 func SetProcessGroup(cmd *exec.Cmd) {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}

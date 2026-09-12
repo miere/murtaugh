@@ -347,7 +347,7 @@ murtaugh slack update_msg --channel "#deploys" --ts 1716950455.123456 \
   --body "Build finished" --blocks ./done-blocks.json
 ```
 
-## murtaugh slack gateway
+## murtaugh gateway
 
 **Gateway binary, no command.** `murtaugh-gateway` with no command IS the
 long-running Socket Mode daemon. It responds to slash commands, runs YAML

@@ -70,9 +70,8 @@ type Aggregator interface {
 	RegisterSession(meta SessionMetadata, emit TurnEmitter) (server MCPServerSpec, release func(), err error)
 }
 
-// MCPServerSpec is the stdio MCP server an ACP agent is asked to spawn — the
-// `murtaugh mcp-bridge` proxy. It maps onto ACP's stdio McpServer shape in
-// session/new (name + command + args + env).
+// MCPServerSpec is shaped by ACP's stdio McpServer in session/new; it always
+// describes the `murtaugh-runtime mcp-bridge` proxy.
 type MCPServerSpec struct {
 	Name    string
 	Command string
