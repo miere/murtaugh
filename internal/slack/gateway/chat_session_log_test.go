@@ -235,3 +235,101 @@ func TestChatHandlerNoSessionLogIsNoop(t *testing.T) {
 		t.Fatalf("Handle: %v", err)
 	}
 }
+
+// servedByNode builds a handler routing to `requested` whose conversation is
+// pinned to a node advertising `profiles`.
+func servedByNode(t *testing.T, rec journal.Recorder, blobDir, requested string, profiles []string) *ChatHandler {
+	t.Helper()
+	sessions := scriptedSessions{id: "sess-node", events: []agent.Event{
+		{Type: agent.EventText, Text: "hello"},
+		{Type: agent.EventComplete},
+	}}
+	return NewChatHandler(&fakeStreamAPI{}, map[string]ChatSessionManager{requested: sessions},
+		func(ChatRequest) ChatRoute { return ChatRoute{Agent: requested, ReplyOnThread: true} },
+		time.Hour, 1, discardLogger()).
+		WithSessionLogger(newSessionLogger(rec, blobDir, discardLogger())).
+		WithPinnedNode(func(context.Context, agent.ConversationKey) (agentruntime.NodeRef, error) {
+			return agentruntime.NodeRef{NodeID: "n1", Owner: "U0ADMIN", Profiles: profiles}, nil
+		})
+}
+
+func TestChatHandlerRecordsTheRoutedAgentWhenTheNodeServesIt(t *testing.T) {
+	blobDir := t.TempDir()
+	rec := &journalSpy{}
+	handler := servedByNode(t, rec, blobDir, "default", []string{"default"})
+
+	if err := handler.handleResolving(context.Background(), ChatRequest{ChannelID: "D1", UserID: "U1", MessageTS: "1.1", DM: true, Text: "hi", Source: "dm"}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	turns := rec.byKind("session.turn")
+	if len(turns) != 1 {
+		t.Fatalf("expected one session.turn, got %d", len(turns))
+	}
+	payload := turns[0].Payload.(map[string]any)
+	if payload["agent"] != "default" {
+		t.Fatalf("agent = %v, want default", payload["agent"])
+	}
+	if _, substituted := payload["requested_agent"]; substituted {
+		t.Fatalf("no substitution happened, so the row must not claim one: %+v", payload)
+	}
+	if strings.Contains(turns[0].Summary, "asked for") {
+		t.Fatalf("summary = %q, want no substitution note", turns[0].Summary)
+	}
+	data, err := os.ReadFile(filepath.Join(blobDir, turns[0].BlobRef))
+	if err != nil {
+		t.Fatalf("read transcript: %v", err)
+	}
+	if strings.Contains(string(data), "requested_agent") {
+		t.Fatalf("transcript %q should carry no requested_agent", data)
+	}
+}
+
+// The e2e run journalled a DM as agent=tweaker on a node that only serves
+// `default`, so the journal named a profile that never ran.
+func TestChatHandlerRecordsTheProfileTheNodeServes(t *testing.T) {
+	blobDir := t.TempDir()
+	rec := &journalSpy{}
+	handler := servedByNode(t, rec, blobDir, "tweaker", []string{"default"})
+
+	if err := handler.handleResolving(context.Background(), ChatRequest{ChannelID: "D1", UserID: "U1", MessageTS: "1.1", DM: true, Text: "hi", Source: "dm"}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	turns := rec.byKind("session.turn")
+	if len(turns) != 1 {
+		t.Fatalf("expected one session.turn, got %d", len(turns))
+	}
+	payload := turns[0].Payload.(map[string]any)
+	if payload["agent"] != "default" || payload["requested_agent"] != "tweaker" {
+		t.Fatalf("row must name both the served and the requested profile: %+v", payload)
+	}
+	if !strings.Contains(turns[0].Summary, "via default (asked for tweaker)") {
+		t.Fatalf("summary = %q, want it to show the substitution", turns[0].Summary)
+	}
+	data, err := os.ReadFile(filepath.Join(blobDir, turns[0].BlobRef))
+	if err != nil {
+		t.Fatalf("read transcript: %v", err)
+	}
+	for _, want := range []string{`"agent":"default"`, `"requested_agent":"tweaker"`} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("transcript %q missing %q", data, want)
+		}
+	}
+}
+
+// A node serving several profiles cannot say which one ran (issue #223), so the
+// routed name stands rather than a guess being recorded.
+func TestChatHandlerKeepsTheRoutedAgentWhenTheNodeServesSeveral(t *testing.T) {
+	rec := &journalSpy{}
+	handler := servedByNode(t, rec, t.TempDir(), "tweaker", []string{"default", "reviewer"})
+
+	if err := handler.handleResolving(context.Background(), ChatRequest{ChannelID: "D1", UserID: "U1", MessageTS: "1.1", DM: true, Text: "hi", Source: "dm"}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	turns := rec.byKind("session.turn")
+	if len(turns) != 1 || turns[0].Payload.(map[string]any)["agent"] != "tweaker" {
+		t.Fatalf("expected the routed agent to stand, got %+v", turns)
+	}
+}

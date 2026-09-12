@@ -23,12 +23,15 @@ func NewBlobStore(dir string) *BlobStore { return &BlobStore{dir: dir} }
 // TranscriptTurn is one appended line in a session's transcript file: the user
 // prompt, the agent's full response, and how the turn ended.
 type TranscriptTurn struct {
-	Time     time.Time `json:"time"`
-	Agent    string    `json:"agent,omitempty"`
-	Source   string    `json:"source,omitempty"`
-	Outcome  string    `json:"outcome"`
-	Prompt   string    `json:"prompt"`
-	Response string    `json:"response"`
+	Time  time.Time `json:"time"`
+	Agent string    `json:"agent,omitempty"`
+	// Set only when routing asked for a profile the node that ran the turn does
+	// not serve, so the substitution is on the record rather than hidden.
+	RequestedAgent string `json:"requested_agent,omitempty"`
+	Source         string `json:"source,omitempty"`
+	Outcome        string `json:"outcome"`
+	Prompt         string `json:"prompt"`
+	Response       string `json:"response"`
 }
 
 // AppendTranscript appends one turn to the session's NDJSON transcript file and

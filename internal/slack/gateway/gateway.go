@@ -565,6 +565,7 @@ func New(cfg config.Config, logger *slog.Logger, recorder journal.Recorder, brok
 			WithReplyBlocks(cfg.BaseDir, api).
 			WithAlerts(cfg.BaseDir, alertAPI).
 			WithCredentialRepair(credRepair).
+			WithPinnedNode(runtime.PinnedNode).
 			WithBackgroundEventsRouter(bgRouter)
 		// The router renders background turns through the chat handler's own renderer,
 		// so a background reply looks exactly like a foreground one.

@@ -165,16 +165,20 @@ func (h *Host) pinnedNode(ctx context.Context, conversation agent.ConversationKe
 	if node == nil {
 		return agentruntime.NodeRef{NodeID: pin.NodeID}, fmt.Errorf("node %s, which this conversation runs on, is not connected", pin.NodeID)
 	}
-	return agentruntime.NodeRef{NodeID: node.nodeID, Owner: node.userID}, nil
+	return h.nodeRef(node), nil
 }
 
 func (h *Host) connectedNodes() []agentruntime.NodeRef {
 	nodes := h.connected()
 	out := make([]agentruntime.NodeRef, 0, len(nodes))
 	for _, node := range nodes {
-		out = append(out, agentruntime.NodeRef{NodeID: node.nodeID, Owner: node.userID})
+		out = append(out, h.nodeRef(node))
 	}
 	return out
+}
+
+func (h *Host) nodeRef(node *attached) agentruntime.NodeRef {
+	return agentruntime.NodeRef{NodeID: node.nodeID, Owner: node.userID, Profiles: h.claimOf(node).Profiles}
 }
 
 func (h *Host) renewCredential(ctx context.Context, nodeID string) (agentruntime.RenewalStatus, error) {

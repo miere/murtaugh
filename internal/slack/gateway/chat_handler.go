@@ -117,6 +117,10 @@ type ChatHandler struct {
 	// offlineOwners holds the machine-offline card's mention backoff across turns.
 	// A gateway restart forgets it, which costs the owner one more mention.
 	offlineOwners *ownerNotifyWindow
+	// pinnedNode reports the runtime node a conversation runs on, with the agent
+	// profiles it advertised. nil (an in-process gateway, or tests) reports every
+	// turn under the profile routing asked for, which is what actually ran.
+	pinnedNode func(context.Context, agent.ConversationKey) (agentruntime.NodeRef, error)
 	// credRepair asks the admin to re-authenticate when a claude_code turn fails
 	// because its credential was rejected. It covers the case auth.request
 	// structurally cannot: that tool is called by an agent from inside a turn, but
@@ -179,6 +183,29 @@ func NewChatHandler(api StreamAPI, sessions map[string]ChatSessionManager, resol
 		logger: logger, statusRefreshInterval: defaultStatusRefreshInterval,
 		offlineOwners: newOwnerNotifyWindow(ownerNotifyBackoff, time.Now),
 	}
+}
+
+// WithPinnedNode attaches the lookup that says which node a conversation runs
+// on, so a turn is recorded under the profile that node serves.
+func (h *ChatHandler) WithPinnedNode(pinned func(context.Context, agent.ConversationKey) (agentruntime.NodeRef, error)) *ChatHandler {
+	h.pinnedNode = pinned
+	return h
+}
+
+// A node advertising several profiles is issue #223: which one ran is unknown,
+// so the requested name stands.
+func (h *ChatHandler) servedAgent(ctx context.Context, key agent.ConversationKey, requested string) string {
+	if h.pinnedNode == nil {
+		return requested
+	}
+	node, err := h.pinnedNode(ctx, key)
+	if err != nil {
+		return requested
+	}
+	if len(node.Profiles) == 1 && node.Profiles[0] != requested {
+		return node.Profiles[0]
+	}
+	return requested
 }
 
 // WithCredentialRepair attaches the path that asks the admin to re-authenticate
@@ -557,8 +584,10 @@ func (h *ChatHandler) Handle(ctx context.Context, req ChatRequest, route ChatRou
 			}
 			// Fresh context: on the interrupt/timeout paths the request ctx is
 			// already cancelled, but the row enqueue + transcript write must run.
-			h.sessionLog.record(context.Background(), sessionTurn{
-				req: req, agent: agentName, sessionID: sessionID, prompt: prompt,
+			logCtx := context.Background()
+			h.sessionLog.record(logCtx, sessionTurn{
+				req: req, agent: h.servedAgent(logCtx, key, agentName), requestedAgent: agentName,
+				sessionID: sessionID, prompt: prompt,
 				response: respBuf.String(), outcome: outcome, stopReason: stopReason,
 				duration: time.Since(startedAt), chunks: chunkSeen, bytes: byteSeen,
 				errText: errText,

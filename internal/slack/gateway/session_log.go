@@ -41,16 +41,19 @@ func newSessionLogger(recorder journal.Recorder, blobDir string, logger *slog.Lo
 
 // sessionTurn is one completed ACP chat turn to record.
 type sessionTurn struct {
-	req        ChatRequest
-	agent      string
-	sessionID  string
-	prompt     string
-	response   string
-	outcome    string
-	stopReason string
-	duration   time.Duration
-	chunks     int
-	bytes      int
+	req   ChatRequest
+	agent string
+	// requestedAgent is what routing asked for; it differs from agent when the
+	// node that ran the turn does not serve that profile.
+	requestedAgent string
+	sessionID      string
+	prompt         string
+	response       string
+	outcome        string
+	stopReason     string
+	duration       time.Duration
+	chunks         int
+	bytes          int
 	// errText is the terminal error message for an errored turn (empty otherwise),
 	// so a failed turn is explainable from the journal row alone.
 	errText string
@@ -73,13 +76,18 @@ func (s *sessionLogger) record(ctx context.Context, t sessionTurn) {
 	if s == nil {
 		return
 	}
+	requested := t.requestedAgent
+	if requested == t.agent {
+		requested = ""
+	}
 	ref, err := s.blobs.AppendTranscript(t.sessionID, journal.TranscriptTurn{
-		Time:     time.Now(),
-		Agent:    t.agent,
-		Source:   t.req.Source,
-		Outcome:  t.outcome,
-		Prompt:   t.prompt,
-		Response: t.response,
+		Time:           time.Now(),
+		Agent:          t.agent,
+		RequestedAgent: requested,
+		Source:         t.req.Source,
+		Outcome:        t.outcome,
+		Prompt:         t.prompt,
+		Response:       t.response,
 	})
 	if err != nil {
 		s.logger.Warn("failed to write session transcript", "session_id", t.sessionID, "error", err)
@@ -94,7 +102,11 @@ func (s *sessionLogger) record(ctx context.Context, t sessionTurn) {
 		level = journal.LevelWarn
 	}
 
-	summary := fmt.Sprintf("%s turn via %s (%d bytes)", t.outcome, t.agent, t.bytes)
+	via := t.agent
+	if requested != "" {
+		via = fmt.Sprintf("%s (asked for %s)", t.agent, requested)
+	}
+	summary := fmt.Sprintf("%s turn via %s (%d bytes)", t.outcome, via, t.bytes)
 	if t.errText != "" {
 		summary += ": " + truncateForSummary(t.errText, 160)
 	}
@@ -107,6 +119,9 @@ func (s *sessionLogger) record(ctx context.Context, t sessionTurn) {
 		"duration_ms": t.duration.Milliseconds(),
 		"chunks":      t.chunks,
 		"bytes":       t.bytes,
+	}
+	if requested != "" {
+		payload["requested_agent"] = requested
 	}
 	if t.errText != "" {
 		payload["error"] = t.errText
