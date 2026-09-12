@@ -23,8 +23,6 @@ import (
 	"github.com/miere/murtaugh/internal/nodetoken"
 )
 
-var ErrNoNode = errors.New("no runtime node is connected")
-
 const (
 	initializeTimeout = 30 * time.Second
 	shutdownGrace     = 5 * time.Second
@@ -328,7 +326,7 @@ func (h *Host) anyClient() (*remote.Client, error) {
 	defer h.mu.Unlock()
 	node := h.newest()
 	if node == nil {
-		return nil, ErrNoNode
+		return nil, agentruntime.ErrNoNode
 	}
 	return node.client, nil
 }

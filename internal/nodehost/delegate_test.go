@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/miere/murtaugh/internal/agent"
+	"github.com/miere/murtaugh/internal/agentruntime"
 	"github.com/miere/murtaugh/internal/agentwire"
 	"github.com/miere/murtaugh/internal/config"
 	configstore "github.com/miere/murtaugh/internal/config/store"
@@ -188,10 +189,10 @@ func TestTheFleetIsOwnNodesOrGrantedNodesButNeverAMixture(t *testing.T) {
 		attachStubs(host, nodeStub{id: "node-a", owner: "U2"})
 		ctx := agent.WithConversation(context.Background(), agent.ConversationKey{ChannelID: "C1"})
 		_, err := host.delegate(ctx, agent.SessionMetadata{ChannelID: "C1", UserID: "U9"})
-		if !errors.Is(err, ErrNoFleet) {
+		if !errors.Is(err, agentruntime.ErrNoFleet) {
 			t.Fatalf("want ErrNoFleet, got %v", err)
 		}
-		if errors.Is(err, ErrNoNode) {
+		if errors.Is(err, agentruntime.ErrNoNode) {
 			t.Fatal("a user with no fleet was told the gateway has no nodes at all")
 		}
 	})
@@ -200,7 +201,7 @@ func TestTheFleetIsOwnNodesOrGrantedNodesButNeverAMixture(t *testing.T) {
 		host := newTestHost(t, nil, access)
 		ctx := agent.WithConversation(context.Background(), agent.ConversationKey{ChannelID: "C1"})
 		_, err := host.delegate(ctx, agent.SessionMetadata{ChannelID: "C1", UserID: "U1"})
-		if !errors.Is(err, ErrNoNode) {
+		if !errors.Is(err, agentruntime.ErrNoNode) {
 			t.Fatalf("want ErrNoNode, got %v", err)
 		}
 	})
@@ -304,6 +305,42 @@ func TestReElectionOverwritesTheStoredPin(t *testing.T) {
 	}
 	if pins.puts != 2 {
 		t.Fatalf("the pin was written %d times; want 2 — once elected, once re-elected", pins.puts)
+	}
+}
+
+// Spec #170: a conversation is never lost silently, so a refusal has to name the
+// machine the conversation was on rather than only say none is left.
+func TestAConversationThatCannotMoveNamesTheMachineItWasOn(t *testing.T) {
+	ctx := agent.WithConversation(context.Background(),
+		agent.ConversationKey{TeamID: "T1", ChannelID: "C1", ThreadTS: "1.1"})
+	meta := agent.SessionMetadata{TeamID: "T1", ChannelID: "C1", ThreadTS: "1.1", UserID: "U1"}
+
+	for _, tc := range []struct {
+		name   string
+		others []nodeStub
+		want   error
+	}{
+		{name: "nothing else is connected", want: agentruntime.ErrNoNode},
+		{name: "only somebody else's machine is connected", others: []nodeStub{{id: "node-b", owner: "U2"}}, want: agentruntime.ErrNoFleet},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host := newTestHost(t, &memPins{}, config.AccessConfig{})
+			nodes := attachStubs(host, nodeStub{id: "node-a", owner: "U1"})
+			if _, err := host.delegate(ctx, meta); err != nil {
+				t.Fatalf("first election: %v", err)
+			}
+			host.remove(nodes["node-a"])
+			attachStubs(host, tc.others...)
+
+			_, err := host.delegate(ctx, meta)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("got %v, want %v", err, tc.want)
+			}
+			var offline *agentruntime.NodeOfflineError
+			if !errors.As(err, &offline) || offline.Node.NodeID != "node-a" {
+				t.Fatalf("the refusal does not name the machine the conversation was on: %v", err)
+			}
+		})
 	}
 }
 
@@ -523,7 +560,7 @@ func TestASessionIsBoundToTheNodeThatMintedIt(t *testing.T) {
 	if !errors.Is(err, agent.ErrSessionGone) {
 		t.Fatalf("a session whose node left gave %v, want ErrSessionGone", err)
 	}
-	if errors.Is(err, ErrNoNode) {
+	if errors.Is(err, agentruntime.ErrNoNode) {
 		t.Fatal("a lost session was reported as a gateway with no nodes")
 	}
 }

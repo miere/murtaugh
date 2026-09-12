@@ -121,7 +121,7 @@ func TestDefaultSlackSink_AlertTextDowngrades(t *testing.T) {
 	s := newDefaultSlackSink(api, poster, "C1", StreamWriterOptions{MinChars: 1, Logger: discardLogger()}, discardLogger())
 
 	ctx := context.Background()
-	if err := s.Append(ctx, alertcard.PlainText(failSpec(errSample))); err != nil {
+	if err := s.Append(ctx, alertcard.PlainText(failSpec(ctx, errSample, nil))); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
 	if err := s.Stop(ctx); err != nil {

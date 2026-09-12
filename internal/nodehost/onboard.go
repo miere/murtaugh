@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/miere/murtaugh/internal/agentruntime"
 	"github.com/miere/murtaugh/internal/agentwire"
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/journal"
@@ -124,7 +125,7 @@ func (h *Host) Configure(ctx context.Context, nodeID string, cfg agentwire.NodeC
 	}
 	h.mu.Unlock()
 	if target == nil {
-		return agentwire.NodeConfigured{}, ErrNoNode
+		return agentwire.NodeConfigured{}, agentruntime.ErrNoNode
 	}
 	return target.client.Configure(ctx, cfg)
 }

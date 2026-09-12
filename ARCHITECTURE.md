@@ -1089,6 +1089,22 @@ between their own fleet and the gateway admin's; #196 does not, and that card is
 left to the work that builds a cross-fleet grant flow — the notice the model
 delivers is what makes the move visible today.
 
+**When nothing can take the conversation, the user is told which machine went
+away.** `ErrNoNode` and `ErrNoFleet` live in `agentruntime`, beside `NodeRef`,
+so the gateway tells a missing machine from a fault with `errors.Is` without
+linking the node host. A pinned conversation wraps them in `NodeOfflineError`,
+which names the node and its owner (read from the token store, since the node is
+gone). The chat failure card then says the machine is offline and how to get one
+back, and the turn is journalled as `node_unavailable` rather than `errored`.
+
+The card is drawn on every failed turn — the person talking needs to know why
+nothing happened — but the owner's `<@…>` mention is not: a sleeping laptop and a
+persistent user would otherwise notify them once per message. `ownerNotifyWindow`
+(the same "once per outage" shape as the credential alert, keyed by node and held
+on the `ChatHandler`) mentions the owner once, then names them plainly for 24
+hours. Lapsed nodes are swept as it goes, and a gateway restart forgets the
+window — worth one extra mention, not a store.
+
 **Delegation runs under `*agent.SessionManager`, never in place of it.** The
 gateway type-asserts four optional capability surfaces on the manager and three
 of them fail silently when unsatisfied, so the choice of node lives at

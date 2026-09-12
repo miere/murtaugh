@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/miere/murtaugh/internal/agentruntime"
 	"github.com/miere/murtaugh/internal/agentwire"
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/journal"
@@ -302,7 +303,7 @@ func (s *settledNodes) first() nodehost.Node {
 func TestConfiguringAnAbsentNodeSaysSo(t *testing.T) {
 	rig := dialLoopback(t, newScriptedAgent(func(*scriptedTurn) {}))
 	_, err := rig.host.Configure(context.Background(), "node-that-left", agentwire.NodeConfiguration{})
-	if !errors.Is(err, nodehost.ErrNoNode) {
+	if !errors.Is(err, agentruntime.ErrNoNode) {
 		t.Fatalf("configuring an absent node gave %v, want ErrNoNode", err)
 	}
 }

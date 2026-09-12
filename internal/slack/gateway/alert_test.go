@@ -4,11 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/slack-go/slack"
+
 	"github.com/miere/murtaugh/assets"
+	"github.com/miere/murtaugh/internal/agentruntime"
 	"github.com/miere/murtaugh/internal/slack/alertcard"
 	slackclient "github.com/miere/murtaugh/internal/slack/client"
 )
@@ -32,6 +36,10 @@ func testAlertCards() *alertcard.Renderer { return alertcard.NewRenderer("", ass
 // alertRenderer wires a sectionRenderer whose alerts go to api. A nil api leaves
 // the poster unwired, which is the text-fallback path.
 func alertRenderer(stream *fakeStreamAPI, msgr *fakeStatusMessenger, api alertMessagePoster) *sectionRenderer {
+	return ownerAlertRenderer(stream, msgr, api, nil)
+}
+
+func ownerAlertRenderer(stream *fakeStreamAPI, msgr *fakeStatusMessenger, api alertMessagePoster, owner ownerRef) *sectionRenderer {
 	var poster alertPoster
 	if api != nil {
 		poster = newAlertPoster(api, testAlertCards(), "C1", "100.0")
@@ -40,7 +48,7 @@ func alertRenderer(stream *fakeStreamAPI, msgr *fakeStatusMessenger, api alertMe
 	return newSectionRenderer(
 		func() SlackSink { return NewStreamWriter(stream, "C1", opts) },
 		func() toolBlock { return newDefaultCardBlock(stream, msgr, "C1", "100.0", opts, discardLogger()) },
-		nil, poster, "C1", "100.0",
+		nil, poster, owner, "C1", "100.0",
 		discardLogger(),
 	)
 }
@@ -91,6 +99,41 @@ func TestSectionRendererFailPostsACardNotStreamText(t *testing.T) {
 	// The reply keeps the agent's own words and nothing else.
 	if got := streamedText(t, stream); got != "here is what I found" {
 		t.Errorf("reply surface = %q, want the agent's text alone", got)
+	}
+}
+
+// Checked on the rendered card, not the spec, because a template that dropped
+// Reason would hide which machine went away.
+func TestSectionRendererFailTellsTheUserTheirMachineIsOffline(t *testing.T) {
+	stream, msgr, api := &fakeStreamAPI{}, &fakeStatusMessenger{}, &fakeAlertAPI{}
+	r := alertRenderer(stream, msgr, api)
+
+	err := fmt.Errorf("create agent session: %w", &agentruntime.NodeOfflineError{
+		Node: agentruntime.NodeRef{NodeID: "e2e-node", Owner: "U0ADMIN"},
+		Err:  agentruntime.ErrNoNode,
+	})
+	if err := r.Fail(context.Background(), err); err != nil {
+		t.Fatalf("Fail: %v", err)
+	}
+
+	if len(api.posts) != 1 {
+		t.Fatalf("want one alert card posted, got %d", len(api.posts))
+	}
+	post := api.posts[0]
+	if strings.Contains(post.Text, "Oops!") {
+		t.Errorf("fallback text = %q, want the offline headline, not the generic one", post.Text)
+	}
+	blocks := string(post.Blocks)
+	for _, want := range []string{
+		"Machine offline",
+		"The machine this conversation was running on is offline.",
+		"`e2e-node`, <@U0ADMIN>'s machine, is not connected",
+		"murtaugh-runtime",
+		"Warning icon",
+	} {
+		if !strings.Contains(blocks, want) {
+			t.Errorf("card is missing %q: %s", want, blocks)
+		}
 	}
 }
 
@@ -276,5 +319,80 @@ func TestAlertCardsArriveCollapsed(t *testing.T) {
 	}
 	if !doc.Blocks[0].IsCollapsible || !doc.Blocks[0].DefaultCollapse {
 		t.Error("alert card did not arrive collapsed")
+	}
+}
+
+// The card is checked as rendered, because the whole point is what the owner's
+// phone does: a mention notifies, their name does not.
+func TestSectionRendererFailMentionsAnOfflineOwnerOnceADay(t *testing.T) {
+	now := time.Date(2026, 9, 12, 9, 0, 0, 0, time.UTC)
+	names := newUserNameCache(&fakeBackfillAPI{
+		users: map[string]*slack.User{"U0ADMIN": userWithDisplayName("Miere")},
+	}, discardLogger())
+	owner := newOfflineOwnerRef(newOwnerNotifyWindow(24*time.Hour, func() time.Time { return now }), names)
+	api := &fakeAlertAPI{}
+
+	fail := func(node string) string {
+		t.Helper()
+		r := ownerAlertRenderer(&fakeStreamAPI{}, &fakeStatusMessenger{}, api, owner)
+		err := fmt.Errorf("create agent session: %w", &agentruntime.NodeOfflineError{
+			Node: agentruntime.NodeRef{NodeID: node, Owner: "U0ADMIN"},
+			Err:  agentruntime.ErrNoNode,
+		})
+		if err := r.Fail(context.Background(), err); err != nil {
+			t.Fatalf("Fail: %v", err)
+		}
+		return string(api.posts[len(api.posts)-1].Blocks)
+	}
+
+	first := fail("e2e-node")
+	if want := "`e2e-node`, <@U0ADMIN>'s machine, is not connected"; !strings.Contains(first, want) {
+		t.Errorf("first card is missing %q: %s", want, first)
+	}
+
+	now = now.Add(5 * time.Minute)
+	repeat := fail("e2e-node")
+	if want := "`e2e-node`, Miere's machine, is not connected"; !strings.Contains(repeat, want) {
+		t.Errorf("repeat card is missing %q: %s", want, repeat)
+	}
+	if strings.Contains(repeat, "<@U0ADMIN>") {
+		t.Errorf("repeat card notified the owner again: %s", repeat)
+	}
+	// The user speaking still has to be told why nothing happened.
+	if !strings.Contains(repeat, "Machine offline") {
+		t.Errorf("repeat card was not drawn: %s", repeat)
+	}
+
+	if other := fail("laptop"); !strings.Contains(other, "`laptop`, <@U0ADMIN>'s machine,") {
+		t.Errorf("a second machine going offline must notify on its own: %s", other)
+	}
+
+	now = now.Add(24 * time.Hour)
+	if lapsed := fail("e2e-node"); !strings.Contains(lapsed, "`e2e-node`, <@U0ADMIN>'s machine,") {
+		t.Errorf("card a day later did not notify again: %s", lapsed)
+	}
+	if len(api.posts) != 4 {
+		t.Errorf("posted %d cards, want one per failed turn", len(api.posts))
+	}
+}
+
+// A node nobody has failed on for longer than the window must not sit in the
+// window's memory for the life of the gateway.
+func TestOwnerNotifyWindowForgetsNodesItHasNotSeen(t *testing.T) {
+	now := time.Now()
+	w := newOwnerNotifyWindow(24*time.Hour, func() time.Time { return now })
+
+	for _, node := range []string{"one", "two", "three"} {
+		if !w.claim(node) {
+			t.Fatalf("first claim for %s was refused", node)
+		}
+	}
+
+	now = now.Add(25 * time.Hour)
+	if !w.claim("four") {
+		t.Fatal("claim after the window was refused")
+	}
+	if len(w.notified) != 1 {
+		t.Errorf("window remembers %d nodes, want only the one still inside it", len(w.notified))
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/miere/murtaugh/internal/agent"
+	"github.com/miere/murtaugh/internal/agentruntime"
 	"github.com/miere/murtaugh/internal/journal"
 )
 
@@ -111,6 +112,43 @@ func TestChatHandlerRecordsErroredTurn(t *testing.T) {
 	}
 	if !strings.Contains(turns[0].Summary, "boom") {
 		t.Fatalf("summary = %q, want it to name the cause", turns[0].Summary)
+	}
+}
+
+type refusedSessions struct{ err error }
+
+func (s refusedSessions) Prompt(context.Context, agent.ConversationKey, agent.SessionMetadata, agent.PromptRequest) (<-chan agent.Event, error) {
+	return nil, s.err
+}
+
+func (refusedSessions) Lookup(agent.ConversationKey) (string, bool) { return "", false }
+func (refusedSessions) Cancel(context.Context, string) error        { return nil }
+
+// The e2e run journalled a machine that was switched off as an errored turn,
+// which sends whoever reads the journal looking for a fault in the agent.
+func TestChatHandlerRecordsANodeUnavailableTurnApartFromErrors(t *testing.T) {
+	rec := &journalSpy{}
+	cause := fmt.Errorf("initialize agent client: %w", &agentruntime.NodeOfflineError{
+		Node: agentruntime.NodeRef{NodeID: "e2e-node", Owner: "U0ADMIN"},
+		Err:  agentruntime.ErrNoNode,
+	})
+	handler := newLoggingHandler(t, rec, t.TempDir(), refusedSessions{err: cause})
+
+	_ = handler.handleResolving(context.Background(), ChatRequest{ChannelID: "C1", MessageTS: "1.1", Text: "still there?", Source: "test"})
+
+	turns := rec.byKind("session.turn")
+	if len(turns) != 1 {
+		t.Fatalf("expected one session.turn, got %d", len(turns))
+	}
+	payload := turns[0].Payload.(map[string]any)
+	if payload["outcome"] != turnNodeUnavailable {
+		t.Fatalf("outcome = %v, want %v", payload["outcome"], turnNodeUnavailable)
+	}
+	if turns[0].Level != journal.LevelWarn {
+		t.Fatalf("level = %v, want warn", turns[0].Level)
+	}
+	if payload["error"] != cause.Error() || !strings.Contains(turns[0].Summary, "e2e-node") {
+		t.Fatalf("the row does not say which machine was missing: summary=%q error=%v", turns[0].Summary, payload["error"])
 	}
 }
 

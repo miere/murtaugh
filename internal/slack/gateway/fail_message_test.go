@@ -1,12 +1,14 @@
 package gateway
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/miere/murtaugh/internal/agent"
+	"github.com/miere/murtaugh/internal/agentruntime"
 	"github.com/miere/murtaugh/internal/providerfail"
 	"github.com/miere/murtaugh/internal/slack/alertcard"
 )
@@ -25,7 +27,7 @@ func geminiOverload() error {
 // agent's provider is down — the incident this replaced was a three-layer Go
 // error chain wrapped around a pretty-printed JSON body.
 func TestFailSpecProviderFailure(t *testing.T) {
-	spec := failSpec(geminiOverload())
+	spec := failSpec(context.Background(), geminiOverload(), nil)
 
 	if spec.Level != alertcard.LevelError {
 		t.Errorf("Level = %q, want error", spec.Level)
@@ -54,7 +56,7 @@ func TestFailSpecProviderFailure(t *testing.T) {
 func TestFailSpecKeepsTheUnabridgedError(t *testing.T) {
 	err := geminiOverload()
 
-	if got := failSpec(err).Detail; got != err.Error() {
+	if got := failSpec(context.Background(), err, nil).Detail; got != err.Error() {
 		t.Errorf("Detail = %q, want the full error chain %q", got, err.Error())
 	}
 }
@@ -62,7 +64,7 @@ func TestFailSpecKeepsTheUnabridgedError(t *testing.T) {
 // Everything that is not a provider error keeps the generic headline with the
 // raw error, which is what diagnosing an ACP or spawn fault needs.
 func TestFailSpecNonProviderFailure(t *testing.T) {
-	spec := failSpec(errors.New("acp: session terminated"))
+	spec := failSpec(context.Background(), errors.New("acp: session terminated"), nil)
 
 	if spec.Subtitle != "Murtaugh hit an error while talking to the agent." {
 		t.Errorf("Subtitle = %q, want the generic notice", spec.Subtitle)
@@ -81,7 +83,7 @@ func TestFailSpecNonProviderFailure(t *testing.T) {
 
 // Fail(nil) still produces a usable alert rather than an empty card.
 func TestFailSpecNilError(t *testing.T) {
-	spec := failSpec(nil)
+	spec := failSpec(context.Background(), nil, nil)
 
 	if spec.Level != alertcard.LevelError {
 		t.Errorf("Level = %q, want error", spec.Level)
@@ -102,7 +104,7 @@ func TestFailSpecNilError(t *testing.T) {
 // and who to ask for more — without the error styling that sends people looking
 // for a fault that does not exist.
 func TestFailSpecAtCapacityWarnsRatherThanErrors(t *testing.T) {
-	spec := failSpec(fmt.Errorf("prompt agent: %w", &agent.CapacityError{Limit: 12}))
+	spec := failSpec(context.Background(), fmt.Errorf("prompt agent: %w", &agent.CapacityError{Limit: 12}), nil)
 
 	if spec.Level != alertcard.LevelWarn {
 		t.Errorf("Level = %q, want a warning — nothing is broken", spec.Level)
@@ -119,5 +121,97 @@ func TestFailSpecAtCapacityWarnsRatherThanErrors(t *testing.T) {
 	// The wrapping is still worth keeping for whoever opens the card.
 	if !strings.Contains(spec.Detail, "all 12 session slots") {
 		t.Errorf("Detail = %q, want the unabridged cause", spec.Detail)
+	}
+}
+
+// The e2e gap behind spec #170: a turn with no machine to run on got the generic
+// card, which said neither that the machine was off nor what to do about it.
+func TestFailSpecNoMachineOffersAWayForward(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		err    error
+		reason string
+	}{
+		{
+			name:   "nothing is connected",
+			err:    fmt.Errorf("initialize agent client: %w", agentruntime.ErrNoNode),
+			reason: "No machine is connected to Murtaugh right now.",
+		},
+		{
+			name:   "nothing of the user's is connected",
+			err:    fmt.Errorf("create agent session: %w", agentruntime.ErrNoFleet),
+			reason: "None of your machines is connected, and you hold no grant on anyone else's.",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := failSpec(context.Background(), tc.err, nil)
+
+			if spec.Level != alertcard.LevelWarn {
+				t.Errorf("Level = %q, want a warning — nothing is broken", spec.Level)
+			}
+			if spec.Title != "No machine available" {
+				t.Errorf("Title = %q", spec.Title)
+			}
+			if spec.Subtitle != "No machine is available to run this conversation." {
+				t.Errorf("Subtitle = %q", spec.Subtitle)
+			}
+			if spec.Reason != tc.reason {
+				t.Errorf("Reason = %q, want %q", spec.Reason, tc.reason)
+			}
+			if spec.NextSteps != "Start your runtime node (`murtaugh-runtime`) and try again, or ask the gateway admin for a grant on theirs." {
+				t.Errorf("NextSteps = %q", spec.NextSteps)
+			}
+			if spec.Detail != tc.err.Error() {
+				t.Errorf("Detail = %q, want the unabridged cause", spec.Detail)
+			}
+		})
+	}
+}
+
+func TestFailSpecNamesTheMachineAConversationWasOn(t *testing.T) {
+	err := fmt.Errorf("initialize agent client: %w", &agentruntime.NodeOfflineError{
+		Node: agentruntime.NodeRef{NodeID: "e2e-node", Owner: "U0ADMIN"},
+		Err:  agentruntime.ErrNoNode,
+	})
+
+	spec := failSpec(context.Background(), err, nil)
+
+	if spec.Title != "Machine offline" {
+		t.Errorf("Title = %q", spec.Title)
+	}
+	if spec.Subtitle != "The machine this conversation was running on is offline." {
+		t.Errorf("Subtitle = %q", spec.Subtitle)
+	}
+	want := "`e2e-node`, <@U0ADMIN>'s machine, is not connected, and no machine of yours can take the conversation over."
+	if spec.Reason != want {
+		t.Errorf("Reason = %q, want %q", spec.Reason, want)
+	}
+	if !strings.Contains(spec.NextSteps, "murtaugh-runtime") {
+		t.Errorf("NextSteps = %q, want the way forward", spec.NextSteps)
+	}
+}
+
+// A token may name an owner that is not a Slack user ID, which would render as a
+// broken mention.
+func TestFailSpecLeavesOutAnOwnerThatIsNotASlackUser(t *testing.T) {
+	spec := failSpec(context.Background(), &agentruntime.NodeOfflineError{
+		Node: agentruntime.NodeRef{NodeID: "e2e-node", Owner: "miere"},
+		Err:  agentruntime.ErrNoFleet,
+	}, nil)
+
+	if want := "`e2e-node` is not connected, and no machine of yours can take the conversation over."; spec.Reason != want {
+		t.Errorf("Reason = %q, want %q", spec.Reason, want)
+	}
+}
+
+// Classified by identity, so an error that merely reads the same is still a fault.
+func TestFailSpecDoesNotMatchTheSentinelsByText(t *testing.T) {
+	spec := failSpec(context.Background(), errors.New("initialize agent client: "+agentruntime.ErrNoNode.Error()), nil)
+
+	if spec.Subtitle != "Murtaugh hit an error while talking to the agent." {
+		t.Errorf("Subtitle = %q, want the generic notice", spec.Subtitle)
+	}
+	if spec.Level != alertcard.LevelError {
+		t.Errorf("Level = %q, want error", spec.Level)
 	}
 }
