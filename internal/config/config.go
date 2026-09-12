@@ -1440,6 +1440,15 @@ func (p AgentProfile) ResolvedSandboxMode() string {
 	return SandboxModeOff
 }
 
+// CancelOverride is read by both the in-process runtime and a node, so an
+// acp.interruptible override means the same thing wherever the agent runs.
+func (p AgentProfile) CancelOverride() *bool {
+	if p.ACP == nil {
+		return nil
+	}
+	return p.ACP.Interruptible
+}
+
 // ResolvedACPPermission reports the effective permission policy for an ACP agent,
 // defaulting an empty value to "ask".
 func (p AgentProfile) ResolvedACPPermission() string {

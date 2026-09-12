@@ -1,8 +1,11 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -11,6 +14,7 @@ import (
 	"github.com/slack-go/slack"
 
 	"github.com/miere/murtaugh/internal/agent"
+	"github.com/miere/murtaugh/internal/agentruntime"
 	"github.com/miere/murtaugh/internal/slack/alertcard"
 )
 
@@ -1348,5 +1352,38 @@ func TestChatHandlerWithdrawsASignInWhenItsTurnDies(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("the turn did not finish after its sign-in was withdrawn")
+	}
+}
+
+type fakeWarmer struct {
+	ChatSessionManager
+	err error
+}
+
+func (w fakeWarmer) Warm(context.Context) error { return w.err }
+
+// A gateway whose agents all run on nodes starts before any node attaches, so a warning there
+// fired on every start of a healthy gateway.
+func TestWarmingBeforeAnyNodeAttachesIsNotAWarning(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		err    error
+		want   string
+		refuse string
+	}{
+		{"no node yet", fmt.Errorf("initialize agent client: %w", agentruntime.ErrNoNode), "level=INFO", "level=WARN"},
+		{"a real failure", errors.New("initialize agent client: spawn failed"), "level=WARN", "level=INFO"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			handler := NewChatHandler(&fakeStreamAPI{}, map[string]ChatSessionManager{"default": fakeWarmer{err: tc.err}},
+				nil, time.Hour, 5, slog.New(slog.NewTextHandler(&logs, nil)))
+			if err := handler.Warm(context.Background()); err != nil {
+				t.Fatalf("Warm: %v", err)
+			}
+			if got := logs.String(); !strings.Contains(got, tc.want) || strings.Contains(got, tc.refuse) {
+				t.Errorf("warming logged the wrong level, want %s and no %s:\n%s", tc.want, tc.refuse, got)
+			}
+		})
 	}
 }

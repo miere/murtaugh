@@ -29,6 +29,10 @@ type Options struct {
 
 	Credentials *Credentials
 
+	// Interruptible is the profile's override; nil falls back to probing the agent, then to true,
+	// as in-process, so the gateway is never left to guess.
+	Interruptible *bool
+
 	Failed func(error) error
 
 	RenewCredential func(ctx context.Context) (agentwire.CredentialRenewal, error)
@@ -56,6 +60,7 @@ type Server struct {
 	restart   func()
 	failed    func(error) error
 	renew     func(ctx context.Context) (agentwire.CredentialRenewal, error)
+	override  *bool
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -105,6 +110,7 @@ func Serve(ctx context.Context, conn nodelink.Conn, client agent.Client, opts Op
 		restart:   opts.Restart,
 		failed:    opts.Failed,
 		renew:     opts.RenewCredential,
+		override:  opts.Interruptible,
 	}
 	s.ctx, s.cancel = context.WithCancel(ctx)
 	defer s.cancel()
@@ -272,17 +278,23 @@ func (s *Server) serveInitialize(msg agentwire.Message) {
 		s.fault(msg.ID, err)
 		return
 	}
-	var result agentwire.InitializeResult
-	if prober, ok := s.client.(interface {
-		SupportsCancel(context.Context) bool
-	}); ok {
-		answer := prober.SupportsCancel(s.ctx)
-		result.Interruptible = &answer
-	}
+	result := agentwire.InitializeResult{Interruptible: s.interruptible()}
 	if s.claim != nil {
 		result.Advertisement = s.claim.Current()
 	}
 	s.replyResult(msg.ID, result)
+}
+
+func (s *Server) interruptible() *bool {
+	answer := true
+	if s.override != nil {
+		answer = *s.override
+	} else if prober, ok := s.client.(interface {
+		SupportsCancel(context.Context) bool
+	}); ok {
+		answer = prober.SupportsCancel(s.ctx)
+	}
+	return &answer
 }
 
 func (s *Server) serveNewSession(msg agentwire.Message) {

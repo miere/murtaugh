@@ -127,17 +127,13 @@ func buildAgent(
 		logger.Error("agent disabled: could not build client", "agent", name, "kind", profile.ResolvedKind(), "error", err)
 		return nil, nil, problems, false
 	}
-	var interruptible *bool
-	if profile.ACP != nil {
-		interruptible = profile.ACP.Interruptible
-	}
 	mgr := agent.NewSessionManager(
 		client,
 		cfg.Defaults.EffectiveSessionIdleTimeout(),
 		cfg.Defaults.EffectiveMaxSessions(),
 	).WithLogger(logger.With("agent", name)).
 		WithBusyTimeout(cfg.Defaults.EffectiveSessionBusyTimeout()).
-		WithCancelOverride(interruptible).
+		WithCancelOverride(profile.CancelOverride()).
 		WithDescriptor(string(profile.ResolvedKind()), profile.ResolvedApproval())
 	return mgr, client, problems, true
 }

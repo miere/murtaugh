@@ -26,6 +26,7 @@ const (
 	DefaultWindowBytes = 256 << 10
 
 	handshakeTimeout = 15 * time.Second
+	closeGrace       = time.Second
 )
 
 // Not safe for concurrent writes on purpose: nodelink already serialises them and gorilla panics on
@@ -71,7 +72,15 @@ func (c *Conn) WriteMessage(raw []byte) error {
 	return nil
 }
 
-func (c *Conn) Close() error { return c.ws.Close() }
+// Close says goodbye first so the peer reads an orderly close, not an abnormal one it would log as a
+// failure; the grace is short because a peer too wedged to take one frame gets nothing from waiting.
+func (c *Conn) Close() error {
+	if c.err() == nil {
+		farewell := websocket.FormatCloseMessage(websocket.CloseNormalClosure, "")
+		_ = c.ws.WriteControl(websocket.CloseMessage, farewell, time.Now().Add(closeGrace))
+	}
+	return c.ws.Close()
+}
 
 func (c *Conn) err() error {
 	c.mu.Lock()

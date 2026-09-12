@@ -40,6 +40,10 @@ func TestCfgNodeSplitRunsAgainstARealDestination(t *testing.T) {
 		t.Errorf("the node's seed address is %v, want [wss://gw.example:8443]", got)
 	}
 
+	mint := "murtaugh node token mint --node <id> --user <U…> --token-file " + filepath.Join(filepath.Dir(nodePath), "node-token")
+	if !strings.Contains(out, mint) {
+		t.Errorf("the split does not name the command that gives the node its credential (%q): %s", mint, out)
+	}
 	if !strings.Contains(out, "agent 1") {
 		t.Errorf("the split does not report copying the agent bodies across: %s", out)
 	}

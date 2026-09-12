@@ -625,7 +625,11 @@ func (s *procSession) abortActive(subtype string) {
 	s.mu.Lock()
 	sub := s.active
 	s.mu.Unlock()
-	if sub != nil && sub.interrupted.Load() {
+	if sub == nil {
+		s.log.Debug("claudecode: aborted result with no turn in flight", "session", s.id, "subtype", subtype)
+		return
+	}
+	if sub.interrupted.Load() {
 		s.log.Debug("claudecode: turn aborted by interrupt", "session", s.id, "subtype", subtype)
 		s.failActive(fmt.Errorf("claudecode: turn interrupted: %w", context.Canceled))
 		return

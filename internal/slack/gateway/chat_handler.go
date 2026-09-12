@@ -10,6 +10,7 @@ import (
 
 	"github.com/miere/murtaugh/assets"
 	"github.com/miere/murtaugh/internal/agent"
+	"github.com/miere/murtaugh/internal/agentruntime"
 	"github.com/miere/murtaugh/internal/slack/alertcard"
 	"github.com/slack-go/slack"
 )
@@ -395,7 +396,12 @@ func (h *ChatHandler) Warm(ctx context.Context) error {
 		if !ok {
 			continue
 		}
-		if err := warmer.Warm(ctx); err != nil {
+		err := warmer.Warm(ctx)
+		switch {
+		case err == nil:
+		case errors.Is(err, agentruntime.ErrNoNode):
+			h.logger.Info("agent not warmed yet: it runs on a runtime node and none is attached; it starts once one attaches", "agent", name)
+		default:
 			h.logger.Warn("failed to warm agent", "agent", name, "error", err)
 		}
 	}

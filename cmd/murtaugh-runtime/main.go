@@ -36,6 +36,7 @@ import (
 	"github.com/miere/murtaugh/internal/tools/ask"
 	authrequest "github.com/miere/murtaugh/internal/tools/auth/request"
 	"github.com/miere/murtaugh/internal/tools/helptool"
+	jobsrun "github.com/miere/murtaugh/internal/tools/jobs/run"
 	"github.com/miere/murtaugh/internal/tools/ping"
 	"github.com/miere/murtaugh/internal/tools/plan"
 	versiontool "github.com/miere/murtaugh/internal/tools/version"
@@ -121,8 +122,7 @@ func run(args []string) error {
 	if credential == "" {
 		credential = nodetoken.PathFor(cfg.BaseDir)
 	}
-	token, err := nodetoken.ReadFile(credential)
-	if err != nil {
+	if _, err := nodetoken.ReadFile(credential); err != nil {
 		return err
 	}
 
@@ -175,7 +175,7 @@ func run(args []string) error {
 	configure := &configurer{store: cfgStore, baseDir: cfg.BaseDir, logger: logger, restarts: true}
 	return attach(runCtx, logger, attachment{
 		gateways:   seeds,
-		token:      token,
+		tokenFile:  credential,
 		insecure:   *insecure,
 		client:     served.client,
 		gate:       served.gate,
@@ -184,6 +184,8 @@ func run(args []string) error {
 		claim:      served.claim,
 		configure:  configure.apply,
 		restart:    restart,
+
+		interruptible: served.interruptible,
 
 		credentials: credentials,
 		failed:      repair.failed,
@@ -198,6 +200,8 @@ type servedAgent struct {
 	signIns    *nodeserve.SignIns
 	claim      *nodeserve.Advertiser
 	serveTools func(context.Context) error
+
+	interruptible *bool
 }
 
 func serveAgent(cfg config.Config, logger *slog.Logger, requested string) (servedAgent, string, error) {
@@ -217,7 +221,7 @@ func serveAgent(cfg config.Config, logger *slog.Logger, requested string) (serve
 	signIns := nodeserve.NewSignIns(logger)
 	claim := nodeserve.NewAdvertiser(logger)
 
-	runtime := local.Builder(cfg, nodeTools(signIns), logger)(nodeHooks(cfg, gate, background))
+	runtime := local.Builder(cfg, nodeTools(cfg, signIns), logger)(nodeHooks(cfg, gate, background))
 	client, ok := runtime.Clients[name]
 	if !ok {
 		return servedAgent{}, "", fmt.Errorf("agent %q did not build; see the errors above", name)
@@ -229,10 +233,12 @@ func serveAgent(cfg config.Config, logger *slog.Logger, requested string) (serve
 		signIns:    signIns,
 		claim:      claim,
 		serveTools: runtime.ServeTools,
+
+		interruptible: cfg.Agents[name].CancelOverride(),
 	}, name, nil
 }
 
-func nodeTools(signIns *nodeserve.SignIns) *tools.Registry {
+func nodeTools(cfg config.Config, signIns *nodeserve.SignIns) *tools.Registry {
 	registry := tools.NewRegistry()
 	registry.Register(ping.New())
 	registry.Register(versiontool.New(version))
@@ -240,6 +246,14 @@ func nodeTools(signIns *nodeserve.SignIns) *tools.Registry {
 	registry.Register(ask.New(agent.TurnDisplay{}))
 	registry.Register(plan.New(agent.TurnDisplay{}))
 	registry.Register(authrequest.New(agent.TurnDisplay{}).WithoutConversation(signIns))
+
+	// A job's reply goes nowhere but back to the caller here: only the gateway
+	// reads report_to, and only for a run it scheduled itself.
+	jobs := func(name string) (config.JobProfile, bool) {
+		job, ok := cfg.Jobs[name]
+		return job, ok
+	}
+	registry.Register(jobsrun.New(jobs).WithDelegator(local.Delegator(cfg, registry)))
 	return registry
 }
 
@@ -289,7 +303,7 @@ func chooseAgent(cfg config.Config, requested string) (string, error) {
 
 type attachment struct {
 	gateways   []string
-	token      string
+	tokenFile  string
 	insecure   bool
 	client     agent.Client
 	gate       *nodeserve.ToolGate
@@ -299,21 +313,22 @@ type attachment struct {
 	configure  func(context.Context, agentwire.NodeConfiguration) (agentwire.NodeConfigured, error)
 	restart    func()
 
-	credentials *nodeserve.Credentials
-	failed      func(error) error
-	renew       func(context.Context) (agentwire.CredentialRenewal, error)
+	credentials   *nodeserve.Credentials
+	failed        func(error) error
+	renew         func(context.Context) (agentwire.CredentialRenewal, error)
+	interruptible *bool
 
-	dial func(ctx context.Context, address string) (*nodesocket.Conn, error)
+	dial func(ctx context.Context, address, token string) (*nodesocket.Conn, error)
 	wait func(d time.Duration) <-chan time.Time
 }
 
-func (a attachment) dialer() func(context.Context, string) (*nodesocket.Conn, error) {
+func (a attachment) dialer() func(context.Context, string, string) (*nodesocket.Conn, error) {
 	if a.dial != nil {
 		return a.dial
 	}
-	return func(ctx context.Context, address string) (*nodesocket.Conn, error) {
+	return func(ctx context.Context, address, token string) (*nodesocket.Conn, error) {
 		return nodesocket.Dial(ctx, address, nodesocket.DialOptions{
-			Token:              a.token,
+			Token:              token,
 			InsecureSkipVerify: a.insecure,
 		})
 	}
@@ -328,11 +343,23 @@ func (a attachment) waiter() func(time.Duration) <-chan time.Time {
 
 func attach(ctx context.Context, logger *slog.Logger, a attachment) error {
 	gateways := newGatewayList(a.gateways...)
+	gateways.credential = a.tokenFile
 	dial, wait := a.dialer(), a.waiter()
 	backoff := reconnectFloor
 	for {
 		address := gateways.current()
-		conn, err := dial(ctx, address)
+		token, err := nodetoken.ReadFile(a.tokenFile)
+		if err != nil {
+			logger.Error("could not read this node's credential; trying again shortly", "error", err)
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-wait(jitter(backoff)):
+			}
+			backoff = nextBackoff(backoff)
+			continue
+		}
+		conn, err := dial(ctx, address, token)
 		if err != nil {
 			if gateways.refusal(address, err, logger) {
 				select {
@@ -369,6 +396,7 @@ func attach(ctx context.Context, logger *slog.Logger, a attachment) error {
 			AckInterval: 30 * time.Second,
 
 			RenewCredential: a.renew,
+			Interruptible:   a.interruptible,
 		}); err != nil {
 			logger.Warn("gateway connection ended", "error", err, "gateway", address)
 		} else {
