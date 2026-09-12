@@ -110,7 +110,7 @@ func envAsset(role Role) string {
 //     Code aliases) — because the config root is itself the workdir for any
 //     agent that does not set one. See ScaffoldWorkspaceDocs.
 func BootstrapWithReport(configPath string, force bool) (BootstrapReport, error) {
-	return bootstrapWithReport(configPath, force, RoleCombined)
+	return bootstrapWithReport(configPath, force, RoleGateway)
 }
 
 func bootstrapWithReport(configPath string, force bool, role Role) (BootstrapReport, error) {

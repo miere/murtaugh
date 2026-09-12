@@ -249,6 +249,7 @@ func nodeConfigStore(t *testing.T) (config.Store, config.Config) {
 	t.Helper()
 	dir := t.TempDir()
 	base := config.Config{
+		Role:     config.RoleNode,
 		BaseDir:  dir,
 		BaseName: "config",
 		OAuth:    config.OAuthConfig{AppToken: "xapp-test", BotToken: "xoxb-test"},

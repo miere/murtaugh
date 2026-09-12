@@ -20,19 +20,33 @@ import (
 	"github.com/miere/murtaugh/internal/config"
 )
 
-// Provider yields the open config store. It returns an error when the store is
-// unavailable (e.g. a setup invocation that could not open the database), so a
-// cfg tool fails cleanly rather than dereferencing nil.
-type Provider func() (config.Store, error)
+// Provider yields the open config store and the role the binary holding it
+// plays. The role travels with the store because every write is re-validated,
+// and a gateway and a node do not answer "is this valid" the same way.
+type Provider struct {
+	open func() (config.Store, error)
+	role config.Role
+}
 
-// NewProvider adapts a possibly-nil store into a Provider.
-func NewProvider(s config.Store) Provider {
-	return func() (config.Store, error) {
-		if s == nil {
-			return nil, errors.New("config store is unavailable")
-		}
-		return s, nil
+// NewProvider adapts a possibly-nil store into a Provider for the given role.
+func NewProvider(s config.Store, role config.Role) Provider {
+	return Provider{
+		open: func() (config.Store, error) {
+			if s == nil {
+				return nil, errors.New("config store is unavailable")
+			}
+			return s, nil
+		},
+		role: role,
 	}
+}
+
+// Store opens the configuration store, or reports why it cannot.
+func (p Provider) Store() (config.Store, error) {
+	if p.open == nil {
+		return nil, errors.New("config store is unavailable")
+	}
+	return p.open()
 }
 
 // validationBase is the placeholder credentials used when validating store
@@ -41,25 +55,23 @@ func NewProvider(s config.Store) Provider {
 // satisfy that check while every other rule runs for real.
 var validationBase = config.Config{OAuth: config.OAuthConfig{AppToken: "x", BotToken: "x"}}
 
-var role config.Role
-
-func validationBaseFor() config.Config {
+func (p Provider) validationBase() config.Config {
 	base := validationBase
-	base.Role = role
+	base.Role = p.role
 	return base
 }
 
 // validateStore loads and validates the whole config from the store, ignoring
 // the bootstrap-only oauth requirement.
-func validateStore(ctx context.Context, s config.Store) error {
-	_, err := s.Load(ctx, validationBaseFor())
+func (p Provider) validateStore(ctx context.Context, s config.Store) error {
+	_, err := s.Load(ctx, p.validationBase())
 	return err
 }
 
 // upsertItemValidated writes one collection entity and re-validates the whole
 // config, rolling the store back to its prior state if the result would be
 // invalid. This makes every mutation atomic with respect to validity.
-func upsertItemValidated(ctx context.Context, s config.Store, section, name string, body any) error {
+func (p Provider) upsertItemValidated(ctx context.Context, s config.Store, section, name string, body any) error {
 	prior, existed, err := s.GetItem(ctx, section, name)
 	if err != nil {
 		return err
@@ -67,7 +79,7 @@ func upsertItemValidated(ctx context.Context, s config.Store, section, name stri
 	if err := s.UpsertItem(ctx, section, name, body); err != nil {
 		return err
 	}
-	if verr := validateStore(ctx, s); verr != nil {
+	if verr := p.validateStore(ctx, s); verr != nil {
 		rollbackItem(ctx, s, section, name, prior, existed)
 		return fmt.Errorf("change rejected — config would be invalid: %w", verr)
 	}
@@ -75,7 +87,7 @@ func upsertItemValidated(ctx context.Context, s config.Store, section, name stri
 }
 
 // putSingletonValidated is the singleton equivalent of upsertItemValidated.
-func putSingletonValidated(ctx context.Context, s config.Store, key string, body any) error {
+func (p Provider) putSingletonValidated(ctx context.Context, s config.Store, key string, body any) error {
 	prior, existed, err := s.GetSingleton(ctx, key)
 	if err != nil {
 		return err
@@ -83,7 +95,7 @@ func putSingletonValidated(ctx context.Context, s config.Store, key string, body
 	if err := s.PutSingleton(ctx, key, body); err != nil {
 		return err
 	}
-	if verr := validateStore(ctx, s); verr != nil {
+	if verr := p.validateStore(ctx, s); verr != nil {
 		if existed {
 			_ = s.PutSingleton(ctx, key, prior)
 		}

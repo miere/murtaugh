@@ -25,13 +25,10 @@ func TestRegistry_ContainsAllExpectedTools(t *testing.T) {
 		required []string
 	}{
 		{"ping", nil},
-		{"jobs.run", []string{"name"}},
 		{"jobs.define", []string{"name", "command"}},
-		{"setup.bootstrap", []string{}}, // optional --force flag; no required fields
-		{"setup.slack", []string{"app_token", "bot_token", "admin_user"}},
-		{"setup.agents", []string{}},
-		{"setup.mcp_register", []string{"client", "binary_path"}},
-		{"setup.launchd", []string{"binary_path"}},
+		{"cfg.launchd", []string{}}, // every field defaults; the binary knows its own role
+		{"cfg.migrate", nil},
+		{"cfg.validate", nil},
 		{"setup.update", []string{}},
 		{"journal.query", []string{}},
 		{"journal.stats", nil},
@@ -74,16 +71,20 @@ func TestUsageLine_ListsFlatToolsNamespacesAndModes(t *testing.T) {
 
 	for _, want := range []string{
 		"ping",
-		"jobs <define|run>",
-		"setup <agents|bootstrap|env|launchd|mcp_register|slack|update>",
-		"slack <canvas|create_channel|fetch_msgs|fetch_reactions|gateway|send_msg|update_msg>",
-		"mcp",
+		"jobs <define>",
+		"setup <update>",
+		"slack <canvas|create_channel|fetch_msgs|fetch_reactions|send_msg|update_msg>",
 	} {
 		if !strings.Contains(line, want) {
 			t.Errorf("UsageLine missing %q in:\n%s", want, line)
 		}
 	}
-	if !strings.HasPrefix(line, "usage: murtaugh <command>; commands: ") {
+	// Running the binary with no command starts the daemon, so `slack gateway`
+	// is not a subcommand any more and must not be advertised as one.
+	if strings.Contains(line, "gateway|") || strings.Contains(line, "|gateway") {
+		t.Errorf("UsageLine still offers a `slack gateway` subcommand:\n%s", line)
+	}
+	if !strings.HasPrefix(line, "usage: murtaugh-gateway [command]; ") {
 		t.Errorf("UsageLine prefix wrong: %q", line)
 	}
 }

@@ -32,32 +32,31 @@ self-contained binary that connects to your workspace over Socket Mode and adds:
 
 ## Quick start
 
-**macOS** — the installer asks nothing. It installs the binary, seeds a config
-skeleton, and registers the background daemon without starting it:
-
-```sh
-curl -fsSL https://github.com/miere/murtaugh/releases/latest/download/install_macos.sh | bash
-```
-
-It then prints three steps: put your Slack tokens in `~/.config/murtaugh/.env`,
-pick a storage backend in `config.yaml` (SQLite by default; Firestore and
-Postgres are commented out there), and start the daemon. Everything after that —
-the agent, its model, its credentials — is configured by direct-messaging
-Murtaugh in Slack. The first person to DM it becomes its administrator.
-
-**From source** (requires [Go 1.26+](https://go.dev/dl/)):
+Murtaugh ships **two binaries** and no install script: putting a file where you
+want it is not Murtaugh's job. Download `murtaugh-gateway` and `murtaugh-runtime`
+from the [latest release](https://github.com/miere/murtaugh/releases/latest), or
+build them (requires [Go 1.26+](https://go.dev/dl/)):
 
 ```sh
 git clone https://github.com/miere/murtaugh.git
 cd murtaugh
-go build -o murtaugh ./cmd/murtaugh
+go build -o murtaugh-gateway ./cmd/murtaugh-gateway
+go build -o murtaugh-runtime ./cmd/murtaugh-runtime
 ```
 
-Then create a Slack app, fill in your config, and start the gateway:
+Each binary then configures itself. Put your Slack tokens in
+`~/.config/murtaugh/.env`, pick a storage backend in `config.yaml` (SQLite by
+default; Firestore and Postgres are commented out there), and start the gateway:
 
 ```sh
-murtaugh slack gateway
+murtaugh-gateway                                 # the Slack daemon
+murtaugh-gateway cfg launchd --update-existing true   # …or run it under launchd
 ```
+
+`cfg launchd` writes the LaunchAgent and stops; `launchctl bootstrap
+gui/$(id -u) <path>` starts it when you are ready. Everything after that — the
+agent, its model, its credentials — is configured by direct-messaging Murtaugh
+in Slack. The first person to DM it becomes its administrator.
 
 👉 Full walkthrough: **[Getting started](docs/getting-started.md)**.
 
@@ -83,19 +82,23 @@ murtaugh slack gateway
 
 ```
                        ┌──────────────────────────────┐
-   Slack workspace ◄──►│   murtaugh slack gateway      │
+   Slack workspace ◄──►│   murtaugh-gateway            │
    (Socket Mode)       │   the long-lived daemon       │
                        │                               │
-   • slash commands    │   • chat   → agent (native /  │──► LLM provider
-   • @mentions / DMs    │             ACP), streamed    │    or ACP process
-   • button clicks     │   • workflow rules            │
-   • shared links      │   • link unfurls              │──► journal (SQLite)
-                       │   • job scheduler             │
-                       └──────────────────────────────┘
-                          ▲                        ▲
-                          │                        │
-                 murtaugh <tool>            murtaugh mcp
-                 (CLI, one-shot)         (MCP server, stdio)
+   • slash commands    │   • chat   → a node's agent   │
+   • @mentions / DMs   │   • workflow rules            │
+   • button clicks     │   • link unfurls              │──► journal (SQLite)
+   • shared links      │   • job scheduler             │
+                       └──────────────┬───────────────┘
+                                      │ nodes dial in; the
+                                      │ gateway never dials out
+                       ┌──────────────▼───────────────┐
+                       │   murtaugh-runtime           │──► LLM provider
+                       │   agents, tools, jobs        │    or ACP process
+                       └──────────────┬───────────────┘
+                                      │
+                       murtaugh-runtime <tool> | mcp
+                       (CLI one-shot, or MCP over stdio)
 ```
 
 Every capability is registered as a **tool** with one definition, surfaced three

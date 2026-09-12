@@ -29,6 +29,7 @@ func openTestStore(t *testing.T) config.Store {
 // by Validate; everything else comes from the store).
 func baseConfig() config.Config {
 	return config.Config{
+		Role:    config.RoleNode,
 		BaseDir: "/tmp/murtaugh",
 		OAuth:   config.OAuthConfig{AppToken: "xapp-test", BotToken: "xoxb-test"},
 	}

@@ -9,24 +9,17 @@ import (
 	"github.com/miere/murtaugh/internal/config"
 )
 
-func withRole(t *testing.T, r config.Role) {
-	t.Helper()
-	previous := role
-	role = r
-	t.Cleanup(func() { role = previous })
-}
+// A node holds the profile bodies, so the write-time check it always had must
+// still fire there — the deferral is the gateway's, not everybody's.
+func TestANodeStillRefusesAnUnknownDefaultAgent(t *testing.T) {
+	p := testProvider(t, config.RoleNode)
 
-func TestACombinedInstallStillRefusesAnUnknownDefaultAgent(t *testing.T) {
-	withRole(t, config.RoleCombined)
-	p := testProvider(t)
-	singles := SingletonTools(p)
-
-	_, err := invoke(t, find(t, singles, "cfg.chat.set"), map[string]any{
+	_, err := invoke(t, find(t, NodeSingletonTools(p), "cfg.chat.set"), map[string]any{
 		"enabled":       true,
 		"default_agent": "code",
 	})
 	if err == nil {
-		t.Fatal("a combined install accepted a default agent it holds no profile for")
+		t.Fatal("a node accepted a default agent it holds no profile for")
 	}
 	if !strings.Contains(err.Error(), "not found") {
 		t.Errorf("the refusal does not name the problem: %v", err)
@@ -34,11 +27,10 @@ func TestACombinedInstallStillRefusesAnUnknownDefaultAgent(t *testing.T) {
 }
 
 // The profile's body lives on somebody's node and is checked at connect time; held to
-// the combined rules, a broker gateway could never be configured at all.
+// the node's rules, a broker gateway could never be configured at all.
 func TestABrokerGatewayMayNameAProfileItDoesNotHold(t *testing.T) {
-	withRole(t, config.RoleGateway)
-	p := testProvider(t)
-	singles := SingletonTools(p)
+	p := testProvider(t, config.RoleGateway)
+	singles := GatewaySingletonTools(p)
 
 	if _, err := invoke(t, find(t, singles, "cfg.chat.set"), map[string]any{
 		"enabled":       true,
@@ -57,9 +49,8 @@ func TestABrokerGatewayMayNameAProfileItDoesNotHold(t *testing.T) {
 // Checked here because a bad address would otherwise surface only inside the node's
 // redial loop, which is built to keep retrying quietly.
 func TestCfgNodeSetChecksTheSeedAddresses(t *testing.T) {
-	withRole(t, config.RoleNode)
-	p := testProvider(t)
-	singles := SingletonTools(p)
+	p := testProvider(t, config.RoleNode)
+	singles := NodeSingletonTools(p)
 
 	if _, err := invoke(t, find(t, singles, "cfg.node.set"), map[string]any{
 		"gateway": []any{"https://gateway.example.com"},
@@ -88,10 +79,9 @@ func TestCfgNodeSetChecksTheSeedAddresses(t *testing.T) {
 // The DSN is unusable on purpose: the test only needs the command to get past its own
 // validation to the target, not a working Postgres.
 func TestABrokerGatewayCanMigrateItsConfigStore(t *testing.T) {
-	withRole(t, config.RoleGateway)
-	p := testProvider(t)
+	p := testProvider(t, config.RoleGateway)
 
-	if _, err := invoke(t, find(t, SingletonTools(p), "cfg.chat.set"), map[string]any{
+	if _, err := invoke(t, find(t, GatewaySingletonTools(p), "cfg.chat.set"), map[string]any{
 		"enabled":       true,
 		"default_agent": "code",
 	}); err != nil {
@@ -108,16 +98,15 @@ func TestABrokerGatewayCanMigrateItsConfigStore(t *testing.T) {
 		t.Fatal("an unusable DSN was accepted")
 	}
 	if strings.Contains(err.Error(), "agents") {
-		t.Fatalf("cfg db migrate holds a broker gateway to the combined rules, so it can never complete a migration: %v", err)
+		t.Fatalf("cfg db migrate holds a broker gateway to the node's rules, so it can never complete a migration: %v", err)
 	}
 }
 
 // A refusal after the copy used to leave a full store nothing points at; the target
 // here can't even be opened, so a check that ran late would fail with the wrong error.
 func TestAnInvalidStoreIsRefusedBeforeAnythingIsCopied(t *testing.T) {
-	withRole(t, config.RoleCombined)
-	p := testProvider(t)
-	s, err := p()
+	p := testProvider(t, config.RoleNode)
+	s, err := p.Store()
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}
@@ -138,7 +127,7 @@ func TestAnInvalidStoreIsRefusedBeforeAnythingIsCopied(t *testing.T) {
 	if !strings.Contains(err.Error(), "only move the problem") {
 		t.Fatalf("the invalid store was not refused before the copy; the failure came from further down the command: %v", err)
 	}
-	if !strings.Contains(err.Error(), "not valid for a combined install") {
+	if !strings.Contains(err.Error(), "not valid for a node") {
 		t.Errorf("the refusal does not say which half judged it: %v", err)
 	}
 }

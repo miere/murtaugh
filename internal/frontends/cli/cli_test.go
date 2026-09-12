@@ -33,13 +33,13 @@ func newTestFrontend(t *testing.T, tl tools.Tool) (*Frontend, *bytes.Buffer, *by
 	reg := tools.NewRegistry()
 	reg.Register(tl)
 	var stdout, stderr bytes.Buffer
-	return New(reg).WithOutput(&stdout, &stderr), &stdout, &stderr
+	return New("murtaugh-test", reg).WithOutput(&stdout, &stderr), &stdout, &stderr
 }
 
 func TestRun_NoArgs_ReturnsUsageError(t *testing.T) {
 	reg := tools.NewRegistry()
 	var stdout, stderr bytes.Buffer
-	f := New(reg).WithOutput(&stdout, &stderr)
+	f := New("murtaugh-test", reg).WithOutput(&stdout, &stderr)
 	if err := f.Run(context.Background(), nil); err == nil {
 		t.Fatal("Run returned nil, want error")
 	}
@@ -51,7 +51,7 @@ func TestRun_NoArgs_ReturnsUsageError(t *testing.T) {
 func TestRun_UnknownCommand_ReturnsError(t *testing.T) {
 	reg := tools.NewRegistry()
 	var stdout, stderr bytes.Buffer
-	f := New(reg).WithOutput(&stdout, &stderr)
+	f := New("murtaugh-test", reg).WithOutput(&stdout, &stderr)
 	err := f.Run(context.Background(), []string{"nope"})
 	if err == nil {
 		t.Fatal("Run returned nil, want error")
@@ -109,7 +109,7 @@ func TestRun_JSON_StructResult_SingleLine(t *testing.T) {
 	reg := tools.NewRegistry()
 	reg.Register(tl)
 	var stdout, stderr bytes.Buffer
-	f := New(reg).WithOutput(&stdout, &stderr).WithJSON(true)
+	f := New("murtaugh-test", reg).WithOutput(&stdout, &stderr).WithJSON(true)
 
 	if err := f.Run(context.Background(), []string{"send"}); err != nil {
 		t.Fatalf("Run returned error: %v", err)
@@ -127,7 +127,7 @@ func TestRun_JSON_SliceResult_OnePerLine(t *testing.T) {
 	reg := tools.NewRegistry()
 	reg.Register(tl)
 	var stdout, stderr bytes.Buffer
-	f := New(reg).WithOutput(&stdout, &stderr).WithJSON(true)
+	f := New("murtaugh-test", reg).WithOutput(&stdout, &stderr).WithJSON(true)
 
 	if err := f.Run(context.Background(), []string{"list"}); err != nil {
 		t.Fatalf("Run returned error: %v", err)
@@ -145,7 +145,7 @@ func TestRun_JSON_SliceOfStructs_OnePerLine(t *testing.T) {
 	reg := tools.NewRegistry()
 	reg.Register(tl)
 	var stdout, stderr bytes.Buffer
-	f := New(reg).WithOutput(&stdout, &stderr).WithJSON(true)
+	f := New("murtaugh-test", reg).WithOutput(&stdout, &stderr).WithJSON(true)
 
 	if err := f.Run(context.Background(), []string{"items"}); err != nil {
 		t.Fatalf("Run returned error: %v", err)
@@ -166,7 +166,7 @@ func TestRun_JSON_StructContainingSlice_SingleLine(t *testing.T) {
 	reg := tools.NewRegistry()
 	reg.Register(tl)
 	var stdout, stderr bytes.Buffer
-	f := New(reg).WithOutput(&stdout, &stderr).WithJSON(true)
+	f := New("murtaugh-test", reg).WithOutput(&stdout, &stderr).WithJSON(true)
 
 	if err := f.Run(context.Background(), []string{"fetch"}); err != nil {
 		t.Fatalf("Run returned error: %v", err)
@@ -181,7 +181,7 @@ func TestRun_JSON_NilResult_PrintsNothing(t *testing.T) {
 	reg := tools.NewRegistry()
 	reg.Register(tl)
 	var stdout, stderr bytes.Buffer
-	f := New(reg).WithOutput(&stdout, &stderr).WithJSON(true)
+	f := New("murtaugh-test", reg).WithOutput(&stdout, &stderr).WithJSON(true)
 
 	if err := f.Run(context.Background(), []string{"noop"}); err != nil {
 		t.Fatalf("Run returned error: %v", err)

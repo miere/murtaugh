@@ -180,6 +180,7 @@ func TestChannelRulesRejectsScalar(t *testing.T) {
 // allowAnyoneValidationConfig is a minimal valid config carrying the given rules.
 func allowAnyoneValidationConfig(rules ChannelRules) Config {
 	return Config{
+		Role:   RoleNode,
 		OAuth:  OAuthConfig{AppToken: "xapp-test", BotToken: "xoxb-test"},
 		Agents: map[string]AgentProfile{"coding": {ACP: &ACPProfile{Command: "/bin/agent"}}},
 		Chat:   ChatConfig{Enabled: true, Defaults: ChatDefaults{Agent: "coding"}, Channels: rules},

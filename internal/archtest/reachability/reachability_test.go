@@ -23,18 +23,20 @@ func TestTheGatewayBinaryReachesNoAgentBackend(t *testing.T) {
 }
 
 // Positive control: without it the gateway test would pass just as happily
-// against a Check that always returns nothing.
+// against a Check that always returns nothing. The runtime binary is the
+// control because running agents is exactly what it is for.
 func TestTheCheckReportsABinaryThatMayRunAgents(t *testing.T) {
-	reached, err := reachability.Check("./cmd/murtaugh")
+	reached, err := reachability.Check(reachability.RuntimeBinary)
 	if err != nil {
-		t.Fatalf("checking ./cmd/murtaugh: %v", err)
+		t.Fatalf("checking %s: %v", reachability.RuntimeBinary, err)
 	}
 	for _, want := range []string{
 		reachability.Module + "/internal/agentbuild",
 		reachability.Module + "/internal/llm",
 	} {
 		if !slices.Contains(reached, want) {
-			t.Errorf("./cmd/murtaugh does not reach %s; the CLI has lost its local agent, or the check has stopped working", want)
+			t.Errorf("%s does not reach %s; the node has lost its local agent, or the check has stopped working",
+				reachability.RuntimeBinary, want)
 		}
 	}
 }
@@ -138,12 +140,12 @@ func TestTheRuntimeBinaryReachesNoSlack(t *testing.T) {
 	}
 }
 
-// The CLI links the Slack gateway, so it must trip the runtime rule; if it does
-// not, the check has stopped working.
+// Each binary is the other's positive control: the gateway links Slack, so it
+// must trip the runtime rule. If it does not, the check has stopped working.
 func TestTheRuntimeCheckReportsABinaryThatTalksToSlack(t *testing.T) {
-	reached, err := reachability.CheckRuntime("./cmd/murtaugh")
+	reached, err := reachability.CheckRuntime(reachability.GatewayBinary)
 	if err != nil {
-		t.Fatalf("checking ./cmd/murtaugh: %v", err)
+		t.Fatalf("checking %s: %v", reachability.GatewayBinary, err)
 	}
 	for _, want := range []string{
 		"github.com/slack-go/slack",
@@ -151,7 +153,7 @@ func TestTheRuntimeCheckReportsABinaryThatTalksToSlack(t *testing.T) {
 		reachability.Module + "/internal/tools/slack/sendmsg",
 	} {
 		if !slices.Contains(reached, want) {
-			t.Errorf("./cmd/murtaugh does not reach %s; the check has stopped working", want)
+			t.Errorf("%s does not reach %s; the check has stopped working", reachability.GatewayBinary, want)
 		}
 	}
 }

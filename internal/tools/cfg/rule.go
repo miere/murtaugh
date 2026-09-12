@@ -58,11 +58,11 @@ func (t *ruleSetTool) Invoke(ctx context.Context, args map[string]any) (any, err
 	if err != nil {
 		return nil, fmt.Errorf("parse %s %q: %w", t.label, path, err)
 	}
-	s, err := t.p()
+	s, err := t.p.Store()
 	if err != nil {
 		return nil, err
 	}
-	if err := upsertItemValidated(ctx, s, t.section, name, rule); err != nil {
+	if err := t.p.upsertItemValidated(ctx, s, t.section, name, rule); err != nil {
 		return nil, err
 	}
 	return okResult{Message: fmt.Sprintf("saved %s %q", t.label, name)}, nil

@@ -39,7 +39,7 @@ func (t *mcpSetTool) Invoke(ctx context.Context, args map[string]any) (any, erro
 	if err != nil {
 		return nil, err
 	}
-	s, err := t.p()
+	s, err := t.p.Store()
 	if err != nil {
 		return nil, err
 	}
@@ -65,7 +65,7 @@ func (t *mcpSetTool) Invoke(ctx context.Context, args map[string]any) (any, erro
 	if v, ok := stringArg(args, "url"); ok {
 		cfg.URL = v
 	}
-	if err := upsertItemValidated(ctx, s, config.SectionMCP, name, cfg); err != nil {
+	if err := t.p.upsertItemValidated(ctx, s, config.SectionMCP, name, cfg); err != nil {
 		return nil, err
 	}
 	return okResult{Message: fmt.Sprintf("saved MCP server %q", name)}, nil

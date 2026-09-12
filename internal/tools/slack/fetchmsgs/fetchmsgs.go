@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/jsonschema-go/jsonschema"
 
+	"github.com/miere/murtaugh/internal/convref"
 	slacklib "github.com/miere/murtaugh/internal/slack/client"
 )
 
@@ -45,7 +46,7 @@ func (t *Tool) InputSchema() *jsonschema.Schema {
 	return &jsonschema.Schema{
 		Type: "object",
 		Properties: map[string]*jsonschema.Schema{
-			"channel": {Type: "string", Description: "Conversation to read: " + slacklib.ConversationRefHelp},
+			"channel": {Type: "string", Description: "Conversation to read: " + convref.Conversation},
 			"thread":  {Type: "string", Description: "Thread timestamp (e.g. 1234567890.123456) to fetch replies from."},
 			"since":   {Type: "string", Description: "Exclude messages sent before this Sydney datetime (YYYY-MM-DD HH:mm:ss). Default: 24h ago."},
 		},

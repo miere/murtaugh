@@ -8,7 +8,7 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 
 	"github.com/miere/murtaugh/internal/config"
-	slackclient "github.com/miere/murtaugh/internal/slack/client"
+	"github.com/miere/murtaugh/internal/convref"
 	"github.com/miere/murtaugh/internal/tools"
 )
 
@@ -36,7 +36,7 @@ func (t *jobSetTool) InputSchema() *jsonschema.Schema {
 			"timeout": {Type: "string", Description: "run timeout as a Go duration (e.g. 30m)"},
 			"agent":   {Type: "string", Description: "delegate to this agent instead of running a command"},
 			"prompt":  {Type: "string", Description: "prompt sent to the delegated agent (supports {{ 1 }} placeholders)"},
-			"report_to": {Type: "string", Description: "agent jobs only: where the gateway posts the agent's final reply after a scheduled run — " + slackclient.ConversationRefHelp +
+			"report_to": {Type: "string", Description: "agent jobs only: where the gateway posts the agent's final reply after a scheduled run — " + convref.Conversation +
 				" Posted only when the node that ran the job belongs to the gateway admin; otherwise, and when omitted, the reply is only journalled. Pass an empty string to clear it."},
 			"schedule": {Type: "string", Description: "cron schedule, 5-field (mutually exclusive with every)"},
 			"every":    {Type: "string", Description: "fixed interval as a Go duration (mutually exclusive with schedule)"},
@@ -49,7 +49,7 @@ func (t *jobSetTool) Invoke(ctx context.Context, args map[string]any) (any, erro
 	if err != nil {
 		return nil, err
 	}
-	s, err := t.p()
+	s, err := t.p.Store()
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +95,7 @@ func (t *jobSetTool) Invoke(ctx context.Context, args map[string]any) (any, erro
 	// behave identically no matter who edited the job.
 	unconfirmed := false
 	job.Confirmed = &unconfirmed
-	if err := upsertItemValidated(ctx, s, config.SectionJob, name, job); err != nil {
+	if err := t.p.upsertItemValidated(ctx, s, config.SectionJob, name, job); err != nil {
 		return nil, err
 	}
 	return okResult{Message: fmt.Sprintf("saved job %q", name)}, nil

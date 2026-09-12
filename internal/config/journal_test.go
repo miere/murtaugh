@@ -141,7 +141,7 @@ func TestJournalValidate(t *testing.T) {
 }
 
 func TestConfigValidateSurfacesJournalErrors(t *testing.T) {
-	cfg, err := Parse(testConfig(``))
+	cfg, err := parseNode(testConfig(``))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}

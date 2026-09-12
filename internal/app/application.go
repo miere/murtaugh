@@ -27,7 +27,6 @@ import (
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/config/store"
 	"github.com/miere/murtaugh/internal/frontends/cli"
-	"github.com/miere/murtaugh/internal/frontends/mcp"
 	"github.com/miere/murtaugh/internal/help"
 	"github.com/miere/murtaugh/internal/journal"
 	"github.com/miere/murtaugh/internal/slack/askcard"
@@ -50,12 +49,6 @@ import (
 	"github.com/miere/murtaugh/internal/tools/ping"
 	"github.com/miere/murtaugh/internal/tools/plan"
 	"github.com/miere/murtaugh/internal/tools/restart"
-	setupagents "github.com/miere/murtaugh/internal/tools/setup/agents"
-	setupbootstrap "github.com/miere/murtaugh/internal/tools/setup/bootstrap"
-	setupenv "github.com/miere/murtaugh/internal/tools/setup/env"
-	setuplaunchd "github.com/miere/murtaugh/internal/tools/setup/launchd"
-	setupmcpregister "github.com/miere/murtaugh/internal/tools/setup/mcpregister"
-	setupslack "github.com/miere/murtaugh/internal/tools/setup/slack"
 	setupupdate "github.com/miere/murtaugh/internal/tools/setup/update"
 	slackcanvas "github.com/miere/murtaugh/internal/tools/slack/canvas"
 	slackcreatechannel "github.com/miere/murtaugh/internal/tools/slack/createchannel"
@@ -74,12 +67,12 @@ type Mode int
 const (
 	// ModeCLI runs the human-facing CLI frontend.
 	ModeCLI Mode = iota
-	// ModeMCP runs the MCP stdio server frontend.
-	ModeMCP
-	// ModeGateway runs the Slack gateway: the Socket Mode daemon started
-	// by `murtaugh slack gateway`.
+	// ModeGateway runs the Slack gateway: the Socket Mode daemon this binary is.
 	ModeGateway
 )
+
+// Program is the binary name used in the CLI's error messages.
+const Program = "murtaugh-gateway"
 
 // Application is the composition root for a single murtaugh invocation. It
 // is constructed once per process and reused for the lifetime of the chosen
@@ -190,27 +183,20 @@ func New(mode Mode, args []string, cfg config.Config, cfgStore config.Store, con
 	}
 }
 
-// Run starts the selected frontend and blocks until it returns. CLI and MCP
-// share the same Registry; the gateway ignores the registry and starts the
-// Socket Mode daemon directly.
+// Run starts the selected frontend and blocks until it returns. The gateway
+// ignores the registry and starts the Socket Mode daemon directly.
 func (a *Application) Run(ctx context.Context) error {
-	switch a.mode {
-	case ModeMCP:
-		return mcp.New(a.registry).Serve(ctx)
-	case ModeGateway:
+	if a.mode == ModeGateway {
 		return a.runGateway(ctx)
-	default:
-		return cli.New(a.registry).WithJSON(a.jsonOutput).Run(ctx, a.args)
 	}
+	return cli.New(Program, a.registry).WithJSON(a.jsonOutput).Run(ctx, a.args)
 }
 
 // UsageLine renders a human-readable usage string built from the registered
 // tools. Flat tool names (e.g. `ping`) are listed first; namespaced tools
-// (e.g. `jobs.run`) are grouped by their namespace and rendered as
-// `<ns> <sub>`. The `gateway` subcommand is injected into the `slack`
-// namespace (it starts the daemon and is not a registry tool), and the
-// built-in `mcp` mode (handled by main.go) is appended, so callers see
-// every entry point in one line.
+// (e.g. `cfg.launchd`) are grouped by their namespace and rendered as
+// `<ns> <sub>`. Running the binary with no command at all starts the daemon,
+// so this is only ever the answer to an unusable command line.
 func (a *Application) UsageLine() string {
 	var flat []string
 	groups := map[string][]string{}
@@ -229,39 +215,14 @@ func (a *Application) UsageLine() string {
 		flat = append(flat, name)
 	}
 
-	// `slack gateway` starts the Socket Mode daemon. It is not a registry
-	// tool, so surface it as a slack subcommand alongside the slack.* tools.
-	if _, seen := groups["slack"]; !seen {
-		groupOrder = append(groupOrder, "slack")
-	}
-	groups["slack"] = append(groups["slack"], "gateway")
-
 	parts := append([]string{}, flat...)
 	for _, ns := range groupOrder {
 		subs := groups[ns]
 		sort.Strings(subs)
 		parts = append(parts, fmt.Sprintf("%s <%s>", ns, strings.Join(subs, "|")))
 	}
-	parts = append(parts, "mcp")
-	return "usage: murtaugh <command>; commands: " + strings.Join(parts, ", ") +
-		"\nrun `murtaugh help` for full command docs, or `murtaugh help <command>` for one."
-}
-
-// SlackUsageLine renders the help shown for a bare `murtaugh slack`
-// invocation: the `slack.*` tools (without their namespace prefix) plus the
-// `gateway` daemon subcommand, sorted. It exists so the slack namespace lists
-// its own subcommands instead of falling through to the generic CLI error.
-func (a *Application) SlackUsageLine() string {
-	subs := []string{"gateway"}
-	for _, t := range a.registry.All() {
-		if name := t.Name(); strings.HasPrefix(name, "slack.") {
-			subs = append(subs, strings.TrimPrefix(name, "slack."))
-		}
-	}
-	sort.Strings(subs)
-	return "usage: murtaugh slack <subcommand>; subcommands: " + strings.Join(subs, ", ") +
-		"\n  gateway starts the Slack Socket Mode daemon; the rest are one-shot tools." +
-		"\n  run `murtaugh help slack <subcommand>` for flags and examples."
+	return "usage: " + Program + " [command]; with no command it runs the Slack gateway. Commands: " + strings.Join(parts, ", ") +
+		"\nrun `" + Program + " help` for full command docs, or `" + Program + " help <command>` for one."
 }
 
 // Registry exposes the underlying registry. Intended for tests so the
@@ -353,12 +314,6 @@ func buildRegistry(cfg config.Config, cfgStore config.Store, configPath, version
 	// a command's flags instead of probing the CLI for them.
 	reg.Register(helptool.New(func() []help.Doc { return HelpDocs(reg) }))
 
-	jobsLookup := func(name string) (config.JobProfile, bool) {
-		j, ok := cfg.Jobs[name]
-		return j, ok
-	}
-	reg.Register(run.New(jobsLookup).WithDelegator(agents.localDelegator(cfg, reg)).WithRecorder(recorder))
-
 	// Journal read/maintenance tools open the event store on demand from the
 	// configured path; one opener (carrying per-stream retention for prune)
 	// backs all three. They are how Gateway Debug Mode and admins inspect and
@@ -381,43 +336,16 @@ func buildRegistry(cfg config.Config, cfgStore config.Store, configPath, version
 		return cfgStore, nil
 	}
 	reg.Register(define.New(storeProvider))
-	for _, t := range cfgtools.All(cfgStore, configPath, cfg.Role) {
+	for _, t := range cfgtools.GatewayTools(cfgStore, configPath, cfgtools.InstallerDeps{
+		Role:       config.RoleGateway,
+		Home:       os.UserHomeDir,
+		GOOS:       runtime.GOOS,
+		Plutil:     execRunner,
+		Executable: os.Executable,
+		ConfigPath: configPath,
+	}) {
 		reg.Register(t)
 	}
-
-	bootstrapPath := func() string {
-		if strings.TrimSpace(configPath) != "" {
-			return configPath
-		}
-		if home, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(home, ".config", "murtaugh", "config.yaml")
-		}
-		return ""
-	}
-	reg.Register(setupbootstrap.New(bootstrapPath))
-	reg.Register(setupslack.New(bootstrapPath, storeProvider))
-
-	troubleshootConfigPath := func() string {
-		if base := baseDirFor(cfg, configPath); base != "" {
-			return filepath.Join(base, "troubleshoot.yaml")
-		}
-		return ""
-	}
-	reg.Register(setupagents.New(storeProvider, troubleshootConfigPath))
-	envPath := func() string {
-		if base := baseDirFor(cfg, configPath); base != "" {
-			return filepath.Join(base, ".env")
-		}
-		return ""
-	}
-	reg.Register(setupenv.New(envPath))
-	reg.Register(setupmcpregister.New(os.UserHomeDir, troubleshootConfigPath, troubleshoot.KnownProviders()))
-	reg.Register(setuplaunchd.New(setuplaunchd.Deps{
-		Home:      os.UserHomeDir,
-		GOOS:      runtime.GOOS,
-		Plutil:    execRunner,
-		Launchctl: execRunner,
-	}))
 	reg.Register(setupupdate.New(updateDeps(version)))
 
 	// Slack tools share the daemon's bot token (oauth.bot_token in
@@ -482,11 +410,10 @@ func buildRegistry(cfg config.Config, cfgStore config.Store, configPath, version
 }
 
 // effectiveTroubleshootProviders resolves which downstream providers a bundle
-// should include by default: the set configured in troubleshoot.yaml (written
-// by setup.mcp_register) when non-empty, otherwise every provider Murtaugh
-// knows how to collect diagnostics for. Missing files are skipped at collection
-// time, so the all-known fallback is safe on a machine that only runs some of
-// them.
+// should include by default: troubleshoot.providers when the admin set it,
+// otherwise every provider Murtaugh knows how to collect diagnostics for.
+// Missing files are skipped at collection time, so the all-known fallback is
+// safe on a machine that only runs some of them.
 func effectiveTroubleshootProviders(cfg config.Config) []string {
 	if len(cfg.Troubleshoot.Providers) > 0 {
 		return cfg.Troubleshoot.Providers
@@ -611,33 +538,14 @@ func (a *Application) newAdminClaimer(store config.Store) gateway.AdminClaimer {
 }
 
 // updateDeps builds the dependency bundle shared by the setup.update tool and
-// the App Home "Update" button. Centralizing it guarantees the in-Slack update
-// installs exactly what the tool would, against the same GitHub repository.
+// the App Home release notice, so both read the same GitHub repository.
 func updateDeps(version string) setupupdate.Deps {
 	return setupupdate.Deps{
 		CurrentVersion: func() string { return version },
-		CurrentBinary:  os.Executable,
-		GOOS:           runtime.GOOS,
-		GOARCH:         runtime.GOARCH,
 		HTTPGet:        setupupdate.HTTPGetter(),
-		VerifyBinary:   verifyBinary,
 		Owner:          "miere",
 		Repo:           "murtaugh",
 	}
-}
-
-// verifyBinary runs `<path> version` to confirm the staged binary is
-// executable on this host. A non-zero exit or unparseable output means we
-// refuse to swap it into place.
-func verifyBinary(path string) error {
-	out, err := exec.Command(path, "version").CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%s version: %w: %s", path, err, strings.TrimSpace(string(out)))
-	}
-	if strings.TrimSpace(string(out)) == "" {
-		return fmt.Errorf("%s version produced no output", path)
-	}
-	return nil
 }
 
 // execRunner runs name with args, surfacing combined stdout/stderr only when

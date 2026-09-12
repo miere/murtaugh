@@ -7,9 +7,9 @@ import (
 	"strings"
 
 	"github.com/miere/murtaugh/internal/config"
+	"github.com/miere/murtaugh/internal/envfile"
 	"github.com/miere/murtaugh/internal/onboarding"
 	gateway "github.com/miere/murtaugh/internal/slack/gateway"
-	setupenv "github.com/miere/murtaugh/internal/tools/setup/env"
 )
 
 // This file applies a completed agent-setup form.
@@ -79,19 +79,15 @@ func (a *Application) adoptOwnConfigChange(daemonCtx, opCtx context.Context, hol
 	return a.reloadConfig(daemonCtx, ctx, holder, runner, cfg)
 }
 
-// writeEnvVar stores a credential in the .env beside the config.
-//
-// It goes through the setup.env tool rather than writing the file directly.
-// That tool already owns the merge semantics — preserve unrelated keys, back up
-// the previous file — and its envfile package sits behind an internal/ boundary
-// this package cannot import anyway.
-func (a *Application) writeEnvVar(ctx context.Context, key, value string) error {
+// writeEnvVar stores a credential in the .env beside the config. envfile owns
+// the merge semantics: unrelated keys are preserved and the previous file is
+// backed up.
+func (a *Application) writeEnvVar(_ context.Context, key, value string) error {
 	if strings.TrimSpace(a.configPath) == "" {
 		return fmt.Errorf("the config path is unknown, so there is no .env to write")
 	}
-	envPath := filepath.Join(filepath.Dir(a.configPath), ".env")
-	tool := setupenv.New(func() string { return envPath })
-	_, err := tool.Invoke(ctx, map[string]any{"set": []any{key + "=" + value}})
+	envPath := filepath.Join(filepath.Dir(a.configPath), config.EnvFileName)
+	_, err := envfile.Merge(envPath, map[string]string{key: value})
 	return err
 }
 

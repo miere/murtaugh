@@ -31,7 +31,7 @@ func (t *singletonShowTool) Description() string {
 }
 func (t *singletonShowTool) InputSchema() *jsonschema.Schema { return nil }
 func (t *singletonShowTool) Invoke(ctx context.Context, _ map[string]any) (any, error) {
-	s, err := t.p()
+	s, err := t.p.Store()
 	if err != nil {
 		return nil, err
 	}
@@ -64,7 +64,7 @@ func (t *chatSetTool) InputSchema() *jsonschema.Schema {
 	}
 }
 func (t *chatSetTool) Invoke(ctx context.Context, args map[string]any) (any, error) {
-	s, err := t.p()
+	s, err := t.p.Store()
 	if err != nil {
 		return nil, err
 	}
@@ -89,7 +89,7 @@ func (t *chatSetTool) Invoke(ctx context.Context, args map[string]any) (any, err
 		b := v
 		cfg.Defaults.ReplyOnThread = &b
 	}
-	if err := putSingletonValidated(ctx, s, config.SingletonChat, cfg); err != nil {
+	if err := t.p.putSingletonValidated(ctx, s, config.SingletonChat, cfg); err != nil {
 		return nil, err
 	}
 	return okResult{Message: "saved chat config"}, nil
@@ -114,7 +114,7 @@ func (t *accessSetTool) InputSchema() *jsonschema.Schema {
 	}
 }
 func (t *accessSetTool) Invoke(ctx context.Context, args map[string]any) (any, error) {
-	s, err := t.p()
+	s, err := t.p.Store()
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +138,7 @@ func (t *accessSetTool) Invoke(ctx context.Context, args map[string]any) (any, e
 	if v, ok := stringArg(args, "main_node"); ok {
 		cfg.MainNode = strings.TrimSpace(v)
 	}
-	if err := putSingletonValidated(ctx, s, config.SingletonAccess, cfg); err != nil {
+	if err := t.p.putSingletonValidated(ctx, s, config.SingletonAccess, cfg); err != nil {
 		return nil, err
 	}
 	return okResult{Message: "saved access config"}, nil
@@ -168,7 +168,7 @@ func (t *electionSetTool) InputSchema() *jsonschema.Schema {
 	}
 }
 func (t *electionSetTool) Invoke(ctx context.Context, args map[string]any) (any, error) {
-	s, err := t.p()
+	s, err := t.p.Store()
 	if err != nil {
 		return nil, err
 	}
@@ -189,25 +189,33 @@ func (t *electionSetTool) Invoke(ctx context.Context, args map[string]any) (any,
 	// putSingletonValidated re-validates the whole assembled config and rolls
 	// back on failure, so an unworkable lease/renew pair is refused here rather
 	// than discovered during a failover.
-	if err := putSingletonValidated(ctx, s, config.SingletonElection, cfg); err != nil {
+	if err := t.p.putSingletonValidated(ctx, s, config.SingletonElection, cfg); err != nil {
 		return nil, err
 	}
 	return okResult{Message: "saved election config; restart Murtaugh to apply"}, nil
 }
 
-// SingletonTools returns the typed set tools for chat/access plus read-only
-// show tools for every singleton block.
-func SingletonTools(p Provider) []tools.Tool {
+// GatewaySingletonTools are the one-off blocks the gateway admin owns.
+func GatewaySingletonTools(p Provider) []tools.Tool {
 	return []tools.Tool{
 		&chatSetTool{p: p},
 		&singletonShowTool{p: p, key: config.SingletonChat, label: "chat"},
 		&accessSetTool{p: p},
 		&singletonShowTool{p: p, key: config.SingletonAccess, label: "access"},
-		&singletonShowTool{p: p, key: config.SingletonDefaults, label: "defaults"},
 		&singletonShowTool{p: p, key: config.SingletonJournal, label: "journal"},
 		&singletonShowTool{p: p, key: config.SingletonTroubleshoot, label: "troubleshoot"},
 		&electionSetTool{p: p},
 		&singletonShowTool{p: p, key: config.SingletonElection, label: "election"},
+	}
+}
+
+// NodeSingletonTools are the one-off blocks a node admin owns: where this node
+// dials, how it routes work to its own agents, and its runtime defaults.
+func NodeSingletonTools(p Provider) []tools.Tool {
+	return []tools.Tool{
+		&chatSetTool{p: p},
+		&singletonShowTool{p: p, key: config.SingletonChat, label: "chat"},
+		&singletonShowTool{p: p, key: config.SingletonDefaults, label: "defaults"},
 		&nodeSetTool{p: p},
 		&singletonShowTool{p: p, key: config.SingletonNode, label: "node"},
 	}
@@ -233,7 +241,7 @@ func (t *nodeSetTool) InputSchema() *jsonschema.Schema {
 	}
 }
 func (t *nodeSetTool) Invoke(ctx context.Context, args map[string]any) (any, error) {
-	s, err := t.p()
+	s, err := t.p.Store()
 	if err != nil {
 		return nil, err
 	}
@@ -251,7 +259,7 @@ func (t *nodeSetTool) Invoke(ctx context.Context, args map[string]any) (any, err
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	if err := putSingletonValidated(ctx, s, config.SingletonNode, cfg); err != nil {
+	if err := t.p.putSingletonValidated(ctx, s, config.SingletonNode, cfg); err != nil {
 		return nil, err
 	}
 	return okResult{Message: "saved node config; restart the node to apply"}, nil

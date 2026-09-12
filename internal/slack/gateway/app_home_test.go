@@ -335,19 +335,12 @@ func TestAppHomeUpdateTarget(t *testing.T) {
 	}
 }
 
-func TestIsAppHomeUpdateSubmit(t *testing.T) {
-	submit := slack.InteractionCallback{
-		Type: slack.InteractionTypeViewSubmission,
-		View: slack.View{CallbackID: appHomeUpdateCallbackID},
-	}
-	if !isAppHomeUpdateSubmit(submit) {
-		t.Fatal("expected the confirm-modal submission to be recognised")
-	}
-	// Another modal's submission must not match.
-	other := submit
-	other.View.CallbackID = "ask_form"
-	if isAppHomeUpdateSubmit(other) {
-		t.Fatal("a different modal callback id must not match")
+// Murtaugh announces a release and never installs it, so the modal has nothing
+// to submit. A Submit button here would offer an action no handler answers.
+func TestTheUpdateModalCannotBeSubmitted(t *testing.T) {
+	gw := newGatewayForHome("UADMIN00", "v0.9.1", stubChecker("v0.9.1", "v0.9.4"))
+	if submit := gw.buildUpdateModal("v0.9.4").Submit; submit != nil {
+		t.Fatalf("the update modal offers %q; Murtaugh does not replace its own binary", submit.Text)
 	}
 }
 

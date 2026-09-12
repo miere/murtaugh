@@ -1,9 +1,4 @@
-// Package backup centralises the "copy file aside with a timestamp suffix
-// before overwriting" convention shared by every setup.* tool that writes a
-// user-managed config file. Keeping this in one place ensures the suffix
-// format (".bak.YYYYMMDDHHMMSS") matches what install.sh produced before the
-// installer logic was moved into Murtaugh proper.
-package backup
+package envfile
 
 import (
 	"errors"
@@ -14,17 +9,16 @@ import (
 	"time"
 )
 
-// Now is overridden in tests so the suffix is deterministic. It defaults to
-// time.Now and must always be set to a non-nil value.
-var Now = time.Now
+// now is overridden in tests so the suffix is deterministic.
+var now = time.Now
 
-// IfExists copies path to "<path>.bak.<timestamp>" when path is a regular
+// backupIfExists copies path to "<path>.bak.<timestamp>" when path is a regular
 // file, returning the new backup path. It returns an empty string with a nil
 // error when path does not exist (a fresh install).
 //
 // The destination's permission bits are preserved so the backup is as
 // restrictive as the original (config files are written with 0600).
-func IfExists(path string) (string, error) {
+func backupIfExists(path string) (string, error) {
 	info, err := os.Stat(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return "", nil
@@ -36,11 +30,10 @@ func IfExists(path string) (string, error) {
 		return "", fmt.Errorf("backup target %q is not a regular file", path)
 	}
 
-	// Second-precision timestamps collide when two tools back up the same file
-	// within one second (e.g. setup.slack then setup.env both touching .env).
-	// Uniquify with a numeric suffix so the second backup does not fail on the
+	// Second-precision timestamps collide when two writes land in the same
+	// second. Uniquify with a numeric suffix so the second backup does not fail on the
 	// O_EXCL create. The common (no-collision) case keeps the plain ".bak.<ts>".
-	base := path + ".bak." + Now().Format("20060102150405")
+	base := path + ".bak." + now().Format("20060102150405")
 	backupPath := base
 	for i := 2; ; i++ {
 		if _, err := os.Stat(backupPath); errors.Is(err, fs.ErrNotExist) {

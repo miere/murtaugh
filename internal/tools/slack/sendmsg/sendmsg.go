@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/jsonschema-go/jsonschema"
 
+	"github.com/miere/murtaugh/internal/convref"
 	slacklib "github.com/miere/murtaugh/internal/slack/client"
 )
 
@@ -55,7 +56,7 @@ func (t *Tool) InputSchema() *jsonschema.Schema {
 		Type: "object",
 		Properties: map[string]*jsonschema.Schema{
 			"body":            {Type: "string", Description: "Message body text. Also used as the notification fallback when blocks are set."},
-			"to":              {Type: "string", Description: "Destination: " + slacklib.ConversationRefHelp},
+			"to":              {Type: "string", Description: "Destination: " + convref.Conversation},
 			"attachment":      {Type: "string", Description: "Path to a file to attach. Mutually exclusive with blocks."},
 			"thread":          {Type: "string", Description: "Thread timestamp to reply to."},
 			"attachment_type": {Type: "string", Enum: []any{"markdown"}, Description: "Snippet type for the attachment."},

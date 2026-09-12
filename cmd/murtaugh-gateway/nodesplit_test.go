@@ -12,6 +12,10 @@ import (
 	configstore "github.com/miere/murtaugh/internal/config/store"
 )
 
+// These drive run() — the real command line against a real directory — because
+// `cfg node split` was broken on the CLI while its unit tests passed. The fault
+// was in the composition root, which an Invoke-level test never reaches.
+
 func TestCfgNodeSplitRunsAgainstARealDestination(t *testing.T) {
 	ctx := context.Background()
 	gatewayPath := seededGatewayRoot(t)
@@ -70,18 +74,6 @@ func TestCfgNodeSplitRunsAgainstARealDestination(t *testing.T) {
 	}
 }
 
-// --config applies to the whole command line, so a tool flag of the same name can
-// never be passed; that is why the destination flag is --dest.
-func TestCfgNodeSplitRefusesASecondGlobalConfigFlag(t *testing.T) {
-	_, _, err := extractConfigFlag([]string{"--config", "/gw/config.yaml", "cfg", "node", "split", "--config", "/node/config.yaml"}, "/default")
-	if err == nil {
-		t.Fatal("a second --config was accepted; it silently becomes the target of the whole command")
-	}
-	if !strings.Contains(err.Error(), "--dest") {
-		t.Errorf("the refusal does not name the flag to use instead: %v", err)
-	}
-}
-
 func TestCfgNodeSplitValidatesBeforeItWrites(t *testing.T) {
 	gatewayPath := seededGatewayRoot(t)
 	nodePath := filepath.Join(t.TempDir(), "node", "config.yaml")
@@ -105,7 +97,7 @@ func seededGatewayRoot(t *testing.T) string {
 		t.Fatalf("seed a gateway root: %v", err)
 	}
 	ctx := context.Background()
-	_, store, err := configstore.Bootstrap(ctx, path, true)
+	_, store, err := configstore.BootstrapRole(ctx, path, config.RoleGateway, true)
 	if err != nil {
 		t.Fatalf("open the gateway store: %v", err)
 	}

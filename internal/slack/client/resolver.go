@@ -6,14 +6,9 @@ import (
 	"io"
 	"regexp"
 	"strings"
+
+	"github.com/miere/murtaugh/internal/convref"
 )
-
-// ConversationRefHelp is shared by every tool schema that takes a conversation, so the
-// documented grammar cannot drift from ResolveTarget.
-const ConversationRefHelp = "#channel-name, a channel ID (C…/G…), a DM ID (D…), or a person — @handle, a user ID (U…) or <@U…> — which resolves to your DM with them."
-
-// UserRefHelp is shared by every tool schema that takes a person, for the same reason.
-const UserRefHelp = "@handle (matched against username, display name and real name), a user ID (U…/W…), or <@U…>."
 
 var slackID = regexp.MustCompile(`^[A-Z][A-Z0-9]*[0-9][A-Z0-9]*$`)
 
@@ -93,7 +88,7 @@ func ResolveChannel(ctx context.Context, api SlackAPI, ref string) (string, erro
 			return ch.ID, nil
 		}
 	}
-	return "", fmt.Errorf("Channel '%s' not found among the channels the bot can see — a private channel only appears once the bot is invited. Accepted forms: %s", value, ConversationRefHelp)
+	return "", fmt.Errorf("Channel '%s' not found among the channels the bot can see — a private channel only appears once the bot is invited. Accepted forms: %s", value, convref.Conversation)
 }
 
 // ResolveUser prefers username over display name over real name, because only the
@@ -123,7 +118,7 @@ func ResolveUser(ctx context.Context, api SlackAPI, ref string) (string, error) 
 			return u.ID, nil
 		}
 	}
-	return "", fmt.Errorf("User '%s' not found. Accepted forms: %s", handle, UserRefHelp)
+	return "", fmt.Errorf("User '%s' not found. Accepted forms: %s", handle, convref.User)
 }
 
 var mentionPattern = regexp.MustCompile(`@([a-zA-Z0-9._-]+)`)

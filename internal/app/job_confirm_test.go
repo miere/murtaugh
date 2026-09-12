@@ -24,7 +24,10 @@ func testStore(t *testing.T) config.Store {
 
 func storedJob(t *testing.T, s config.Store, name string) config.JobProfile {
 	t.Helper()
-	cfg, err := s.Load(context.Background(), config.Config{OAuth: config.OAuthConfig{AppToken: "x", BotToken: "x"}})
+	cfg, err := s.Load(context.Background(), config.Config{
+		Role:  config.RoleGateway,
+		OAuth: config.OAuthConfig{AppToken: "x", BotToken: "x"},
+	})
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}

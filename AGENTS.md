@@ -38,14 +38,14 @@ Murtaugh gateway — quite possibly the very process relaying your own replies t
 Slack. Taking it down cuts your only channel to the user, so you cannot report
 what you broke, and the user's first symptom is silence.
 
-**Before** running `murtaugh slack gateway`, `install/macos/install.sh`,
-`murtaugh setup launchd`, any `launchctl` verb against `dev.murtaugh`, or
-`go test ./...` (the installer tests drive the real installer), check for a live
+**Before** starting `murtaugh-gateway`, running `cfg launchd` against the real
+`~/Library/LaunchAgents`, or using any `launchctl` verb against a
+`murtaugh.gateway.*` (or the legacy `dev.murtaugh`) label, check for a live
 gateway:
 
 ```sh
 launchctl print "gui/$(id -u)/dev.murtaugh" >/dev/null 2>&1 && echo "LIVE AGENT"
-pgrep -fl 'murtaugh slack gateway'
+pgrep -fl 'murtaugh-gateway'
 ```
 
 If either reports something, treat the gateway as live and **stop**. Do not
@@ -67,16 +67,19 @@ A healthy gateway shows a recent `Slack socket connected`. A wall of
 report that to the user rather than silently restarting it.
 
 Scoped commands (`go build ./...`, `go test ./internal/...`, a single `-run`)
-are safe and preferred. When you genuinely need the full suite, `go test
--short ./...` skips the installer tests. The installer additionally refuses to
-touch `gui/$(id -u)` when `$HOME` is not the login home
-(`launchd_domain_is_ours` in `install/macos/install.sh`), but that is the last
-line of defence — not a licence to skip the check above.
+are safe and preferred.
 
-This rule exists because it already happened: an agent ran `go test ./...`, the
-macOS installer test bootstrapped its sandbox plist over the live
-`dev.murtaugh`, and the daemon spent ~19 hours running from a deleted temp
-binary, unable to reach Slack, with nobody able to tell the user.
+**A test may never write outside a temp directory.** `cfg launchd` takes its
+LaunchAgents directory as a dependency (`InstallerDeps.LaunchAgentsDir`) for
+exactly this reason, and every test that exercises it passes a `t.TempDir()`.
+Nothing in this repository may load a LaunchAgent: `cfg launchd` writes a plist
+and stops, and `launchctl bootstrap` is the operator's step.
+
+This rule exists because it already happened: an agent ran the whole suite, a
+test bootstrapped its sandbox plist over the live `dev.murtaugh`, and the
+daemon spent ~19 hours running from a deleted temp binary, unable to reach
+Slack, with nobody able to tell the user. The shell installer that did it is
+gone; the way to bring it back is a test that writes to a real path.
 
 # Validated core
 - A hard-precondition value (one a downstream tool cannot function without) is
@@ -110,9 +113,11 @@ binary, unable to reach Slack, with nobody able to tell the user.
 - Write `Description` for the reader who has to DECIDE: what the flag does to
   the system, which flags it excludes, what happens if it is omitted. Both the
   human reference and the model's per-turn context are rendered from it.
-- The registry-walking tests in `internal/app/docs_test.go` enforce the above.
-  Do NOT reintroduce a hand-maintained list of commands to check coverage
-  against; the previous one drifted and missed six tools.
+- The registry-walking tests in `internal/app/docs_test.go` (gateway) and
+  `internal/nodeapp/docs_test.go` (node) enforce the above. One reference
+  covers both binaries, so each half needs its own walk. Do NOT reintroduce a
+  hand-maintained list of commands to check coverage against; the previous one
+  drifted and missed six tools.
 
 # Tool names
 - Every tool we give an agent is named so that, with its dots turned into

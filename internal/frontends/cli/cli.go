@@ -25,22 +25,26 @@ const maxNameDepth = 3
 // ErrUsage is returned when the user invokes the CLI without arguments or
 // with an unknown command. Callers map it to a non-zero exit and a usage
 // message on stderr.
-var ErrUsage = errors.New("usage: murtaugh <command>")
+var ErrUsage = errors.New("no command given")
 
 // Frontend is the CLI adapter.
 type Frontend struct {
 	registry *tools.Registry
-	stdout   io.Writer
-	stderr   io.Writer
+	// program names the binary in error messages, so a reader is told which of
+	// the two to run `help` against.
+	program string
+	stdout  io.Writer
+	stderr  io.Writer
 	// json toggles JSONL output: when set, results are JSON-marshalled
 	// (one value per line) instead of rendered for humans. Driven by the
 	// global --json flag stripped in main.
 	json bool
 }
 
-// New constructs a CLI Frontend that writes to os.Stdout and os.Stderr.
-func New(reg *tools.Registry) *Frontend {
-	return &Frontend{registry: reg, stdout: os.Stdout, stderr: os.Stderr}
+// New constructs a CLI Frontend for the named program that writes to os.Stdout
+// and os.Stderr.
+func New(program string, reg *tools.Registry) *Frontend {
+	return &Frontend{registry: reg, program: program, stdout: os.Stdout, stderr: os.Stderr}
 }
 
 // WithOutput overrides the output streams; intended for tests.
@@ -133,7 +137,7 @@ func (f *Frontend) resolve(args []string) (string, []string, error) {
 			return name, args[n:], nil
 		}
 	}
-	return "", nil, fmt.Errorf("unknown command: %s (run `murtaugh help` to list commands)", args[0])
+	return "", nil, fmt.Errorf("unknown command: %s (run `%s help` to list commands)", args[0], f.program)
 }
 
 func (f *Frontend) lookup(tokens []string) (string, bool) {

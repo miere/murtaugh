@@ -108,11 +108,11 @@ func TestTheTwoHalvesOfTheInvariantAgreeSiteBySite(t *testing.T) {
 		t.Fatalf("the fixture exercises %d reference sites, want 7: %+v", len(refs), refs)
 	}
 
-	combined := cfg
-	combined.Role = RoleCombined
-	combinedErr := combined.Validate()
-	if combinedErr == nil {
-		t.Fatal("a combined install accepted seven agent names with no agents defined")
+	node := cfg
+	node.Role = RoleNode
+	nodeErr := node.Validate()
+	if nodeErr == nil {
+		t.Fatal("a node accepted seven agent names with no agents defined")
 	}
 
 	gateway := cfg
@@ -123,9 +123,9 @@ func TestTheTwoHalvesOfTheInvariantAgreeSiteBySite(t *testing.T) {
 	}
 
 	for _, ref := range refs {
-		if !strings.Contains(combinedErr.Error(), ref.Name) {
-			t.Errorf("%s names %q and a combined install did not refuse it; "+
-				"AgentReferences carries a site Validate never checked:\n%v", ref.Field, ref.Name, combinedErr)
+		if !strings.Contains(nodeErr.Error(), ref.Name) {
+			t.Errorf("%s names %q and a node did not refuse it; "+
+				"AgentReferences carries a site Validate never checked:\n%v", ref.Field, ref.Name, nodeErr)
 		}
 		if strings.Contains(gatewayText, ref.Name) {
 			t.Errorf("%s names %q and a gateway still refused it; the check did not move to connect time:\n%s",

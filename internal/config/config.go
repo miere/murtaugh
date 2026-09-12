@@ -1096,6 +1096,10 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("read troubleshoot config %q: %w", troubleshootPath, err)
 	}
 
+	// The YAML tree predates the split and carries the agent bodies, so it is
+	// validated as a node: that is the half whose name-to-body checks can run
+	// here. The gateway's own rules are applied to the store it is migrated into.
+	cfg.Role = RoleNode
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -1116,14 +1120,26 @@ func Parse(data []byte) (Config, error) {
 	return cfg, nil
 }
 
+// A seeded placeholder reads as a configured credential, so the gateway would
+// pass this check and die at Slack instead of naming the field.
+func configured(value string) bool {
+	value = strings.TrimSpace(value)
+	return value != "" && !strings.HasSuffix(value, "-replace-me")
+}
+
 func (c Config) Validate() error {
 	var errs []error
+	if !c.Role.Valid() {
+		errs = append(errs, errors.New("role is unset: a configuration is loaded either as a gateway or as a node, never as neither"))
+	}
 	if c.Role.HoldsSlackCredentials() {
-		if strings.TrimSpace(c.OAuth.AppToken) == "" {
-			errs = append(errs, errors.New("oauth.app_token is required"))
+		if !configured(c.OAuth.AppToken) {
+			errs = append(errs, errors.New("oauth.app_token is required: a gateway talks to Slack, so it needs the app-level token. "+
+				"Set SLACK_APP_TOKEN in the .env beside config.yaml"))
 		}
-		if strings.TrimSpace(c.OAuth.BotToken) == "" {
-			errs = append(errs, errors.New("oauth.bot_token is required"))
+		if !configured(c.OAuth.BotToken) {
+			errs = append(errs, errors.New("oauth.bot_token is required: a gateway posts as the bot, so it needs the bot token. "+
+				"Set SLACK_BOT_TOKEN in the .env beside config.yaml"))
 		}
 	}
 	if err := c.Node.Validate(); err != nil {
