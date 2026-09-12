@@ -5,8 +5,8 @@
 // seatbelt are what the whole design rests on:
 //
 //   - Confinement is INHERITED by every descendant. `claude` spawns node, git,
-//     ripgrep and Murtaugh's own `murtaugh mcp-bridge` grandchild; all of them are
-//     boxed without cooperating.
+//     ripgrep and Murtaugh's own `murtaugh-runtime mcp-bridge` grandchild; all of
+//     them are boxed without cooperating.
 //   - Confinement cannot be LOOSENED by a child. A descendant calling
 //     sandbox-exec with a permissive profile gets EPERM.
 //
@@ -97,10 +97,8 @@ type Spec struct {
 	// names only ANTHROPIC_API_KEY drop PATH and kill the agent in a way that looks
 	// nothing like a config error.
 	EnvAllow []string
-	// BridgeSocket is the MCP bridge's unix socket. The `murtaugh mcp-bridge`
-	// grandchild dials it to serve Murtaugh's own tools back to the agent; connect
-	// counts as a write, so it needs an explicit carve-out. Empty when the agent
-	// has no bridge (CLI/delegate paths).
+	// The `murtaugh-runtime mcp-bridge` grandchild dials this socket, and connecting
+	// counts as a write, so it needs a carve-out. Empty on the CLI/delegate paths.
 	BridgeSocket string
 	// Kept out of DenyRead because a profile's deny_read replaces the defaults and
 	// would drop it; writes are denied too, since the token can sit in the workdir.

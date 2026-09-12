@@ -12,10 +12,10 @@ import (
 // consulted, and `cfg`, which is an umbrella section introducing the whole
 // cfg.* family rather than a command of its own.
 var nonToolCommands = map[string]bool{
-	"slack gateway": true,
-	"mcp":           true,
-	"help":          true,
-	"cfg":           true,
+	"gateway": true,
+	"mcp":     true,
+	"help":    true,
+	"cfg":     true,
 }
 
 // nodeOnlyCommands are documented commands the RUNTIME binary registers. One

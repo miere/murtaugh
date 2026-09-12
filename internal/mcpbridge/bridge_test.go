@@ -1,10 +1,17 @@
 package mcpbridge
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
+	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,6 +41,36 @@ func (e *echoTool) Invoke(_ context.Context, _ map[string]any) (any, error) {
 // (~104 bytes on macOS), and t.TempDir() can exceed that.
 func startServer(t *testing.T) (*Server, context.Context) {
 	t.Helper()
+	srv, ctx, _ := startLoggingServer(t)
+	return srv, ctx
+}
+
+// syncBuffer collects log lines the server writes from its own goroutines.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+func (s *syncBuffer) reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.b.Reset()
+}
+
+func startLoggingServer(t *testing.T) (*Server, context.Context, *syncBuffer) {
+	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "mb")
 	if err != nil {
 		t.Fatalf("temp dir: %v", err)
@@ -43,19 +80,20 @@ func startServer(t *testing.T) (*Server, context.Context) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	srv := NewServer(socket, nil)
+	logs := &syncBuffer{}
+	srv := NewServer(socket, slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { _ = srv.Close() })
 	go func() { _ = srv.Start(ctx) }()
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(socket); err == nil {
-			return srv, ctx
+			return srv, ctx, logs
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("server socket never appeared")
-	return nil, nil
+	return nil, nil, nil
 }
 
 // connectThroughBridge wires an MCP client to the server through a RunBridge
@@ -158,4 +196,59 @@ func TestBridgePublishesUnderTheSessionsAliases(t *testing.T) {
 			t.Errorf("session published %+v, want one tool named %s", list.Tools, want)
 		}
 	}
+}
+
+// Every new conversation is tried as a resume first; the process torn down when
+// that fails takes its bridge with it, and the warning that produced fired on
+// every new conversation.
+func TestAnAggregatorSessionWarnsOnlyWhenItEndsUnexpectedly(t *testing.T) {
+	logs := &syncBuffer{}
+	srv := NewServer("unused", slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	for _, err := range []error{io.EOF, net.ErrClosed, context.Canceled,
+		fmt.Errorf("read unix @->/tmp/mb/s: %w", net.ErrClosed)} {
+		logs.reset()
+		srv.logSessionEnd(err)
+		if strings.Contains(logs.String(), "level=WARN") {
+			t.Errorf("a bridge that went away with its agent was logged as a warning:\n%s", logs.String())
+		}
+		if !strings.Contains(logs.String(), "level=DEBUG") {
+			t.Errorf("a bridge teardown (%v) left no trace at all:\n%s", err, logs.String())
+		}
+	}
+
+	logs.reset()
+	srv.logSessionEnd(errors.New("jsonrpc: malformed frame"))
+	if !strings.Contains(logs.String(), "level=WARN") {
+		t.Errorf("an aggregator session that ended unexpectedly was not warned about:\n%s", logs.String())
+	}
+}
+
+// The end-to-end shape of the same thing: a live session whose bridge is killed
+// must leave no warning behind.
+func TestKillingABridgeLeavesNoWarning(t *testing.T) {
+	srv, ctx, logs := startLoggingServer(t)
+	token, err := srv.Register(Session{Tools: []tools.Tool{&echoTool{name: "ping"}}})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	bridgeCtx, killBridge := context.WithCancel(ctx)
+	session := connectThroughBridge(t, bridgeCtx, srv.SocketPath(), token)
+	if _, err := session.ListTools(ctx, &mcpsdk.ListToolsParams{}); err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+
+	killBridge()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(logs.String(), "mcp aggregator session ended") {
+			if strings.Contains(logs.String(), "level=WARN") {
+				t.Fatalf("killing a bridge warned:\n%s", logs.String())
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("the aggregator never reported the session ending:\n%s", logs.String())
 }

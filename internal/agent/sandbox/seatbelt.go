@@ -84,10 +84,10 @@ func seatbeltProfile(spec Spec) (string, error) {
 //	$TMPDIR, /tmp  node refuses to run without a writable temp dir
 //	~/.claude      Claude Code's session state, resume history and todos
 //	~/.claude.json its top-level settings file
-//	bridge socket  `murtaugh mcp-bridge` dials it to serve Murtaugh's own tools;
-//	               connecting to a unix socket counts as a write, and omitting it
-//	               takes down the ENTIRE slack.*/jobs tool surface with no error
-//	               that points at the sandbox
+//	bridge socket  `murtaugh-runtime mcp-bridge` dials it, and connecting to a
+//	               unix socket counts as a write; omitting it takes down the
+//	               ENTIRE slack.*/jobs tool surface with no error that points at
+//	               the sandbox
 func writablePaths(spec Spec) ([]string, error) {
 	var raw []string
 
