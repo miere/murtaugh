@@ -867,9 +867,9 @@ credential a node holds when the node itself is compromised.
   revoke that guessed would be worse than one that refuses.
 - Two credentials may be live for one node at once, which is what makes rotation
   need no downtime: mint the replacement, install it, then revoke the old one.
-- A revoked credential stops verifying immediately, but **a connection already
-  authenticated with it stays open** until the gateway learns to close it (#193).
-  Revoking is not yet the same as disconnecting.
+- A revoked credential stops verifying immediately, and the gateway drops any
+  connection already authenticated with it **within 10 seconds**, the next time
+  it re-checks its live connections against the store.
 
 ```
 murtaugh node token revoke --selector 1a2b3c4d5e6f7a8b

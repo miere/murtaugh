@@ -82,6 +82,7 @@ type rigConfig struct {
 	credentialHealth func(agentruntime.CredentialHealth)
 	renewCredential  func(context.Context) (agentwire.CredentialRenewal, error)
 	logs             io.Writer
+	recheck          time.Duration
 }
 
 func withoutWaitingForAttach() rigOption {
@@ -132,6 +133,10 @@ func logging(w io.Writer) rigOption {
 	return func(c *rigConfig) { c.logs = w }
 }
 
+func rechecking(every time.Duration) rigOption {
+	return func(c *rigConfig) { c.recheck = every }
+}
+
 type gatewayLog struct {
 	mu  sync.Mutex
 	buf strings.Builder
@@ -167,7 +172,8 @@ func dialLoopback(t *testing.T, script *scriptedAgent, options ...rigOption) *lo
 	if cfg.logs != nil {
 		gatewayLogger = slog.New(slog.NewTextHandler(cfg.logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	}
-	host, err := nodehost.New(nodehost.Options{Tokens: store, Logger: gatewayLogger, Journal: cfg.journal, Pins: cfg.pins})
+	host, err := nodehost.New(nodehost.Options{Tokens: store, Logger: gatewayLogger, Journal: cfg.journal, Pins: cfg.pins,
+		RecheckInterval: cfg.recheck})
 	if err != nil {
 		t.Fatalf("host: %v", err)
 	}
@@ -1280,8 +1286,10 @@ func (f approverFunc) Approve(ctx context.Context, toolName, summary string) (bo
 }
 
 type memTokens struct {
-	mu      sync.Mutex
-	records map[string]config.NodeToken
+	mu       sync.Mutex
+	records  map[string]config.NodeToken
+	failWith error
+	lookups  int
 }
 
 func (m *memTokens) Put(_ context.Context, token config.NodeToken) error {
@@ -1297,6 +1305,10 @@ func (m *memTokens) Put(_ context.Context, token config.NodeToken) error {
 func (m *memTokens) BySelector(_ context.Context, selector string) (config.NodeToken, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.lookups++
+	if m.failWith != nil {
+		return config.NodeToken{}, false, m.failWith
+	}
 	record, ok := m.records[selector]
 	return record, ok, nil
 }

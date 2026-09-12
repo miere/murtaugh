@@ -51,13 +51,17 @@ func (s *cardSlack) OpenDM(_ context.Context, userID string) (string, error) {
 
 func (s *cardSlack) OpenView(context.Context, string, slackgo.ModalViewRequest) error { return nil }
 
+// Matching the URL anywhere in the card finds the command being approved, which
+// quotes the URL it is about to print, so the wait ended before the sign-in was
+// linked and the click that follows raced it. Only a link button proves it.
 func (s *cardSlack) awaitLink(t *testing.T, url string) {
 	t.Helper()
+	button := regexp.MustCompile(`"url"\s*:\s*"` + regexp.QuoteMeta(url) + `"`)
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		s.mu.Lock()
 		for _, u := range s.updates {
-			if strings.Contains(string(u.Blocks), url) {
+			if button.Match(u.Blocks) {
 				s.mu.Unlock()
 				return
 			}
