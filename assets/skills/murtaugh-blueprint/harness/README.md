@@ -5,11 +5,11 @@ Reusable BDD test scaffolding for Murtaugh customisations, so each automation
 confirm → enforce → loop method and the tiering policy; this README is the
 mechanical wiring.
 
-Automations reach Slack and GitHub by shelling out to the **`murtaugh`** and
-**`gh`** CLIs (the tools every Murtaugh user has) — there is no per-machine Python
+Automations reach Slack and GitHub by shelling out to the
+**`murtaugh-gateway`** and **`gh`** CLIs (the tools every Murtaugh user has) — there is no per-machine Python
 Slack client. Tests inject *fake runners* in their place.
 
-> Prerequisite: the model assumes `murtaugh slack <tool> --json` returns
+> Prerequisite: the model assumes `murtaugh-gateway slack <tool> --json` returns
 > structured output (`{ok, channel, ts}`). That is a Murtaugh-core capability.
 
 ## Contents

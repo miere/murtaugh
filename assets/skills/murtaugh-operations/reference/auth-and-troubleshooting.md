@@ -11,7 +11,7 @@ Two settings in the config database, set with `cfg access set` (view with
   commands, send mentions/DMs, and click buttons.
 
 ```bash
-murtaugh cfg access set --admin-user @you --allowed-users U0AAA --allowed-users U0BBB
+murtaugh-gateway cfg access set --admin-user @you --allowed-users U0AAA --allowed-users U0BBB
 ```
 
 At startup both are resolved from handles to Slack user IDs (fail-closed: an
@@ -36,7 +36,7 @@ logged at startup.
 
 | Symptom | Likely cause |
 |---|---|
-| No startup DM | The `cfg access set` admin user is unset or unresolvable; or the daemon didn't start — check `slack.err.log`. |
+| No startup DM | The `cfg access set` admin user is unset or unresolvable; or the daemon didn't start — check `murtaugh.gateway.default.err.log`. |
 | Bot ignores my DM / @-mention | Your user isn't the `cfg access` admin / allowed user (mentions/DMs fail **silently**); or the chat surface is disabled (`cfg chat set --enabled false`, or no default agent). See `murtaugh-agents`. |
 | "you are not authorized" on a slash command | Same allowlist issue, surfaced because slash commands deny loudly. |
 | Ran `cfg` but the bot is unchanged | Config loads once — you changed the store but didn't **restart**. Restart to apply. See `reference/config-and-restart.md`. |
@@ -44,7 +44,7 @@ logged at startup.
 | A scheduled job didn't run | The gateway was down at fire time (no catch-up), or the schedule edit needs a restart. See `murtaugh-jobs`. |
 | A message handled twice | Not redelivery (that's de-duped) — check you don't have **two daemons** running. |
 | A chat turn "hangs" with no reply | It may be **legitimately waiting on a human**, not stuck — see *A turn that's waiting, not hung* below. |
-| Need to see what happened | `~/Library/Logs/murtaugh/slack.out.log` and `…/slack.err.log` (launchd). |
+| Need to see what happened | `~/Library/Logs/murtaugh/murtaugh.gateway.<alias>.out.log` and `….err.log` (launchd). |
 
 ### A turn that's waiting, not hung
 
@@ -66,9 +66,10 @@ and timed out, the agent is told no answer came — it won't proceed on a guess.
 
 ## Logs
 
-Under launchd the daemon's stdout/stderr go to
-`~/Library/Logs/murtaugh/slack.out.log` and `~/Library/Logs/murtaugh/slack.err.log`.
-Running the gateway in a terminal instead sends the same logs to that terminal.
+Under launchd the daemon's stdout/stderr go to files named after its
+LaunchAgent label: `~/Library/Logs/murtaugh/murtaugh.gateway.<alias>.out.log` and
+`….err.log`, with `<alias>` defaulting to `default`. Running `murtaugh-gateway`
+in a terminal instead sends the same logs to that terminal.
 They record startup, allowlist resolution, agent warmup verdicts, event
 handling, unfurl/job outcomes, and errors — the first place to look for anything
 in this table.

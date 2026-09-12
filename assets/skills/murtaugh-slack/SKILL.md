@@ -25,7 +25,7 @@ the file your task needs:
 
 > If a task needs something not listed above, it's often an operator **config
 > change**. Config now lives in the config database and is changed with
-> `murtaugh cfg …` (chat routing, access, agents, jobs, workflow/unfurl rules) —
+> `murtaugh-gateway cfg …` (chat routing, access, agents, jobs, workflow/unfurl rules) —
 > those commands re-validate the whole config and roll back a bad change, so you
 > **may** make the change that way (e.g. `cfg chat set`, `cfg access set`,
 > `cfg workflow_rule set --from-file`, `cfg unfurl_rule set --from-file`), then

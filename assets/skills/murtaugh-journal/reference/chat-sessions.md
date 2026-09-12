@@ -22,13 +22,13 @@ So: **query rows to find sessions, read the transcript file for content.**
 
 ```
 # Recent chat turns across all conversations
-murtaugh journal query --stream acp_session --since 24h
+murtaugh-gateway journal query --stream acp_session --since 24h
 
 # One conversation's turns (session id comes from a row's keys)
-murtaugh journal query --stream acp_session --session <session_id>
+murtaugh-gateway journal query --stream acp_session --session <session_id>
 
 # A specific user or channel, failures only
-murtaugh journal query --stream acp_session --user U123 --level warn
+murtaugh-gateway journal query --stream acp_session --user U123 --level warn
 ```
 
 Each row's `blob_ref` is a path **relative to the journal `blob_dir`** (see

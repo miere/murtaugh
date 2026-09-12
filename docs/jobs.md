@@ -1,7 +1,7 @@
 # Jobs
 
 A **job** is a named unit of work in the config store, managed with
-`murtaugh cfg job …`. It runs **either** a shell command (with args, working
+`murtaugh-gateway cfg job …`. It runs **either** a shell command (with args, working
 directory, and timeout) **or** an agent (`--agent` + `--prompt`, optionally
 reporting its reply with `--report-to`) — the two are mutually exclusive. Jobs run **on demand** (CLI,
 MCP, or a workflow trigger) and can additionally run **automatically** on a
@@ -36,33 +36,33 @@ one — the change re-validates the whole store):
 
 ```sh
 # Command job, manual.
-murtaugh cfg job set --name example-job \
+murtaugh-gateway cfg job set --name example-job \
   --command /bin/echo --arg "hello from murtaugh"
   # --workdir /path/to/working/directory --timeout 5m
 
 # Command job, cron-scheduled (daily at 02:00).
-murtaugh cfg job set --name nightly-backup \
+murtaugh-gateway cfg job set --name nightly-backup \
   --command /usr/local/bin/backup.sh --schedule "0 2 * * *"
 
 # Command job, interval-scheduled (hourly).
-murtaugh cfg job set --name hourly-sync \
+murtaugh-gateway cfg job set --name hourly-sync \
   --command /usr/local/bin/sync.sh --every 1h
 
 # Agent-delegated job, cron-scheduled, reporting its reply to #ops.
-murtaugh cfg job set --name nightly-digest \
+murtaugh-gateway cfg job set --name nightly-digest \
   --agent default --prompt 'Summarise last night'"'"'s alerts.' \
   --schedule "0 7 * * *" --report-to "#ops"
 
 # Agent-delegated job.
-murtaugh cfg job set --name code-review-job \
+murtaugh-gateway cfg job set --name code-review-job \
   --agent default \
   --prompt 'Review the code changes in this PR and provide feedback.
 - pr: {{ 1 }}
 - local repository: {{ 2 }}'
 
-murtaugh cfg job list                       # existing jobs
-murtaugh cfg job show --name code-review-job
-murtaugh cfg job delete --name code-review-job
+murtaugh-gateway cfg job list                       # existing jobs
+murtaugh-gateway cfg job show --name code-review-job
+murtaugh-gateway cfg job delete --name code-review-job
 ```
 
 - **`--command`** should be an absolute path (or a binary on `PATH`); a relative
@@ -98,8 +98,7 @@ Who ran the job decides everything else. The gateway looks at the node that ran
 it — its owner is the user its node token was minted for — after the run and
 before it keeps or shows anything:
 
-- **The gateway admin's own node** (the owner is `access.admin_user`), **or the
-  gateway's own process** (`murtaugh slack gateway` runs agents itself). The
+- **The gateway admin's own node** (the owner is `access.admin_user`). The
   reply is kept in the journal as a `job.reply` event on the `job` stream (a
   long one is kept whole in a journal blob file), and posted to `--report-to`
   when the job has one.
@@ -126,16 +125,16 @@ channel, bot not invited) is journalled at ERROR. Clear the setting with
 ## Running a job
 
 ```sh
-murtaugh jobs run --name nightly-backup
+murtaugh-runtime jobs run --name nightly-backup
 
 # Pass positional args (fill {{ 1 }}, {{ 2 }}, …):
-murtaugh jobs run --name code-review-job --args 1234 --args /path/to/repo
+murtaugh-runtime jobs run --name code-review-job --args 1234 --args /path/to/repo
 ```
 
 Define a job from the CLI or an MCP client:
 
 ```sh
-murtaugh jobs define \
+murtaugh-gateway jobs define \
   --name nightly-deploy \
   --command /usr/local/bin/deploy \
   --args --env --args production \
@@ -143,9 +142,11 @@ murtaugh jobs define \
   --timeout 15m
 ```
 
-Both `jobs run` and `jobs define` are also MCP tools (`jobs.run`, `jobs.define`).
-Run `murtaugh help jobs run` / `murtaugh help jobs define` for the full flag
-reference, including the repeatable `--args` form and the
+`jobs define` is a **gateway** command — it writes the store the scheduler
+reads — while `jobs run` is a **runtime** one, because only a node can run an
+agent. Both are also MCP tools (`jobs_run`, `jobs_define`). Run
+`murtaugh-runtime help jobs run` / `murtaugh-gateway help jobs define` for the
+full flag reference, including the repeatable `--args` form and the
 `--timeout`/`--schedule`/`--every` value formats.
 
 ---

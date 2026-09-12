@@ -33,8 +33,8 @@ did the daemon go silent?"*.
 
 ## Querying
 
-Three tools, spaced on the CLI (`murtaugh journal query …`) and dotted over MCP
-(`journal.query`):
+Three tools, spaced on the CLI (`murtaugh-gateway journal query …`) and joined
+with underscores over MCP (`journal_query`):
 
 | Tool | Use it to… |
 |---|---|
@@ -43,11 +43,11 @@ Three tools, spaced on the CLI (`murtaugh journal query …`) and dotted over MC
 | `journal prune` | Delete events past their retention (rarely needed; the daemon sweeps automatically). |
 
 ```sh
-murtaugh journal query --stream gateway --channel C123 --since 1h --level error
-murtaugh journal query --corr-id gw_3f9c2b1a       # the whole story of one interaction
-murtaugh journal query --stream acp_session --session <id>
-murtaugh journal stats                             # per-stream counts and time span
-murtaugh journal prune                             # drop events past their retention
+murtaugh-gateway journal query --stream gateway --channel C123 --since 1h --level error
+murtaugh-gateway journal query --corr-id gw_3f9c2b1a       # the whole story of one interaction
+murtaugh-gateway journal query --stream acp_session --session <id>
+murtaugh-gateway journal stats                             # per-stream counts and time span
+murtaugh-gateway journal prune                             # drop events past their retention
 ```
 
 **Filters** (all optional, ANDed): `--stream` `--kind` `--level` (at-least
@@ -74,17 +74,17 @@ Worked example — *"I clicked Approve in #reviews and nothing happened"*:
 
 ```sh
 # 1. Recent failures in that channel
-murtaugh journal query --stream gateway --channel C0REVIEWS --since 1h --level warn
+murtaugh-gateway journal query --stream gateway --channel C0REVIEWS --since 1h --level warn
 #    → a workflow.trigger error, corr_id gw_3f9c…, rule "code-review-approval"
 
 # 2. The whole interaction
-murtaugh journal query --corr-id gw_3f9c2b1a
+murtaugh-gateway journal query --corr-id gw_3f9c2b1a
 #    → interactive.received → workflow.matched → workflow.trigger (error:
 #      "render Slack response: template execute … map has no entry for key …")
 ```
 
 If `journal stats` shows the `gateway` stream at **0 rows**, recording is off —
-check the journal config (`murtaugh cfg journal show` → `streams.gateway.enabled`)
+check the journal config (`murtaugh-gateway cfg journal show` → `streams.gateway.enabled`)
 and that the daemon restarted.
 
 ---
@@ -97,7 +97,7 @@ one `session.turn` row (queryable like above) plus a full per-session transcript
 written under `blob_dir` and referenced by the row's `blob_ref`:
 
 ```sh
-murtaugh journal query --stream acp_session --session <id>
+murtaugh-gateway journal query --stream acp_session --session <id>
 # then read the referenced transcript file for the message bodies
 ```
 
@@ -112,7 +112,7 @@ The journal is a **singleton in the config store** — per-stream `enabled` and
 cadence. Inspect it with:
 
 ```sh
-murtaugh cfg journal show
+murtaugh-gateway cfg journal show
 ```
 
 ```

@@ -1,103 +1,140 @@
 ---
 name: murtaugh-setup
-description: Install and configure Murtaugh from scratch with the idempotent setup_* tools and the murtaugh cfg admin CLI — binary on PATH, config dir, config.yaml (oauth + database), .env secrets, the config database (agents/chat/jobs/…), the macOS daemon, and self-update.
+description: Install and configure Murtaugh from scratch with the `cfg` admin CLI on each of the two binaries — placing murtaugh-gateway / murtaugh-runtime, writing config.yaml (oauth + database) and the .env secrets by hand, seeding the config database, writing the macOS LaunchAgent, and checking for a newer release.
 requires: [setup]
 files:
-  reference/config-tools.md:       { requires: [setup], summary: "seed config / write config.yaml (oauth+database) / .env secrets / seed the config DB via murtaugh cfg" }
-  reference/daemon-and-clients.md: { requires: [setup], summary: "install the daemon, register an MCP client, self-update" }
-  reference/mcp-server.md:         { requires: [setup], summary: "run Murtaugh as an MCP server for another tool" }
+  reference/config-tools.md:       { requires: [setup], summary: "write config.yaml (oauth+database) / .env secrets / seed the config DB via cfg" }
+  reference/daemon-and-clients.md: { requires: [setup], summary: "write the LaunchAgent, register Murtaugh in another AI client by hand, check for a release" }
+  reference/mcp-server.md:         { requires: [setup], summary: "run a node as an MCP server for another tool" }
 ---
 
 # Skill: Murtaugh Setup & Install
 
-How to install and configure Murtaugh from scratch using the `setup_*` tools and
-the `murtaugh cfg …` admin CLI. This is **operator-facing**: getting the binary
-in place, writing the two on-disk files, seeding the config **database**, and
-(on macOS) installing the daemon. For *running and debugging* the daemon
-afterward, see the `murtaugh-operations` skill.
+How to install and configure Murtaugh from scratch using each binary's own
+`cfg …` admin CLI. This is **operator-facing**: getting the binaries in place, writing
+the two on-disk files, seeding the config **database**, and (on macOS) writing
+the daemon's LaunchAgent. For *running and debugging* the daemon afterward, see
+the `murtaugh-operations` skill.
 
-**Where config lives now.** Only **two files** sit on disk, both under
-`~/.config/murtaugh`:
+**Two binaries, and no install script.** Murtaugh ships `murtaugh-gateway` (the
+Slack daemon) and `murtaugh-runtime` (a node that runs agents). There is no
+combined `murtaugh` binary and no `curl … | bash` installer: putting a file
+where you want it is the operator's job, and each binary then configures itself
+with `cfg launchd`, `cfg validate` and `cfg migrate`. The role is implied by
+which file you ran, so no command takes a `--role`.
 
-- **`config.yaml`** — slimmed to two blocks: `oauth:` (Slack tokens via `${VAR}`)
-  and `database:` (`backend: sqlite` [default, `sqlite.path`] or `postgres`
-  [`postgres.dsn: ${VAR}`]).
-- **`.env`** — **all secrets**: Slack tokens, provider API keys, a Postgres DSN.
+**The `setup_*` tools are gone.** `setup_bootstrap`, `setup_slack`, `setup_env`,
+`setup_agents` and `setup_mcp_register` were decommissioned: the first three are
+a text editor and two `cfg` commands, agents are `cfg agent create`, and
+registering Murtaugh into another AI client is that client's business. Only
+`setup_update` survives, and only to compare versions and link the release
+notes. If you are following older notes that call one of these, use the `cfg`
+equivalent in `reference/config-tools.md` instead.
+
+**Where config lives now.** Each binary has its own configuration **root** — the
+gateway's is `~/.config/murtaugh`, a node's is `~/.config/murtaugh/node` — and
+each root holds only **two files**:
+
+- **`config.yaml`** — the gateway's has two blocks, `oauth:` (Slack tokens via
+  `${VAR}`) and `database:`; a node's has `database:` only, because a node has no
+  Slack connection.
+- **`.env`** — **all secrets**: Slack tokens (gateway), provider API keys
+  (node), a Postgres DSN.
 
 **Everything else lives in the config database** — agents, mcp_servers, jobs,
 chat routing, access, runtime defaults, journal, troubleshoot, workflow/unfurl
-rules — and is managed with `murtaugh cfg …` (also exposed over MCP as `cfg.*`
-tools). The old sibling YAMLs (`agents.yaml`, `jobs.yaml`, `journal.yaml`,
-`workflow-rules.yaml`, `unfurl-rules.yaml`, `troubleshoot.yaml`) are **gone** as
-the source of truth. The default store is SQLite at
-`~/.config/murtaugh/config.db` (beside `config.yaml`; override with `database.sqlite.path`).
+rules — and is managed with `cfg …` (also exposed over MCP as `cfg_*`
+tools). The default store is SQLite beside `config.yaml` (`config.yaml` →
+`config.db`), so two roots never share a store.
 
-**Upgrading auto-migrates.** On the first run of a new binary against an old YAML
-tree, Murtaugh migrates the whole tree into SQLite, slims `config.yaml` down to
-`oauth:`+`database:`, and archives the old siblings to
-`~/.config/murtaugh/migrated-<timestamp>/`. Move to Postgres later with
-`murtaugh cfg db migrate --to postgres --dsn-env MURTAUGH_DB_DSN`.
+**Each binary carries only its own half of `cfg`.** The gateway has `access`,
+`job`, `election`, `workflow_rule`, `unfurl_rule` and `node split`; the node has
+`agent`, `mcp`, `defaults` and `node set|show`. `chat`, `show`, `export`,
+`import`, `db migrate`, `validate`, `migrate` and `launchd` are on both, acting
+on that binary's own configuration. Asking a binary for the other half's command
+is an unknown command, not a permission error.
 
-Every `setup_*` tool is idempotent, so re-running is safe. The file writers
-(`setup_slack`, `setup_env`, `setup_launchd`, `setup_mcp_register`) back up any
-file they replace (`<file>.bak.<timestamp>`); `setup_agents` writes the config
-database. `setup_bootstrap` seeds the workspace and is safe to re-run.
+**Upgrading migrates the directory.** `cfg migrate` brings a configuration root
+up to the schema this version expects; both daemons run the same pass at
+startup. (`cfg db migrate` is a different command — it moves the store's
+*content* between SQLite, Postgres and Firestore.)
+
 Every `cfg` mutation **re-validates the whole config** and rolls back an invalid
 change. The bundled agent skills are served in-binary (not written to disk), so
 there's no on-disk skill copy to keep in sync — see `reference/config-tools.md`.
 
 ## Install order (the workflow)
 
-1. **Get the binary** on `PATH` (download a release, or `go build`).
-2. **`setup_bootstrap`** — seed the config dir and create the store (must run
-   first, so later steps write real files/rows). → `reference/config-tools.md`
-3. **`setup_slack`** — write `config.yaml` `oauth:` (tokens via `${VAR}`) and the
-   token values into `.env`.
-4. **`setup_env`** — upsert provider keys into `.env` (a native agent can't
-   authenticate without its key here; run before/with `setup_agents`).
-5. **`setup_agents`** — create an agent **in the database** (native, ACP, or
-   claude_code), or leave chat disabled.
-6. **`murtaugh cfg …`** — everything else in the DB: `cfg access set` (admin +
-   allowed users), `cfg chat set` (turn chat on, pick agents), `cfg job set`,
-   `cfg mcp set`, `cfg workflow_rule set` / `cfg unfurl_rule set`.
-   → `reference/config-tools.md`
-7. **`setup_launchd`** *(macOS, optional)* — install the daemon as a LaunchAgent.
-   → `reference/daemon-and-clients.md`
-8. **`setup_mcp_register`** *(optional)* — register Murtaugh in an MCP client.
+**On the gateway host:**
 
-Later: **`setup_update`** self-updates the binary from a GitHub release (and the
-next start auto-migrates any old YAML tree, as above).
+1. **Place `murtaugh-gateway`** wherever you want it (a release download, or
+   `go build -o murtaugh-gateway ./cmd/murtaugh-gateway`).
+2. **Run any command once** (`murtaugh-gateway cfg validate` will do) — the root
+   seeds itself: a commented `config.yaml`, a template `.env`, the templates,
+   and an empty config store. It then reports the missing Slack tokens, which is
+   the expected first-run output.
+3. **Put the Slack tokens in `~/.config/murtaugh/.env`.** `config.yaml`'s
+   `oauth:` block already references them as `${VAR}`.
+   → `reference/config-tools.md`
+4. **`murtaugh-gateway cfg validate`** — it names the missing field if one is.
+5. **`murtaugh-gateway cfg launchd`** *(macOS)* — writes the LaunchAgent; you
+   load it with the `launchctl bootstrap` line it prints.
+   → `reference/daemon-and-clients.md`
+6. **`murtaugh-gateway node token mint --node <id> --user <U…> --token-file …`**
+   — one credential per node. Printed once.
+
+There is no admin to set: an unclaimed gateway adopts the first person who
+direct-messages it, and says so. Set it explicitly instead with
+`murtaugh-gateway cfg access set --admin-user @you` if you would rather not race
+for it.
+
+**On each node host:**
+
+7. **Place `murtaugh-runtime`**, then put the minted token at
+   `~/.config/murtaugh/node/node-token` (mode `0600`).
+8. **`murtaugh-runtime cfg node set --gateway wss://host:port`** — where it
+   dials. A node dials in; the gateway never dials out.
+9. **`murtaugh-runtime cfg agent create …`** — the agent this node serves
+   (native, ACP, or claude_code), plus `cfg mcp set` for any external MCP
+   servers it attaches. → `reference/config-tools.md`
+10. **`murtaugh-runtime cfg launchd --alias <name>`** *(macOS)*, then load it.
+
+Later: **`setup update`** reports whether a newer release exists and links its
+notes. It downloads nothing.
 
 ## Read the right file (don't load everything)
 
 | When you're… | Read |
 |---|---|
-| Seeding config / writing config.yaml (oauth+database) / .env secrets / seeding the DB with `cfg` | `reference/config-tools.md` |
-| Installing the daemon, registering an MCP client, or self-updating | `reference/daemon-and-clients.md` |
-| Running Murtaugh as an MCP server for another tool | `reference/mcp-server.md` |
+| Writing config.yaml (oauth+database) / .env secrets / seeding the DB with `cfg` | `reference/config-tools.md` |
+| Writing the LaunchAgent, registering Murtaugh in another AI client, or checking for a release | `reference/daemon-and-clients.md` |
+| Running a node as an MCP server for another tool | `reference/mcp-server.md` |
 | Wanting a copy-paste install sequence | `examples/install-sequence.sh` |
 
 ## Global guidelines (defaults — follow unless the user says otherwise)
 
-- **`setup_bootstrap` first.** It creates the workspace (`~/.config/murtaugh`),
-  the config store, and templates/skills; the other tools write files/rows that
-  must already exist.
-- **`config.yaml` and `.env` hold secrets** — they're written `0600`. Slack
-  tokens and provider API keys live in `.env`; `config.yaml` `oauth:` and a
-  Postgres DSN reference them by `${VAR}`. Agents reference their key by variable
-  name via `api_key_env`. Don't commit them or echo tokens into logs.
+- **A binary starts on sensible defaults and refuses only what has none.** A
+  gateway needs `oauth.app_token` and `oauth.bot_token`; a node needs a
+  credential file and a gateway seed address. Each failure names the field, so
+  read the error rather than guessing at the configuration around it.
+- **`config.yaml` and `.env` hold secrets** — write them `0600`. Slack tokens
+  live in the gateway's `.env`; provider API keys live in the **node's** `.env`,
+  because that is where agents run. `config.yaml` and the store reference them by
+  `${VAR}`. Agents reference their key by variable name via `api_key_env`. Don't
+  commit them or echo tokens into logs.
 - **Restart to apply.** The runtime still loads config **once** at startup. After
-  any `cfg` change (or a file edit), restart the gateway for it to take effect.
-- **`setup_launchd` is macOS-only**; on other platforms run the gateway under
-  your own supervisor (`murtaugh slack gateway`).
-- Tools run as `murtaugh setup <tool> …` / `murtaugh cfg <group> <verb> …` on the
-  CLI, and as `setup_<tool>` / `cfg.*` over MCP. Setup tools work **before** a
-  valid config exists (they create it).
-- **CLI flags always carry a value — booleans included.** Write `--load true`,
-  `--force true`, `--enabled true`; a bare `--load` is rejected. Arrays repeat the
-  flag (`--tools files --tools terminal`). snake_case arg names map to kebab flags
-  (`binary_path` → `--binary-path`, `app_token` → `--app-token`).
-- **When in doubt, ask the binary.** `murtaugh help` lists every command;
-  `murtaugh help setup <tool>` / `murtaugh help cfg <group>` (or `--help` on any)
-  prints that command's full flag reference — required/optional, types, defaults,
-  examples.
+  any `cfg` change (or a file edit), restart the daemon for it to take effect.
+- **`cfg launchd` is macOS-only** and only WRITES the plist; on other platforms
+  run the binary under your own supervisor.
+- Tools run as `murtaugh-gateway cfg <group> <verb> …` /
+  `murtaugh-runtime cfg <group> <verb> …` on the CLI, and as `cfg_*` over MCP.
+  `cfg` works **before** a valid config exists (it creates the store).
+- **CLI flags always carry a value — booleans included.** Write `--enabled true`,
+  `--update-existing true`; a bare `--enabled` is rejected. Arrays repeat the
+  flag (`--tools files --tools terminal`). snake_case arg names map to kebab
+  flags (`binary_path` → `--binary-path`, `update_existing` →
+  `--update-existing`).
+- **When in doubt, ask the binary.** `murtaugh-gateway help` /
+  `murtaugh-runtime help` lists every command that binary carries;
+  `… help cfg <group>` (or `--help` on any) prints that command's full flag
+  reference — required/optional, types, defaults, examples.

@@ -1,6 +1,6 @@
 ---
 name: murtaugh-agents
-description: Configure Murtaugh's agent chat with `murtaugh cfg agent` (stored in the config database) — native, claude_code, and ACP profiles, which tools an agent may call, the defaults block, and which agent answers DMs vs each channel.
+description: Configure Murtaugh's agent chat with `murtaugh-runtime cfg agent` (stored in the config database) — native, claude_code, and ACP profiles, which tools an agent may call, the defaults block, and which agent answers DMs vs each channel.
 requires: [manage]
 files:
   reference/agents-yaml.md: { requires: [manage], summary: "define agents via cfg agent (provider/model/tools/approval, the defaults block) or a command-based ACP/claude_code agent" }
@@ -17,7 +17,7 @@ streaming/timeouts, or understanding the `/chat` and `/stop` behavior.
 
 ## Three agent backends
 
-Agents live in the **config database**, managed with `murtaugh cfg agent …` (also
+Agents live in the **config database**, managed with `murtaugh-runtime cfg agent …` (also
 `cfg.*` over MCP). The backend is the agent's `--type`:
 
 - **native** (the **default**) — Murtaugh runs the LLM loop in-process and
@@ -47,10 +47,10 @@ Slack chat surface (DMs + @mentions); agent delegation (jobs, workflow rules,
 unfurls) runs whenever the target agent is defined, regardless of this flag.
 
 ```bash
-murtaugh cfg agent create --name default --type native \
+murtaugh-runtime cfg agent create --name default --type native \
   --provider gemini --model gemini-2.5-pro --api-key-env GEMINI_API_KEY \
   --tools files --tools terminal --tools skills --tools ask --tools present_plan
-murtaugh cfg chat set --enabled true --default-agent default
+murtaugh-runtime cfg chat set --enabled true --default-agent default
 ```
 
 > The runtime tuning **`defaults` block** (grouped by `session`, `rendering`,
@@ -88,12 +88,15 @@ murtaugh cfg chat set --enabled true --default-agent default
   `native` (default), `acp`, or `claude_code`. Native needs `--provider` +
   `--model` + `--api-key-env`; the command-based types (`acp`/`claude_code`) need
   `--command`. Set them with `cfg agent create` / `cfg agent update`.
-- **Native agents authenticate via `~/.config/murtaugh/.env`.** The profile names
-  the variable with `--api-key-env`; write the value there with `setup_env` (see
-  the `murtaugh-setup` skill). The key never goes in the config store.
-- **`cfg chat set --default-agent` is required when chat is enabled**, and every
-  routed agent name must exist (`cfg agent list`), or the gateway refuses to start
-  (fail-closed).
+- **Native agents authenticate via the node's `.env`** (`~/.config/murtaugh/node/.env`
+  by default). The profile names the variable with `--api-key-env`; write the
+  value into that file by hand — `setup_env` is gone. The key never goes in the
+  config store.
+- **`cfg chat set --default-agent` is required when chat is enabled.** On a node
+  the name is checked against a profile body it holds, so a typo is rejected on
+  the spot (`cfg agent list`). The gateway holds no bodies, so it accepts the
+  name and resolves it at connect time against what the attached nodes
+  advertise — a warning, never fatal.
 - **Per-channel routing is keyed by channel ID** (e.g. `C0ENG1`) or a channel-name
   glob (`feature-*`), not a `#name`; each entry picks an agent and/or a
   thread-reply setting. → `reference/routing.md`

@@ -1,7 +1,7 @@
 # Agent configuration via `cfg agent`
 
 Agents live in the **config database**, not a YAML file. You manage them with
-`murtaugh cfg agent …` (also `cfg.*` over MCP):
+`murtaugh-runtime cfg agent …` (also `cfg.*` over MCP):
 
 - `cfg agent create --name <n> --type <native|acp|claude_code> [flags]`
 - `cfg agent update --name <n> [flags]`
@@ -29,10 +29,10 @@ The type is set explicitly with `--type` (native/acp/claude_code). Shared knobs
 
 ```bash
 # Native (the default) — provider loop in-process.
-murtaugh cfg agent create --name default --type native \
+murtaugh-runtime cfg agent create --name default --type native \
   --workdir '${HOME}/work' \
-  --tools files --tools terminal --tools skills --tools slack \
-  --tools jobs --tools ask --tools present_plan --tools attach \
+  --tools files --tools terminal --tools skills \
+  --tools ask --tools present_plan --tools attach \
   --mcp-servers vaultre \
   --approval-terminal allowlist --approval-allow kubectl --approval-allow "docker ps" \
   --provider gemini --model gemini-2.5-pro --api-key-env GEMINI_API_KEY \
@@ -73,8 +73,8 @@ defaults for one agent; to retune the rest, `cfg export` the config, edit the
 ## Native profiles (the default — `--type native`)
 
 A native agent needs a **provider**, a **model**, and an **api-key-env**; the key
-value itself never lives in the store (it comes from `~/.config/murtaugh/.env` —
-see the `murtaugh-setup` skill's `setup_env`).
+value itself never lives in the store (it comes from the node's `.env`,
+`~/.config/murtaugh/node/.env` by default — see the `murtaugh-setup` skill).
 
 | Flag | Scope | Required | Meaning |
 |---|---|---|---|
@@ -94,7 +94,7 @@ see the `murtaugh-setup` skill's `setup_env`).
 | Flag | Required | Meaning |
 |---|---|---|
 | `--workdir` | no | Working directory that roots the files/terminal/attach tools. Defaults to the workspace (`~/.config/murtaugh`) when unset. |
-| `--tools` | no | Allowlist of tool groups the agent may use — **repeat the flag**. Native groups (`files`, `terminal`, `attach`) plus registry namespaces (`skills`, `slack`, `jobs`, `ask`, `present_plan`, …) and the `manage` skills-visibility grant. `attach` lets the agent return a workspace file (report, image, export) to the user as a real downloadable upload, confined to `workdir` like the files tools. Empty means only the always-on set. |
+| `--tools` | no | Allowlist of tool groups the agent may use — **repeat the flag**. Native groups (`files`, `terminal`, `skills`, `attach`) plus registry namespaces and the `manage` skills-visibility grant. The registry an agent on a node sees holds `ask`, `present_plan`, `auth.request`, `ping`, `version` and `help` — a `slack` or `jobs` entry matches nothing there and is a silent no-op, since only the gateway talks to Slack. `attach` lets the agent return a workspace file (report, image, export) to the user as a real downloadable upload, confined to `workdir` like the files tools. Empty means only the always-on set. |
 | `--export-skills-to-fs` | no | Bundled (`murtaugh-*`) skills to write into this agent's `workdir` so a filesystem-discovering backend (e.g. a Claude Code agent) can load them. **Repeat the flag**; `all` exports every bundled skill. Empty (default) keeps the bundled skills in-binary only — readable solely through the gated `skills` tool, never by `files`/`terminal`. See below. |
 | `--mcp-servers` | no | Names of `cfg mcp` entries to attach — **repeat the flag**. Each contributes its remote tools. |
 | `--approval-terminal` / `--approval-allow` / `--approval-requests` | no | Human-approval gate for side-effecting tool calls (see below). Defaults to gating on (`allowlist`). |
@@ -116,7 +116,7 @@ reads `.claude/skills/`). For those, list the skills to mirror into the agent's
 `workdir`:
 
 ```bash
-murtaugh cfg agent create --name claude --type claude_code \
+murtaugh-runtime cfg agent create --name claude --type claude_code \
   --workdir '${HOME}/work/claude' \
   --export-skills-to-fs all \
   --command claude-code-acp
@@ -199,7 +199,8 @@ Because it is three-state (`unset` / `true` / `false`), an agent can opt out of 
 
 Murtaugh drives the `claude` CLI directly over its stream-json protocol — one
 process per conversation, no ACP adapter in between. Like an ACP agent, it
-reaches Murtaugh's own tools (`slack.*`, `jobs`, `ask`, …) through the tool
+reaches Murtaugh's own tools (`ask`, `present_plan`, `auth.request`, plus its
+attached MCP servers) through the tool
 bridge, gated by the same `--approval-*` policy. The command-based knobs live on
 their own flags; the shared knobs (`--workdir`, `--tools`, `--approval-*`,
 `--export-skills-to-fs`) apply as above.
@@ -212,11 +213,11 @@ their own flags; the shared knobs (`--workdir`, `--tools`, `--approval-*`,
 | `--env KEY=VALUE` (repeatable) | no | Extra environment variables for the process; expanded and layered on the inherited environment exactly like an ACP agent's env. |
 
 ```bash
-murtaugh cfg agent create --name coder --type claude_code \
+murtaugh-runtime cfg agent create --name coder --type claude_code \
   --command claude --model claude-opus-4-8 \
   --workdir '${HOME}/work/coder' \
-  --tools files --tools terminal --tools skills --tools slack \
-  --tools jobs --tools ask --tools present_plan \
+  --tools files --tools terminal --tools skills \
+  --tools ask --tools present_plan \
   --approval-terminal allowlist --approval-allow kubectl --approval-allow "docker ps"
 ```
 
@@ -238,7 +239,7 @@ own flags; the shared knobs (`--workdir`, `--tools`, `--approval-*`,
 | `--model` | no | Model id, shared with native (some backends honour it). |
 
 ```bash
-murtaugh cfg agent create --name legacy --type acp \
+murtaugh-runtime cfg agent create --name legacy --type acp \
   --workdir /path/to/workspace \
   --command /path/to/acp-agent --arg --stdio
 ```
@@ -257,10 +258,10 @@ same way, so this applies only to the process-driven types.
 The servers a native agent attaches to via `--mcp-servers` are defined with
 `cfg mcp set` (see the `murtaugh-slack`/`murtaugh-setup` skills). Each uses exactly
 one transport — a stdio child process (`--command`/`--arg`/`--env`) or a remote
-endpoint (`--url`). Secrets in `--env` come from `~/.config/murtaugh/.env` via
-`${VAR}`:
+endpoint (`--url`). Secrets in `--env` come from the node's `.env`
+(`~/.config/murtaugh/node/.env`) via `${VAR}`:
 
 ```bash
-murtaugh cfg mcp set --name vaultre --command vaultre-mcp --arg --stdio \
+murtaugh-runtime cfg mcp set --name vaultre --command vaultre-mcp --arg --stdio \
   --env VAULTRE_TOKEN=${VAULTRE_TOKEN}
 ```

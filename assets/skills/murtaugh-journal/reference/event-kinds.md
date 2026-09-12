@@ -25,7 +25,7 @@ share a `corr_id` (minted at ingress as `gw_…`).
 ### Why the daemon went silent
 
 If the bot stopped responding and the logs are quiet, scan the `connection`
-events: `murtaugh journal query --stream gateway --kind connection --since 24h`.
+events: `murtaugh-gateway journal query --stream gateway --kind connection --since 24h`.
 A healthy daemon shows the occasional `connecting` → `reconnecting` pair; a
 `stalled` or repeated `heartbeat_failed` marks where a half-open or unreachable
 socket was force-recycled (the watchdog that ended the days-long "zombie" hang).

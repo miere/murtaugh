@@ -5,18 +5,29 @@ reply back into the thread, and let a follow-up interrupt an in-flight response.
 This page covers the two agent backends, the tools an agent may call, routing,
 and how a turn behaves.
 
+**Agents live on a node.** Every command on this page is a `murtaugh-runtime`
+command, run against a node's own configuration root
+(`~/.config/murtaugh/node` by default). The gateway binary cannot run an agent —
+it cannot even reach the packages that would let it, and CI enforces that — so
+`murtaugh-gateway cfg agent create` is an unknown command, not a permission
+error.
+
 Two `cfg` commands turn chat on:
 
-1. **`murtaugh cfg agent create …`** — define at least one agent.
-2. **`murtaugh cfg chat set --enabled true --default-agent <name>`** — turn on
-   the chat surface and point it at one of those agents.
+1. **`murtaugh-runtime cfg agent create …`** — define at least one agent.
+2. **`murtaugh-runtime cfg chat set --enabled true --default-agent <name>`** —
+   turn on the chat surface and point it at one of those agents.
+
+A node serves **one** agent per process: the one named by `chat.defaults.agent`,
+or the only one it holds, or the one you name with `-agent`. A node with several
+agents and no default refuses to start rather than pick.
 
 With chat disabled (the default), DMs and mentions are ignored — but agents are
 still available to [jobs](jobs.md), [workflow rules](slack.md#workflow-rules),
 and [unfurls](slack.md#link-unfurling).
 
 Every `cfg` change re-validates the whole config store and takes effect on the
-next gateway restart (config is loaded once at startup).
+next restart of the daemon that reads it (config is loaded once at startup).
 
 ---
 
@@ -37,10 +48,10 @@ An agent's backend is chosen with **`--type`** on `cfg agent create`:
 ### A native agent
 
 ```sh
-murtaugh cfg agent create --name emily --type native \
+murtaugh-runtime cfg agent create --name emily --type native \
   --workdir '${HOME}/work/emily' \
-  --tools files --tools terminal --tools skills --tools slack \
-  --tools jobs --tools ask --tools present_plan --tools attach \
+  --tools files --tools terminal --tools skills \
+  --tools ask --tools present_plan --tools attach \
   --approval-terminal allowlist \
   --approval-allow kubectl --approval-allow 'docker ps' \
   --provider gemini --model gemini-2.5-pro --api-key-env GEMINI_API_KEY \
@@ -58,7 +69,8 @@ murtaugh cfg agent create --name emily --type native \
   inlines the prompt instead of `--system-prompt-file`.
 
 The API key value **never** lives in the config store — `--api-key-env` names a
-variable in `~/.config/murtaugh/.env`. Write it with `murtaugh setup env`. GLM,
+variable in the **node's** `.env` (`~/.config/murtaugh/node/.env` by default).
+Write it there by hand; `setup env` no longer exists. GLM,
 DeepSeek, and Kimi ride the `anthropic`/`openai`-compatible families via a
 `--base-url` override. A workspace `AGENTS.md` in the agent's `--workdir` is
 auto-loaded into the system prompt as project guidelines.
@@ -98,13 +110,13 @@ a name or personality yet" true rather than immediately contradicted.
 Change a field later with `cfg agent update`:
 
 ```sh
-murtaugh cfg agent update --name emily --max-turns 60 --cache-retention 1h
+murtaugh-runtime cfg agent update --name emily --max-turns 60 --cache-retention 1h
 ```
 
 ### An ACP or claude_code agent
 
 ```sh
-murtaugh cfg agent create --name default --type acp \
+murtaugh-runtime cfg agent create --name default --type acp \
   --workdir /path/to/workspace \
   --command /path/to/acp-agent --arg --stdio \
   --env ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
@@ -114,6 +126,180 @@ murtaugh cfg agent create --name default --type acp \
 support at startup, so you don't declare interruptibility. Native agents don't
 probe. A `claude_code` agent is created the same way with `--type claude_code`
 and may add `--model`.
+
+---
+
+## ACP agents are the node admin's job
+
+Murtaugh used to register itself into opencode, auggie and goose for you, and
+to guess the rest. It no longer does: **an ACP agent is configured by the person
+who runs the node**, deliberately, because most of the investment has gone into
+`claude_code` and pretending otherwise moves the surprise to runtime. This
+section is what that person needs.
+
+### Configuring one, end to end
+
+Everything below runs on the **node**, against the node's own root. There is no
+combined install to do it from.
+
+```sh
+# 1. Where the node dials, and the credential the gateway minted for it.
+murtaugh-runtime cfg node set --gateway wss://gateway.example.com:8443
+#    …and put the minted token at ~/.config/murtaugh/node/node-token (0600).
+
+# 2. The agent profile. --command is what makes it an ACP agent.
+murtaugh-runtime cfg agent create --name coder --type acp \
+  --workdir "$HOME/work/coder" \
+  --command "$HOME/.local/bin/claude-code-acp" --arg --stdio \
+  --env ANTHROPIC_API_KEY='${ANTHROPIC_API_KEY}' \
+  --tools ask --tools present_plan --tools attach \
+  --approval-requests ask \
+  --sandbox-mode seatbelt
+
+# 3. Any external MCP servers it should reach, by name.
+murtaugh-runtime cfg mcp set --name vaultre --command vaultre-mcp --arg --stdio
+murtaugh-runtime cfg agent update --name coder --mcp-servers vaultre
+
+# 4. Make it the agent this node serves, then check the whole store.
+murtaugh-runtime cfg chat set --enabled true --default-agent coder
+murtaugh-runtime cfg validate
+murtaugh-runtime cfg agent show --name coder
+```
+
+The adapter's own credentials are **yours**: `--env` is applied to the child
+process after the sandbox's environment filter, and the value is a `${VAR}`
+reference resolved from the node's `.env`. Murtaugh downloads no third-party
+agent and authenticates none.
+
+### Murtaugh's tools reach the agent by themselves
+
+You do **not** wire Murtaugh into the adapter to give it Murtaugh's tools. For
+every session it opens, the node hands the agent one stdio MCP server in
+`session/new`, named `murtaugh`, whose command is the runtime binary's internal
+`mcp-bridge` subcommand with a single-use socket path and token in its
+environment. Behind that socket the node serves exactly this agent's resolved
+toolset — its own groups, minus the native-only ones, plus the proxied tools of
+every MCP server it attaches — gated by the same approval broker a native agent
+goes through. Third-party MCP credentials never leave the node's process.
+
+The consequence for you: an ACP agent's tool surface is `--tools` and
+`--mcp-servers` on the profile, and nothing else. `files`, `terminal` and
+`skills` are stripped from it whether or not you list them — the adapter brings
+its own — while `attach`, `ask`, `present_plan` and `auth.request` are served
+when you list them, because they deliver something to the person in the thread.
+(`auth.request` is spelled `--tools auth` or `--tools auth.request`; a namespace
+or an exact name both match.)
+
+### Registering Murtaugh inside opencode / auggie / goose — manual
+
+That is the *other* direction: making Murtaugh's tools available when you drive
+opencode, auggie or goose **yourself**, outside Murtaugh. `setup mcp_register`
+used to write these files; it is gone, and they are yours to edit.
+
+The entry is always the same command — the runtime binary, the `--config` of the
+node root it should act on, and the `mcp` subcommand. `--config` is a global
+flag, so it comes **before** `mcp`. Use absolute paths; these clients do not run
+under your login shell.
+
+**opencode** — `~/.config/opencode/opencode.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "murtaugh": {
+      "type": "local",
+      "command": ["/usr/local/bin/murtaugh-runtime", "--config", "/Users/you/.config/murtaugh/node/config.yaml", "mcp"],
+      "enabled": true
+    }
+  }
+}
+```
+
+**auggie** — `~/.augment/settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "murtaugh": {
+      "command": "/usr/local/bin/murtaugh-runtime",
+      "args": ["--config", "/Users/you/.config/murtaugh/node/config.yaml", "mcp"]
+    }
+  }
+}
+```
+
+**goose** — `~/.config/goose/config.yaml`:
+
+```yaml
+extensions:
+  murtaugh:
+    name: murtaugh
+    type: stdio
+    enabled: true
+    cmd: /usr/local/bin/murtaugh-runtime
+    args: ["--config", "/Users/you/.config/murtaugh/node/config.yaml", "mcp"]
+    timeout: 300
+```
+
+Merge it into whatever the file already holds. What the client gets is the
+**node's** tool surface — `cfg_agent_*`, `cfg_mcp_*`, `cfg_node_*`, `cfg_show`,
+`cfg_validate`, `jobs_run`, `ping`, `version`, `help`, `setup_update`, and
+`ask` / `present_plan` / `auth_request`. There are no `slack_*` tools: only the
+gateway talks to Slack. Names use underscores, not dots
+(`cfg.agent.create` → `cfg_agent_create`), because some providers reject a `.`
+in a function name. See [CLI & MCP server](cli-and-mcp.md).
+
+> Do this for standalone use of the client, **not** to wire up a Murtaugh agent.
+> If the adapter you registered it in is also the `--command` of an ACP profile,
+> that agent now sees two copies of Murtaugh: the per-session bridge above, and
+> this one — which carries no approval gate and no turn context. Point the entry
+> at a different node root, or leave it out.
+
+### `troubleshoot.providers` is a manual knob
+
+`troubleshoot bundle` (and `/murtaugh troubleshoot`) can fold a downstream
+provider's own sessions and logs into the bundle. `setup mcp_register` used to
+append to that list when it registered a client that was also a known provider;
+nothing appends to it now.
+
+Nothing is lost. The list lives on the **gateway** and an **empty one — the
+default — means every provider Murtaugh knows how to collect diagnostics for**,
+today `goose` and `claude-code`. Missing files are skipped at collection time,
+so the all-known fallback is safe on a machine that runs only some of them.
+
+```sh
+murtaugh-gateway cfg troubleshoot show                     # what is pinned, if anything
+murtaugh-gateway troubleshoot bundle --include goose       # narrow one bundle
+```
+
+There is no `cfg troubleshoot set`: to pin a narrower default list, edit a
+`cfg export` snapshot and `cfg import` it back.
+
+### The honest state of ACP, next to Claude Code
+
+Both backends implement one `agent.Client` and feed one event stream into the
+same Slack renderer, so streaming, task cards, interrupts, approval prompts and
+attachments look the same either way. That parity is a hard constraint, not a
+claim about how well any given adapter behaves. Where they genuinely differ:
+
+| | `claude_code` | `acp` |
+|---|---|---|
+| Persona (`SOUL.md`) | Passed as `--append-system-prompt`. | **None.** An adapter brings its own harness, so its voice is yours to configure there. |
+| `--model` | Honoured. | **Silently ignored** — the flag exists on `cfg agent create` for the other two backends and is not written to an `acp:` block. Pick the model in the adapter. |
+| Credential upkeep | The warden refreshes the Claude Code login before it lapses and DMs the node's owner when it fails. | **Not covered.** An ACP command may be Claude Code behind an adapter, but the adapter's name is arbitrary, so guessing would fail quietly. Yours to keep alive. |
+| Approvals | `--approval-requests ask\|auto-allow\|auto-deny`, answered on the agent's own permission requests. | The same flag, same default (`ask`) — but only for the requests the adapter actually raises. An adapter that gates nothing is never gated. |
+| Cancellation | Supported. | **Probed at startup** and logged. An adapter that does not support cancel cannot be interrupted; a follow-up message waits instead. |
+| Session resume | Resumes its on-disk session (`--resume`), falling back to a fresh one. | **None.** One process per conversation, and the adapter's advertised `loadSession` is logged at startup but not acted on. |
+| MCP transport | n/a — the bridge is stdio. | Stdio only. HTTP/SSE are read from the adapter's capabilities but not used, and at least one shipping adapter advertises HTTP while silently dropping such servers. |
+| Tested against | Exercised throughout the suite. | One live smoke test, against the **Claude Code ACP adapter** only, behind the `acplive` build tag — so it never runs in CI. |
+
+Read that last row as the summary: **`acp` is a supported shape, not a
+supported list of agents.** Adapters vary in what they implement, Murtaugh
+cannot tell which parts yours skips, and a gap shows up as a feature that
+quietly does nothing rather than as an error. If you want the path with the most
+road behind it, use `--type claude_code`. Choose `acp` when you specifically
+want that adapter, and expect to verify each surface yourself.
 
 ---
 
@@ -128,8 +314,8 @@ capabilities an agent may call. Values are native tool **groups** plus registry
 | `files` | Read and write files under its `workdir`. |
 | `terminal` | Run shell commands (subject to the approval gate, below). |
 | `skills` | Load Murtaugh's bundled skills for how-to knowledge. |
-| `slack` | Post, update, and read Slack messages and reactions. |
-| `jobs` | Define and run [jobs](jobs.md). |
+| `slack` | Post, update, and read Slack messages and reactions. **Not available to an agent on a node** — see the note below. |
+| `jobs` | Define and run [jobs](jobs.md). **Not available to an agent on a node** — see the note below. |
 | `ask` | Put a question with options to you as clickable buttons, and **wait** for the answer. |
 | `present_plan` | Show a plan with Proceed / Revise / Cancel and **wait** for sign-off. |
 | `attach` | Return a workspace file (report, image, export) as a real Slack upload; confined to `workdir`. |
@@ -137,6 +323,16 @@ capabilities an agent may call. Values are native tool **groups** plus registry
 
 `ask` and `present_plan` are recommended — they let the agent get a real answer
 instead of guessing. See [Slack → Asking the user](slack.md#asking-the-user).
+
+> **What a group resolves to depends on where the agent runs.** `files`,
+> `terminal`, `skills` and `attach` are synthesized per agent, rooted at its
+> `workdir`, and always available. The rest are *registry namespaces*, and the
+> registry an agent on a node sees holds exactly `ask`, `present_plan`,
+> `auth.request`, `ping`, `version` and `help`. A `slack` or `jobs` entry
+> therefore contributes no tool there — only the gateway talks to Slack, and an
+> agent reaches a person through the display requests above instead. An
+> unmatched entry contributes nothing rather than being rejected, so a group
+> with no home on a node is a quiet no-op, not a startup error.
 
 `auth.request` is the one tool that does **not** ask the person in the thread.
 Credentials belong to the machine the agent runs on, so the sign-in runs there,
@@ -153,7 +349,7 @@ agent stops rather than retrying a call it still has no credentials for.
 Outside a conversation it only works on a runtime node: a scheduled job there
 still reaches the node's owner by DM, with no thread notice, while an agent
 inside the gateway or a CLI call is refused before anything runs. See
-`murtaugh help auth request`.
+`murtaugh-runtime help auth request`.
 
 Its built-in profiles are `gcloud`, `gcloud-adc`, `claude-code`, and `custom`.
 The `claude-code` profile re-authenticates the Claude Code CLI itself — the
@@ -200,11 +396,11 @@ A native agent can attach to external MCP servers, defined once with
 `cfg mcp set` and referenced by name:
 
 ```sh
-murtaugh cfg mcp set --name vaultre \
+murtaugh-runtime cfg mcp set --name vaultre \
   --command vaultre-mcp --arg --stdio --env VAULTRE_TOKEN=${VAULTRE_TOKEN}
-murtaugh cfg mcp set --name data-api --url https://data-api.internal/mcp
+murtaugh-runtime cfg mcp set --name data-api --url https://data-api.internal/mcp
 
-murtaugh cfg agent update --name emily \
+murtaugh-runtime cfg agent update --name emily \
   --mcp-servers vaultre --mcp-servers data-api   # additive on top of the global set
 ```
 
@@ -219,7 +415,7 @@ your permissions. `sandbox.mode: seatbelt` confines it — and every process it
 spawns — with the macOS kernel sandbox:
 
 ```sh
-murtaugh cfg agent update --name code --sandbox-mode seatbelt
+murtaugh-runtime cfg agent update --name code --sandbox-mode seatbelt
 ```
 
 ```yaml
@@ -270,23 +466,34 @@ Two limits worth knowing:
 
 ## Routing: which agent answers
 
+`chat` is one of the few blocks **both** binaries carry, and it means a
+different thing on each. Slack-side routing — which agent NAME a conversation
+asks for — is the **gateway's**:
+
 ```sh
-murtaugh cfg chat set --enabled true \
+murtaugh-gateway cfg chat set --enabled true \
   --default-agent default \        # DMs and any unrouted channel
   --dm-agent support \             # optional: a different agent for DMs
   --reply-on-thread true           # optional: global reply strategy (default true)
 
-murtaugh cfg chat show             # inspect the current routing
+murtaugh-gateway cfg chat show             # inspect the current routing
 ```
+
+On a **node**, the same block answers a smaller question: which of that node's
+own agents this process serves (`murtaugh-runtime cfg chat set --default-agent
+coder`).
 
 - `--default-agent` handles DMs and any channel without a more specific route.
 - `--reply-on-thread` (global default `true`) picks where the bot replies to a
   top-level channel message: `true` roots a thread; `false` replies directly in
   the channel and treats it as one rolling conversation. A message already in a
   thread is always answered in-thread.
-- Every routed agent name must exist, or the `cfg chat set` change is rejected on
-  the spot (fail-closed) — and the gateway refuses to start against an invalid
-  store.
+- **Where you set the name decides when it is checked.** A node holds the
+  profile bodies, so `murtaugh-runtime cfg chat set --default-agent typo` is
+  rejected on the spot. The gateway holds none, so it accepts the name and
+  resolves it at **connect time** against what the connected nodes advertise; a
+  name nothing serves is journalled (`stream=gateway kind=node
+  state=unservable`) as a warning, never a fatal error.
 
 | Entry point | Session scope |
 |---|---|
@@ -334,7 +541,7 @@ timeouts, streaming cadence, ACP child-process lifecycle, and the global approva
 default that per-agent flags override. Inspect it with:
 
 ```sh
-murtaugh cfg defaults show
+murtaugh-runtime cfg defaults show
 ```
 
 ```

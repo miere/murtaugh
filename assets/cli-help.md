@@ -372,12 +372,32 @@ murtaugh-gateway --config /etc/murtaugh/config.yaml -node-listen 127.0.0.1:8787
 **Runtime binary only.** Start the MCP stdio server: it serves every tool this
 node registers to an MCP client over JSON-RPC on stdin/stdout. stdout is
 reserved for protocol traffic — do not run this interactively expecting human
-output. Registering Murtaugh into a downstream client's config is that client's
-business, not Murtaugh's: point it at this binary and this subcommand.
+output. The gateway has no `mcp` command; what a client gets here is the node
+admin's surface (`cfg_agent_*`, `cfg_mcp_*`, `cfg_node_*`, `jobs_run`, `ask`,
+`present_plan`, `auth_request`, …) and no `slack_*` tool at all.
+
+Registering Murtaugh into a downstream client's config is that client's
+business, not Murtaugh's, and is a **manual** step since `setup mcp-register`
+was removed. Point the client at this binary, the node root it should act on,
+and this subcommand — `--config` is global, so it comes first:
 
 ```
 murtaugh-runtime mcp
+murtaugh-runtime --config ~/.config/murtaugh/node/config.yaml mcp
 ```
+
+The entry an MCP client wants is that argv. For auggie
+(`~/.augment/settings.json`) it is `mcpServers.murtaugh` with `command` and
+`args`; for opencode (`~/.config/opencode/opencode.json`) it is `mcp.murtaugh`
+with `type: local` and a single `command` array; for goose
+(`~/.config/goose/config.yaml`) it is `extensions.murtaugh` with `type: stdio`,
+`cmd` and `args`. Use absolute paths — these clients do not run under your
+login shell.
+
+An ACP agent this node already drives does **not** need the entry: it is handed
+a per-session `murtaugh` MCP server (the internal `mcp-bridge`) in `session/new`
+with its own approval gate. Adding one here gives that agent a second, ungated
+copy.
 
 ## murtaugh cfg
 
@@ -499,6 +519,13 @@ murtaugh cfg journal show        # journal streams, retention, sweep cadence
 murtaugh cfg troubleshoot show   # default diagnostics providers
 ```
 
+`troubleshoot.providers` has no setter and nothing writes it any more: it is a
+manual knob whose **empty default means every provider Murtaugh knows how to
+collect diagnostics for**, today `goose` and `claude-code`. Missing files are
+skipped at collection time, so the fallback is safe on a machine running only
+some of them. Narrow a single bundle with `troubleshoot bundle --include`; to
+pin a narrower default, edit a `cfg export` snapshot and `cfg import` it back.
+
 ### Store-wide operations
 
 ```
@@ -539,7 +566,7 @@ are baked into the plist's arguments; passing the other role's flag is an error
 rather than a plist that fails at launch.
 
 ```
-murtaugh-gateway cfg launchd -node-listen 127.0.0.1:8787
+murtaugh-gateway cfg launchd --node-listen 127.0.0.1:8787
 murtaugh-runtime --config ~/.config/murtaugh/node/config.yaml \
   cfg launchd --alias laptop --gateway wss://gw.example:8443
 ```
@@ -570,7 +597,7 @@ is stripped from the whole command line before any tool sees it, so a second one
 would silently retarget the whole invocation instead of naming the destination:
 
 ```
-murtaugh --config ~/.config/murtaugh/config.yaml \
+murtaugh-gateway --config ~/.config/murtaugh/config.yaml \
   cfg node split --dest ~/.config/murtaugh/node/config.yaml
 ```
 

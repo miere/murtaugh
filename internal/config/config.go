@@ -53,10 +53,10 @@ type Config struct {
 	UnfurlRules   map[string]UnfurlRuleConfig   `yaml:"-" json:"-"`
 }
 
-// TroubleshootConfig is the machine-managed troubleshoot.yaml sibling. It
-// records which downstream providers' on-disk diagnostics the bundler should
-// include by default. setup.mcp_register appends to Providers when it registers
-// Murtaugh into a client that is also a known diagnostics provider (e.g. goose).
+// TroubleshootConfig records which downstream providers' on-disk diagnostics
+// the bundler should include by default. Nothing writes Providers since
+// setup.mcp_register was removed, so an empty list is the normal state and
+// means every known provider.
 type TroubleshootConfig struct {
 	Providers []string `yaml:"providers" json:"providers,omitempty"`
 }

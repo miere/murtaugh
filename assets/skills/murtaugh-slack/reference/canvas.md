@@ -1,7 +1,7 @@
 # Canvas: read & edit a Slack canvas
 
 Read or edit a **Slack canvas** document through Murtaugh — one tool,
-`slack_canvas`, on the CLI (`murtaugh slack canvas …`) and over MCP
+`slack_canvas`, on the CLI (`murtaugh-gateway slack canvas …`) and over MCP
 (`slack_canvas`), backed by the gateway's bot token. **Reads and writes both use
 standard Markdown**, so you work in one syntax in both directions.
 

@@ -1,83 +1,49 @@
 # Getting started
 
-This guide takes you from nothing to a running Murtaugh that answers in Slack.
-Three steps: **install the binary**, **create the Slack app**, **configure it
-and run the gateway**.
+This guide takes you from nothing to a running Murtaugh that answers in Slack:
+**place the binaries**, **create the Slack app**, **configure the gateway**,
+**configure a node**.
 
 ---
 
-## 1. Install
+## 0. Two binaries, and no install script
 
-### macOS (recommended)
+Murtaugh ships **two** binaries and no installer:
 
-The bundled installer downloads the right binary for your architecture, seeds
-starter config files, sets up a background daemon (LaunchAgent), and can wire
-Murtaugh into your MCP client.
+- **`murtaugh-gateway`** — the Slack side. Run it with no command and it is the
+  Socket Mode daemon; run it with a command and it acts on its own
+  configuration. It never runs an agent.
+- **`murtaugh-runtime`** — a **node**. It dials the gateway and runs the agents.
+  Agent profiles, provider keys and MCP servers live here. (Jobs are still
+  defined and scheduled on the gateway; the node is what executes an agent one.)
 
-```sh
-curl -fsSL https://github.com/miere/murtaugh/releases/latest/download/install_macos.sh | bash
-```
+There is no combined `murtaugh` binary. Putting a file where you want it is not
+Murtaugh's job, so there is nothing to `curl | bash`: you place the file, and
+each binary then configures itself with `cfg launchd`, `cfg validate` and
+`cfg migrate`. The role is implied by which file you ran — no command takes a
+`--role`.
 
-Useful flags:
+The two keep **separate configuration roots**, so nothing they own can collide:
+the gateway's is `~/.config/murtaugh`, a node's is `~/.config/murtaugh/node`
+(point either elsewhere with the global `--config /path/to/config.yaml`).
 
-| Flag | Effect |
-|---|---|
-| `--yes` | Non-interactive; accept all defaults. |
-| `--version v1.2.3` | Install a specific release. |
-| `--dry-run` | Preview every change without writing anything. |
-| `--force` | Reinstall even if the latest version is already present. |
-| `--skip-config` | Update the binary only; leave config files untouched. |
-| `--reconfigure` | Rewrite all config files from scratch. |
+---
 
-The installer is **safe to re-run**: it exits cleanly when already up to date,
-preserves your config by default, and restarts a running daemon after updating.
+## 1. Place the binaries
 
-During install you choose how chat is backed:
-
-- **native** — Murtaugh talks to an LLM directly. You pick a provider
-  (`gemini` / `anthropic` / `openai`), a model, and an API key. The key is
-  stored in `~/.config/murtaugh/.env`.
-- an **ACP agent** already on your machine (`opencode acp`, `goose acp`,
-  `auggie --acp`, or a custom command). The installer records the command but
-  does **not** download third-party agents for you.
-- **skip** — set chat up later with `murtaugh cfg agent create`.
-
-For unattended installs (`--yes`), set `MURTAUGH_CHAT_AGENT=native` with
-`MURTAUGH_NATIVE_PROVIDER`, `MURTAUGH_NATIVE_MODEL`, and
-`MURTAUGH_NATIVE_API_KEY`.
-
-### Build from source
-
-Requirements: **Go 1.26+**.
+Download `murtaugh-gateway` and `murtaugh-runtime` from the
+[latest release](https://github.com/miere/murtaugh/releases/latest) and put them
+anywhere on your `$PATH`, or build them (requires **Go 1.26+**):
 
 ```sh
 git clone https://github.com/miere/murtaugh.git
 cd murtaugh
-go build -o murtaugh ./cmd/murtaugh
+go build -o murtaugh-gateway ./cmd/murtaugh-gateway
+go build -o murtaugh-runtime ./cmd/murtaugh-runtime
 ```
 
-Move the binary anywhere on your `$PATH`, then continue below.
-
-### Guided setup with the tools
-
-Once the binary is on `PATH`, the `setup_*` tools create the on-disk pieces
-(config directory, tokens, provider keys) and the config store for you (each is
-idempotent and backs up what it replaces):
-
-```sh
-murtaugh setup bootstrap          # seed ~/.config/murtaugh + init the config store (run first)
-murtaugh setup slack ...          # write config.yaml's oauth block (OAuth tokens, admin user)
-murtaugh setup env ...            # upsert provider keys into .env
-murtaugh setup agents ...         # create a native or ACP agent (writes to the config store)
-murtaugh setup launchd ...        # (macOS) install the daemon
-murtaugh setup mcp_register ...   # (optional) register Murtaugh in an MCP client
-```
-
-Run `murtaugh help setup <tool>` for the exact flags of each. `setup bootstrap`,
-`setup slack`, and `setup env` still touch files and credentials; `setup agents`
-now writes into the config store (the same place `murtaugh cfg agent …` edits).
-The rest of this guide shows the on-disk files and the `cfg` commands so you can
-also do it by hand.
+Both may sit on one machine — that is the ordinary single-host install, just
+with two processes instead of one.
 
 ---
 
@@ -110,20 +76,31 @@ Murtaugh connects over **Socket Mode**. In your Slack app settings, enable:
    Murtaugh banner and the running version. For the `admin_user` it also offers
    a **Restart** button (a graceful, confirmed restart on demand), a **Test
    communication** button (a round-trip self-test answered by the binary
-   itself), and a one-click **Upgrade to version …** button when a newer release
-   is available. No extra scope required.
+   itself), and an **Upgrade to version …** button when a newer release is
+   available — which announces the release and links its notes; Murtaugh never
+   replaces its own binary. No extra scope required.
 
 Copy the **app-level token** (`xapp-…`) and the **bot token** (`xoxb-…`); you
 need both next.
 
 ---
 
-## 3. Configure and run
+## 3. Configure the gateway
 
 Two files live in `~/.config/murtaugh/`: the secret `.env` and a slimmed
-`config.yaml`. Everything else — agents, chat routing, access — lives in a
-config store and is edited with `murtaugh cfg …`. Secrets stay in `.env`;
-`config.yaml` and the store reference them as `${VAR}`.
+`config.yaml`. Everything else — chat routing, access, jobs, rules — lives in a
+config store and is edited with `murtaugh-gateway cfg …`. Secrets stay in
+`.env`; `config.yaml` and the store reference them as `${VAR}`.
+
+**Seed the root by running any command against it.** The first run writes
+`config.yaml`, a template `.env`, the templates and an empty store — and then
+tells you the Slack tokens are missing, which is the expected first-run output:
+
+```sh
+murtaugh-gateway cfg validate
+# oauth.app_token is required: a gateway talks to Slack, so it needs the
+# app-level token. Set SLACK_APP_TOKEN in the .env beside config.yaml
+```
 
 ### `.env` — secrets
 
@@ -131,10 +108,10 @@ config store and is edited with `murtaugh cfg …`. Secrets stay in `.env`;
 # ~/.config/murtaugh/.env   (mode 0600 — keep it secret)
 SLACK_APP_TOKEN=xapp-your-socket-mode-app-token
 SLACK_BOT_TOKEN=xoxb-your-bot-token
-
-# Only the provider keys your native agents use:
-GEMINI_API_KEY=your-key-here
 ```
+
+Provider API keys do **not** go here — they belong to the node that runs the
+agents (step 4).
 
 ### `config.yaml` — oauth + database
 
@@ -151,19 +128,19 @@ database:
 ```
 
 `config.yaml` no longer holds `access:` or `chat:` — those are records in the
-config store now. `setup bootstrap` writes this file and initialises an empty
-SQLite store for you.
+config store now. Run `murtaugh-gateway cfg validate` again once the tokens are
+in place; a gateway refuses to start only on a required value that has no
+default, and names the field when it does.
 
-### Access and chat routing
+### Access
 
-Set the admin, the access list, and the chat surface with `cfg`:
+There is no admin to set up front: an unclaimed gateway adopts the first person
+who direct-messages it, once, and announces the fact. Set it explicitly if you
+would rather not race for it:
 
 ```sh
-murtaugh cfg access set --admin-user your-slack-handle --debug false
+murtaugh-gateway cfg access set --admin-user your-slack-handle --debug false
 #   allowed_users defaults to empty = admin-only (fail-closed)
-
-murtaugh cfg chat set --enabled true --default-agent default
-#   --default-agent must name an agent that exists (create one below first)
 ```
 
 `--admin-user` may be a handle (with or without `@`) or a user ID. On startup
@@ -171,38 +148,92 @@ Murtaugh opens a DM with that user and sends a **"Murtaugh has started"** card.
 To check the link at any other time, open Murtaugh's **App Home** tab and press
 **Test communication**.
 
+### Start the gateway, and mint a node credential
+
+```sh
+murtaugh-gateway -node-listen 127.0.0.1:8787
+```
+
+`murtaugh-gateway` with **no command** is the daemon. `-node-listen` is what
+lets nodes attach; without it the gateway accepts none. On macOS write a
+LaunchAgent instead so it starts on login and restarts on crash — see
+**[Operations](operations.md)**.
+
+Each node needs its own bearer credential, minted here and displayed **once**:
+
+```sh
+murtaugh-gateway node token mint --node my-laptop --user U012ABCDEF \
+  --label "my laptop" --token-file /tmp/node-token
+```
+
+`--user` is the Slack user ID of the node's owner: a node never asserts who it
+is, it presents the token and the gateway resolves the rest.
+
+---
+
+## 4. Configure a node
+
+The node is where agents, provider keys and MCP servers live. Its root is
+`~/.config/murtaugh/node` — a directory of its own, so the two roles never share
+a `.env`, a store or a schema migration.
+
+```sh
+murtaugh-runtime cfg validate          # seeds ~/.config/murtaugh/node
+install -m 0600 /tmp/node-token ~/.config/murtaugh/node/node-token
+murtaugh-runtime cfg node set --gateway ws://127.0.0.1:8787
+```
+
+A node **dials in**; the gateway never dials out. Those two — the credential
+file and a seed address — are the only values a node has no default for, and it
+names whichever is missing when you start it.
+
+### `.env` — provider keys
+
+```sh
+# ~/.config/murtaugh/node/.env   (mode 0600 — keep it secret)
+# Only the provider keys your native agents use:
+GEMINI_API_KEY=your-key-here
+```
+
+There are deliberately no `SLACK_*` variables here. A node reaches Slack only
+through the gateway it dials.
+
 ### The chat agent
 
 Create a minimal native agent (Murtaugh runs the LLM loop itself, no external
 process):
 
 ```sh
-murtaugh cfg agent create --name default --type native \
-  --tools files --tools terminal --tools skills --tools slack \
+murtaugh-runtime cfg agent create --name default --type native \
+  --tools files --tools terminal --tools skills \
   --tools ask --tools present_plan \
   --provider gemini --model gemini-2.5-pro --api-key-env GEMINI_API_KEY
+
+murtaugh-runtime cfg chat set --enabled true --default-agent default
 ```
 
-`--api-key-env` names the variable in `.env` (never the key itself). If you
-don't need chat, run `murtaugh cfg chat set --enabled false` and skip the agent.
-See **[Agent chat](agents.md)** for ACP agents, tools, and tuning.
+`--api-key-env` names the variable in the node's `.env` (never the key itself).
+A node serves **one** agent per process: `chat.defaults.agent` when there is one,
+the only agent when there is exactly one, and otherwise it refuses until you pass
+`-agent <name>`. See **[Agent chat](agents.md)** for ACP agents, tools, and
+tuning.
 
 Because every `cfg` change re-validates the whole store, `chat set
---default-agent default` will be rejected until that agent exists — create the
-agent first, then enable chat.
+--default-agent default` is rejected until that agent exists — create the agent
+first, then enable chat.
 
-### Start the gateway
+### Start the node
 
 ```sh
-murtaugh slack gateway
+murtaugh-runtime
 ```
 
-On macOS the installer can register a LaunchAgent so the gateway starts on login
-and restarts on crash — see **[Operations](operations.md)**.
+Like the gateway, `murtaugh-runtime` with no command is the daemon, and
+`cfg launchd --alias <name>` writes its LaunchAgent.
 
 ---
 
-## 4. Verify it works
+## 5. Verify it works
 
 **Test the connection.** Open your DM with the bot and press the **Ping** button
 on the startup card. A pong reply within a second or two confirms Socket Mode,

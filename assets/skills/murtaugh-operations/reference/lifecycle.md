@@ -1,6 +1,6 @@
 # Gateway lifecycle
 
-What `murtaugh slack gateway` does, in order, when it starts:
+What `murtaugh-gateway` (no command) does, in order, when it starts:
 
 1. **Resolve the allowlist.** `admin_user` and `allowed_users` (handles or IDs)
    are resolved to Slack user IDs up front, with one `users.list` call if any

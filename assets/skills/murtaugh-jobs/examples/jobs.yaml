@@ -8,7 +8,7 @@
 
 jobs:
   # 1. MANUAL — neither schedule nor every. Runs only when invoked:
-  #    murtaugh jobs run --name greet
+  #    murtaugh-runtime jobs run --name greet
   greet:
     command: /bin/echo
     args: ["hello from murtaugh"]
@@ -31,7 +31,7 @@ jobs:
   # 4. AGENT — delegates to an agent instead of a command (mutually exclusive
   #    with `command`). Fire-and-forget: the agent acts through its own tools.
   #    Positional {{ N }} placeholders are filled from run-time args:
-  #      murtaugh jobs run --name code-review-job --args 1234 --args /path/to/repo
+  #      murtaugh-runtime jobs run --name code-review-job --args 1234 --args /path/to/repo
   code-review-job:
     agent: default                  # an agent keyed in agents.yaml
     prompt: |

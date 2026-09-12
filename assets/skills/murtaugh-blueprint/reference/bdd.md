@@ -89,10 +89,10 @@ its JSON output:
 > CLI seam to fake. Test those at the Go level, not in `behave`.
 
 ```
-murtaugh slack send_msg --to "#chan" --body "…" --json   ->   {"ok":true,"channel":"C…","ts":"170…"}
+murtaugh-gateway slack send_msg --to "#chan" --body "…" --json   ->   {"ok":true,"channel":"C…","ts":"170…"}
 ```
 
-> Prerequisite: this assumes the `murtaugh` CLI supports `--json` structured
+> Prerequisite: this assumes the `murtaugh-gateway` CLI supports `--json` structured
 > output on `slack send_msg`/`update_msg`/`fetch_reactions`. That is a
 > Murtaugh-core capability the model depends on.
 

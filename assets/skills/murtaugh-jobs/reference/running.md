@@ -2,19 +2,19 @@
 
 Jobs are invoked the same way whether or not they're scheduled. The two tools
 are exposed identically on the CLI and over MCP (when Murtaugh runs as
-`murtaugh mcp`).
+`murtaugh-runtime mcp`).
 
 For the full per-command reference (every flag, required/optional, defaults),
-run `murtaugh help jobs run` / `murtaugh help jobs define`, or
-`murtaugh jobs <run|define> --help`.
+run `murtaugh-runtime help jobs run` / `murtaugh-gateway help jobs define`, or
+`murtaugh-runtime jobs run --help` / `murtaugh-gateway jobs define --help`.
 
 ## `jobs_run` — execute a job
 
 ```bash
-murtaugh jobs run --name cleanup-logs
+murtaugh-runtime jobs run --name cleanup-logs
 
 # Agent job: pass positional args for the prompt's {{ 1 }}, {{ 2 }}, … markers
-murtaugh jobs run --name code-review-job --args 1234 --args /path/to/repo
+murtaugh-runtime jobs run --name code-review-job --args 1234 --args /path/to/repo
 ```
 
 `--name` is **required**. `--args` is optional and repeatable (once per value);
@@ -47,7 +47,7 @@ the job below that gate once the admin has approved its first run.)
 ## `jobs_define` — register / update a job
 
 ```bash
-murtaugh jobs define --name hourly-sync \
+murtaugh-gateway jobs define --name hourly-sync \
   --command /usr/local/bin/sync.sh \
   --every 1h
 ```
@@ -73,7 +73,7 @@ murtaugh jobs define --name hourly-sync \
 - Does **not** run the job — only defines it.
 
 ```bash
-murtaugh jobs define --name nightly-backup \
+murtaugh-gateway jobs define --name nightly-backup \
   --command /usr/local/bin/backup --args --full --args /data \
   --workdir /srv --timeout 30m --schedule "0 2 * * *"
 ```
@@ -82,7 +82,7 @@ murtaugh jobs define --name nightly-backup \
 
 | Caller | How |
 |---|---|
-| You, by hand | `murtaugh jobs run --name <n>` |
+| You, by hand | `murtaugh-runtime jobs run --name <n>` |
 | An MCP client / agent | the `jobs_run` tool |
 | A Slack workflow | a `run` trigger in `workflow-rules` (see the `murtaugh-slack` skill) |
 | The scheduler | automatically, per `schedule` / `every` (see `scheduling.md`) |

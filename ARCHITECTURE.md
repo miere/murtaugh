@@ -475,7 +475,8 @@ never the secrets), and **archives** the now-migrated siblings to
 re-reads the rewritten bootstrap so it points at the new store.
 
 **`cfg` tools** (`internal/tools/cfg`) are the store's write surface, exposed on
-both the CLI (`murtaugh cfg …`) and MCP (`cfg.*`). Every mutation is
+both the CLI (`cfg …`, on whichever binary owns the group) and MCP (`cfg_*`).
+Every mutation is
 **validate-and-rollback**: it upserts the row, re-loads and validates the whole
 assembled config via `AssembleFromRows`, and on failure restores the prior row
 (`upsertItemValidated`/`putSingletonValidated` in `internal/tools/cfg/deps.go`),
@@ -1415,7 +1416,7 @@ than naming the same problem twice. Three sites — `chat.defaults.dm_agents`,
 as a side effect of the body lookup failing, which meant #198 deferred it with
 the rest and it fell through both halves.
 
-**Splitting an existing install.** `murtaugh cfg node split` (→
+**Splitting an existing install.** `murtaugh-gateway cfg node split` (→
 `store.SplitForNode`) copies the node's half — agent profiles, MCP servers,
 jobs, `chat` and `defaults` — into a second store, validates each half under its
 OWN role, and **deletes nothing**. `chat` and `defaults` are copied rather than
