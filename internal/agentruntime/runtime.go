@@ -116,6 +116,9 @@ func (e *NodeOfflineError) Unwrap() error { return e.Err }
 type NodeRef struct {
 	NodeID string
 	Owner  string
+	// The profiles the node advertised at connect time, so the gateway can report
+	// the agent a turn actually ran as rather than the one routing asked for.
+	Profiles []string
 }
 
 // RenewalStatus is reported back as it is, so nobody is told a sign-in is on its
