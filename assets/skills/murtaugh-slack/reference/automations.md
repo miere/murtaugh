@@ -31,14 +31,14 @@ external trigger. Murtaugh registers and runs jobs from the config database (see
 the **`murtaugh-jobs`** skill):
 
 ```bash
-murtaugh cfg job set --name <name> \
+murtaugh-gateway cfg job set --name <name> \
   --command /usr/bin/python3 \
   --arg /Users/<you>/.config/murtaugh/automations/<name>.py
   # optional: --workdir /Users/<you>/.config/murtaugh  --timeout 5m
 ```
 
 Define jobs with `cfg job set` (operator) or the `jobs_define` tool; run them with
-`murtaugh jobs run --name <name>` (also the MCP `jobs_run` tool). Murtaugh
+`murtaugh-runtime jobs run --name <name>` (also the MCP `jobs_run` tool). Murtaugh
 schedules jobs itself: add `--schedule` (cron) or `--every` (interval) and the
 gateway runs the job automatically — then **restart the gateway** to pick up the
 schedule. See **`murtaugh-jobs`** for the full configuration. Whatever the cadence,

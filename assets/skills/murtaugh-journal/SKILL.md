@@ -28,8 +28,8 @@ reason over.
 | `journal_stats` | See per-stream row counts and time span — confirm a stream is recording. |
 | `journal_prune` | Delete events past their retention (rarely needed; the daemon sweeps automatically). |
 
-Over MCP the names are dotted (`journal_query`); on the CLI they are spaced
-(`murtaugh journal query …`).
+Over MCP the names are joined with underscores (`journal_query`); on the CLI
+they are spaced (`murtaugh-gateway journal query …`).
 
 ## Streams (what's recorded where)
 
@@ -58,12 +58,12 @@ Worked example — "I clicked Approve in #reviews and nothing happened":
 
 ```
 # 1. Recent failures in that channel
-murtaugh journal query --stream gateway --channel C0REVIEWS --since 1h --level warn
+murtaugh-gateway journal query --stream gateway --channel C0REVIEWS --since 1h --level warn
 
 #    → a workflow.trigger error, corr_id gw_3f9c…, rule "code-review-approval"
 
 # 2. The whole interaction
-murtaugh journal query --corr-id gw_3f9c2b1a…
+murtaugh-gateway journal query --corr-id gw_3f9c2b1a…
 #    → interactive.received → workflow.matched (rule) → workflow.trigger (error:
 #      "render Slack response: template execute … map has no entry for key …")
 ```

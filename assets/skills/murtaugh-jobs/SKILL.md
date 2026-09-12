@@ -1,6 +1,6 @@
 ---
 name: murtaugh-jobs
-description: Define, run, and schedule Murtaugh jobs (stored in the config database) via `murtaugh cfg job` and the jobs_run/jobs_define tools — a shell command or an agent, run manually or on a cron/interval.
+description: Define, run, and schedule Murtaugh jobs (stored in the config database) via `murtaugh-gateway cfg job` and the jobs_run/jobs_define tools — a shell command or an agent, run manually or on a cron/interval.
 requires: [jobs]
 files:
   reference/configuring.md: { requires: [jobs], summary: "define a job (cfg job set) — command / agent+prompt / report-to / arg / workdir / timeout" }
@@ -11,7 +11,7 @@ files:
 # Skill: Murtaugh Jobs
 
 A **job** is a named unit of work stored in the **config database** and managed
-with `murtaugh cfg job …` (`cfg job set|list|show|delete`, also `cfg.*` over MCP).
+with `murtaugh-gateway cfg job …` (`cfg job set|list|show|delete`, also `cfg.*` over MCP).
 It runs **either** a shell command (with args, working directory, and timeout)
 **or** an agent (`--agent` + `--prompt`, optionally reporting its reply to Slack
 with `--report-to`) — the two are mutually exclusive. Jobs run **on demand** (CLI, MCP, or a workflow trigger) and can
@@ -76,7 +76,7 @@ without a human OK.
 - **Scheduled runs are best-effort.** A run that would fire while the gateway is
   down is **skipped, not caught up** (see `reference/scheduling.md`). Don't rely
   on a scheduled job for must-not-miss accounting without external safeguards.
-- **Ask the binary for exact flags.** `murtaugh help cfg job` (defining) and
-  `murtaugh help jobs run` (running by hand) — or `--help` on either — print the
+- **Ask the binary for exact flags.** `murtaugh-gateway help cfg job` (defining) and
+  `murtaugh-runtime help jobs run` (running by hand) — or `--help` on either — print the
   full flag reference: which are required, the repeatable `--arg` form, and the
   `--timeout`/`--schedule`/`--every` value formats.

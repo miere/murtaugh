@@ -1,15 +1,33 @@
 # Configuration
 
-Murtaugh keeps almost nothing on disk. Two files live in
-`~/.config/murtaugh/` (override the gateway path with
-`--config /path/to/config.yaml`); **everything else lives in a database** and is
-managed with the `murtaugh cfg …` admin CLI.
+Murtaugh keeps almost nothing on disk. Two files live in a **configuration
+root** (override the path with `--config /path/to/config.yaml`); **everything
+else lives in a database** and is managed with the `cfg …` admin CLI.
+
+**Each binary has its own root, and its own half of `cfg`.** The gateway's root
+is `~/.config/murtaugh`, a node's is `~/.config/murtaugh/node` — a directory of
+its own, so the two roles never share a `.env`, a store or a schema migration. A
+node's backend need not match the gateway's: a laptop node on SQLite attaching
+to a Firestore-backed gateway is ordinary and supported.
+
+| Owner | Root | Carries | `cfg` groups |
+|---|---|---|---|
+| `murtaugh-gateway` | `~/.config/murtaugh` | Slack tokens, access, election, jobs, workflow/unfurl rules, node token hashes | `access`, `job`, `election`, `workflow_rule`, `unfurl_rule`, `node split` |
+| `murtaugh-runtime` | `~/.config/murtaugh/node` | its node credential, the gateway seed address, agent profiles, MCP servers, provider keys | `agent`, `mcp`, `defaults`, `node set\|show` |
+
+`chat`, `show`, `export`, `import`, `db migrate`, `validate`, `migrate` and
+`launchd` are on **both**, acting on that binary's own configuration. Asking a
+binary for the other half's command is an unknown command, not a permission
+error — the role is implied by which file you ran, so nothing takes a `--role`.
+
+The examples below are written `murtaugh-gateway …` or `murtaugh-runtime …`
+according to which one owns the setting.
 
 | Where | Holds | Reference |
 |---|---|---|
 | `.env` | **All secrets** — Slack tokens, provider API keys, the Postgres DSN. Mode `0600`. | [below](#env--secrets) |
 | `config.yaml` | Two blocks only: `oauth:` (Slack tokens) and `database:` (the config-store backend). | [below](#configyaml) |
-| the **config store** (SQLite/Postgres) | Agents, MCP servers, jobs, chat routing, access control, runtime defaults, journal, troubleshoot providers, workflow-rules, unfurl-rules. | [The `cfg` surface](#the-murtaugh-cfg-surface) |
+| the **config store** (SQLite/Postgres) | Agents, MCP servers, jobs, chat routing, access control, runtime defaults, journal, troubleshoot providers, workflow-rules, unfurl-rules. | [The `cfg` surface](#the-cfg-surface) |
 
 > **Golden rule:** secrets live **only** in `.env`. `config.yaml` and the config
 > store reference them as `${VAR}`. This is what lets `murtaugh troubleshoot`
@@ -19,7 +37,7 @@ managed with the `murtaugh cfg …` admin CLI.
 The old sibling files — `agents.yaml`, `jobs.yaml`, `journal.yaml`,
 `workflow-rules.yaml`, `unfurl-rules.yaml`, `troubleshoot.yaml` — **no longer
 exist** as the source of truth. Their contents are now records in the config
-store, edited with `murtaugh cfg …` (see below). If you are upgrading from a
+store, edited with `cfg …` (see below). If you are upgrading from a
 YAML-tree install, the [auto-migration](#upgrading-from-the-yaml-tree) moves them
 into the store for you.
 
@@ -50,9 +68,13 @@ OPENAI_API_KEY=
 # VAULTRE_TOKEN=
 ```
 
-A value exported in the real environment overrides the one here. Write provider
-keys with `murtaugh setup env --provider gemini --key ...` or by editing the file
-directly.
+A value exported in the real environment overrides the one here. **Edit the file
+directly** — `setup env` is gone.
+
+This is the **gateway's** `.env`. The provider keys belong in the *node's*
+(`~/.config/murtaugh/node/.env`), because that is where agents run; a node's
+`.env` deliberately holds no `SLACK_*` variables at all. Both files are seeded as
+commented templates the first time a binary runs against their root.
 
 ---
 
@@ -91,12 +113,12 @@ database:
   DSN stays in `.env`. Use this to share one config store across hosts.
 
 You rarely hand-edit `database:`. Switch backends with
-[`murtaugh cfg db migrate`](#switching-the-store-backend), which copies the whole
+[`cfg db migrate`](#switching-the-store-backend), which copies the whole
 store and rewrites this block for you.
 
 Everything that used to live in the sibling YAMLs — agents, jobs, chat routing,
 access control, and the rest — is now read from this store. Edit it with
-[`murtaugh cfg …`](#the-murtaugh-cfg-surface).
+[`cfg …`](#the-cfg-surface).
 
 ### Slash commands
 
@@ -107,11 +129,13 @@ manifest**, not here. Murtaugh recognises the verbs `chat`, `stop`,
 
 ---
 
-## The `murtaugh cfg` surface
+## The `cfg` surface
 
-`murtaugh cfg …` is the admin CLI for the config store. Every command is **also**
-an MCP tool with the same name (dots for spaces — e.g. `cfg.agent.create`), so an
-agent can reconfigure Murtaugh the same way you can.
+`cfg …` is the admin CLI for the config store, carried by both binaries over
+their own half of the surface. Every command is **also** an MCP tool, named with
+underscores where the CLI uses spaces — `murtaugh-runtime cfg agent create`
+publishes as `cfg_agent_create` — so an agent can reconfigure Murtaugh the same
+way you can.
 
 Two rules apply to every mutation:
 
@@ -130,15 +154,15 @@ all flags are `--kebab-case value`.
 ### Agents
 
 ```sh
-murtaugh cfg agent create --name emily --type native \
+murtaugh-runtime cfg agent create --name emily --type native \
   --workdir '${HOME}/work/emily' \
-  --tools files --tools terminal --tools skills --tools slack \
+  --tools files --tools terminal --tools skills \
   --provider gemini --model gemini-2.5-pro --api-key-env GEMINI_API_KEY
 
-murtaugh cfg agent update --name emily --max-turns 40
-murtaugh cfg agent list
-murtaugh cfg agent show --name emily
-murtaugh cfg agent delete --name emily
+murtaugh-runtime cfg agent update --name emily --max-turns 40
+murtaugh-runtime cfg agent list
+murtaugh-runtime cfg agent show --name emily
+murtaugh-runtime cfg agent delete --name emily
 ```
 
 `--type` is one of `native`, `acp`, or `claude_code`. See
@@ -148,12 +172,12 @@ flags, tools, approval).
 ### MCP servers
 
 ```sh
-murtaugh cfg mcp set --name vaultre \
+murtaugh-runtime cfg mcp set --name vaultre \
   --command vaultre-mcp --arg --stdio --env VAULTRE_TOKEN=${VAULTRE_TOKEN}
-murtaugh cfg mcp set --name data-api --url https://data-api.internal/mcp
-murtaugh cfg mcp list
-murtaugh cfg mcp show --name vaultre
-murtaugh cfg mcp delete --name vaultre
+murtaugh-runtime cfg mcp set --name data-api --url https://data-api.internal/mcp
+murtaugh-runtime cfg mcp list
+murtaugh-runtime cfg mcp show --name vaultre
+murtaugh-runtime cfg mcp delete --name vaultre
 ```
 
 Each server uses exactly one transport: a stdio child process (`--command` +
@@ -163,13 +187,13 @@ agent with `cfg agent … --mcp-servers <name>` (repeatable).
 ### Jobs
 
 ```sh
-murtaugh cfg job set --name nightly-backup \
+murtaugh-gateway cfg job set --name nightly-backup \
   --command /usr/local/bin/backup.sh --schedule "0 2 * * *"
-murtaugh cfg job set --name code-review-job \
+murtaugh-gateway cfg job set --name code-review-job \
   --agent default --prompt 'Review PR {{ 1 }} in {{ 2 }}.'
-murtaugh cfg job list
-murtaugh cfg job show --name nightly-backup
-murtaugh cfg job delete --name nightly-backup
+murtaugh-gateway cfg job list
+murtaugh-gateway cfg job show --name nightly-backup
+murtaugh-gateway cfg job delete --name nightly-backup
 ```
 
 See [Jobs](jobs.md) for command vs agent jobs, scheduling, and the run-time
@@ -178,14 +202,25 @@ tools.
 ### Chat routing
 
 ```sh
-murtaugh cfg chat set --enabled true --default-agent default
-murtaugh cfg chat set --dm-agent support --reply-on-thread true
-murtaugh cfg chat show
+murtaugh-gateway cfg chat set --enabled true --default-agent default
+murtaugh-gateway cfg chat set --dm-agent support --reply-on-thread true
+murtaugh-gateway cfg chat show
 ```
 
-`--enabled` gates **only** the DM + `@mention` chat surface. When enabled,
-`--default-agent` is required and every routed agent name must exist, or the
-store rejects the change. See [Slack → chat routing](slack.md).
+`chat` is one of the blocks **both** binaries carry, and it means a different
+thing on each. On the gateway it is the Slack surface: `--enabled` gates DMs and
+`@mentions`, and the routing below decides which agent NAME a conversation asks
+for. On a node it decides which of that node's own agents the process serves.
+
+`--enabled` gates **only** the DM + `@mention` chat surface. A routed agent name
+is checked against a profile BODY, so **where** you set it decides when the
+check happens: `murtaugh-runtime cfg chat set --default-agent typo` is rejected
+on the spot, while the gateway holds no bodies and accepts the name, resolving
+it at **connect time** against the profiles the connected nodes advertise. A
+name nothing serves is journalled (`stream=gateway kind=node
+state=unservable`) and is a warning, never fatal — a gateway that refused to
+start with an empty node registry could never start at all. See
+[Slack → chat routing](slack.md).
 
 Per-channel routing lives in `chat.channels`, an **ordered list** where the
 **first matching rule wins**:
@@ -222,9 +257,9 @@ values are rejected: past the first, they could never be reached.
 ### Access control
 
 ```sh
-murtaugh cfg access set --admin-user your-slack-handle \
+murtaugh-gateway cfg access set --admin-user your-slack-handle \
   --allowed-users U0123ABC --allowed-users alice --debug false
-murtaugh cfg access show
+murtaugh-gateway cfg access show
 ```
 
 Access is **fail-closed**: only `--admin-user` plus everyone in
@@ -326,7 +361,7 @@ configuration. Being main is the right to serve every user's unfurls and every
 scheduled job, which is the largest grant this gateway makes, and a node that
 could declare itself main would be granting it to itself.
 
-Set it with `murtaugh cfg access set --main-node <node-id>`; pass an empty string
+Set it with `murtaugh-gateway cfg access set --main-node <node-id>`; pass an empty string
 to clear it. With none set — or with the designated node not attached — every
 headless surface **refuses and says so**, in the log and in the journal (gateway
 stream, kind `headless`). Nothing is borrowed from whichever node happens to be
@@ -343,15 +378,15 @@ These carry richer nested structure, so they are set from a YAML fragment on
 disk rather than a flat flag list:
 
 ```sh
-murtaugh cfg workflow_rule set --name code-review-approval --from-file rule.yaml
-murtaugh cfg workflow_rule list
-murtaugh cfg workflow_rule show --name code-review-approval
-murtaugh cfg workflow_rule delete --name code-review-approval
+murtaugh-gateway cfg workflow_rule set --name code-review-approval --from-file rule.yaml
+murtaugh-gateway cfg workflow_rule list
+murtaugh-gateway cfg workflow_rule show --name code-review-approval
+murtaugh-gateway cfg workflow_rule delete --name code-review-approval
 
-murtaugh cfg unfurl_rule set --name github-pr --from-file unfurl.yaml
-murtaugh cfg unfurl_rule list
-murtaugh cfg unfurl_rule show --name github-pr
-murtaugh cfg unfurl_rule delete --name github-pr
+murtaugh-gateway cfg unfurl_rule set --name github-pr --from-file unfurl.yaml
+murtaugh-gateway cfg unfurl_rule list
+murtaugh-gateway cfg unfurl_rule show --name github-pr
+murtaugh-gateway cfg unfurl_rule delete --name github-pr
 ```
 
 See [Slack → workflow rules](slack.md#workflow-rules) and
@@ -362,10 +397,16 @@ See [Slack → workflow rules](slack.md#workflow-rules) and
 Some blocks are read-only from the CLI — inspect them with a `show`:
 
 ```sh
-murtaugh cfg defaults show      # runtime defaults (session, rendering, acp, approval)
-murtaugh cfg journal show       # journal streams and retention
-murtaugh cfg troubleshoot show  # troubleshoot providers
+murtaugh-runtime cfg defaults show      # runtime defaults (session, rendering, acp, approval)
+murtaugh-gateway cfg journal show       # journal streams and retention
+murtaugh-gateway cfg troubleshoot show  # troubleshoot providers
 ```
+
+`troubleshoot.providers` has no setter: it is a manual knob whose **empty
+default means every provider Murtaugh knows how to collect diagnostics for**
+(today `goose` and `claude-code`). To pin a narrower list, edit a `cfg export`
+snapshot and `cfg import` it back — see
+[Operations → Ship a diagnostics bundle](operations.md#ship-a-diagnostics-bundle).
 
 Runtime defaults are covered in [Agent chat → Runtime defaults](agents.md#runtime-defaults);
 journal tuning in [Gateway Debug Mode](journal.md).
@@ -373,15 +414,30 @@ journal tuning in [Gateway Debug Mode](journal.md).
 ### Store-wide operations
 
 ```sh
-murtaugh cfg show               # dump the whole config as JSON
-murtaugh cfg validate           # re-validate the store without changing it
-murtaugh cfg export --file cfg.json   # export the whole store (to stdout if no --file)
-murtaugh cfg import --file cfg.json   # replace the store from an export
-murtaugh cfg db migrate --to postgres --dsn-env MURTAUGH_DB_DSN
+murtaugh-gateway cfg show               # dump the whole config as JSON
+murtaugh-gateway cfg validate           # re-validate the store without changing it
+murtaugh-gateway cfg export --file cfg.json   # export the whole store (to stdout if no --file)
+murtaugh-gateway cfg import --file cfg.json   # replace the store from an export
+murtaugh-gateway cfg db migrate --to postgres --dsn-env MURTAUGH_DB_DSN
 ```
 
-`cfg export` / `cfg import` move a complete configuration between hosts. `cfg
-validate` is the same whole-config check every mutation runs, on demand.
+These act on **that binary's own** configuration; run them on the runtime binary
+to reach a node's. `cfg export` / `cfg import` move a complete configuration
+between hosts. `cfg validate` is the same whole-config check every mutation
+runs, on demand, judged as the role the binary implies — there is no `--role`.
+
+Two more are installer-shaped and also on both:
+
+```sh
+murtaugh-gateway cfg migrate                 # bring the config DIRECTORY to this version's schema
+murtaugh-gateway cfg launchd [--alias <a>] [--update-existing true]
+```
+
+`cfg migrate` and `cfg db migrate` are different: the first brings the
+configuration *directory* up to the schema this version expects (which the
+daemons also do at startup), the second moves the store's *content* between
+backends. `cfg launchd` is covered in
+[Operations](operations.md#as-a-daemon-macos).
 
 ---
 
@@ -403,7 +459,7 @@ migrate:
 #    MURTAUGH_DB_DSN=postgres://murtaugh:secret@host:5432/murtaugh?sslmode=disable
 
 # 2. copy the whole store into Postgres and rewrite config.yaml
-murtaugh cfg db migrate --to postgres --dsn-env MURTAUGH_DB_DSN
+murtaugh-gateway cfg db migrate --to postgres --dsn-env MURTAUGH_DB_DSN
 ```
 
 `cfg db migrate` copies everything and **rewrites `config.yaml`'s `database:`
@@ -425,7 +481,7 @@ of the new binary auto-migrates them** — no action required, and it's idempote
 3. The old sibling YAMLs are **moved** (never deleted) into
    `~/.config/murtaugh/migrated-<timestamp>/`, so the originals stay recoverable.
 
-From then on, edit configuration with `murtaugh cfg …`. See
+From then on, edit configuration with `cfg …`. See
 [Operations](operations.md#applying-config-changes) for the operational view.
 
 ---
@@ -433,13 +489,14 @@ From then on, edit configuration with `murtaugh cfg …`. See
 ## Applying changes
 
 The gateway loads config **once at startup** — it never hot-reloads. After any
-`murtaugh cfg …` change, restart the gateway. When the store changes the running
+`cfg …` change, restart the daemon that reads it. When the store changes the running
 daemon *suggests* a restart (via an admin-only button) but applies nothing until
 you do. See [Operations](operations.md#applying-config-changes).
 
 ## Reference assets
 
-The repository's `assets/` directory ships a fully-commented `config.yaml` and
-`env.example` starter, plus default Block Kit templates. `setup_bootstrap` seeds
-copies into your config directory and initialises an empty config store; you can
-also read the templates in-tree as the canonical reference.
+The repository's `assets/` directory ships fully-commented `config.yaml` /
+`env.example` starters for a gateway and `node-config.yaml` / `node-env.example`
+for a node, plus default Block Kit templates. The first command a binary runs
+against a root copies the right pair in and initialises an empty config store;
+you can also read the templates in-tree as the canonical reference.

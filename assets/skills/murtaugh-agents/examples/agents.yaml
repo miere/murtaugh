@@ -34,12 +34,12 @@ mcp_servers:
 agents:
   # --- Native agent (in-process LLM, the default backend) ------------------
   # Murtaugh talks to the model itself — no external agent process. The API key
-  # never lives here: api_key_env names the variable in ~/.config/murtaugh/.env
-  # (write it with `setup_env`). Shared knobs (workdir, tools, approval,
+  # never lives here: api_key_env names the variable in the node's .env
+  # (~/.config/murtaugh/node/.env; edit it by hand). Shared knobs (workdir, tools, approval,
   # mcp_servers) sit at the top; model/provider knobs go under `native:`.
   default:
     workdir: ${HOME}/work       # roots the files/terminal tools
-    tools: [files, terminal, skills, slack, jobs, ask, present_plan, attach]
+    tools: [files, terminal, skills, ask, present_plan, attach]
     # `ask` lets the agent put a question (buttons, or a multi/free-text form) to
     # you and WAIT for the answer. `present_plan` shows a plan with Proceed /
     # Revise / Cancel and WAITS for sign-off before multi-step work.

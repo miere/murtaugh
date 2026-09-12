@@ -11,8 +11,8 @@ _Your Slack-native AI agent and developer toolkit — chat, automations, jobs, a
 
 </div>
 
-Murtaugh turns Slack into a first-class developer surface. It is a single,
-self-contained binary that connects to your workspace over Socket Mode and adds:
+Murtaugh turns Slack into a first-class developer surface. It connects to your
+workspace over Socket Mode and adds:
 
 - 💬 **AI chat** — DM the bot or `@mention` it; a built-in native LLM agent (or
   any ACP-compatible agent) streams its reply back into the thread.
@@ -24,9 +24,9 @@ self-contained binary that connects to your workspace over Socket Mode and adds:
   queryable event so you (or an agent) can ask *"why did that misbehave?"*.
 - 🧰 **CLI + MCP server** — every capability is a terminal command and an MCP
   tool exposed to other AI clients.
-- 🔑 **Node credentials** — `murtaugh node token mint|list|revoke` issues,
-  lists and withdraws the bearer tokens that runtime nodes will authenticate
-  with. Groundwork: nothing connects with one yet.
+- 🔑 **Node credentials** — `murtaugh-gateway node token mint|list|revoke`
+  issues, lists and withdraws the bearer tokens runtime nodes authenticate
+  with.
 
 ---
 
@@ -67,8 +67,8 @@ in Slack. The first person to DM it becomes its administrator.
 | Guide | What it covers |
 |---|---|
 | 🚀 [Getting started](docs/getting-started.md) | Install, create the Slack app, write the config, first run. |
-| ⚙️ [Configuration](docs/configuration.md) | `config.yaml` (`oauth` + `database`), the `.env` secrets, and the `murtaugh cfg` admin CLI for everything else. |
-| 🤖 [Agent chat](docs/agents.md) | Native vs ACP agents, tools, routing, streaming, interrupts, approval. |
+| ⚙️ [Configuration](docs/configuration.md) | Each binary's configuration root (`config.yaml` + `.env`) and the `cfg` admin CLI for everything else. |
+| 🤖 [Agent chat](docs/agents.md) | Native, claude_code and ACP agents on a node, tools, routing, streaming, interrupts, approval. |
 | 💬 [Slack](docs/slack.md) | Messaging, asking the user, Block Kit, workflow rules, and link unfurling. |
 | ⏰ [Jobs](docs/jobs.md) | Define, run, and schedule shell-command and agent jobs. |
 | 🔍 [Gateway Debug Mode](docs/journal.md) | Query the structured event journal to debug and audit Murtaugh. |

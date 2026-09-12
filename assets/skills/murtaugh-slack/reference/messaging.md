@@ -3,7 +3,7 @@
 The **active** Slack surface: how an agent or automation posts, updates, and
 reads messages through Murtaugh. Four tools — `slack_send_msg`,
 `slack_update_msg`, `slack_fetch_msgs`, `slack_fetch_reactions` — on the CLI
-(`murtaugh slack <tool> …`) and over MCP (`slack_<tool>`), backed by the
+(`murtaugh-gateway slack <tool> …`) and over MCP (`slack_<tool>`), backed by the
 gateway's bot token, so a script never needs a raw Slack token of its own. For
 the Block Kit you put in these messages see `blocks.md`.
 
@@ -23,7 +23,7 @@ the Block Kit you put in these messages see `blocks.md`.
 
 > On the CLI these are kebab flags carrying a value (`--to`, `--body`,
 > `--blocks`, `--attachment-type`, …) — there are no bare switches. Run
-> `murtaugh help slack <tool>` for the canonical reference (required vs optional
+> `murtaugh-gateway help slack <tool>` for the canonical reference (required vs optional
 > flags, the `#channel`/`@user`/ID `--to` forms, mutual exclusions, examples).
 
 ## `slack_send_msg` — post a message
@@ -63,7 +63,7 @@ Behavior:
   it never silently falls back to the bot.
 
 ```bash
-murtaugh slack send_msg --to "#dev" --body "Deploy started" \
+murtaugh-gateway slack send_msg --to "#dev" --body "Deploy started" \
   --blocks /path/to/card.json --thread 1700000000.000100
 ```
 
@@ -85,7 +85,7 @@ forms as `send_msg`'s `to`; pass the `channel` send_msg returned and no lookup
 happens.
 
 ```bash
-murtaugh slack update_msg --channel C123ABC --ts 1700000000.000100 \
+murtaugh-gateway slack update_msg --channel C123ABC --ts 1700000000.000100 \
   --blocks /path/to/card.json --body "Deploy complete"
 ```
 
@@ -160,8 +160,8 @@ With `thread`, returns the thread's replies; otherwise channel history. Slack
 returns newest-first; the tool reverses to oldest-first for you.
 
 ```bash
-murtaugh slack fetch_msgs --channel "#releases" --since "2026-06-10 09:00:00"
-murtaugh slack fetch_msgs --channel C123 --thread 1700000000.000100
+murtaugh-gateway slack fetch_msgs --channel "#releases" --since "2026-06-10 09:00:00"
+murtaugh-gateway slack fetch_msgs --channel C123 --thread 1700000000.000100
 ```
 
 ### `slack_fetch_reactions` — find what a user reacted to
@@ -181,7 +181,7 @@ equivalent. Use it for lightweight approvals — e.g. "which release notes did
 @lead 👍?".
 
 ```bash
-murtaugh slack fetch_reactions --from @lead --emoji thumbsup \
+murtaugh-gateway slack fetch_reactions --from @lead --emoji thumbsup \
   --channel "#releases" --since "2026-06-09 00:00:00"
 ```
 

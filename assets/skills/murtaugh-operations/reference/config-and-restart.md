@@ -3,9 +3,10 @@
 ## Config is loaded once
 
 The gateway reads `config.yaml` (only `oauth:` + `database:`) and the **config
-database** it points at **at startup only**. Changing config — via `murtaugh cfg
-…` for everything in the database (access, chat routing, agents, jobs,
-workflow/unfurl rules, journal), or editing `config.yaml`'s two blocks — changes
+database** it points at **at startup only**. Changing config — via `cfg …` on
+whichever binary owns the setting (the gateway for access, chat routing, jobs,
+workflow/unfurl rules and journal; the node for agents and MCP servers), or
+editing `config.yaml`'s two blocks — changes
 nothing until the daemon restarts. Each `cfg` mutation re-validates the whole
 config and rolls back an invalid change, but the **live** gateway keeps running
 the config it loaded at boot until you restart it.
@@ -16,7 +17,7 @@ the config it loaded at boot until you restart it.
 `oauth:`+`database:`, and archives the old siblings to
 `~/.config/murtaugh/migrated-<timestamp>/`. Validated, rolled back on failure.
 Move the store to Postgres later with
-`murtaugh cfg db migrate --to postgres --dsn-env MURTAUGH_DB_DSN`.)
+`murtaugh-gateway cfg db migrate --to postgres --dsn-env MURTAUGH_DB_DSN`.)
 
 ## Picking up a config change
 

@@ -1,8 +1,12 @@
-# Murtaugh bootstrap file. This is the ONLY configuration kept on disk; it holds
-# just credentials and the database connection. Everything else — agents, MCP
-# servers, jobs, chat routing, access control, workflow/unfurl rules — lives in
-# the database and is managed with `murtaugh cfg …` (e.g. `murtaugh cfg agent
-# list`, `murtaugh cfg chat set --enabled true --default-agent code`).
+# Murtaugh GATEWAY bootstrap file. This is the ONLY configuration kept on disk;
+# it holds just credentials and the database connection. Everything else this
+# binary owns — jobs, chat routing, access control, election, workflow/unfurl
+# rules — lives in the database and is managed with `murtaugh-gateway cfg …`
+# (e.g. `murtaugh-gateway cfg access show`, `murtaugh-gateway cfg chat set
+# --enabled true --default-agent code`).
+#
+# Agent profiles and MCP servers are NOT here: they belong to a runtime node and
+# are managed with `murtaugh-runtime cfg agent …` against the node's own root.
 #
 # Credentials are NOT stored here. They live in ~/.config/murtaugh/.env (a
 # template .env is seeded on first run) and are referenced below as ${VAR}.

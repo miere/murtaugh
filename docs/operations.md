@@ -1,8 +1,8 @@
 # Operations
 
-Running and debugging the `slack gateway` daemon — the long-lived Socket Mode
-process that handles every Slack event (slash commands, button clicks, mentions,
-DMs, link previews) and runs scheduled jobs. For *installing* the daemon see
+Running and debugging the gateway daemon — the long-lived Socket Mode process
+that handles every Slack event (slash commands, button clicks, mentions, DMs,
+link previews) and runs scheduled jobs. For *installing* the daemon see
 [Getting started](getting-started.md); this page is about what it does once it's
 running and how to keep it healthy.
 
@@ -11,27 +11,49 @@ running and how to keep it healthy.
 ## Running the gateway
 
 ```sh
-murtaugh slack gateway
+murtaugh-gateway                                  # the daemon
+murtaugh-gateway -node-listen 127.0.0.1:8787      # …and accept node connections
 ```
 
-The gateway connects to Slack over Socket Mode and stays up. At startup it warms
-up the configured agents, sends the **"Murtaugh has started"** info card to the
-admin DM, and starts the job scheduler.
+**`murtaugh-gateway` with no command IS the daemon.** There is no `slack
+gateway` subcommand: give the binary a command and it acts on its own
+configuration, give it none and it connects to Slack over Socket Mode and stays
+up. At startup it warms up the configured agents, sends the **"Murtaugh has
+started"** info card to the admin DM, and starts the job scheduler.
+
+It runs no agents itself — those live on `murtaugh-runtime` nodes, which dial
+in. `-node-listen` is what lets them attach; without it the gateway accepts
+none.
 
 ### As a daemon (macOS)
 
-The macOS installer can create `~/Library/LaunchAgents/dev.murtaugh.plist` (via
-`murtaugh setup launchd`) so the gateway starts automatically on login and
-restarts on crash. Under launchd it logs to:
+`murtaugh-gateway cfg launchd` writes
+`~/Library/LaunchAgents/murtaugh.gateway.<alias>.plist` so the gateway starts on
+login and restarts on crash. `--alias` defaults to `default`, and the label is
+decided by which binary you ran — a node's is `murtaugh.node.<alias>`.
 
-- **`~/Library/Logs/murtaugh/slack.out.log`** — stdout
-- **`~/Library/Logs/murtaugh/slack.err.log`** — stderr
+**It writes the plist and stops.** Loading it is yours, once you are ready for
+the daemon to start:
+
+```sh
+murtaugh-gateway cfg launchd --node-listen 127.0.0.1:8787
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/murtaugh.gateway.default.plist
+```
+
+An existing plist is **refused** unless you pass `--update-existing true`: it is
+very likely running a live daemon, and overwriting one on the way past is how
+you take Murtaugh off Slack without noticing.
+
+Under launchd it logs to files named after the label:
+
+- **`~/Library/Logs/murtaugh/murtaugh.gateway.default.out.log`** — stdout
+- **`~/Library/Logs/murtaugh/murtaugh.gateway.default.err.log`** — stderr
 
 **Start any debugging in those logs** — startup, agent warmup, event handling,
 job runs, and errors all land there.
 
-On other platforms, run `murtaugh slack gateway` under your own supervisor
-(systemd, a process manager, etc.).
+On other platforms, run `murtaugh-gateway` under your own supervisor (systemd, a
+process manager, etc.).
 
 ---
 
@@ -64,7 +86,7 @@ sibling YAMLs (`agents.yaml`, `jobs.yaml`, `journal.yaml`, `workflow-rules.yaml`
 SQLite config store, rewrites `config.yaml` down to `oauth:` + `database:`, and
 **moves** the old files into `~/.config/murtaugh/migrated-<timestamp>/` (never
 deletes them). This is automatic and idempotent — a second run is a no-op. From
-then on, edit configuration with `murtaugh cfg …`. See
+then on, edit configuration with `cfg …`. See
 [Configuration](configuration.md#upgrading-from-the-yaml-tree).
 
 ---
@@ -92,18 +114,18 @@ before assuming it's stuck.
 
 Only the admin plus everyone in the access allowed-users list may interact. With
 the list empty, the bot is **admin-only** — so *"the bot ignores me"* is most
-often an access-list problem, not a bug. Inspect it with `murtaugh cfg access
-show`. Handles in the access lists are resolved to IDs at startup, and **the
+often an access-list problem, not a bug. Inspect it with `murtaugh-gateway cfg
+access show`. Handles in the access lists are resolved to IDs at startup, and **the
 gateway refuses to start if any entry can't be resolved** — check the startup log
 for a resolution error.
 
 ### "The bot ignores me" checklist
 
-1. Are you the admin, or in the allowed-users list? (`murtaugh cfg access show`)
+1. Are you the admin, or in the allowed-users list? (`murtaugh-gateway cfg access show`)
 2. In a channel, did you `@mention` the bot?
-3. Is chat enabled and pointed at a real agent? (`murtaugh cfg chat show`,
-   `murtaugh cfg agent list`)
-4. Did the gateway actually start? Check `slack.err.log` for an auth or
+3. Is chat enabled and pointed at a real agent? (`murtaugh-runtime cfg chat show`,
+   `murtaugh-runtime cfg agent list`)
+4. Did the gateway actually start? Check `murtaugh.gateway.default.err.log` for an auth or
    config-validation failure.
 
 ### Query the journal
@@ -116,15 +138,27 @@ the `gateway` stream are where to look for *"why did the daemon go silent?"*.
 ### Ship a diagnostics bundle
 
 ```sh
-murtaugh slack send_msg ...        # if Slack itself works
+murtaugh-gateway slack send_msg ...   # if Slack itself works
 /murtaugh troubleshoot             # from Slack: bundles config.yaml + a config-store dump
 ```
 
 `/murtaugh troubleshoot` collects `config.yaml` and a dump of the config store
-(the same content as `murtaugh cfg show`) into an uploadable bundle. It
+(the same content as `murtaugh-gateway cfg show`) into an uploadable bundle. It
 deliberately **never** includes `.env`, so secrets don't leak — and because every
 value in the store is a `${VAR}` reference, the dump carries no credentials
 either (see [Configuration](configuration.md)).
+
+It can also fold in a downstream provider's own sessions and logs.
+`troubleshoot.providers` in the gateway's store decides which by default, and it
+is a **manual** knob now — the tool that used to append to it,
+`setup mcp_register`, is gone. **An empty list — the default — means every
+provider Murtaugh knows how to collect diagnostics for**, today `goose` and
+`claude-code`; missing files are skipped at collection time, so the all-known
+fallback is safe on a machine running only some of them. Read it with
+`murtaugh-gateway cfg troubleshoot show`, and narrow a single bundle with
+`troubleshoot bundle --include <provider>` (repeatable). There is no
+`cfg troubleshoot set`: to pin a narrower default, edit a `cfg export` snapshot
+and `cfg import` it back.
 
 ---
 
@@ -137,10 +171,9 @@ Slack, so a lapsed login does not mean SSH-ing to the host.
 The credential belongs to the machine the agent runs on, so that machine does
 the work. A runtime node (`murtaugh-runtime`) looks after the credentials of its
 own `claude_code` agents and sends anything that needs a person to the **node's
-owner** — the Slack user its token was minted for. A gateway that runs agents
-itself (`murtaugh slack gateway`) looks after theirs and asks the admin. A
-gateway whose agents all run on nodes (`murtaugh-gateway`) holds no Claude Code
-credential, so it watches nothing and never starts a sign-in on its own machine.
+owner** — the Slack user its token was minted for. `murtaugh-gateway` runs no
+agents, so it holds no Claude Code credential: it watches nothing and never
+starts a sign-in on its own machine, only relays the node's.
 
 ### Why it needs keeping alive
 
@@ -248,16 +281,21 @@ node waits ten minutes before asking again on its own.
 
 ---
 
-## What the daemon owns
+## What the gateway owns, and what a node owns
 
-One process runs it all:
+The gateway process owns:
 
 - the **Slack event loop** (slash commands, mentions, DMs, buttons, links);
-- the **chat agents** and their streaming replies ([Agent chat](agents.md));
+- the **rendering** of every chat turn, including its streaming reply
+  ([Agent chat](agents.md));
 - the **workflow** and **unfurl** handlers ([Slack](slack.md));
 - the **job scheduler** ([Jobs](jobs.md));
-- the **Claude Code credential warden** for the agents it runs itself (above);
 - the **event journal** writer ([Gateway Debug Mode](journal.md)).
 
+A node (`murtaugh-runtime`) owns the other half: the **agents** themselves and
+their tools, their MCP servers, and the **Claude Code credential warden** for
+the agents it runs (above).
+
 If the gateway is down, scheduled jobs don't fire and Slack events go unanswered
-— everything flows through it.
+— every Slack event flows through it. If the node serving a conversation is
+down, that conversation has nowhere to run even though the gateway is up.

@@ -15,7 +15,7 @@ Murtaugh is customised across a few surfaces. This skill owns the *architecture*
 that ties them together; the **mechanics** of each surface live in a dedicated
 capability skill — defer to them for flag/tool details:
 
-Most config lives in the **config database**, managed with `murtaugh cfg …`; only
+Most config lives in the **config database**, managed with `murtaugh-gateway cfg …`; only
 `config.yaml` (`oauth:` + `database:`) and `.env` (secrets) sit on disk, along with
 your `automations/` and `templates/`.
 
@@ -55,7 +55,7 @@ your `automations/` and `templates/`.
 
 # Everything else — agents, jobs, journal, chat routing, access, defaults,
 # workflow-rules, unfurl-rules — lives in the config database (SQLite by default at
-# ~/.config/murtaugh/config.db), managed with `murtaugh cfg …`. The old sibling
+# ~/.config/murtaugh/config.db), managed with `murtaugh-gateway cfg …`. The old sibling
 # YAMLs (agents.yaml, jobs.yaml, journal.yaml, workflow-rules.yaml, unfurl-rules.yaml,
 # troubleshoot.yaml) are gone as the source of truth.
 ```
@@ -78,9 +78,9 @@ from shared.formatting import render_card
 ```
 
 > Slack and GitHub are **not** a `shared/` module: routines reach them by shelling
-> out to the `murtaugh` and `gh` CLIs through injectable runners (so tests can
+> out to the `murtaugh-gateway` and `gh` CLIs through injectable runners (so tests can
 > fake them) — see `bdd.md` → *Testability rules*. Don't write a per-machine
-> Slack client; use `murtaugh slack … --json`.
+> Slack client; use `murtaugh-gateway slack … --json`.
 
 ### Each routine is a self-contained folder
 

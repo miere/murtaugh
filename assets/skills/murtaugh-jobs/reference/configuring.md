@@ -9,14 +9,14 @@ take effect.
 
 ```bash
 # command job
-murtaugh cfg job set --name cleanup-logs \
+murtaugh-gateway cfg job set --name cleanup-logs \
   --command /usr/bin/find \
   --arg /var/log --arg -mtime --arg +7 --arg -delete \
   --workdir /tmp --timeout 5m
   # add --schedule "0 3 * * *"  (cron) or --every 1h  (interval) for auto-runs
 
 # agent-delegated job
-murtaugh cfg job set --name code-review-job \
+murtaugh-gateway cfg job set --name code-review-job \
   --agent default \
   --prompt 'Review the changes in PR {{ 1 }} at {{ 2 }} and post your feedback.'
 ```
@@ -55,7 +55,7 @@ to Slack — so "post the result to #ops" in the prompt cannot work there; use
 `--report-to`. Pass positional args at run time to fill the prompt placeholders:
 
 ```sh
-murtaugh jobs run --name code-review-job --args 1234 --args /path/to/repo
+murtaugh-runtime jobs run --name code-review-job --args 1234 --args /path/to/repo
 ```
 
 Here `{{ 1 }}` becomes `1234` and `{{ 2 }}` becomes `/path/to/repo`. For a
@@ -68,7 +68,7 @@ After a **scheduled** run the gateway posts the agent's final reply, as the bot,
 to the job's `--report-to` destination:
 
 ```sh
-murtaugh cfg job set --name nightly-digest \
+murtaugh-gateway cfg job set --name nightly-digest \
   --agent default --prompt "Summarise last night's alerts." \
   --schedule "0 7 * * *" --report-to "#ops"
 ```
@@ -98,7 +98,7 @@ globbing, and `$VAR` expansion do **not** happen. If you need them, make the
 command a shell explicitly:
 
 ```sh
-murtaugh cfg job set --name piped-report \
+murtaugh-gateway cfg job set --name piped-report \
   --command /bin/sh \
   --arg -c --arg 'generate | tee $HOME/report.txt'
 ```

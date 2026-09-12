@@ -19,10 +19,10 @@ one-shot CLI tools under the `slack` namespace. They reuse the gateway's
 `oauth.bot_token`, so no extra configuration is needed for the common case.
 
 ```sh
-murtaugh slack send_msg --to '#general' --body 'hello'
-murtaugh slack fetch_msgs --channel general
-murtaugh slack fetch_reactions --channel general --from @ada --emoji thumbsup
-murtaugh slack update_msg --channel C123 --ts 1234.5678 --body 'edited'
+murtaugh-gateway slack send_msg --to '#general' --body 'hello'
+murtaugh-gateway slack fetch_msgs --channel general
+murtaugh-gateway slack fetch_reactions --channel general --from @ada --emoji thumbsup
+murtaugh-gateway slack update_msg --channel C123 --ts 1234.5678 --body 'edited'
 ```
 
 `send_msg` posts as the app by default. To post as the **human admin** instead,
@@ -116,10 +116,10 @@ trigger:
 ```
 
 ```sh
-murtaugh cfg workflow_rule set --name code-review-approval --from-file rule.yaml
-murtaugh cfg workflow_rule list
-murtaugh cfg workflow_rule show --name code-review-approval
-murtaugh cfg workflow_rule delete --name code-review-approval
+murtaugh-gateway cfg workflow_rule set --name code-review-approval --from-file rule.yaml
+murtaugh-gateway cfg workflow_rule list
+murtaugh-gateway cfg workflow_rule show --name code-review-approval
+murtaugh-gateway cfg workflow_rule delete --name code-review-approval
 ```
 
 `delegate-to-agent` prompts are rendered as Go templates against the interaction
@@ -163,11 +163,11 @@ unfurl:
 ```
 
 ```sh
-murtaugh cfg unfurl_rule set --name github-pr --from-file github-pr.yaml
-murtaugh cfg unfurl_rule set --name github-issues --from-file github-issues.yaml
-murtaugh cfg unfurl_rule list
-murtaugh cfg unfurl_rule show --name github-pr
-murtaugh cfg unfurl_rule delete --name github-pr
+murtaugh-gateway cfg unfurl_rule set --name github-pr --from-file github-pr.yaml
+murtaugh-gateway cfg unfurl_rule set --name github-issues --from-file github-issues.yaml
+murtaugh-gateway cfg unfurl_rule list
+murtaugh-gateway cfg unfurl_rule show --name github-pr
+murtaugh-gateway cfg unfurl_rule delete --name github-pr
 ```
 
 Prompts and templates can reference `{{ .URL }}`, `{{ .Domain }}`, and named

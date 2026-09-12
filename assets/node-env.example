@@ -16,7 +16,7 @@
 #
 # This node's own credential is not here either. It is a FILE — `node-token`
 # beside this one — so the sandboxed model this node runs cannot read it out of
-# the environment. Mint one on the gateway with `murtaugh node token mint`.
+# the environment. Mint one on the gateway with `murtaugh-gateway node token mint`.
 
 # --- LLM providers (only the ones your native agents use) ---
 # The variable NAME is what an agent profile's `api_key_env:` points at.
@@ -24,7 +24,7 @@ GEMINI_API_KEY=
 ANTHROPIC_API_KEY=
 OPENAI_API_KEY=
 # OpenAI/Anthropic-compatible third parties reuse the families above with a
-# base_url override (set per-agent with `murtaugh cfg agent …`). Give each its
+# base_url override (set per-agent with `murtaugh-runtime cfg agent …`). Give each its
 # own key var:
 # ZAI_API_KEY=
 # DEEPSEEK_API_KEY=

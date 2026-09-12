@@ -1,46 +1,73 @@
 #!/usr/bin/env bash
 # Example first-run install sequence for Murtaugh.
-# Assumes the `murtaugh` binary is already on PATH.
+# There is no install script: you place the two binaries, and each one then
+# configures itself. Assumes murtaugh-gateway and murtaugh-runtime are already
+# somewhere on PATH.
 set -euo pipefail
 
-BIN="$(command -v murtaugh)"
+NODE_CONFIG="$HOME/.config/murtaugh/node/config.yaml"
 
-# 1. Seed the workspace (~/.config/murtaugh): config defaults, templates, skills.
-murtaugh setup bootstrap
+# ---------------------------------------------------------------- gateway host
 
-# 2. Slack credentials + admin user → config.yaml (the anchor file: oauth +
-#    access + chat). The tool is still `setup slack`; it writes config.yaml.
-murtaugh setup slack \
-  --app-token "xapp-REPLACE" \
-  --bot-token "xoxb-REPLACE" \
-  --admin-user "@you"
+# 1. Seed the gateway root. Any command does it; this one also tells you which
+#    required field is still missing. Expect it to report the Slack tokens on a
+#    fresh root — that is the fail-closed message, not a broken install.
+murtaugh-gateway cfg validate || true
 
-# 3. Provider API key → ~/.config/murtaugh/.env. A native agent references the
-#    key by variable NAME (api_key_env); the value lives only here, never in YAML.
-#    --set is repeatable; other .env entries are preserved.
-murtaugh setup env --set GEMINI_API_KEY="AIza-REPLACE"
+# 2. Slack credentials go in the .env beside config.yaml, which already
+#    references them as ${VAR}. Edit it by hand — `setup env` is gone.
+#      $HOME/.config/murtaugh/.env
+#        SLACK_APP_TOKEN=xapp-REPLACE
+#        SLACK_BOT_TOKEN=xoxb-REPLACE
+${EDITOR:-vi} "$HOME/.config/murtaugh/.env"
+murtaugh-gateway cfg validate
 
-# 4. Native agent (the DEFAULT kind). Passing --provider infers kind=native.
-#    --tools is repeatable. Wire chat.enabled + chat.defaults.agent in
-#    config.yaml separately (setup_slack --default-agent, or the
-#    murtaugh-agents skill).
-murtaugh setup agents \
-  --provider gemini --model gemini-2.5-pro \
-  --api-key-env GEMINI_API_KEY \
+# 3. There is no admin to set: the first person to DM Murtaugh becomes its
+#    administrator. Set it explicitly only if you would rather not race for it.
+# murtaugh-gateway cfg access set --admin-user "@you"
+
+# 4. (macOS) Write the gateway's LaunchAgent, then load it yourself. `cfg
+#    launchd` writes the plist and stops; -node-listen is what lets nodes attach.
+#    The launchctl line is left commented ON PURPOSE: bootstrapping a plist over
+#    a gateway that is already running takes Murtaugh off Slack. Check first
+#    (`pgrep -fl murtaugh-gateway`), then run it yourself.
+murtaugh-gateway cfg launchd --node-listen 127.0.0.1:8787
+# launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/murtaugh.gateway.default.plist"
+
+# 5. Mint one credential per node. Printed once — only its hash is stored.
+murtaugh-gateway node token mint --node mac-mini --user U012ABCDEF \
+  --label "office mac" --token-file /tmp/mac-mini-node-token
+
+# ------------------------------------------------------------------- node host
+
+# 6. Seed the node root, then install the credential the gateway minted.
+murtaugh-runtime --config "$NODE_CONFIG" cfg validate
+install -m 0600 /tmp/mac-mini-node-token "$HOME/.config/murtaugh/node/node-token"
+
+# 7. Tell the node where to dial. A node dials in; the gateway never dials out.
+murtaugh-runtime --config "$NODE_CONFIG" cfg node set --gateway ws://127.0.0.1:8787
+
+# 8. Provider API keys go in the NODE's .env — that is where agents run.
+#      $HOME/.config/murtaugh/node/.env
+#        GEMINI_API_KEY=AIza-REPLACE
+${EDITOR:-vi} "$HOME/.config/murtaugh/node/.env"
+
+# 9. The agent this node serves. Native is the default kind; --tools repeats.
+murtaugh-runtime --config "$NODE_CONFIG" cfg agent create \
+  --name default --type native \
+  --provider gemini --model gemini-2.5-pro --api-key-env GEMINI_API_KEY \
   --tools files --tools terminal --tools skills --tools ask --tools present_plan
 
-#    Alternative: a legacy ACP agent (omit the native flags). Passing --command
-#    infers kind=acp; --args is repeatable. Omit both paths to leave chat off.
-# murtaugh setup agents --kind acp \
-#   --command /usr/local/bin/acp-agent --args --stdio
+#    Alternative: an ACP agent. --type acp needs --command; --arg repeats.
+#    Its credentials are the node admin's own responsibility.
+# murtaugh-runtime --config "$NODE_CONFIG" cfg agent create \
+#   --name coder --type acp --command /usr/local/bin/claude-code-acp --arg --stdio
 
-# 5. (macOS) install + start the gateway daemon as a LaunchAgent.
-murtaugh setup launchd --binary-path "$BIN" --load true
+# 10. (macOS) Write and load the node's LaunchAgent. --alias is what lets a
+#     second node share this machine.
+murtaugh-runtime --config "$NODE_CONFIG" cfg launchd --alias default
+# launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/murtaugh.node.default.plist"
 
-# 6. (optional) expose Murtaugh's tools to an MCP client.
-murtaugh setup mcp_register --client opencode --binary-path "$BIN"
-
-# Later: self-update the binary, then reload the daemon.
-# A bare `setup update` refuses to overwrite a dev build — add --force true.
-# murtaugh setup update --force true
-# murtaugh setup launchd --binary-path "$BIN" --load true
+# Later: check for a newer release. It downloads nothing — fetch the file
+# yourself, put it where the current one is, and restart the daemon.
+# murtaugh-gateway setup update
