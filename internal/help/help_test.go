@@ -42,7 +42,7 @@ func TestSectionLookup(t *testing.T) {
 		{"slack send_msg", "## murtaugh slack send_msg"},
 		{"slack.send_msg", "## murtaugh slack send_msg"},
 		{"  Jobs   Define ", "## murtaugh jobs define"}, // whitespace/case tolerant
-		{"setup mcp_register", "## murtaugh setup mcp_register"},
+		{"setup update", "## murtaugh setup update"},
 		{"present_plan", "## murtaugh present_plan"}, // generated, no prose section
 	}
 	for _, tc := range cases {

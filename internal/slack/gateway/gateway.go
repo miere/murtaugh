@@ -142,11 +142,6 @@ type Gateway struct {
 	// when rendering the admin's App Home panel. nil disables the update check,
 	// so the panel shows the version alone.
 	updates *updates.Checker
-	// installUpdate downloads and swaps in the binary for a given release tag,
-	// returning the installed version. Injected over the setup.update tool. nil
-	// disables the App Home "Update" action (the button still never appears
-	// unless updates is also wired).
-	installUpdate func(ctx context.Context, target string) (string, error)
 	// resumeStore persists the restart marker between processes. nil
 	// disables the "restarting…" / "back online" Slack confirmation flow
 	// — the restart still happens, just silently.
@@ -753,13 +748,10 @@ func (a *Gateway) WithVersion(version string) *Gateway {
 	return a
 }
 
-// WithUpdateChecker wires the App Home update affordance: checker reports
-// whether a newer release exists, and install downloads+swaps the binary for a
-// given tag (returning the installed version). Passing nil for either leaves
-// the panel showing the version without an "Update" button.
-func (a *Gateway) WithUpdateChecker(checker *updates.Checker, install func(ctx context.Context, target string) (string, error)) *Gateway {
+// WithUpdateChecker wires the App Home update notice: checker reports whether a
+// newer release exists. nil leaves the panel showing the version alone.
+func (a *Gateway) WithUpdateChecker(checker *updates.Checker) *Gateway {
 	a.updates = checker
-	a.installUpdate = install
 	return a
 }
 
@@ -1254,7 +1246,6 @@ func (a *Gateway) builtinInteractionHandled(interaction slack.InteractionCallbac
 	return isRestartSuggestionInteraction(interaction) ||
 		isPingInteraction(interaction) ||
 		isAppHomeUpdateClick(interaction) ||
-		isAppHomeUpdateSubmit(interaction) ||
 		isAppHomeRestartClick(interaction) ||
 		isAppHomeRestartSubmit(interaction) ||
 		isConfigApprovalInteraction(interaction) ||
@@ -1285,20 +1276,15 @@ func (a *Gateway) dispatchInteractiveBuiltins(interaction slack.InteractionCallb
 		}()
 		return
 	}
-	// App Home control panel: the admin's "Update" button opens a confirmation
-	// modal; submitting it installs the release and restarts. Both are owned by
-	// the binary (admin-gated) and handled before the workflow engine, like the
-	// restart and ping built-ins above.
+	// App Home control panel: the admin's "Update" button opens the release
+	// notice. Owned by the binary (admin-gated) and handled before the workflow
+	// engine, like the restart and ping built-ins above.
 	if isAppHomeUpdateClick(interaction) {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			a.handleAppHomeUpdateClick(ctx, interaction)
 		}()
-		return
-	}
-	if isAppHomeUpdateSubmit(interaction) {
-		go a.handleAppHomeUpdateSubmit(interaction)
 		return
 	}
 	// App Home "Restart Murtaugh" button: the admin's on-demand restart. Like

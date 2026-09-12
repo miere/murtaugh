@@ -7,6 +7,7 @@ import (
 
 func everyReferenceConfig() Config {
 	return Config{
+		Role: RoleNode,
 		Agents: map[string]AgentProfile{
 			"code":     {Native: &NativeProfile{Provider: "anthropic", Model: "claude", APIKeyEnv: "K"}},
 			"tweaker":  {Native: &NativeProfile{Provider: "anthropic", Model: "claude", APIKeyEnv: "K"}},

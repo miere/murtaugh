@@ -22,12 +22,14 @@ import (
 	"github.com/miere/murtaugh/internal/agentruntime"
 	"github.com/miere/murtaugh/internal/agentruntime/local"
 	"github.com/miere/murtaugh/internal/agentwire"
+	"github.com/miere/murtaugh/internal/cmdline"
 	"github.com/miere/murtaugh/internal/config"
 	"github.com/miere/murtaugh/internal/config/migrate"
 	configstore "github.com/miere/murtaugh/internal/config/store"
 	"github.com/miere/murtaugh/internal/credwarden"
 	"github.com/miere/murtaugh/internal/help"
 	"github.com/miere/murtaugh/internal/mcpbridge"
+	"github.com/miere/murtaugh/internal/nodeapp"
 	"github.com/miere/murtaugh/internal/nodeclaim"
 	"github.com/miere/murtaugh/internal/nodeserve"
 	"github.com/miere/murtaugh/internal/nodesocket"
@@ -44,7 +46,8 @@ import (
 
 var version = "dev"
 
-var errNoGateway = errors.New("no gateway address: set one with `murtaugh cfg node set --gateway wss://host:port` or pass -gateway (a node dials in; the gateway never dials out)")
+var errNoGateway = errors.New("node.gateway is required: a node dials its gateway, so it needs an address. " +
+	"Set one with `murtaugh-runtime cfg node set --gateway wss://host:port`, or pass -gateway to override it once (a node dials in; the gateway never dials out)")
 
 const (
 	reconnectFloor   = 1 * time.Second
@@ -53,49 +56,59 @@ const (
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, "murtaugh-runtime:", err)
+		fmt.Fprintln(os.Stderr, nodeapp.Program+":", err)
 		os.Exit(1)
 	}
 }
 
-func run(args []string) error {
-	if len(args) > 0 && args[0] == mcpbridge.Subcommand {
+func run(rawArgs []string) error {
+	if len(rawArgs) > 0 && rawArgs[0] == mcpbridge.Subcommand {
 		return runMCPBridge()
 	}
-
-	fs := flag.NewFlagSet("murtaugh-runtime", flag.ContinueOnError)
-	configPath := fs.String("config", "", "path to this node's config.yaml (default ~/.config/murtaugh/node/config.yaml)")
-	gatewayURL := fs.String("gateway", "", "gateway address to attach to, ws:// or wss://; overrides node.gateway in the configuration. Addresses learned from a redirect are added to the seeds and never replace them")
-	agentName := fs.String("agent", "", "which configured agent this node serves (default: the chat default, or the only one)")
-	tokenPath := fs.String("token-file", "", "path to this node's credential (default: node-token beside the config)")
-	insecure := fs.Bool("insecure-skip-verify", false, "do not verify the gateway's TLS certificate")
-	showVersion := fs.Bool("version", false, "print the version and exit")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if *showVersion {
+	if len(rawArgs) > 0 && rawArgs[0] == "version" {
 		fmt.Println(version)
 		return nil
 	}
-	if fs.NArg() > 0 {
-		return fmt.Errorf("unexpected argument %q: this binary takes no subcommands", fs.Arg(0))
+
+	defaultPath, err := config.DefaultNodePath()
+	if err != nil {
+		return err
+	}
+	path, args, err := cmdline.ExtractConfigFlag(rawArgs, defaultPath)
+	if err != nil {
+		return err
+	}
+	jsonOutput, args, err := cmdline.ExtractJSONFlag(args)
+	if err != nil {
+		return err
+	}
+	// Help is resolved before the configuration is touched, so it works on a
+	// machine that has never been configured.
+	if tokens, ok := cmdline.HelpRequest(args); ok {
+		fmt.Fprint(os.Stdout, nodeapp.HelpReference(version).Render(tokens))
+		return nil
 	}
 
-	path := *configPath
-	if path == "" {
-		defaultPath, err := config.DefaultNodePath()
-		if err != nil {
+	command := cmdline.IsCommand(args)
+	var gatewayURL, agentName, tokenPath string
+	var insecure bool
+	if !command {
+		fs := flag.NewFlagSet(nodeapp.Program, flag.ContinueOnError)
+		fs.StringVar(&gatewayURL, "gateway", "", "gateway address to attach to, ws:// or wss://; overrides node.gateway in the configuration. Addresses learned from a redirect are added to the seeds and never replace them")
+		fs.StringVar(&agentName, "agent", "", "which configured agent this node serves (default: the chat default, or the only one)")
+		fs.StringVar(&tokenPath, "token-file", "", "path to this node's credential (default: node-token beside the config)")
+		fs.BoolVar(&insecure, "insecure-skip-verify", false, "do not verify the gateway's TLS certificate")
+		showVersion := fs.Bool("version", false, "print the version and exit")
+		if err := fs.Parse(args); err != nil {
 			return err
 		}
-		path = defaultPath
+		if *showVersion {
+			fmt.Println(version)
+			return nil
+		}
 	}
 
-	if applied, err := migrate.Run(filepath.Dir(path)); err != nil {
-		return fmt.Errorf("config migration failed: %w", err)
-	} else if len(applied) > 0 {
-		fmt.Fprintf(os.Stderr, "murtaugh-runtime: migrated config to schema v%d\n", applied[len(applied)-1])
-	}
-	if err := config.BootstrapNode(path); err != nil {
+	if err := prepareConfigDir(path); err != nil {
 		return err
 	}
 
@@ -108,8 +121,16 @@ func run(args []string) error {
 	}
 	defer func() { _ = cfgStore.Close() }()
 
+	if command {
+		registry := nodeapp.Registry(cfg, cfgStore, path, version)
+		if args[0] == "mcp" {
+			return nodeapp.RunMCP(ctx, registry)
+		}
+		return nodeapp.RunCLI(ctx, registry, args, jsonOutput)
+	}
+
 	seeds := cfg.Node.Seeds()
-	if flagged := strings.TrimSpace(*gatewayURL); flagged != "" {
+	if flagged := strings.TrimSpace(gatewayURL); flagged != "" {
 		seeds = []string{flagged}
 	}
 
@@ -118,19 +139,20 @@ func run(args []string) error {
 		return errNoGateway
 	}
 
-	credential := *tokenPath
+	credential := tokenPath
 	if credential == "" {
 		credential = nodetoken.PathFor(cfg.BaseDir)
 	}
 	if _, err := nodetoken.ReadFile(credential); err != nil {
-		return err
+		return fmt.Errorf("this node has no usable credential: %w.\n"+
+			"Mint one on the gateway with `murtaugh-gateway node token mint`, then write it to that path (mode 0600)", err)
 	}
 
 	logger := newLogger(cfg.Access.Debug)
 	runCtx, restart := context.WithCancel(ctx)
 	defer restart()
 
-	served, name, err := serveAgent(cfg, logger, *agentName)
+	served, name, err := serveAgent(cfg, logger, agentName)
 	if err != nil {
 		return err
 	}
@@ -176,7 +198,7 @@ func run(args []string) error {
 	return attach(runCtx, logger, attachment{
 		gateways:   seeds,
 		tokenFile:  credential,
-		insecure:   *insecure,
+		insecure:   insecure,
 		client:     served.client,
 		gate:       served.gate,
 		background: served.background,
@@ -418,6 +440,20 @@ func nextBackoff(backoff time.Duration) time.Duration {
 		return reconnectCeiling
 	}
 	return backoff
+}
+
+// prepareConfigDir brings this node's configuration directory up to what the
+// binary expects. Migration runs first but only over a directory that exists: a
+// fresh path has nothing to migrate, and stamping a schema version into a
+// directory that is not there yet used to kill the first start with a missing
+// `.schema_version` instead of the missing credential.
+func prepareConfigDir(path string) error {
+	if applied, err := migrate.Run(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("config migration failed: %w", err)
+	} else if len(applied) > 0 {
+		fmt.Fprintf(os.Stderr, "%s: migrated config to schema v%d\n", nodeapp.Program, applied[len(applied)-1])
+	}
+	return config.BootstrapNode(path)
 }
 
 func runMCPBridge() error {

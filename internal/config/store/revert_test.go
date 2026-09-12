@@ -203,7 +203,7 @@ func TestRevertedStoreStillLoads(t *testing.T) {
 	if _, err := s.DeleteItem(ctx, config.SectionAgent, "code"); err != nil {
 		t.Fatal(err)
 	}
-	base := config.Config{OAuth: config.OAuthConfig{AppToken: "x", BotToken: "x"}}
+	base := config.Config{Role: config.RoleNode, OAuth: config.OAuthConfig{AppToken: "x", BotToken: "x"}}
 	if _, err := s.Load(ctx, base); err == nil {
 		t.Fatal("setup: the broken store loaded; the test proves nothing")
 	}

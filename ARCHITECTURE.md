@@ -6,76 +6,81 @@ between them, and the conventions you must respect so changes stay consistent.
 
 ## What this service is
 
-A Go toolkit that ships a single binary with **three frontends** backed by a
-shared Tool registry:
+A Go toolkit that ships **two binaries** over a shared Tool registry. Each
+runs its daemon when given no command, and acts on its own configuration when
+given one.
 
-- **Slack gateway** — Socket Mode daemon (`murtaugh slack gateway`) that
-  responds to slash commands, runs YAML-defined **workflow rules** against
-  interactive payloads (Block Kit buttons, etc.), bridges Slack conversations
-  to an **agent** — either the in-process native LLM loop (`kind: native`, the
-  default) or an external **ACP** (Agent Communication Protocol) agent
-  (`kind: acp`) — with live response streaming, and renders **custom link
-  unfurls** for shared URLs.
-- **CLI** — human-facing direct invocation (`murtaugh <tool> [...]`), including
-  the Slack tools under the `slack` namespace (`murtaugh slack send_msg`, …).
-- **MCP** — JSON-RPC stdio server (`murtaugh mcp`) that exposes every
-  registered tool to AI clients.
+- **`murtaugh-gateway`** — the Socket Mode daemon. It responds to slash
+  commands, runs YAML-defined **workflow rules** against interactive payloads
+  (Block Kit buttons, etc.), bridges Slack conversations to an **agent** on an
+  attached node with live response streaming, and renders **custom link
+  unfurls** for shared URLs. It links no agent machinery at all; CI proves it.
+- **`murtaugh-runtime`** — a runtime node. It dials a gateway, holds the
+  connection open and serves one agent over it — either the in-process native
+  LLM loop (`kind: native`, the default), an external **ACP** agent
+  (`kind: acp`), or Claude Code. `murtaugh-runtime mcp` serves the same tools
+  to a local AI client over JSON-RPC on stdio.
+
+Both carry a CLI over their half of the registry, and both carry `cfg launchd`,
+`cfg validate` and `cfg migrate`: each binary configures itself, and there is
+no install script.
 
 Module path: `github.com/miere/murtaugh`.
 
 ## High-level architecture
 
 ```
-       ┌──────────────┐        ┌──────────────────────┐
-       │ cmd/murtaugh │        │ cmd/murtaugh-gateway │
-       └──────┬───────┘        └──────────┬───────────┘
-              │  app.Agents{local}        │  app.Agents{} (empty)
-              └────────────┬──────────────┘
-                    ┌──────▼───────┐
-                    │ internal/app │   ← composition root
-                    └──────┬───────┘
-            builds Registry + selects Mode
-   ┌───────────────────────┼───────────────────────┐
-   │                       │                       │
-┌──▼─────────────┐  ┌──────▼──────────┐  ┌─────────▼──────────┐
-│ frontends/cli  │  │ frontends/mcp   │  │ slack/gateway      │
-└──┬─────────────┘  └──────┬──────────┘  └────────────────────┘
-   │                       │
-   └──────► Tool ◄─────────┘
+  ┌──────────────────────┐            ┌──────────────────────┐
+  │ cmd/murtaugh-gateway │            │ cmd/murtaugh-runtime │
+  └──────────┬───────────┘            └──────────┬───────────┘
+   app.Agents{} or a broker             agentruntime/local
+        ┌─────▼────────┐                  ┌──────▼───────────┐
+        │ internal/app │                  │ internal/nodeapp │
+        └─────┬────────┘                  └──────┬───────────┘
+   ┌──────────┴──────────┐            ┌──────────┴──────────┐
+┌──▼────────────┐ ┌──────▼────────┐ ┌─▼─────────────┐ ┌─────▼─────────┐
+│ frontends/cli │ │ slack/gateway │ │ frontends/cli │ │ frontends/mcp │
+└──┬────────────┘ └───────────────┘ └─┬─────────────┘ └─────┬─────────┘
+   └──────► Tool ◄────────────────────┴─────────────────────┘
              (internal/tools/*)
 ```
 
-- `internal/app` is the only place tools are wired into the registry.
-- CLI and MCP frontends know nothing about each other and reach tools only
-  through `tools.Tool`.
-- The Slack gateway does not use the Tool registry today; it runs side-by-side
-  as a third frontend selected by mode (`ModeGateway`). The `slack.*` tools,
-  by contrast, are ordinary registry tools shared by the CLI and MCP frontends.
+- There is one composition root per binary: `internal/app` for the gateway,
+  `internal/nodeapp` for the node. Nothing else wires tools into a registry.
+- Frontends know nothing about each other and reach tools only through
+  `tools.Tool`.
+- The Slack gateway does not use the Tool registry; it runs beside the CLI as a
+  second frontend selected by mode (`ModeGateway`). The `slack.*` tools, by
+  contrast, are ordinary registry tools — and they are on the gateway only.
 - **The agent machinery is injected, not imported.** `internal/app` names no
-  agent backend; each entry point hands it an `app.Agents` (a pair of
-  constructors). `cmd/murtaugh` passes `internal/agentruntime/local`, so the CLI
-  and today's `murtaugh slack gateway` behave exactly as before.
-  `cmd/murtaugh-gateway` passes either the zero value or a **broker** over
-  attached runtime nodes, and therefore links nothing that can run a model
-  either way — CI proves it (see "The gateway reachability rule"). A third
-  binary, `cmd/murtaugh-runtime`, is the runtime-node entry point: it dials a
-  gateway, holds the connection open and serves one agent over it.
+  agent backend; the entry point hands it an `app.Agents` (a pair of
+  constructors), and `cmd/murtaugh-gateway` passes either the zero value or a
+  **broker** over attached runtime nodes. Either way it links nothing that can
+  run a model, which CI proves (see "The gateway reachability rule").
+- **`internal/nodeapp` is separate from `internal/app` for the same reason.**
+  `internal/app` reaches Slack, which a node must not, so the node's registry
+  is composed on its own rather than filtered out of the gateway's.
 
 ## Repository layout
 
 ```
-cmd/murtaugh/         Entry point: flag parsing, mode selection, signal handling.
-                      The one binary that ships today; keeps its local agent.
-cmd/murtaugh-gateway/ The Slack gateway alone, linking no agent machinery.
-                      `-node-listen ADDR` opens the node endpoint; empty (the
-                      default) accepts none and the process binds nothing.
-                      `-node-advertise` names the address(es) nodes are
-                      redirected to when this gateway leads.
+cmd/murtaugh-gateway/ The Slack gateway alone, linking no agent machinery. With
+                      no command it is the daemon. `-node-listen ADDR` opens the
+                      node endpoint; empty (the default) accepts none and the
+                      process binds nothing. `-node-advertise` names the
+                      address(es) nodes are redirected to when this one leads.
 cmd/murtaugh-runtime/ The runtime-node entry point. May reach the agent
-                      packages. `-gateway URL` is required: it dials in, and
+                      packages. A seed address is required: it dials in, and
                       addresses learned from a redirect augment it.
-internal/app/         Composition root + Registry wiring. Names no agent
-                      backend: `app.Agents` is injected by the entry point.
+internal/app/         The gateway's composition root + Registry wiring. Names no
+                      agent backend: `app.Agents` is injected by the entry point.
+internal/nodeapp/     The node's composition root. Separate because internal/app
+                      reaches Slack and a node must not.
+internal/cmdline/     The global argument handling both binaries share: --config,
+                      --json, and what counts as a help or a daemon invocation.
+internal/launchagent/ The shared macOS LaunchAgent layer both binaries install
+                      themselves through, so a gateway and a node are written by
+                      one implementation.
 internal/frontends/   CLI and MCP adapters over the Tool registry.
   cli/                Human frontend: kebab → snake flag mapping, render dispatch.
   mcp/                MCP stdio adapter wrapping the same Registry.
@@ -202,15 +207,19 @@ closure, so it is not a `go/analysis` pass — those run per package. It is a
 `internal/archtest/reachability`, whose decay test fails if the two copies of
 the forbidden list drift apart.
 
-`cmd/murtaugh` is the positive control and always violates the pattern: the CLI
-keeps its local agent on purpose, so `murtaugh jobs run x` works with no gateway
-and no node. A check that cannot demonstrate a failure is not a check.
-
 **The runtime reachability rule** is the mirror image: `cmd/murtaugh-runtime`
 must not reach `internal/slack/...`, `internal/tools/slack/...` or
 `github.com/slack-go/slack`, so a node cannot talk to Slack even by accident. It
-matches whole subtrees rather than exact names, runs in CI as "Runtime
-reachability rule", and uses `cmd/murtaugh` as its positive control too.
+matches whole subtrees rather than exact names and runs in CI as "Runtime
+reachability rule".
+
+**Each binary is the other's positive control.** A check that cannot
+demonstrate a failure is not a check, so the gateway rule is proved live
+against `cmd/murtaugh-runtime` (which reaches `agentbuild` and `llm` on
+purpose — `murtaugh-runtime jobs run x` runs an agent with no gateway and no
+broker) and the runtime rule against `cmd/murtaugh-gateway` (which links
+Slack). Neither control can rot away without someone noticing, because both
+are shipping binaries.
 
 Three consequences are load-bearing and easy to undo by accident:
 
@@ -356,15 +365,19 @@ defaults, mutual exclusions, the boolean-needs-a-value CLI quirk, examples).
 
 ## Lifecycle (entrypoint → shutdown)
 
-`cmd/murtaugh/main.go`:
+`cmd/murtaugh-gateway/main.go` (the node's `cmd/murtaugh-runtime/main.go` is
+the same shape over `internal/nodeapp`):
 
-1. Extracts the global `--config` flag from `os.Args` (supports
-   `--config PATH` and `--config=PATH`).
+1. Extracts the global `--config` and `--json` flags from `os.Args`
+   (`internal/cmdline`, shared so the two binaries cannot drift on what a flag
+   means). Help is answered here, before the configuration is touched, so it
+   works on a machine that has never been configured.
 2. Resolves the config path (`config.DefaultPath()` →
    `~/.config/murtaugh/config.yaml`, overridable with `--config`).
-3. Selects the mode: `slack gateway` → `ModeGateway`, `mcp` → `ModeMCP`, or
-   any other tokens (including `slack <tool>`) → `ModeCLI`. No subcommand, or
-   a bare `slack`, prints usage rather than launching anything.
+3. Selects the mode from the first token: a bare word is a command
+   (`ModeCLI`); a leading flag, or nothing at all, is the daemon
+   (`ModeGateway`). There is no mode to choose between binaries — the binary
+   is the choice.
 4. `config.Bootstrap(path)` seeds the config directory on first run
    (`config.yaml` + `.env` + templates; the former YAML siblings are no longer
    seeded). Then `store.Bootstrap(ctx, path, setup)` resolves the running
@@ -380,7 +393,7 @@ defaults, mutual exclusions, the boolean-needs-a-value CLI quirk, examples).
 7. `app.New(...)` builds the Registry and the chosen frontend; `Run(ctx)`
    blocks until the context is cancelled or the frontend returns. The last
    argument is the `app.Agents` this binary is willing to link — for
-   `cmd/murtaugh`, `internal/agentruntime/local`.
+   `cmd/murtaugh-gateway`, the zero value or a broker over attached nodes.
 
 ## Configuration (`internal/config` + `internal/config/store`)
 
@@ -478,13 +491,14 @@ SOURCE, before it opens the target — a refusal after `Restore` leaves a fully
 populated store that `config.yaml` does not point at, and running the command
 again makes a second one.
 
-`murtaugh cfg node set|show` is the exception to "the binary decides the role":
+`cfg node set|show` needed a special case while one binary served both roles:
 its subject is a NODE's configuration root, which by design has no `oauth:`
-block, so `cmd/murtaugh/main.go` bootstraps those two commands at `RoleNode`
-(`roleFor`). Without it the only documented way to set `node.gateway` died on
-`oauth.app_token is required` — a credential a node must never hold and an
-operator therefore cannot supply. `cfg node split` is deliberately not one of
-them: it runs from the gateway's root and writes the node's.
+block, so the combined binary had to map those two subcommands to `RoleNode` or
+the only documented way to set `node.gateway` died on `oauth.app_token is
+required` — a credential a node must never hold and an operator therefore
+cannot supply. With one binary per role the mapping is gone: `cfg node set` is
+on `murtaugh-runtime`, which is a node, and `cfg node split` is on
+`murtaugh-gateway`, which runs from the gateway's root and writes the node's.
 
 **Configuration is hot-reloaded, under admin approval.** The runtime no longer
 loads config once and keeps it: leader election made that untenable, since a
@@ -868,10 +882,10 @@ bool would decode to `false` and silently disable interrupting a live turn.
 
 The node dials; the gateway never dials a node. `nodehost` is the daemon's
 **first inbound listener** — nothing in Murtaugh had ever bound a port — so it
-is reached only from `cmd/murtaugh-gateway -node-listen`, never from
-`murtaugh slack gateway`, which remains the shipping default and binds nothing.
-There is deliberately no configuration key: a port must not be acquirable by
-editing a file the default daemon also reads.
+is reached only from `cmd/murtaugh-gateway -node-listen`; without that flag
+the gateway accepts no nodes and binds nothing. There is deliberately no
+configuration key: a port must not be acquirable by editing a file the daemon
+already reads.
 
 `nodesocket` is `nodelink.Conn` over gorilla/websocket, and its two rules are
 measured rather than defensive. A deaf peer — one that upgrades and never reads
@@ -1346,17 +1360,24 @@ including its backend.** A laptop node on SQLite attaching to a
 Firestore-backed gateway is ordinary and supported — it is what lets a team run
 nodes without every developer holding cloud credentials.
 
-**Roles decide which rules apply** (`config.Role`, zero value `RoleCombined`):
+**Roles decide which rules apply** (`config.Role`). There are two, and there is
+no zero value:
 
 | Role | Slack tokens | agent name → body |
 |---|---|---|
-| `RoleCombined` (`murtaugh slack gateway`, the shipping default) | required | resolved locally |
 | `RoleGateway` (`murtaugh-gateway`) | required | **deferred to connect time** |
 | `RoleNode` (`murtaugh-runtime`) | not required | resolved locally |
 
 The role is set by the binary that loaded the configuration and is never read
 from the file or the store — a node that could declare itself a gateway by
 editing its own config would be asserting a role the gateway then trusts.
+
+**An unset role fails validation.** `RoleCombined` used to be `Role("")`, so
+every configuration nobody had classified read as "combined" and quietly got
+the strictest rules. With no combined binary there is nothing for that to mean,
+so the zero value is now invalid: a configuration is loaded either as a gateway
+or as a node, never as neither, and a wiring mistake says so instead of picking
+a default.
 
 **The behavioural change, stated where an operator will meet it.** The default
 agent name is validated at WRITE time today: `cfg chat set --default-agent typo`

@@ -220,13 +220,6 @@ func isAppHomeUpdateClick(interaction slack.InteractionCallback) bool {
 	return false
 }
 
-// isAppHomeUpdateSubmit reports whether the interaction is the submission of the
-// update-confirmation modal.
-func isAppHomeUpdateSubmit(interaction slack.InteractionCallback) bool {
-	return interaction.Type == slack.InteractionTypeViewSubmission &&
-		interaction.View.CallbackID == appHomeUpdateCallbackID
-}
-
 // appHomeUpdateTarget returns the release tag carried as the button's value.
 func appHomeUpdateTarget(interaction slack.InteractionCallback) string {
 	for _, action := range interaction.ActionCallback.BlockActions {
@@ -256,11 +249,11 @@ func (a *Gateway) handleAppHomeUpdateClick(ctx context.Context, interaction slac
 	}
 }
 
-// buildUpdateModal renders the confirm-then-update modal. The target tag rides
-// in PrivateMetadata so the submit handler installs exactly what was confirmed.
+// buildUpdateModal announces the release and points at its notes. Murtaugh does
+// not replace its own binary, so there is nothing to confirm and no Submit.
 func (a *Gateway) buildUpdateModal(target string) slack.ModalViewRequest {
 	body := fmt.Sprintf(
-		"Update to *%s* and restart Murtaugh?\n\nThe new binary is downloaded, verified, and swapped in, then the daemon restarts to run it.",
+		"*%s* is available.\n\nMurtaugh does not replace its own binary: download the release and put it where this one is, then restart it.",
 		displayTarget(target),
 	)
 	if a.updates != nil {
@@ -270,9 +263,8 @@ func (a *Gateway) buildUpdateModal(target string) slack.ModalViewRequest {
 		Type:            slack.VTModal,
 		CallbackID:      appHomeUpdateCallbackID,
 		PrivateMetadata: target,
-		Title:           slack.NewTextBlockObject(slack.PlainTextType, "Update Murtaugh", false, false),
-		Submit:          slack.NewTextBlockObject(slack.PlainTextType, "Update & restart", false, false),
-		Close:           slack.NewTextBlockObject(slack.PlainTextType, "Cancel", false, false),
+		Title:           slack.NewTextBlockObject(slack.PlainTextType, "Update available", false, false),
+		Close:           slack.NewTextBlockObject(slack.PlainTextType, "Close", false, false),
 		Blocks: slack.Blocks{BlockSet: []slack.Block{
 			slack.NewSectionBlock(
 				slack.NewTextBlockObject(slack.MarkdownType, body, false, false),
@@ -280,48 +272,6 @@ func (a *Gateway) buildUpdateModal(target string) slack.ModalViewRequest {
 			),
 		}},
 	}
-}
-
-// handleAppHomeUpdateSubmit installs the confirmed release and restarts. Slack
-// has already been ack'd (closing the modal) by handleInteractive, so this runs
-// on its own goroutine with a generous deadline covering the download. Progress
-// and terminal status are reported to the admin's DM, since the Home tab cannot
-// be updated mid-restart.
-func (a *Gateway) handleAppHomeUpdateSubmit(interaction slack.InteractionCallback) {
-	user := interaction.User.ID
-	if !a.access().IsAdminUser(user) {
-		a.logger.Info("denied app home update submit from non-admin", "user", user)
-		return
-	}
-	if a.installUpdate == nil {
-		a.logger.Warn("app home update submit but no installer wired")
-		return
-	}
-	target := strings.TrimSpace(interaction.View.PrivateMetadata)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-
-	installed, err := a.installUpdate(ctx, target)
-	if err != nil {
-		a.logger.Error("app home update install failed", "target", target, "error", err)
-		a.notifyAdminAlert(ctx, alertcard.Spec{
-			Level:     alertcard.LevelError,
-			Title:     "Update failed",
-			Subtitle:  fmt.Sprintf("Could not update to %s.", displayTarget(target)),
-			Detail:    err.Error(),
-			NextSteps: "Check the release tag and the gateway logs, then try again from the App Home.",
-		})
-		return
-	}
-	if a.restart == nil {
-		a.logger.Info("app home update installed but no restart coordinator wired", "version", installed)
-		a.notifyAdminAlert(ctx, updateInstalledAlert(installed))
-		return
-	}
-	a.logger.Info("app home update installed; restarting", "version", installed, "user", user)
-	a.notifyAdminAlert(ctx, updateRestartingAlert(installed))
-	a.restart(restartSourceInteractive, user, "", fmt.Sprintf("app home update to %s", installed))
 }
 
 // isAppHomeRestartClick reports whether the interaction is a click on the Home

@@ -11,7 +11,7 @@ import (
 
 	"github.com/miere/murtaugh/internal/agentwire"
 	"github.com/miere/murtaugh/internal/config"
-	setupenv "github.com/miere/murtaugh/internal/tools/setup/env"
+	"github.com/miere/murtaugh/internal/envfile"
 )
 
 type configurer struct {
@@ -81,12 +81,11 @@ func rootProfile(body json.RawMessage, fallback string) (config.AgentProfile, er
 	return profile.RootedAt(fallback), nil
 }
 
-func (c *configurer) writeEnvVar(ctx context.Context, key, value string) error {
+func (c *configurer) writeEnvVar(_ context.Context, key, value string) error {
 	if strings.TrimSpace(c.baseDir) == "" {
 		return errors.New("the config directory is unknown, so there is no .env to write")
 	}
 	envPath := filepath.Join(c.baseDir, config.EnvFileName)
-	tool := setupenv.New(func() string { return envPath })
-	_, err := tool.Invoke(ctx, map[string]any{"set": []any{key + "=" + value}})
+	_, err := envfile.Merge(envPath, map[string]string{key: value})
 	return err
 }

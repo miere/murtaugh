@@ -20,6 +20,15 @@ func testConfig(extra string) []byte {
 	return []byte(baseSlackYAML + extra)
 }
 
+// The single-file fixtures below are a node's. A node is the half that holds the
+// profile bodies, so every name-to-body check still runs against them; a gateway
+// defers those to connect time and would accept a fixture this is trying to reject.
+func parseNode(data []byte) (Config, error) {
+	cfg, err := Parse(data)
+	cfg.Role = RoleNode
+	return cfg, err
+}
+
 // loadWithRules writes a minimal slack.yaml plus a sibling rules file (e.g.
 // workflow-rules.yaml) and returns the fully loaded + validated config, as the
 // daemon would see it.
@@ -54,7 +63,7 @@ func loadWithAgentAndRules(t *testing.T, name, content string) (Config, error) {
 }
 
 func TestParseValidConfig(t *testing.T) {
-	cfg, err := Parse(testConfig(`access:
+	cfg, err := parseNode(testConfig(`access:
   admin_user: '@admin'
 chat:
   defaults:
@@ -139,7 +148,7 @@ agents:
 }
 
 func TestParseACPRequiresAgentsWhenEnabled(t *testing.T) {
-	cfg, err := Parse(testConfig(""))
+	cfg, err := parseNode(testConfig(""))
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
@@ -151,7 +160,7 @@ func TestParseACPRequiresAgentsWhenEnabled(t *testing.T) {
 }
 
 func TestParseACPValidatesDurations(t *testing.T) {
-	cfg, err := Parse(testConfig(""))
+	cfg, err := parseNode(testConfig(""))
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
@@ -174,7 +183,7 @@ func TestLongRunningToolTimeout(t *testing.T) {
 }
 
 func TestValidateRejectsBadLongRunningToolTimeout(t *testing.T) {
-	cfg, err := Parse(testConfig(""))
+	cfg, err := parseNode(testConfig(""))
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
@@ -197,7 +206,7 @@ func TestBackgroundIdleTimeout(t *testing.T) {
 }
 
 func TestValidateRejectsBadBackgroundIdleTimeout(t *testing.T) {
-	cfg, err := Parse(testConfig(""))
+	cfg, err := parseNode(testConfig(""))
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
@@ -213,6 +222,7 @@ func TestParseRequiresSlackTokens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
+	cfg.Role = RoleGateway
 	err = cfg.Validate()
 	if err == nil {
 		t.Fatal("expected validation error")
@@ -340,7 +350,7 @@ func TestParseUnfurlRejectsTemplateAndRun(t *testing.T) {
 }
 
 func TestParseJobsConfig(t *testing.T) {
-	cfg, err := Parse(testConfig(""))
+	cfg, err := parseNode(testConfig(""))
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
@@ -366,7 +376,7 @@ func TestParseJobsConfig(t *testing.T) {
 }
 
 func TestJobValidationRequiresCommand(t *testing.T) {
-	cfg, err := Parse(testConfig(""))
+	cfg, err := parseNode(testConfig(""))
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
@@ -380,7 +390,7 @@ func TestJobValidationRequiresCommand(t *testing.T) {
 }
 
 func TestJobValidationRejectsBadTimeout(t *testing.T) {
-	cfg, err := Parse(testConfig(""))
+	cfg, err := parseNode(testConfig(""))
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
@@ -394,7 +404,7 @@ func TestJobValidationRejectsBadTimeout(t *testing.T) {
 }
 
 func TestJobValidationAcceptsOptionalFields(t *testing.T) {
-	cfg, err := Parse(testConfig(""))
+	cfg, err := parseNode(testConfig(""))
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
@@ -427,7 +437,7 @@ func TestJobScheduleKind(t *testing.T) {
 }
 
 func TestJobValidationAcceptsScheduleAndEverySeparately(t *testing.T) {
-	cfg, err := Parse(testConfig(""))
+	cfg, err := parseNode(testConfig(""))
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
@@ -441,7 +451,7 @@ func TestJobValidationAcceptsScheduleAndEverySeparately(t *testing.T) {
 }
 
 func TestJobValidationRejectsScheduleAndEveryTogether(t *testing.T) {
-	cfg, err := Parse(testConfig(""))
+	cfg, err := parseNode(testConfig(""))
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
@@ -455,7 +465,7 @@ func TestJobValidationRejectsScheduleAndEveryTogether(t *testing.T) {
 }
 
 func TestJobValidationRejectsBadEvery(t *testing.T) {
-	cfg, err := Parse(testConfig(""))
+	cfg, err := parseNode(testConfig(""))
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
@@ -476,7 +486,7 @@ func TestJobValidationRejectsBadEvery(t *testing.T) {
 }
 
 func TestJobValidationAcceptsAgentPrompt(t *testing.T) {
-	cfg, err := Parse(testConfig(""))
+	cfg, err := parseNode(testConfig(""))
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
@@ -492,7 +502,7 @@ func TestJobValidationAcceptsAgentPrompt(t *testing.T) {
 // Rows written before task cards became the only view still carry
 // progress_display, and must keep loading whatever value they hold.
 func TestALeftoverProgressDisplayIsIgnored(t *testing.T) {
-	cfg, err := Parse(testConfig(""))
+	cfg, err := parseNode(testConfig(""))
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
@@ -512,7 +522,7 @@ func TestALeftoverProgressDisplayIsIgnored(t *testing.T) {
 // Agents stored while icons existed still carry one, and must keep loading
 // whatever it holds.
 func TestALeftoverAgentIconIsIgnored(t *testing.T) {
-	cfg, err := Parse(testConfig(""))
+	cfg, err := parseNode(testConfig(""))
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
@@ -527,7 +537,7 @@ func TestALeftoverAgentIconIsIgnored(t *testing.T) {
 }
 
 func TestJobValidationAcceptsReportToOnAnAgentJob(t *testing.T) {
-	cfg, err := Parse(testConfig(""))
+	cfg, err := parseNode(testConfig(""))
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
@@ -543,7 +553,7 @@ func TestJobValidationAcceptsReportToOnAnAgentJob(t *testing.T) {
 // A command job has no reply, so a report_to on one would never post anything
 // and the admin would wait for a report that cannot come.
 func TestJobValidationRejectsReportToOnACommandJob(t *testing.T) {
-	cfg, err := Parse(testConfig(""))
+	cfg, err := parseNode(testConfig(""))
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
@@ -557,7 +567,7 @@ func TestJobValidationRejectsReportToOnACommandJob(t *testing.T) {
 }
 
 func TestJobValidationRejectsCommandAndAgentTogether(t *testing.T) {
-	cfg, err := Parse(testConfig(""))
+	cfg, err := parseNode(testConfig(""))
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
@@ -572,7 +582,7 @@ func TestJobValidationRejectsCommandAndAgentTogether(t *testing.T) {
 }
 
 func TestJobValidationRejectsAgentWithoutPrompt(t *testing.T) {
-	cfg, err := Parse(testConfig(""))
+	cfg, err := parseNode(testConfig(""))
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
@@ -587,7 +597,7 @@ func TestJobValidationRejectsAgentWithoutPrompt(t *testing.T) {
 }
 
 func TestJobValidationRejectsUnknownAgent(t *testing.T) {
-	cfg, err := Parse(testConfig(""))
+	cfg, err := parseNode(testConfig(""))
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
@@ -750,7 +760,7 @@ func TestEmbeddedBootstrapValidates(t *testing.T) {
 }
 
 func TestParseAllowedUsers(t *testing.T) {
-	cfg, err := Parse(testConfig(`access:
+	cfg, err := parseNode(testConfig(`access:
   admin_user: U0ADMIN00
   allowed_users:
     - U0ALICE00
@@ -768,7 +778,7 @@ func TestParseAllowedUsers(t *testing.T) {
 }
 
 func TestValidateAllowedUsersRejectsBlankEntries(t *testing.T) {
-	cfg, err := Parse(testConfig(`access:
+	cfg, err := parseNode(testConfig(`access:
   allowed_users:
     - ""
     - "   "
@@ -788,7 +798,7 @@ func TestValidateAllowedUsersRejectsBlankEntries(t *testing.T) {
 func TestValidateAllowedUsersAcceptsHandlesAndIDs(t *testing.T) {
 	// Validation must accept both Slack user IDs and handles; resolution from
 	// handles to IDs happens at startup in the gateway layer.
-	cfg, err := Parse(testConfig(`access:
+	cfg, err := parseNode(testConfig(`access:
   allowed_users:
     - "@alice"
     - "bob"
@@ -803,7 +813,7 @@ func TestValidateAllowedUsersAcceptsHandlesAndIDs(t *testing.T) {
 }
 
 func TestIsAllowedUserMatchesAdminWhenConfiguredAsUserID(t *testing.T) {
-	cfg, err := Parse(testConfig(`access:
+	cfg, err := parseNode(testConfig(`access:
   admin_user: U0ADMIN00
 `))
 	if err != nil {
@@ -818,7 +828,7 @@ func TestIsAllowedUserMatchesAdminWhenConfiguredAsUserID(t *testing.T) {
 }
 
 func TestIsAllowedUserHandlesAdminPrefixedHandle(t *testing.T) {
-	cfg, err := Parse(testConfig(`access:
+	cfg, err := parseNode(testConfig(`access:
   admin_user: "@U0ADMIN00"
 `))
 	if err != nil {
@@ -830,7 +840,7 @@ func TestIsAllowedUserHandlesAdminPrefixedHandle(t *testing.T) {
 }
 
 func TestIsAllowedUserSkipsAdminConfiguredAsHandle(t *testing.T) {
-	cfg, err := Parse(testConfig(`access:
+	cfg, err := parseNode(testConfig(`access:
   admin_user: murtaugh-admin
 `))
 	if err != nil {
@@ -843,7 +853,7 @@ func TestIsAllowedUserSkipsAdminConfiguredAsHandle(t *testing.T) {
 }
 
 func TestIsAllowedUserMatchesAllowedList(t *testing.T) {
-	cfg, err := Parse(testConfig(`access:
+	cfg, err := parseNode(testConfig(`access:
   admin_user: U0ADMIN00
   allowed_users:
     - U0ALICE00
@@ -863,7 +873,7 @@ func TestIsAllowedUserMatchesAllowedList(t *testing.T) {
 }
 
 func TestIsAllowedUserRejectsBlankInput(t *testing.T) {
-	cfg, err := Parse(testConfig(`access:
+	cfg, err := parseNode(testConfig(`access:
   admin_user: U0ADMIN00
 `))
 	if err != nil {
@@ -875,7 +885,7 @@ func TestIsAllowedUserRejectsBlankInput(t *testing.T) {
 }
 
 func TestIsAdminUserMatchesAdminID(t *testing.T) {
-	cfg, err := Parse(testConfig(`access:
+	cfg, err := parseNode(testConfig(`access:
   admin_user: U0ADMIN00
   allowed_users:
     - U0ALICE00
@@ -895,7 +905,7 @@ func TestIsAdminUserMatchesAdminID(t *testing.T) {
 }
 
 func TestIsAdminUserSkipsHandleConfiguredAdmin(t *testing.T) {
-	cfg, err := Parse(testConfig(`access:
+	cfg, err := parseNode(testConfig(`access:
   admin_user: murtaugh-admin
 `))
 	if err != nil {
@@ -956,6 +966,7 @@ func channelAgentsValidationConfig(channelAgents map[string]string) Config {
 		channels = append(channels, ChannelConfig{Match: key, Agent: agent})
 	}
 	return Config{
+		Role:  RoleNode,
 		OAuth: OAuthConfig{AppToken: "xapp-test", BotToken: "xoxb-test"},
 		Agents: map[string]AgentProfile{
 			"coding": {ACP: &ACPProfile{Command: "/bin/agent"}},
@@ -994,6 +1005,7 @@ func TestValidateRejectsUnknownAgentInChannelGlob(t *testing.T) {
 func TestValidateExportSkillsToFS(t *testing.T) {
 	base := func(list []string) Config {
 		return Config{
+			Role:   RoleNode,
 			OAuth:  OAuthConfig{AppToken: "xapp-test", BotToken: "xoxb-test"},
 			Agents: map[string]AgentProfile{"coding": {ExportSkillsToFS: list, ACP: &ACPProfile{Command: "/bin/agent"}}},
 			Chat:   ChatConfig{Enabled: true, Defaults: ChatDefaults{Agent: "coding"}},
@@ -1021,6 +1033,7 @@ func TestValidateExportSkillsToFS(t *testing.T) {
 // exercise its glob-key validation in isolation.
 func noMentionValidationConfig(perChannel map[string][]string) Config {
 	return Config{
+		Role:  RoleNode,
 		OAuth: OAuthConfig{AppToken: "xapp-test", BotToken: "xoxb-test"},
 		Agents: map[string]AgentProfile{
 			"coding": {ACP: &ACPProfile{Command: "/bin/agent"}},
@@ -1049,7 +1062,7 @@ func TestValidateRejectsMalformedNoMentionChannelGlob(t *testing.T) {
 }
 
 func TestValidateRejectsEnvKeyWithEquals(t *testing.T) {
-	cfg, err := Parse(testConfig(""))
+	cfg, err := parseNode(testConfig(""))
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}

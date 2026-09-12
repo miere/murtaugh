@@ -75,6 +75,7 @@ func TestElectionValidate(t *testing.T) {
 // persisted.
 func TestConfigValidateRejectsBadElection(t *testing.T) {
 	base := Config{
+		Role:     RoleGateway,
 		OAuth:    OAuthConfig{AppToken: "xapp-x", BotToken: "xoxb-x"},
 		Election: ElectionConfig{LeaseSeconds: 5, RenewSeconds: 30},
 	}

@@ -8,7 +8,9 @@
 package migrate
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -99,6 +101,12 @@ func Pending(dir string) []Migration {
 func Run(dir string) ([]int, error) {
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
+		return nil, nil
+	}
+	// A directory that does not exist holds no legacy configuration to convert.
+	// Stamping one anyway is how a first start against a fresh path used to die
+	// on a missing .schema_version instead of on the missing credential.
+	if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
 	pending := Pending(dir)

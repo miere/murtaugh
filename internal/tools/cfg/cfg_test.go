@@ -12,7 +12,7 @@ import (
 	"github.com/miere/murtaugh/internal/tools"
 )
 
-func testProvider(t *testing.T) Provider {
+func testProvider(t *testing.T, role config.Role) Provider {
 	t.Helper()
 	dbc := config.DatabaseConfig{
 		Backend: config.BackendSQLite,
@@ -23,7 +23,7 @@ func testProvider(t *testing.T) Provider {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
-	return NewProvider(s)
+	return NewProvider(s, role)
 }
 
 func find(t *testing.T, list []tools.Tool, name string) tools.Tool {
@@ -43,9 +43,9 @@ func invoke(t *testing.T, tl tools.Tool, args map[string]any) (any, error) {
 }
 
 func TestCfgAgentLifecycle(t *testing.T) {
-	p := testProvider(t)
+	p := testProvider(t, config.RoleNode)
 	agents := AgentTools(p)
-	singles := SingletonTools(p)
+	singles := NodeSingletonTools(p)
 	admin := AdminTools(p)
 
 	// create
@@ -111,7 +111,7 @@ func TestCfgAgentLifecycle(t *testing.T) {
 }
 
 func TestCfgAgentUpdateMergesFields(t *testing.T) {
-	p := testProvider(t)
+	p := testProvider(t, config.RoleNode)
 	agents := AgentTools(p)
 	if _, err := invoke(t, find(t, agents, "cfg.agent.create"), map[string]any{
 		"name": "n", "type": "native", "provider": "gemini", "model": "gemini-2.5-pro", "api_key_env": "K",
@@ -124,7 +124,7 @@ func TestCfgAgentUpdateMergesFields(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	s, _ := p()
+	s, _ := p.Store()
 	body, _, _ := s.GetItem(context.Background(), config.SectionAgent, "n")
 	str := string(body)
 	if !strings.Contains(str, "gemini-3-pro") || !strings.Contains(str, "gemini") || !strings.Contains(str, "\"api_key_env\":\"K\"") {
@@ -134,13 +134,13 @@ func TestCfgAgentUpdateMergesFields(t *testing.T) {
 
 // Nothing renders an agent icon, so creating an agent must not invent one.
 func TestCfgAgentCreateStoresNoIcon(t *testing.T) {
-	p := testProvider(t)
+	p := testProvider(t, config.RoleNode)
 	if _, err := invoke(t, find(t, AgentTools(p), "cfg.agent.create"), map[string]any{
 		"name": "auto", "type": "native", "provider": "gemini", "model": "gemini-2.5-pro", "api_key_env": "K",
 	}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	s, err := p()
+	s, err := p.Store()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +154,7 @@ func TestCfgAgentCreateStoresNoIcon(t *testing.T) {
 }
 
 func TestCfgRejectsInvalidCreate(t *testing.T) {
-	p := testProvider(t)
+	p := testProvider(t, config.RoleNode)
 	agents := AgentTools(p)
 	// native without provider/model → Validate fails → create rolled back.
 	if _, err := invoke(t, find(t, agents, "cfg.agent.create"), map[string]any{
@@ -172,7 +172,7 @@ func TestCfgRejectsInvalidCreate(t *testing.T) {
 // readJob decodes one stored job entry.
 func readJob(t *testing.T, p Provider, name string) config.JobProfile {
 	t.Helper()
-	s, err := p()
+	s, err := p.Store()
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}
@@ -188,7 +188,7 @@ func readJob(t *testing.T, p Provider, name string) config.JobProfile {
 }
 
 func TestCfgJobSetStoresReportTo(t *testing.T) {
-	p := testProvider(t)
+	p := testProvider(t, config.RoleGateway)
 	if _, err := invoke(t, find(t, AgentTools(p), "cfg.agent.create"), map[string]any{
 		"name": "default", "type": "native", "provider": "gemini", "model": "gemini-2.5-pro", "api_key_env": "K",
 	}); err != nil {
@@ -216,7 +216,7 @@ func TestCfgJobSetStoresReportTo(t *testing.T) {
 // schedule, so every write through cfg.job.set — create or update, and however
 // small the edit — must re-arm the gate rather than inherit the old approval.
 func TestCfgJobSetAlwaysHoldsForConfirmation(t *testing.T) {
-	p := testProvider(t)
+	p := testProvider(t, config.RoleGateway)
 	jobs := JobTools(p)
 	set := find(t, jobs, "cfg.job.set")
 
@@ -230,7 +230,7 @@ func TestCfgJobSetAlwaysHoldsForConfirmation(t *testing.T) {
 	}
 
 	// Simulate the admin approving the first run, as the gateway does.
-	s, _ := p()
+	s, _ := p.Store()
 	approved := readJob(t, p, "nightly")
 	yes := true
 	approved.Confirmed = &yes

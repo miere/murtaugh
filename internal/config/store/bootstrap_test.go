@@ -53,7 +53,7 @@ func TestBootstrapMigratesLegacyYAML(t *testing.T) {
 	gatewayPath := writeLegacyConfigDir(t)
 	dir := filepath.Dir(gatewayPath)
 
-	cfg, s, err := Bootstrap(context.Background(), gatewayPath, false)
+	cfg, s, err := BootstrapRole(context.Background(), gatewayPath, config.RoleGateway, false)
 	if err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestBootstrapIsIdempotent(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	gatewayPath := writeLegacyConfigDir(t)
 
-	cfg1, s1, err := Bootstrap(context.Background(), gatewayPath, false)
+	cfg1, s1, err := BootstrapRole(context.Background(), gatewayPath, config.RoleGateway, false)
 	if err != nil {
 		t.Fatalf("first Bootstrap: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestBootstrapIsIdempotent(t *testing.T) {
 
 	// Second run: config.yaml now has a database block, so migration is skipped
 	// and the config loads straight from the store.
-	cfg2, s2, err := Bootstrap(context.Background(), gatewayPath, false)
+	cfg2, s2, err := BootstrapRole(context.Background(), gatewayPath, config.RoleGateway, false)
 	if err != nil {
 		t.Fatalf("second Bootstrap: %v", err)
 	}
@@ -162,7 +162,7 @@ database:
 	}
 	// setup=true opens the store without loading, which is exactly what a
 	// seeding step wants.
-	_, s, err := Bootstrap(context.Background(), path, true)
+	_, s, err := BootstrapRole(context.Background(), path, config.RoleGateway, true)
 	if err != nil {
 		t.Fatalf("seed Bootstrap: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestBootstrapLeavesStoredAgentsAsTheyAre(t *testing.T) {
 	path := seedStore(t, map[string]config.AgentProfile{"code": nativeAgent()})
 	before := rawAgentRow(t, path, "code")
 
-	_, s, err := Bootstrap(context.Background(), path, false)
+	_, s, err := BootstrapRole(context.Background(), path, config.RoleGateway, false)
 	if err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestBootstrapLeavesStoredAgentsAsTheyAre(t *testing.T) {
 
 func rawAgentRow(t *testing.T, path, name string) []byte {
 	t.Helper()
-	_, s, err := Bootstrap(context.Background(), path, true)
+	_, s, err := BootstrapRole(context.Background(), path, config.RoleGateway, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +224,7 @@ database:
 		t.Fatal(err)
 	}
 	// setup=true opens the store without loading/validating (no agents yet).
-	cfg, s, err := Bootstrap(context.Background(), gatewayPath, true)
+	cfg, s, err := BootstrapRole(context.Background(), gatewayPath, config.RoleGateway, true)
 	if err != nil {
 		t.Fatalf("Bootstrap(setup): %v", err)
 	}

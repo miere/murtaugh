@@ -25,23 +25,20 @@ var legacySiblings = []string{
 	"troubleshoot.yaml",
 }
 
-// Bootstrap resolves the running configuration from the on-disk bootstrap file
-// at configPath. It is the single startup entrypoint that replaces the old
-// config.Load: it parses the credentials + database block, migrates a legacy
-// YAML tree into the store on first upgrade, opens the store, and (unless setup
-// is true) loads and validates the whole config from it.
+// BootstrapRole resolves the running configuration from the on-disk bootstrap
+// file at configPath, as the given role. It parses the credentials + database
+// block, migrates a legacy YAML tree into the store on first upgrade, opens the
+// store, and (unless setup is true) loads and validates the whole config from
+// it. The caller owns the returned store and must Close it.
 //
-// It returns the assembled Config and the open Store. The caller owns the store
-// and must Close it. When setup is true the store is opened but the config is
-// NOT loaded/validated (setup tools run before a valid config exists); the
-// returned Config carries only the bootstrap fields.
-func Bootstrap(ctx context.Context, configPath string, setup bool) (config.Config, config.Store, error) {
-	return BootstrapRole(ctx, configPath, config.RoleCombined, setup)
-}
-
-// Skips the legacy YAML migration for a node: a node's root is always new, and migrating
-// would make it adopt whatever agents.yaml sits beside it.
+// The role is required and comes from the binary: there is no default, because
+// a configuration nobody has classified would silently get one half's rules.
+// The legacy YAML migration is skipped for a node — a node's root is always
+// new, and migrating would make it adopt whatever agents.yaml sits beside it.
 func BootstrapRole(ctx context.Context, configPath string, role config.Role, setup bool) (config.Config, config.Store, error) {
+	if !role.Valid() {
+		return config.Config{}, nil, fmt.Errorf("cannot open %s: no role was given, so there is no way to know which half of the configuration to require", configPath)
+	}
 	boot, err := config.LoadBootstrap(configPath)
 	if err != nil {
 		return config.Config{}, nil, err

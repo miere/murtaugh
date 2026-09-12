@@ -161,7 +161,10 @@ func TestBuiltConfigValidates(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Build: %v", err)
 			}
+			// Onboarding builds a NODE's configuration: the profile bodies it writes
+			// live on the node that will run them.
 			cfg := config.Config{
+				Role:  config.RoleNode,
 				OAuth: config.OAuthConfig{AppToken: "xapp-x", BotToken: "xoxb-x"},
 				Agents: map[string]config.AgentProfile{
 					out.Name:    out.Default,

@@ -65,6 +65,7 @@ oauth:
 
 func baseValidConfig() Config {
 	return Config{
+		Role:  RoleNode,
 		OAuth: OAuthConfig{AppToken: "xapp-x", BotToken: "xoxb-x"},
 	}
 }

@@ -7,7 +7,6 @@ import (
 	"github.com/miere/murtaugh/internal/agentruntime"
 	"github.com/miere/murtaugh/internal/config"
 	gateway "github.com/miere/murtaugh/internal/slack/gateway"
-	setupupdate "github.com/miere/murtaugh/internal/tools/setup/update"
 	"github.com/miere/murtaugh/internal/troubleshoot"
 	"github.com/miere/murtaugh/internal/updates"
 )
@@ -84,11 +83,11 @@ func (a *Application) buildGateway(cfg config.Config) *gateway.Gateway {
 		}
 		return res.Path, res.Manifest.Errors, nil
 	})
-	// App Home control panel: everyone who opens the Home tab sees the
-	// running version; the admin additionally gets a one-click "Update"
-	// button when a newer release exists. The check reuses the same release
-	// source as the setup.update tool, and the install path IS that tool,
-	// followed by the existing restart coordinator.
+	// App Home control panel: everyone who opens the Home tab sees the running
+	// version; the admin additionally gets a button pointing at the notes when a
+	// newer release exists. The check reuses the same release source as the
+	// setup.update tool. Nothing here installs anything — where the binary lives
+	// is the operator's decision.
 	updDeps := updateDeps(a.version)
 	gw = gw.WithVersion(a.version).WithUpdateChecker(
 		updates.New(updates.Deps{
@@ -97,18 +96,6 @@ func (a *Application) buildGateway(cfg config.Config) *gateway.Gateway {
 			Repo:    updDeps.Repo,
 			HTTPGet: updates.HTTPGet(updDeps.HTTPGet),
 		}),
-		func(ctx context.Context, target string) (string, error) {
-			args := map[string]any{}
-			if t := strings.TrimSpace(target); t != "" {
-				args["version"] = t
-			}
-			out, err := setupupdate.New(updDeps).Invoke(ctx, args)
-			if err != nil {
-				return "", err
-			}
-			res, _ := out.(setupupdate.Result)
-			return res.TargetVersion, nil
-		},
 	)
 	return gw
 }

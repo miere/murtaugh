@@ -77,7 +77,7 @@ func (t *agentCreateTool) Invoke(ctx context.Context, args map[string]any) (any,
 	if _, ok := stringArg(args, "type"); !ok {
 		return nil, fmt.Errorf("--type is required (native | acp | claude_code)")
 	}
-	s, err := t.p()
+	s, err := t.p.Store()
 	if err != nil {
 		return nil, err
 	}
@@ -90,7 +90,7 @@ func (t *agentCreateTool) Invoke(ctx context.Context, args map[string]any) (any,
 	if err != nil {
 		return nil, err
 	}
-	if err := upsertItemValidated(ctx, s, config.SectionAgent, name, profile); err != nil {
+	if err := t.p.upsertItemValidated(ctx, s, config.SectionAgent, name, profile); err != nil {
 		return nil, err
 	}
 	return okResult{Message: fmt.Sprintf("created agent %q (%s)", name, profile.ResolvedKind())}, nil
@@ -109,7 +109,7 @@ func (t *agentUpdateTool) Invoke(ctx context.Context, args map[string]any) (any,
 	if err != nil {
 		return nil, err
 	}
-	s, err := t.p()
+	s, err := t.p.Store()
 	if err != nil {
 		return nil, err
 	}
@@ -128,7 +128,7 @@ func (t *agentUpdateTool) Invoke(ctx context.Context, args map[string]any) (any,
 	if err != nil {
 		return nil, err
 	}
-	if err := upsertItemValidated(ctx, s, config.SectionAgent, name, profile); err != nil {
+	if err := t.p.upsertItemValidated(ctx, s, config.SectionAgent, name, profile); err != nil {
 		return nil, err
 	}
 	return okResult{Message: fmt.Sprintf("updated agent %q (%s)", name, profile.ResolvedKind())}, nil

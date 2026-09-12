@@ -136,22 +136,3 @@ jobs:
           MURTAUGH_TEST_POSTGRES_DSN: postgres://murtaugh:murtaugh@localhost:5432/murtaugh?sslmode=disable
           FIRESTORE_EMULATOR_HOST: 127.0.0.1:8579
         run: go test -race ./...
-
-  macos-installer-tests:
-    name: macOS installer tests
-    runs-on: macos-latest
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      # The install/macos suite skips on non-darwin runners (the installer is
-      # macOS-only), so the ubuntu job above never exercises it. Run it here on
-      # macOS where the bash installer and `murtaugh setup` actually execute.
-      - name: Test installer
-        run: go test ./install/...

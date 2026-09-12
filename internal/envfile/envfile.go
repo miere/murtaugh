@@ -17,8 +17,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-
-	"github.com/miere/murtaugh/internal/tools/setup/internal/backup"
 )
 
 // keyLine matches a dotenv assignment, capturing the variable name. An optional
@@ -94,7 +92,7 @@ func Merge(path string, kv map[string]string) (backupPath string, err error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return "", fmt.Errorf("envfile: ensure dir: %w", err)
 	}
-	backupPath, err = backup.IfExists(path)
+	backupPath, err = backupIfExists(path)
 	if err != nil {
 		return "", err
 	}

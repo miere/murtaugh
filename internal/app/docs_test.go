@@ -18,6 +18,13 @@ var nonToolCommands = map[string]bool{
 	"cfg":           true,
 }
 
+// nodeOnlyCommands are documented commands the RUNTIME binary registers. One
+// reference covers both binaries, so the gateway's registry cannot back them;
+// internal/nodeapp/docs_test.go is what holds them to their schemas.
+var nodeOnlyCommands = map[string]bool{
+	"jobs run": true,
+}
+
 // TestHelpReferenceBuildsWithoutConfig is the load-bearing precondition for
 // `murtaugh help` on an unconfigured machine: the reference builds the real
 // registry from a zero config, so every tool must be constructible without a
@@ -80,7 +87,7 @@ func TestEveryFlagIsDocumented(t *testing.T) {
 // section can.
 func TestNoProseSectionOutlivesItsTool(t *testing.T) {
 	for _, cmd := range HelpReference("test").Orphans() {
-		if !nonToolCommands[cmd] {
+		if !nonToolCommands[cmd] && !nodeOnlyCommands[cmd] {
 			t.Errorf("cli-help.md documents %q, but no tool is registered under that name", cmd)
 		}
 	}
@@ -92,12 +99,9 @@ func TestNoProseSectionOutlivesItsTool(t *testing.T) {
 // without it, and the caller only finds out from a failed invocation.
 func TestSchemaRequirednessIsDeclared(t *testing.T) {
 	want := map[string][]string{
-		"cfg.job.set":      {"name"},
-		"cfg.mcp.set":      {"name"},
-		"cfg.agent.create": {"name", "type"},
-		"cfg.agent.update": {"name"},
-		"cfg.import":       {"file"},
-		"cfg.db.migrate":   {"to"},
+		"cfg.job.set":    {"name"},
+		"cfg.import":     {"file"},
+		"cfg.db.migrate": {"to"},
 	}
 	byName := map[string]help.Doc{}
 	for _, d := range helpDocs(t) {
@@ -117,6 +121,22 @@ func TestSchemaRequirednessIsDeclared(t *testing.T) {
 			if !got[r] {
 				t.Errorf("%s: schema does not declare %q required, but Invoke enforces it", name, r)
 			}
+		}
+	}
+}
+
+// `--config` is a GLOBAL flag, stripped from the whole command line before any
+// tool sees it, so a tool that declared one would document a flag that can
+// never arrive — and passing it would silently retarget the whole invocation.
+// This is why `cfg node split` names its destination `--dest`.
+func TestNoToolDeclaresAConfigFlag(t *testing.T) {
+	for _, d := range helpDocs(t) {
+		schema := d.InputSchema()
+		if schema == nil {
+			continue
+		}
+		if _, ok := schema.Properties["config"]; ok {
+			t.Errorf("%s declares a `config` argument; the global --config consumes it before the tool runs", d.Name())
 		}
 	}
 }

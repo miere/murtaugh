@@ -22,7 +22,7 @@ func (t *dumpTool) Name() string                    { return "cfg.show" }
 func (t *dumpTool) Description() string             { return "Dump the entire stored configuration as JSON." }
 func (t *dumpTool) InputSchema() *jsonschema.Schema { return nil }
 func (t *dumpTool) Invoke(ctx context.Context, _ map[string]any) (any, error) {
-	s, err := t.p()
+	s, err := t.p.Store()
 	if err != nil {
 		return nil, err
 	}
@@ -61,15 +61,18 @@ func (r dumpResult) String() string {
 // validateTool (cfg.validate) loads and validates the whole config.
 type validateTool struct{ p Provider }
 
-func (t *validateTool) Name() string                    { return "cfg.validate" }
-func (t *validateTool) Description() string             { return "Validate the stored configuration." }
+func (t *validateTool) Name() string { return "cfg.validate" }
+func (t *validateTool) Description() string {
+	return "Validate the stored configuration as this binary's role. There is no role flag: a gateway is judged on its Slack credentials and defers every agent name to connect time, a node on the profile bodies it holds."
+}
+
 func (t *validateTool) InputSchema() *jsonschema.Schema { return nil }
 func (t *validateTool) Invoke(ctx context.Context, _ map[string]any) (any, error) {
-	s, err := t.p()
+	s, err := t.p.Store()
 	if err != nil {
 		return nil, err
 	}
-	if err := validateStore(ctx, s); err != nil {
+	if err := t.p.validateStore(ctx, s); err != nil {
 		return nil, fmt.Errorf("invalid: %w", err)
 	}
 	return okResult{Message: "config is valid"}, nil
@@ -100,7 +103,7 @@ func (t *exportTool) InputSchema() *jsonschema.Schema {
 	return fileSchema("destination file; omit to print to stdout", false)
 }
 func (t *exportTool) Invoke(ctx context.Context, args map[string]any) (any, error) {
-	s, err := t.p()
+	s, err := t.p.Store()
 	if err != nil {
 		return nil, err
 	}
@@ -146,7 +149,7 @@ func (t *importTool) Invoke(ctx context.Context, args map[string]any) (any, erro
 	if err := json.Unmarshal(data, &snap); err != nil {
 		return nil, fmt.Errorf("parse snapshot: %w", err)
 	}
-	s, err := t.p()
+	s, err := t.p.Store()
 	if err != nil {
 		return nil, err
 	}
@@ -154,7 +157,7 @@ func (t *importTool) Invoke(ctx context.Context, args map[string]any) (any, erro
 		return nil, err
 	}
 	msg := fmt.Sprintf("imported %d items + %d singletons", len(snap.Items), len(snap.Singletons))
-	if verr := validateStore(ctx, s); verr != nil {
+	if verr := t.p.validateStore(ctx, s); verr != nil {
 		return nil, fmt.Errorf("%s, but the result is invalid: %w", msg, verr)
 	}
 	return okResult{Message: msg + "; config is valid"}, nil

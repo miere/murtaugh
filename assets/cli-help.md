@@ -1,26 +1,38 @@
 # murtaugh — command-line reference
 
-Murtaugh ships as a single binary with three frontends over one shared tool
-registry:
+Murtaugh ships as **two binaries**, and each configures itself. Run either with
+no command and it starts its daemon; run it with a command and it acts on its
+own configuration.
 
-- **CLI** — direct invocation: `murtaugh <command> [flags...]`.
-- **MCP** — JSON-RPC stdio server (`murtaugh mcp`) exposing every tool below to
-  AI clients. The MCP tool name is the registry name with every dot replaced by
-  an underscore (e.g. `jobs_run`, `slack_send_msg`) — some providers (e.g.
-  Gemini) reject a `.` in a function name, so it is normalised at the MCP
-  boundary. The dotted form (`jobs.run`) remains the registry key, and the CLI
-  spells the same tool with a space (`jobs run`, `slack send_msg`).
-- **Slack gateway** — the long-running Socket Mode daemon
-  (`murtaugh slack gateway`).
+- **`murtaugh-gateway`** — the Slack side. With no command it is the Socket Mode
+  daemon: slash commands, workflow rules, unfurls, scheduled runs, and the
+  Slack half of every conversation. Its commands are the gateway admin's:
+  access, jobs, rules, election, node tokens, `cfg node split`.
+- **`murtaugh-runtime`** — a node. With no command it dials a gateway and serves
+  agents; `murtaugh-runtime mcp` serves the same tools to a local AI client over
+  JSON-RPC on stdin/stdout. Its commands are the node admin's: agent profiles,
+  MCP servers, where it dials, and `jobs run`.
+
+Both carry `cfg launchd`, `cfg validate` and `cfg migrate`. There is no combined
+binary and no install script: put the file where you want it, then let it
+configure itself.
+
+The MCP tool name is the registry name with every dot replaced by an underscore
+(e.g. `jobs_run`, `slack_send_msg`) — some providers (e.g. Gemini) reject a `.`
+in a function name, so it is normalised at the MCP boundary. The dotted form
+(`jobs.run`) remains the registry key, and the CLI spells the same tool with a
+space (`jobs run`, `slack send_msg`).
 
 ```
-Usage: murtaugh [--config PATH] <command> [flags...]
+Usage: murtaugh-gateway|murtaugh-runtime [--config PATH] [command] [flags...]
 ```
 
-Run `murtaugh help` for this full document, or `murtaugh help <command>`
-(e.g. `murtaugh help slack send_msg`) for a single command. `murtaugh <command>
---help` works too. Agents reach the same reference through the `help` tool
-rather than shelling out for it.
+**One reference covers both binaries.** Sections are written `murtaugh
+<command>` because most read the same on either; where a command lives on only
+one, the section says so, and asking the other binary for it is an unknown
+command. Run `help` for this whole document or `help <command>` for a single
+section; `<command> --help` works too. Agents reach the same reference through
+the `help` tool rather than shelling out for it.
 
 **This file is half of the reference.** Every flag table you see in the
 rendered output is generated from the owning tool's `InputSchema` at render
@@ -125,6 +137,11 @@ murtaugh ping
 
 ## murtaugh jobs run
 
+**Runtime binary only.** The gateway cannot run an agent, so it cannot run a
+job by hand either — a node can, in its own process, with no gateway and no
+broker in the way. When the broker is broken this is the way to run an agent
+at all.
+
 Run a job previously defined in the config store, by name. The job's command
 runs with its configured args/workdir/timeout; child stdout/stderr stream to
 your terminal (and are captured into the JSON result over MCP).
@@ -162,7 +179,7 @@ set` is the equivalent under the unified `cfg` surface.)
 | `--every`    | no       | duration        | Go duration (e.g. `1h`) for fixed-interval runs by the gateway.       |
 
 - `--schedule` and `--every` are **mutually exclusive**; set at most one.
-- A scheduled job only fires while `murtaugh slack gateway` is running.
+- A scheduled job only fires while the gateway daemon is running.
 - `--timeout` and `--every` must be valid Go durations; `--every` must be > 0.
 - Every write stamps the entry `confirmed: false`, so a new **or edited** job is
   held: the scheduler asks the admin to approve its next run before executing it.
@@ -332,29 +349,34 @@ murtaugh slack update_msg --channel "#deploys" --ts 1716950455.123456 \
 
 ## murtaugh slack gateway
 
-Start the Slack gateway: the long-running Socket Mode daemon. It responds to
-slash commands, runs YAML workflow rules against interactive payloads, bridges
-Slack conversations to an ACP agent with live streaming, renders custom link
-unfurls, and fires scheduled jobs. Configuration comes entirely from `config.yaml`
-(`oauth:` + `database:`), its sibling `.env`, and the config store the database
-block points at (agents, jobs, rules, chat routing, access, …); there are no
-tool flags. Stop it with SIGINT/SIGTERM. Normally run under launchd (see `setup
-launchd`).
+**Gateway binary, no command.** `murtaugh-gateway` with no command IS the
+long-running Socket Mode daemon. It responds to slash commands, runs YAML
+workflow rules against interactive payloads, bridges Slack conversations to an
+agent on an attached node with live streaming, renders custom link unfurls, and
+fires scheduled jobs. Configuration comes entirely from `config.yaml` (`oauth:`
++ `database:`), its sibling `.env`, and the config store the database block
+points at. Stop it with SIGINT/SIGTERM. Normally run under launchd — write the
+LaunchAgent with `cfg launchd`.
+
+`-node-listen` is what lets runtime nodes attach; without it the gateway accepts
+none. `-node-advertise` overrides the addresses handed to nodes in a redirect,
+for when the listener's own address is not reachable from where they run.
 
 ```
-murtaugh slack gateway
-murtaugh --config /etc/murtaugh/config.yaml slack gateway
+murtaugh-gateway
+murtaugh-gateway --config /etc/murtaugh/config.yaml -node-listen 127.0.0.1:8787
 ```
 
 ## murtaugh mcp
 
-Start the MCP stdio server. Serves every registered tool to an MCP client over
-JSON-RPC on stdin/stdout. stdout is reserved for protocol traffic — do not run
-this interactively expecting human output. Register it with a client via
-`setup mcp_register`.
+**Runtime binary only.** Start the MCP stdio server: it serves every tool this
+node registers to an MCP client over JSON-RPC on stdin/stdout. stdout is
+reserved for protocol traffic — do not run this interactively expecting human
+output. Registering Murtaugh into a downstream client's config is that client's
+business, not Murtaugh's: point it at this binary and this subcommand.
 
 ```
-murtaugh mcp
+murtaugh-runtime mcp
 ```
 
 ## murtaugh cfg
@@ -373,6 +395,14 @@ Grouped below by entity. Collection entities (`agent`, `mcp`, `job`,
 keyed by `--name`; singletons (`chat`, `access`, `defaults`, `journal`,
 `troubleshoot`) are edited/read in place.
 
+**Each binary carries only its own half of this surface.** The gateway has
+`access`, `job`, `election`, `workflow_rule`, `unfurl_rule` and `node split`;
+the node has `agent`, `mcp`, `defaults` and `node set|show`. `chat`, `show`,
+`export`, `import`, `db migrate`, `validate`, `migrate` and `launchd` are on
+both, acting on that binary's own configuration. Asking a binary for the other
+half's command is an unknown command, not a permission error — the role is
+implied by which file you ran, so no command takes a `--role`.
+
 ### Agents (`cfg agent`)
 
 ```
@@ -383,9 +413,10 @@ murtaugh cfg agent show   --name <n>
 murtaugh cfg agent delete --name <n>
 ```
 
-Same backend fields as `setup agents` (provider/model/api-key-env/tools/…
-for native; command/args for acp). `--type claude_code` selects the direct
-Claude Code stream-json backend.
+`--type native` takes provider/model/api-key-env/tools/…; `--type acp` takes
+command/args; `--type claude_code` selects the direct Claude Code stream-json
+backend. Secrets are never stored: a native agent records `--api-key-env`, the
+name of the `.env` variable holding the key.
 
 ### MCP servers (`cfg mcp`)
 
@@ -472,13 +503,45 @@ murtaugh cfg troubleshoot show   # default diagnostics providers
 
 ```
 murtaugh cfg show                # the whole assembled config
-murtaugh cfg validate            # validate the store's config without changing it
+murtaugh cfg validate            # validate this binary's config without changing it
+murtaugh cfg migrate             # bring the config DIRECTORY to this version's schema
+murtaugh cfg launchd [--alias <a>] [--update-existing true]
 murtaugh cfg export [--file <path>]   # dump the store (stdout, or a file)
 murtaugh cfg import --file <path>     # load a previously exported store
 murtaugh cfg db migrate --to <postgres|sqlite> [--dsn-env <VAR>|--sqlite-path <path>]
 murtaugh cfg node split [--dest <path>] [--gateway wss://host:port]
 murtaugh cfg node set --gateway wss://host:port   # on a node: where it dials
 murtaugh cfg node show
+```
+
+`cfg validate` takes no role flag: `murtaugh-gateway cfg validate` validates as
+a gateway and `murtaugh-runtime cfg validate` as a node. The two ask different
+things — a gateway needs Slack tokens and defers every agent NAME to connect
+time; a node needs no tokens and resolves every name against a profile body it
+holds.
+
+`cfg migrate` and `cfg db migrate` are different commands. `cfg migrate` brings
+the configuration DIRECTORY up to the schema this version expects, which the
+daemons also do at startup. `cfg db migrate` moves the store's CONTENT between
+backends.
+
+`cfg launchd` writes this binary's LaunchAgent and nothing else — loading it is
+`launchctl bootstrap gui/$(id -u) <path>`, which is yours to run when you are
+ready for the daemon to start. The label is `murtaugh.gateway.<alias>` or
+`murtaugh.node.<alias>` depending on which binary you ran, with `--alias`
+defaulting to `default`. The plist runs against the configuration you invoked
+the command with, so a second node on one machine differs by its alias and by
+the global `--config` you gave it. **An existing plist is refused** unless you pass
+`--update-existing true`: it is very likely running a live daemon, and
+overwriting one on the way past is how you take Murtaugh off Slack without
+noticing. `--gateway` (node) and `--node-listen` / `--node-advertise` (gateway)
+are baked into the plist's arguments; passing the other role's flag is an error
+rather than a plist that fails at launch.
+
+```
+murtaugh-gateway cfg launchd -node-listen 127.0.0.1:8787
+murtaugh-runtime --config ~/.config/murtaugh/node/config.yaml \
+  cfg launchd --alias laptop --gateway wss://gw.example:8443
 ```
 
 `cfg db migrate` copies the current store into the target backend and rewrites
@@ -529,166 +592,18 @@ murtaugh cfg workflow_rule set --name deploy-approve --from-file ./rules/deploy.
 murtaugh cfg db migrate --to postgres --dsn-env MURTAUGH_DB_DSN
 ```
 
-## murtaugh setup bootstrap
-
-Seed the Murtaugh config directory with embedded defaults (`config.yaml` with
-its `oauth:` + `database:` blocks, `.env`, `system-prompt.md`, Block Kit
-templates, bundled skills). The config store itself is seeded on first run;
-everything else (agents, jobs, rules, …) is created there via `cfg …` and the
-`setup` tools, not as YAML siblings. Runs on every Murtaugh start, not just the
-first.
-
-| Flag      | Required | Type    | Notes                                                              |
-|-----------|----------|---------|-------------------------------------------------------------------|
-| `--force` | no       | boolean | Refresh the bundled default `system-prompt.md` to the shipped version. |
-
-- **`config.yaml`, `.env`, templates** (`templates/`) and **`AGENTS.md`** (the
-  agent's identity) are created once and then **preserved** — your tokens,
-  edits, and chosen persona are never overwritten, even with `--force`.
-- **`system-prompt.md`** (the default base prompt) is created once and preserved,
-  but `--force` refreshes it to the version shipped with the binary.
-- **Bundled skills** (`.agents/skills/`) are **refreshed** to the shipped version
-  on every run, so the workspace tracks upgrades. A skill directory you add
-  yourself is left untouched; an edit to a skill Murtaugh ships is overwritten —
-  add a new skill instead of editing a shipped one.
-
-The report lists which files were created, updated (refreshed), and preserved.
-
-```
-murtaugh setup bootstrap
-murtaugh setup bootstrap --force true   # refresh the default system prompt
-```
-
-## murtaugh setup slack
-
-Write the `oauth:` block of `config.yaml` (preserving its `database:` block) and
-store the Slack tokens in `~/.config/murtaugh/.env`; the admin user and chat
-routing go into the **config store** (`access` + `chat`). The YAML references the
-tokens as `${SLACK_APP_TOKEN}` / `${SLACK_BOT_TOKEN}`, so they never live in a
-file the troubleshoot bundler collects. Both `config.yaml` and `.env` are backed
-up before being replaced/merged.
-
-| Flag              | Required | Type   | Notes                                                       |
-|-------------------|----------|--------|-------------------------------------------------------------|
-| `--app-token`     | yes      | string | Slack app-level token; must start with `xapp-`. Stored in `.env`. |
-| `--bot-token`     | yes      | string | Slack bot OAuth token; must start with `xoxb-`. Stored in `.env`. |
-| `--admin-user`    | yes      | string | Admin handle (`@name`) or user ID (`U…`). Written to the store's `access`. |
-| `--default-agent` | no       | string | Store agent key to wire into the store's `chat.defaults.agent`. |
-
-```
-murtaugh setup slack --app-token xapp-… --bot-token xoxb-… --admin-user @miere
-```
-
-## murtaugh setup env
-
-Upsert `KEY=VALUE` secrets into `~/.config/murtaugh/.env`, preserving existing
-entries and comments. This is where all secrets live — LLM provider API keys
-(store agents reference them by name via `api_key_env`), Slack tokens, and the
-Postgres DSN. The file is backed up before being merged. Output reports key
-**names** only — never the secret values.
-
-| Flag    | Required | Type            | Notes                                   |
-|---------|----------|-----------------|-----------------------------------------|
-| `--set` | yes      | string (repeat) | A `KEY=VALUE` pair. Repeat for several. |
-
-```
-murtaugh setup env --set GEMINI_API_KEY=AIza… --set VAULTRE_TOKEN=…
-```
-
-## murtaugh setup agents
-
-Write the runtime `defaults` and a single named agent into the **config store**.
-Supports both backends: a **native** LLM agent (the default — Murtaugh talks to
-the model directly) and an external **ACP** agent. The backend is inferred from
-the flags when `--kind` is omitted: `--provider` ⇒ native, `--command` ⇒ acp.
-With no agent flags chat is left disabled. Secrets are never written to the
-store — a native agent records `--api-key-env` (the `.env` variable name); set
-the value with `setup env`. (`cfg agent create|update` is the equivalent under
-the unified `cfg` surface.)
-
-| Flag                   | Required | Type            | Notes                                                             |
-|------------------------|----------|-----------------|------------------------------------------------------------------|
-| `--agent-name`         | no       | string          | Key the agent is registered under. Defaults to `default`.         |
-| `--kind`               | no       | enum            | `native` or `acp`. Inferred from the other flags when omitted.    |
-| `--command`            | acp      | string          | ACP: absolute path to the ACP-speaking binary.                    |
-| `--args`               | no       | string (repeat) | ACP: arguments passed to the command.                             |
-| `--provider`           | native   | enum            | `gemini`, `anthropic`, or `openai` (compat via `--base-url`).     |
-| `--model`              | native   | string          | Provider model id (e.g. `gemini-2.5-pro`).                        |
-| `--api-key-env`        | native   | string          | Name of the `.env` variable holding the API key.                  |
-| `--base-url`           | no       | string          | Native: endpoint override for compat providers.                   |
-| `--tools`              | no       | string (repeat) | Native: tool allowlist (`files`, `terminal`, `skills`, namespaces).|
-| `--mcp-servers`        | no       | string (repeat) | Native: `mcp_servers` entries to attach.                          |
-| `--system-prompt-file` | no       | string          | Native: path (relative to config dir) to the system prompt.       |
-| `--soul-file`          | no       | string          | Persona override; default searches workdir then workspace SOUL.md.|
-| `--context-limit`      | no       | integer         | Native: token budget for compaction. 0 = per-family default.      |
-| `--compaction`         | no       | enum            | Native: `truncate` (default) or `summarize`.                      |
-| `--cache-retention`    | no       | enum            | Native: prompt-cache TTL — `5m` (default), `1h`, or `off`.        |
-
-- For ACP, supplying `--args` without `--command` is an error.
-
-```
-murtaugh setup agents --provider gemini --model gemini-2.5-pro \
-  --api-key-env GEMINI_API_KEY --tools files --tools terminal --tools skills
-murtaugh setup agents --kind acp --agent-name goose --command /usr/local/bin/goose --args acp
-```
-
-## murtaugh setup mcp_register
-
-Register Murtaugh as an MCP server in a downstream AI client's config, merging
-into the existing file (other keys preserved) and backing it up first.
-
-| Flag            | Required | Type   | Notes                                                          |
-|-----------------|----------|--------|----------------------------------------------------------------|
-| `--client`      | yes      | enum   | One of `opencode`, `auggie`, `goose`.                          |
-| `--binary-path` | yes      | string | Absolute path to the `murtaugh` binary used as the MCP command.|
-
-Target files: `opencode` → `~/.config/opencode/opencode.json`; `auggie` →
-`~/.augment/settings.json`; `goose` → `~/.config/goose/config.yaml`.
-
-When the client is also a provider Murtaugh can collect diagnostics for (today
-`goose`), it is recorded in the config store's `troubleshoot` settings so
-`troubleshoot bundle` and `/murtaugh troubleshoot` include that provider's
-sessions/logs **by default** (no `--include` needed). Recording is best-effort —
-a failure there only adds a warning, it does not fail the client registration.
-
-```
-murtaugh setup mcp_register --client opencode --binary-path /usr/local/bin/murtaugh
-murtaugh setup mcp_register --client goose --binary-path /usr/local/bin/murtaugh
-```
-
-## murtaugh setup launchd
-
-Write the `dev.murtaugh` LaunchAgent plist (macOS only) and optionally load it
-via launchctl. On non-macOS hosts it returns a clean "unsupported on <os>"
-error. An existing plist is backed up first.
-
-| Flag            | Required | Type    | Notes                                                              |
-|-----------------|----------|---------|--------------------------------------------------------------------|
-| `--binary-path` | yes      | string  | Absolute path to the `murtaugh` binary.                            |
-| `--load`        | no       | boolean | `true` runs `launchctl bootout`+`bootstrap`+`kickstart` after writing. Remember booleans need a value: `--load true`. |
-
-```
-murtaugh setup launchd --binary-path /usr/local/bin/murtaugh --load true
-```
-
 ## murtaugh setup update
 
-Replace the running Murtaugh binary with the matching asset from a GitHub
-release. The fetched asset is verified before the swap; the previous binary is
-backed up.
+Report whether a newer Murtaugh release exists and where to read its notes.
 
-| Flag                 | Required | Type    | Notes                                                            |
-|----------------------|----------|---------|------------------------------------------------------------------|
-| `--version`          | no       | string  | Release tag to install. Default: latest release.                 |
-| `--force`            | no       | boolean | Update even when the current build is `dev` or already current. `--force true`. |
-| `--release-json-url` | no       | string  | Override the release-metadata URL. Mainly for tests/fixtures.    |
-
-- A `dev` build is refused unless `--force true` (it is likely a local checkout).
-- An already-current install short-circuits with a "nothing to do" result.
+**It does not download or install anything.** Murtaugh does not replace its own
+binary: where the file lives is the operator's decision, and a package manager
+makes it theirs to automate. Fetch the release yourself and put it where this
+one is, then restart the daemon.
 
 ```
 murtaugh setup update
-murtaugh setup update --version v0.5.0 --force true
+murtaugh setup update --version v0.5.0
 ```
 
 ## murtaugh troubleshoot bundle
@@ -703,7 +618,7 @@ never asks an agent to gather the files.
 | Flag             | Required | Type            | Notes                                                                          |
 |------------------|----------|-----------------|--------------------------------------------------------------------------------|
 | `--note`         | no       | string          | Symptom description; recorded in the manifest.                                 |
-| `--include`      | no       | string (repeat) | Provider whose on-disk diagnostics to add (known: `goose`). Repeat per provider. Defaults to the providers in the store's `troubleshoot` settings (written by `setup mcp_register`), else all known providers.|
+| `--include`      | no       | string (repeat) | Provider whose on-disk diagnostics to add (known: `goose`). Repeat per provider. Defaults to the providers in the store's `troubleshoot` settings, else all known providers.|
 | `--out`          | no       | string          | Output path for the zip. Defaults to a timestamped file in the temp dir.       |
 | `--max-log-bytes`| no       | integer         | Tail cap per log file in bytes. Defaults to 5 MiB.                             |
 | `--redact`       | no       | boolean         | Redact known secrets. Defaults to `true`; only set `false` for local-only use. |

@@ -83,7 +83,7 @@ func TestFirestoreRoundTrip(t *testing.T) {
 	if err := s.PutSingleton(ctx, config.SingletonChat, config.ChatConfig{Enabled: true, Defaults: config.ChatDefaults{Agent: "code"}}); err != nil {
 		t.Fatalf("put singleton: %v", err)
 	}
-	cfg, err := s.Load(ctx, config.Config{OAuth: config.OAuthConfig{AppToken: "x", BotToken: "x"}})
+	cfg, err := s.Load(ctx, config.Config{Role: config.RoleGateway, OAuth: config.OAuthConfig{AppToken: "x", BotToken: "x"}})
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestSQLiteToFirestoreMigration(t *testing.T) {
 		t.Fatalf("restore into firestore: %v", err)
 	}
 
-	base := config.Config{OAuth: config.OAuthConfig{AppToken: "x", BotToken: "x"}}
+	base := config.Config{Role: config.RoleGateway, OAuth: config.OAuthConfig{AppToken: "x", BotToken: "x"}}
 	sqliteCfg, err := sqliteStore.Load(ctx, base)
 	if err != nil {
 		t.Fatal(err)

@@ -55,7 +55,7 @@ func (t *dbMigrateTool) InputSchema() *jsonschema.Schema {
 
 func (t *dbMigrateTool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 	to := strings.ToLower(strings.TrimSpace(mustString(args, "to")))
-	src, err := t.p()
+	src, err := t.p.Store()
 	if err != nil {
 		return nil, err
 	}
@@ -105,8 +105,8 @@ func (t *dbMigrateTool) Invoke(ctx context.Context, args map[string]any) (any, e
 		return nil, fmt.Errorf("the config store is already using the %s backend", to)
 	}
 
-	if _, err := src.Load(ctx, validationBaseFor()); err != nil {
-		return nil, fmt.Errorf("this config store is not valid for a %s install, so copying it would only move the problem: %w", role, err)
+	if _, err := src.Load(ctx, t.p.validationBase()); err != nil {
+		return nil, fmt.Errorf("this config store is not valid for a %s install, so copying it would only move the problem: %w", t.p.role, err)
 	}
 
 	target, err := store.Open(ctx, connectDBC, filepath.Dir(t.configPath), config.BaseNameOf(t.configPath))
@@ -122,7 +122,7 @@ func (t *dbMigrateTool) Invoke(ctx context.Context, args map[string]any) (any, e
 	if err := target.Restore(ctx, snap); err != nil {
 		return nil, fmt.Errorf("copy into target: %w", err)
 	}
-	if _, err := target.Load(ctx, validationBaseFor()); err != nil {
+	if _, err := target.Load(ctx, t.p.validationBase()); err != nil {
 		return nil, fmt.Errorf("the copy into the %s backend did not survive being read back, so config.yaml was NOT changed and still points at %s; the %s store now holds a copy that nothing uses: %w",
 			to, src.Backend(), to, err)
 	}

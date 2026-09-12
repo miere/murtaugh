@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/jsonschema-go/jsonschema"
 
+	"github.com/miere/murtaugh/internal/convref"
 	slacklib "github.com/miere/murtaugh/internal/slack/client"
 )
 
@@ -44,9 +45,9 @@ func (t *Tool) InputSchema() *jsonschema.Schema {
 	return &jsonschema.Schema{
 		Type: "object",
 		Properties: map[string]*jsonschema.Schema{
-			"from":    {Type: "string", Description: "Whose reactions to count: " + slacklib.UserRefHelp},
+			"from":    {Type: "string", Description: "Whose reactions to count: " + convref.User},
 			"emoji":   {Type: "string", Description: "Emoji name (with or without colons), e.g. thumbsup or :thumbsup:."},
-			"channel": {Type: "string", Description: "Conversation to scan: " + slacklib.ConversationRefHelp},
+			"channel": {Type: "string", Description: "Conversation to scan: " + convref.Conversation},
 			"since":   {Type: "string", Description: "Exclude messages sent before this Sydney datetime (YYYY-MM-DD HH:mm:ss). Default: 24h ago."},
 		},
 		Required: []string{"from", "emoji", "channel"},

@@ -42,7 +42,7 @@ func (t *listTool) Name() string                    { return t.name }
 func (t *listTool) Description() string             { return fmt.Sprintf("List configured %s.", t.label) }
 func (t *listTool) InputSchema() *jsonschema.Schema { return nil }
 func (t *listTool) Invoke(ctx context.Context, _ map[string]any) (any, error) {
-	s, err := t.p()
+	s, err := t.p.Store()
 	if err != nil {
 		return nil, err
 	}
@@ -75,7 +75,7 @@ func (t *showTool) Invoke(ctx context.Context, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	s, err := t.p()
+	s, err := t.p.Store()
 	if err != nil {
 		return nil, err
 	}
@@ -112,7 +112,7 @@ func (t *deleteTool) Invoke(ctx context.Context, args map[string]any) (any, erro
 	if err != nil {
 		return nil, err
 	}
-	s, err := t.p()
+	s, err := t.p.Store()
 	if err != nil {
 		return nil, err
 	}
@@ -126,7 +126,7 @@ func (t *deleteTool) Invoke(ctx context.Context, args map[string]any) (any, erro
 	if _, err := s.DeleteItem(ctx, t.section, name); err != nil {
 		return nil, err
 	}
-	if verr := validateStore(ctx, s); verr != nil {
+	if verr := t.p.validateStore(ctx, s); verr != nil {
 		_ = s.UpsertItem(ctx, t.section, name, prior)
 		return nil, fmt.Errorf("delete rejected — config would be invalid: %w", verr)
 	}

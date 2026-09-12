@@ -5,8 +5,9 @@ import (
 	"testing"
 )
 
-func combinedConfig() Config {
+func nodeConfig() Config {
 	return Config{
+		Role:  RoleNode,
 		OAuth: OAuthConfig{AppToken: "xapp-1", BotToken: "xoxb-1"},
 		Agents: map[string]AgentProfile{
 			"code": {Native: &NativeProfile{Provider: "anthropic", Model: "claude", APIKeyEnv: "ANTHROPIC_API_KEY"}},
@@ -15,23 +16,48 @@ func combinedConfig() Config {
 	}
 }
 
-func TestCombinedRoleStillRequiresTokensAndResolvesNames(t *testing.T) {
-	cfg := combinedConfig()
+// The zero value is not a role. Every configuration is loaded by a binary that
+// knows which half it is, so "neither" can only be a wiring mistake.
+func TestAnUnsetRoleIsRefused(t *testing.T) {
+	cfg := nodeConfig()
+	cfg.Role = ""
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("a configuration with no role validated")
+	}
+	if !strings.Contains(err.Error(), "role is unset") {
+		t.Errorf("the refusal does not name the problem: %v", err)
+	}
+}
+
+func TestNodeRoleResolvesNames(t *testing.T) {
+	cfg := nodeConfig()
 	if err := cfg.Validate(); err != nil {
-		t.Fatalf("a valid combined configuration was refused: %v", err)
+		t.Fatalf("a valid node configuration was refused: %v", err)
 	}
 
-	missingTokens := combinedConfig()
-	missingTokens.OAuth = OAuthConfig{}
-	if err := missingTokens.Validate(); err == nil {
-		t.Error("a combined configuration validated without Slack credentials")
-	}
-
-	typo := combinedConfig()
+	typo := nodeConfig()
 	typo.Chat.Defaults.Agent = "cdoe"
 	err := typo.Validate()
 	if err == nil || !strings.Contains(err.Error(), "not found in agents.yaml") {
-		t.Errorf("a typo'd default agent gave %v; the write-time check must still fire for a combined install", err)
+		t.Errorf("a typo'd default agent gave %v; the write-time check must still fire on a node", err)
+	}
+}
+
+func TestGatewayRoleRequiresTokens(t *testing.T) {
+	cfg := Config{Role: RoleGateway, OAuth: OAuthConfig{AppToken: "xapp-1", BotToken: "xoxb-1"}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("a valid gateway configuration was refused: %v", err)
+	}
+	missing := Config{Role: RoleGateway}
+	err := missing.Validate()
+	if err == nil {
+		t.Fatal("a gateway validated without Slack credentials")
+	}
+	for _, field := range []string{"oauth.app_token", "oauth.bot_token"} {
+		if !strings.Contains(err.Error(), field) {
+			t.Errorf("the refusal does not name %s: %v", field, err)
+		}
 	}
 }
 
@@ -95,7 +121,7 @@ func TestABlankAgentNameIsRefusedAtEverySiteAndEveryRole(t *testing.T) {
 			c.Chat.Channels = ChannelRules{{Match: "nc-*", Agent: "   "}}
 		},
 	} {
-		for _, role := range []Role{RoleCombined, RoleGateway, RoleNode} {
+		for _, role := range []Role{RoleGateway, RoleNode} {
 			cfg := base
 			cfg.Role = role
 			blank(&cfg)

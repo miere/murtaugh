@@ -38,7 +38,7 @@ func (t *nodeSplitTool) InputSchema() *jsonschema.Schema {
 }
 
 func (t *nodeSplitTool) Invoke(ctx context.Context, args map[string]any) (any, error) {
-	src, err := t.p()
+	src, err := t.p.Store()
 	if err != nil {
 		return nil, err
 	}
