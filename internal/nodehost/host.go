@@ -54,6 +54,8 @@ type Options struct {
 	// The onboarding offer is an entitlement, not a message: never withdrawn, it
 	// routes the owner's next click at a node that is configured or gone.
 	OnNodeSettled func(node Node)
+
+	RecheckInterval time.Duration
 }
 
 type Host struct {
@@ -136,6 +138,17 @@ func (h *Host) Serve(ctx context.Context, listener net.Listener) error {
 	h.setListenAddr(listener.Addr().String())
 	defer h.setListenAddr("")
 	h.log.Info("runtime node endpoint listening", "addr", listener.Addr().String(), "path", nodesocket.Path)
+
+	watchCtx, stopWatching := context.WithCancel(ctx)
+	watched := make(chan struct{})
+	go func() {
+		defer close(watched)
+		h.watchCredentials(watchCtx)
+	}()
+	defer func() {
+		stopWatching()
+		<-watched
+	}()
 
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(listener) }()
@@ -490,11 +503,7 @@ func (h *Host) askApproval(ctx context.Context, toolName, summary string) (bool,
 // Closes by selector, never by node: mid-rotation a node holds two live
 // credentials and must keep the new one.
 func (h *Host) CloseCredential(_ context.Context, selector string) error {
-	for _, node := range h.takeCredential(selector) {
-		h.log.Info("closing a runtime node whose credential was revoked", "node_id", node.nodeID, "selector", selector)
-		h.record(journal.LevelWarn, "revoked", "A runtime node's credential was revoked and its connection closed", node, agentwire.Advertisement{})
-		node.close()
-	}
+	h.closeCredential(selector, nodetoken.ErrRevoked)
 	return nil
 }
 

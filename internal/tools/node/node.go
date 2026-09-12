@@ -350,7 +350,7 @@ func (r revokeResult) String() string {
 	for _, c := range r.Revoked {
 		fmt.Fprintf(&b, "  %s  %s  (revoked %s)\n", c.Selector, c.NodeID, c.RevokedAt)
 	}
-	fmt.Fprintf(&b, "\nNote: %s\n", nodetoken.RevocationLimitation)
+	fmt.Fprintf(&b, "\nNote: %s\n", nodetoken.RevocationNotice)
 	return b.String()
 }
 

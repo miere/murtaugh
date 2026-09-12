@@ -971,6 +971,13 @@ connection evict the first. `Nodes()` collapses back to one entry per node id,
 because delegation must never see one machine twice and round-robin it against
 itself. Choosing between them is delegation, below.
 
+**Revocation is polled.** `node token revoke` runs in the CLI, a separate
+process that cannot reach the gateway's sockets, and no store backend offers a
+change feed they all share. So the gateway re-checks every live connection's
+credential each `nodetoken.RecheckInterval` (10s) and closes, by selector, any
+that is now revoked, expired or gone. A store error closes nothing: a database
+that is down has not said the credential is bad.
+
 **`allow_anyone` deliberately does not cross**, and neither does
 `reply_on_thread`. The first waives the gateway's own access list for a
 channel's chat surface; the second decides the conversation key a pin is keyed
@@ -985,7 +992,7 @@ profile names the process actually serves, and drops any channel rule routing to
 a profile it does not serve. Advertising the rest would be a claim the gateway
 could act on and the node could not honour.
 
-**The node's watcher is the only poll in the design, and it is not a reload.**
+**The node's watcher is not a reload.**
 `nodeclaim.Watcher` compares `config.Store.Snapshot` renderings and re-reads the
 CLAIM SET on a change — applied unconditionally, because a node admin editing
 their own node is the authority and there is no Slack surface on a node to ask

@@ -38,14 +38,33 @@ func Verify(ctx context.Context, store config.NodeTokenStore, presented string, 
 	if !Equal(HashSecret(credential.Secret), Digest(record.SecretHash)) {
 		return config.NodeToken{}, ErrSecretMismatch
 	}
-
-	if !record.RevokedAt.IsZero() {
-		return config.NodeToken{}, ErrRevoked
-	}
-	if !record.ExpiresAt.IsZero() && !now.Before(record.ExpiresAt) {
-		return config.NodeToken{}, ErrExpired
+	if err := standing(record, now); err != nil {
+		return config.NodeToken{}, err
 	}
 	return record, nil
+}
+
+// The secret was proven at the handshake, so a live connection is re-checked
+// on what can change since; a store error is still not a rejection.
+func Recheck(ctx context.Context, store config.NodeTokenStore, selector string, now time.Time) error {
+	record, found, err := store.BySelector(ctx, selector)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return ErrUnknownCredential
+	}
+	return standing(record, now)
+}
+
+func standing(record config.NodeToken, now time.Time) error {
+	if !record.RevokedAt.IsZero() {
+		return ErrRevoked
+	}
+	if !record.ExpiresAt.IsZero() && !now.Before(record.ExpiresAt) {
+		return ErrExpired
+	}
+	return nil
 }
 
 // Keyed by selector, not node: mid-rotation a node holds two credentials, and
@@ -54,8 +73,12 @@ type ConnectionCloser interface {
 	CloseCredential(ctx context.Context, selector string) error
 }
 
-const RevocationLimitation = "revoked credentials stop verifying immediately, but any connection already " +
-	"authenticated with one stays open until the gateway learns to close it (#193)"
+// Polled because revocation is usually written by the CLI, a separate process
+// that cannot reach the gateway's sockets.
+const RecheckInterval = 10 * time.Second
+
+var RevocationNotice = fmt.Sprintf("a revoked credential stops verifying immediately, and the gateway "+
+	"drops any live connection using it within %s", RecheckInterval)
 
 type Revoker struct {
 	Store       config.NodeTokenStore
