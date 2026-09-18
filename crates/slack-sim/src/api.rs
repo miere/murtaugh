@@ -24,6 +24,8 @@ const METHODS: &[&str] = &[
     "reactions.add",
     "conversations.replies",
     "files.info",
+    "files.getUploadURLExternal",
+    "files.completeUploadExternal",
 ];
 const JSON_METHODS: &[&str] = &[
     "auth.test",
@@ -257,6 +259,8 @@ fn dispatch(
         "assistant.threads.setStatus" => crate::stream::set_status(st, params),
         "reactions.add" => add_reaction(st, params),
         "conversations.replies" => replies(st, params),
+        "files.getUploadURLExternal" => crate::upload::reserve(st, params),
+        "files.completeUploadExternal" => crate::upload::complete(st, params),
         _ => file_info(st, params),
     }
 }

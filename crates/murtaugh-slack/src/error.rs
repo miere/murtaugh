@@ -28,4 +28,6 @@ pub enum SlackError {
     /// Slack serves its HTML sign-in page, not an HTTP error, when a file fetch is not authorised.
     #[error("download of {url} failed: {reason}")]
     Download { url: String, reason: String },
+    #[error("upload of {filename} failed: {reason}")]
+    Upload { filename: String, reason: String },
 }

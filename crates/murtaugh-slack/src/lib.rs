@@ -17,5 +17,5 @@ pub use stream::{
 };
 pub use web::{
     DEFAULT_API_BASE, FileInfo, Identity, Message, PostMessage, Posted, SlackClient, Tokens,
-    UpdateMessage,
+    UpdateMessage, Upload,
 };
