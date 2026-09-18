@@ -4,6 +4,18 @@ Murtaugh is a Slack gateway for AI agents. People talk to it in Slack; the agent
 such as [Riggs](https://github.com/miere/riggs), which connect to it over
 [RAX](https://github.com/miere/rax-protocol).
 
+## Creating the Slack app
+
+```sh
+murtaugh-gateway slack-manifest --name Murtaugh > manifest.json
+```
+
+At <https://api.slack.com/apps>, choose **Create New App → From a manifest** and paste it. It turns
+on Socket Mode and asks for exactly the scopes and events the gateway uses. Two things a manifest
+cannot do: install the app to your workspace (**Install App**, which gives you the `xoxb-` bot
+token) and create the app-level token (**Basic Information → App-Level Tokens**, with the
+`connections:write` scope, which gives you the `xapp-` token).
+
 ## Running the gateway
 
 The gateway reads one small TOML file per profile, by default

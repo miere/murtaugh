@@ -35,6 +35,7 @@ fn dispatch(cli: Cli) -> Result<String, String> {
     match cli.command {
         Command::Launchd(args) => return install_launchd(cli.config, args),
         Command::Version(args) => return print_version(args),
+        Command::SlackManifest(args) => return murtaugh_gateway::manifest::render(&args.name),
         _ => {}
     }
     let path = config_path(cli.config, config::DEFAULT_PROFILE)?;

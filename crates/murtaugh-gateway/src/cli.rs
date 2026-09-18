@@ -29,6 +29,8 @@ pub enum Command {
     Launchd(LaunchdArgs),
     /// Print the version, or check GitHub for a newer release
     Version(VersionArgs),
+    /// Print the Slack app manifest to paste into api.slack.com/apps → "Create New App"
+    SlackManifest(ManifestArgs),
     /// Who administers this gateway
     #[command(subcommand)]
     Admin(AdminCommand),
@@ -54,6 +56,13 @@ pub struct LaunchdArgs {
     /// Replace an existing plist
     #[arg(long)]
     pub update_existing: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ManifestArgs {
+    /// The app's name, and its bot's display name in Slack
+    #[arg(long, default_value = "Murtaugh")]
+    pub name: String,
 }
 
 #[derive(Debug, Args)]
