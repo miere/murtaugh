@@ -110,6 +110,7 @@ pub(crate) struct State {
     pub undelivered: VecDeque<Value>,
     pub replies_page_size: usize,
     pub channel_message_events: bool,
+    pub thread_statuses: HashMap<(String, String), String>,
     clock: u64,
     seq: u64,
 }
@@ -131,6 +132,7 @@ impl State {
             undelivered: VecDeque::new(),
             replies_page_size: 1000,
             channel_message_events: true,
+            thread_statuses: HashMap::new(),
             clock: 0,
             seq: 0,
         };

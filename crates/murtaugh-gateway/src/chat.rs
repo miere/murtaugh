@@ -25,6 +25,9 @@ use crate::render;
 use crate::reply::{Reply, Target};
 
 pub const UNAUTHORISED_REACTION: &str = "zipper_mouth_face";
+pub const THINKING: &str = "is thinking...";
+/// Slack clears the status once a chunk lands, so it is re-asserted until the turn ends.
+pub const THINKING_REFRESH: Duration = Duration::from_secs(2);
 /// Long enough for a node to fetch the files a prompt links before accepting it.
 pub const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -35,6 +38,7 @@ pub struct Chat {
     access: Access,
     fleet: Fleet,
     team: String,
+    turn_timings: bool,
     orphaned: Mutex<HashSet<Conversation>>,
     busy: Mutex<HashSet<Conversation>>,
 }
@@ -96,6 +100,7 @@ impl Chat {
         store: Arc<dyn Store>,
         access: Access,
         fleet: Fleet,
+        turn_timings: bool,
     ) -> Arc<Self> {
         Arc::new(Self {
             slack,
@@ -104,12 +109,14 @@ impl Chat {
             access,
             fleet,
             team,
+            turn_timings,
             orphaned: Mutex::new(HashSet::new()),
             busy: Mutex::new(HashSet::new()),
         })
     }
 
     pub async fn on_event(self: Arc<Self>, event: Event) {
+        let received = Instant::now();
         let incoming = match event {
             Event::AppMention {
                 user,
@@ -156,7 +163,7 @@ impl Chat {
             return;
         }
         tracing::debug!(channel = %incoming.channel, ts = %incoming.ts, user = %incoming.user, "Slack message for the agent");
-        self.message(incoming).await;
+        self.message(incoming, received).await;
     }
 
     /// A departed node's pins are dropped now; the notice waits for the next message, which is
@@ -173,7 +180,7 @@ impl Chat {
         }
     }
 
-    async fn message(&self, incoming: Incoming) {
+    async fn message(&self, incoming: Incoming, received: Instant) {
         let Ok(user) = UserId::parse(&incoming.user) else {
             return;
         };
@@ -198,17 +205,34 @@ impl Chat {
             .await;
             return;
         }
-        self.converse(&user, &conversation, &incoming).await;
+        let thinking = Thinking::start(self.slack.clone(), &conversation);
+        let timing = self.converse(&user, &conversation, &incoming).await;
+        thinking.stop().await;
         lock(&self.busy).remove(&conversation);
+        if self.turn_timings
+            && let Some(timing) = timing
+        {
+            let ms = |at: Option<Instant>| at.map(|at| at.duration_since(received).as_millis());
+            tracing::info!(
+                node = %timing.node,
+                accepted_ms = ?ms(Some(timing.accepted)),
+                first_output_ms = ?ms(timing.first_output),
+                finished_ms = received.elapsed().as_millis(),
+                "turn timing: from the Slack event to the node accepting, its first output, and the end"
+            );
+        }
     }
 
-    async fn converse(&self, user: &UserId, conversation: &Conversation, incoming: &Incoming) {
+    async fn converse(
+        &self,
+        user: &UserId,
+        conversation: &Conversation,
+        incoming: &Incoming,
+    ) -> Option<TurnTiming> {
         let text = self.strip_mention(&incoming.text);
         let mut retried = false;
         loop {
-            let Some(seat) = self.seat(user, conversation, incoming).await else {
-                return;
-            };
+            let seat = self.seat(user, conversation, incoming).await?;
             let mut words = String::new();
             if let Some(history) = &seat.history {
                 words.push_str(history);
@@ -227,7 +251,7 @@ impl Chat {
                         &format!("_I couldn't reach *{}*: {err}_", seat.node.name),
                     )
                     .await;
-                    return;
+                    return None;
                 }
             };
             let reply = match tokio::time::timeout(PROMPT_TIMEOUT, pending.reply).await {
@@ -238,14 +262,20 @@ impl Chat {
                         &format!("_*{}* did not take this message in time._", seat.node.name),
                     )
                     .await;
-                    return;
+                    return None;
                 }
             };
             match reply {
                 Ok(GatewayReply::Prompt(_)) => {
-                    self.stream(conversation, incoming, &seat.node, pending.events)
+                    let accepted = Instant::now();
+                    let first_output = self
+                        .stream(conversation, incoming, &seat.node, pending.events)
                         .await;
-                    return;
+                    return Some(TurnTiming {
+                        node: seat.node.name.clone(),
+                        accepted,
+                        first_output,
+                    });
                 }
                 Err(CallError::Fault(fault))
                     if fault.kind == ErrorKind::UnknownSession && !retried =>
@@ -259,11 +289,11 @@ impl Chat {
                         "_Still on your last message. Send this again once I've answered._",
                     )
                     .await;
-                    return;
+                    return None;
                 }
                 Ok(other) => {
                     tracing::warn!(reply = ?other, "a prompt was answered with the wrong reply");
-                    return;
+                    return None;
                 }
                 Err(err) => {
                     self.say(
@@ -271,7 +301,7 @@ impl Chat {
                         &format!("_*{}* could not take this message: {err}_", seat.node.name),
                     )
                     .await;
-                    return;
+                    return None;
                 }
             }
         }
@@ -423,8 +453,9 @@ impl Chat {
         incoming: &Incoming,
         node: &Node,
         mut events: StreamEvents,
-    ) {
+    ) -> Option<Instant> {
         let recipient = (!incoming.direct).then(|| (self.team.clone(), incoming.user.clone()));
+        let mut first_output = None;
         let mut reply = Reply::new(
             self.slack.clone(),
             Target {
@@ -445,51 +476,10 @@ impl Chat {
             let Some(event) = event else {
                 break;
             };
-            match event {
-                Open::Known(TurnEvent::Message {
-                    content: Open::Known(ContentBlock::Text { text }),
-                }) => reply.text(&text).await,
-                Open::Known(TurnEvent::ToolCall { tool_call }) => {
-                    let verdict = ToolVerdict {
-                        id: tool_call.id.clone(),
-                        decision: Decision::Allow,
-                    };
-                    if let Err(err) = node.link.verdict(verdict).await {
-                        tracing::warn!(error = %err, "could not rule on a tool call");
-                    }
-                    let title = tool_call.title.as_deref().unwrap_or(&tool_call.name);
-                    reply
-                        .task(&tool_call.id.0, Some(title), TaskStatus::InProgress)
-                        .await;
-                }
-                Open::Known(TurnEvent::ToolCallUpdate { tool_call_update }) => {
-                    let status = match tool_call_update.status {
-                        ToolCallStatus::InProgress => TaskStatus::InProgress,
-                        ToolCallStatus::Completed => TaskStatus::Complete,
-                        ToolCallStatus::Failed | ToolCallStatus::Denied => TaskStatus::Error,
-                    };
-                    reply
-                        .task(
-                            &tool_call_update.id.0,
-                            tool_call_update.title.as_deref(),
-                            status,
-                        )
-                        .await;
-                }
-                Open::Known(TurnEvent::Question { question }) => {
-                    self.unavailable(node, question.id).await;
-                }
-                Open::Known(TurnEvent::Plan { plan }) => self.unavailable(node, plan.id).await,
-                Open::Known(TurnEvent::SignIn { sign_in }) => {
-                    self.unavailable(node, sign_in.id).await;
-                }
-                Open::Known(TurnEvent::Error { error }) => {
-                    reply
-                        .text(&format!("\n\n_The turn failed: {}_", error.message))
-                        .await;
-                }
-                Open::Known(TurnEvent::Complete { .. }) => {}
-                other => tracing::debug!(event = ?other, "turn event not shown yet"),
+            let written = reply.has_written();
+            self.show(&mut reply, node, event).await;
+            if !written && reply.has_written() {
+                first_output.get_or_insert_with(Instant::now);
             }
         }
         if node.link.is_closed() {
@@ -504,6 +494,56 @@ impl Chat {
             reply.text("_Done, with nothing to say._").await;
         }
         reply.finish().await;
+        first_output
+    }
+
+    async fn show(&self, reply: &mut Reply, node: &Node, event: Open<TurnEvent>) {
+        match event {
+            Open::Known(TurnEvent::Message {
+                content: Open::Known(ContentBlock::Text { text }),
+            }) => reply.text(&text).await,
+            Open::Known(TurnEvent::ToolCall { tool_call }) => {
+                let verdict = ToolVerdict {
+                    id: tool_call.id.clone(),
+                    decision: Decision::Allow,
+                };
+                if let Err(err) = node.link.verdict(verdict).await {
+                    tracing::warn!(error = %err, "could not rule on a tool call");
+                }
+                let title = tool_call.title.as_deref().unwrap_or(&tool_call.name);
+                reply
+                    .task(&tool_call.id.0, Some(title), TaskStatus::InProgress)
+                    .await;
+            }
+            Open::Known(TurnEvent::ToolCallUpdate { tool_call_update }) => {
+                let status = match tool_call_update.status {
+                    ToolCallStatus::InProgress => TaskStatus::InProgress,
+                    ToolCallStatus::Completed => TaskStatus::Complete,
+                    ToolCallStatus::Failed | ToolCallStatus::Denied => TaskStatus::Error,
+                };
+                reply
+                    .task(
+                        &tool_call_update.id.0,
+                        tool_call_update.title.as_deref(),
+                        status,
+                    )
+                    .await;
+            }
+            Open::Known(TurnEvent::Question { question }) => {
+                self.unavailable(node, question.id).await;
+            }
+            Open::Known(TurnEvent::Plan { plan }) => self.unavailable(node, plan.id).await,
+            Open::Known(TurnEvent::SignIn { sign_in }) => {
+                self.unavailable(node, sign_in.id).await;
+            }
+            Open::Known(TurnEvent::Error { error }) => {
+                reply
+                    .text(&format!("\n\n_The turn failed: {}_", error.message))
+                    .await;
+            }
+            Open::Known(TurnEvent::Complete { .. }) => {}
+            other => tracing::debug!(event = ?other, "turn event not shown yet"),
+        }
     }
 
     async fn unavailable(&self, node: &Node, id: rax::id::PromptId) {
@@ -542,6 +582,63 @@ impl Chat {
         };
         if let Err(err) = self.slack.post_message(&message).await {
             tracing::warn!(error = %err, "could not post in a thread");
+        }
+    }
+}
+
+struct TurnTiming {
+    node: String,
+    accepted: Instant,
+    first_output: Option<Instant>,
+}
+
+/// Slack's "is thinking..." line under the thread, kept up for the whole turn.
+struct Thinking {
+    stop: tokio_util::sync::CancellationToken,
+    task: tokio::task::JoinHandle<()>,
+    slack: SlackClient,
+    conversation: Conversation,
+}
+
+impl Thinking {
+    fn start(slack: SlackClient, conversation: &Conversation) -> Self {
+        let stop = tokio_util::sync::CancellationToken::new();
+        let task = tokio::spawn({
+            let (slack, stop) = (slack.clone(), stop.clone());
+            let conversation = conversation.clone();
+            async move {
+                loop {
+                    let shown = slack
+                        .set_thread_status(&conversation.channel, &conversation.thread_ts, THINKING)
+                        .await;
+                    if let Err(err) = shown {
+                        tracing::warn!(error = %err, "could not show that the agent is thinking");
+                        return;
+                    }
+                    tokio::select! {
+                        () = tokio::time::sleep(THINKING_REFRESH) => {}
+                        () = stop.cancelled() => return,
+                    }
+                }
+            }
+        });
+        Self {
+            stop,
+            task,
+            slack,
+            conversation: conversation.clone(),
+        }
+    }
+
+    async fn stop(self) {
+        self.stop.cancel();
+        let _ = self.task.await;
+        let cleared = self
+            .slack
+            .set_thread_status(&self.conversation.channel, &self.conversation.thread_ts, "")
+            .await;
+        if let Err(err) = cleared {
+            tracing::debug!(error = %err, "could not clear the thinking status");
         }
     }
 }

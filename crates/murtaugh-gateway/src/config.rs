@@ -61,6 +61,8 @@ pub enum LogFormat {
 pub struct LogConfig {
     pub level: tracing::Level,
     pub format: LogFormat,
+    /// Off by default: one info line per turn, timing the node's acceptance and first output.
+    pub turn_timings: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -170,6 +172,7 @@ struct NodesFile {
 struct LogFile {
     level: Option<String>,
     format: Option<String>,
+    turn_timings: Option<bool>,
 }
 
 pub fn home() -> Option<PathBuf> {
@@ -443,6 +446,7 @@ fn log(section: &LogFile, problems: &mut Problems) -> Option<LogConfig> {
     Some(LogConfig {
         level: level?,
         format: format?,
+        turn_timings: section.turn_timings.unwrap_or(false),
     })
 }
 
@@ -490,6 +494,13 @@ bot_token = "xoxb-1"
         assert_eq!(config.listen.to_string(), DEFAULT_LISTEN);
         assert_eq!(config.log.level, tracing::Level::INFO);
         assert_eq!(config.log.format, LogFormat::Text);
+        assert!(!config.log.turn_timings, "turn timings must be opt-in");
+    }
+
+    #[test]
+    fn turn_timings_can_be_switched_on() {
+        let (_dir, path) = write(&format!("{GOOD}\n[log]\nturn_timings = true\n"));
+        assert!(load(&path).unwrap().log.turn_timings);
     }
 
     #[test]

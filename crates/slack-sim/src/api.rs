@@ -20,6 +20,7 @@ const METHODS: &[&str] = &[
     "chat.startStream",
     "chat.appendStream",
     "chat.stopStream",
+    "assistant.threads.setStatus",
     "reactions.add",
     "conversations.replies",
     "files.info",
@@ -253,6 +254,7 @@ fn dispatch(
         "chat.startStream" => crate::stream::start(st, params),
         "chat.appendStream" => crate::stream::append(st, params),
         "chat.stopStream" => crate::stream::stop(st, params),
+        "assistant.threads.setStatus" => crate::stream::set_status(st, params),
         "reactions.add" => add_reaction(st, params),
         "conversations.replies" => replies(st, params),
         _ => file_info(st, params),
@@ -324,6 +326,9 @@ fn content(params: &Map<String, Value>) -> Result<Content, ApiError> {
 }
 
 fn post_message(st: &mut State, params: &Map<String, Value>) -> Result<Value, ApiError> {
+    if let (Some(channel), Some(thread)) = (arg(params, "channel")?, arg(params, "thread_ts")?) {
+        st.thread_statuses.remove(&(channel, thread));
+    }
     let id = channel(st, arg(params, "channel")?, true)?;
     let content = content(params)?;
     let blocks = content.blocks.filter(|b| !b.is_empty());

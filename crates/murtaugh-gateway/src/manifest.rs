@@ -53,6 +53,7 @@ mod tests {
         let manifest: Value = serde_json::from_str(&render("Murtaugh").unwrap()).unwrap();
         let scopes = strings(&manifest["oauth_config"]["scopes"]["bot"]);
         for scope in [
+            "assistant:write",
             "chat:write",
             "reactions:write",
             "channels:history",
