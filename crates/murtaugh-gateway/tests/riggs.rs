@@ -52,16 +52,16 @@ async fn riggs_answers_a_mention_through_the_gateway() {
         .local_addr()
         .unwrap();
     let tokens = sim.tokens();
-    let config = dir.path().join("config.yaml");
+    let config = dir.path().join("murtaugh.toml");
     std::fs::write(
         &config,
         format!(
-            "oauth:\n  app_token: {}\n  bot_token: {}\nnodes:\n  listen: {listen}\n",
+            "[slack]\napp_token = \"{}\"\nbot_token = \"{}\"\n[nodes]\nlisten = \"{listen}\"\n",
             tokens.app, tokens.bot
         ),
     )
     .unwrap();
-    let store = SqliteStore::open(&dir.path().join("config.db")).unwrap();
+    let store = SqliteStore::open(&dir.path().join("murtaugh.db")).unwrap();
     store.set_admin(&user(ADMIN)).await.unwrap();
     store.approve(&user(ALICE), &user(ADMIN)).await.unwrap();
     let minted = token::mint();

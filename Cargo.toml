@@ -26,6 +26,7 @@ slack-sim = { path = "crates/slack-sim" }
 async-trait = "0.1"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "ws", "json", "query", "form"] }
 base64 = "0.22"
+dotenvy = "0.15"
 clap = { version = "4", features = ["derive"] }
 gcp_auth = "0.12"
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
@@ -35,10 +36,10 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yaml = "0.9"
 sha2 = "0.10"
 subtle = "2"
 tempfile = "3"
+toml = "1"
 thiserror = "2"
 time = { version = "0.3", features = ["serde-well-known"] }
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }

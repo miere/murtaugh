@@ -27,7 +27,9 @@ pub struct Options {
 }
 
 pub async fn run(path: &Path) -> Result<String, String> {
-    init_logging();
+    let config = config::load(path).map_err(|err| err.to_string())?;
+    crate::logging::init(&config.log);
+    println!("{}", banner(&config));
     let slack_api = Url::parse(SLACK_API).map_err(|err| err.to_string())?;
     let shutdown = CancellationToken::new();
     spawn_signals(shutdown.clone())?;
@@ -211,6 +213,22 @@ async fn serve_as_leader(
     outcome
 }
 
+pub fn banner(config: &config::Config) -> String {
+    let database = match &config.database {
+        config::Database::Sqlite { path } => format!("sqlite {}", path.display()),
+        config::Database::Firestore(firestore) => format!(
+            "firestore {}",
+            firestore.collection.as_deref().unwrap_or("murtaugh")
+        ),
+    };
+    format!(
+        "murtaugh-gateway {}\nconfig: {}\nstore: {database}\nnodes: ws://{}/rax/v1/link",
+        crate::version::VERSION,
+        config.path.display(),
+        config.listen
+    )
+}
+
 fn hostname() -> String {
     std::env::var("HOSTNAME")
         .ok()
@@ -237,12 +255,6 @@ impl Seen {
         }
         true
     }
-}
-
-fn init_logging() {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
 }
 
 fn spawn_signals(shutdown: CancellationToken) -> Result<(), String> {

@@ -6,28 +6,36 @@ such as [Riggs](https://github.com/miere/riggs), which connect to it over
 
 ## Running the gateway
 
-The gateway reads one small bootstrap file, by default `~/.config/murtaugh/config.yaml`
-(`--config PATH` points elsewhere). It holds only the Slack credentials, where the configuration
-store lives, and where nodes dial:
+The gateway reads one small TOML file per profile, by default
+`~/.config/murtaugh/default/murtaugh.toml` (`--config PATH` points elsewhere). Relative paths in it
+are resolved against its folder, so each profile keeps its own database, `.env` and logs apart. It
+holds only the Slack credentials, where the configuration store lives, and where nodes dial:
 
-```yaml
-oauth:
-  app_token: ${SLACK_APP_TOKEN}   # xapp-…, for Socket Mode
-  bot_token: ${SLACK_BOT_TOKEN}   # xoxb-…
-database:
-  backend: sqlite                 # sqlite | firestore
-  # sqlite:
-  #   path: config.db             # defaults to <this file's name>.db beside it
-  # firestore:                    # every field optional; Google's default credentials are used
-  #   project_id: my-project
-  #   database_id: "(default)"
-  #   collection: murtaugh
-  #   credentials_file: ~/sa.json
-nodes:
-  listen: 127.0.0.1:7443          # put a TLS terminator in front; nodes dial wss://…/rax/v1/link
+```toml
+[slack]
+app_token = "${SLACK_APP_TOKEN}"   # xapp-…, for Socket Mode
+bot_token = "${SLACK_BOT_TOKEN}"   # xoxb-…
+
+[database]
+backend = "sqlite"                 # or "firestore"
+# [database.sqlite]
+# path = "murtaugh.db"             # the default, beside this file
+# [database.firestore]             # every field optional; Google's default credentials are used
+# project_id = "my-project"
+# database_id = "(default)"
+# collection = "murtaugh"
+# credentials_file = "~/sa.json"
+
+[nodes]
+listen = "127.0.0.1:7443"          # put a TLS terminator in front; nodes dial wss://…/rax/v1/link
+
+[log]
+level = "info"                     # trace, debug, info, warn or error
+format = "text"                    # or "json"
 ```
 
-`${VAR}` is read from the environment first, then from a `.env` beside the file.
+`${VAR}` is read from the environment first, then from `env_file` (by default a `.env` beside the
+file). Unknown keys are an error, and `validate` names every problem at once.
 
 Only one gateway serves a Slack app at a time. With `sqlite` that holds across one machine; with
 `firestore` it holds across every gateway sharing the collection, and a standby takes over within

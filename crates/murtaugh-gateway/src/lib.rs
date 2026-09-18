@@ -7,9 +7,11 @@ pub mod cli;
 pub mod config;
 pub mod fleet;
 pub mod hub;
+pub mod logging;
 pub mod render;
 pub mod run;
 pub mod token;
+pub mod version;
 
 use std::sync::Arc;
 use std::time::Duration;
