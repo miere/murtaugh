@@ -1183,6 +1183,7 @@ dependencies = [
  "rax",
  "rax-sim",
  "rax-tokio",
+ "rustls",
  "semver",
  "serde",
  "serde_json",

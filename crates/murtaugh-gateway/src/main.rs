@@ -9,6 +9,7 @@ use murtaugh_gateway::version::{self, GitHub, VERSION};
 use murtaugh_gateway::{admin, config, open_store};
 
 fn main() -> ExitCode {
+    murtaugh_gateway::tls::init();
     let cli = Cli::parse();
     match dispatch(cli) {
         Ok(output) => {

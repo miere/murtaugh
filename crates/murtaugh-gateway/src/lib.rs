@@ -12,6 +12,7 @@ pub mod logging;
 pub mod manifest;
 pub mod render;
 pub mod run;
+pub mod tls;
 pub mod token;
 pub mod version;
 
