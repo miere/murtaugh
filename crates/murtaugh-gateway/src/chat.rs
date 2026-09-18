@@ -60,6 +60,24 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+fn event_summary(event: &Event) -> String {
+    match event {
+        Event::Message {
+            channel_type,
+            subtype,
+            bot_id,
+            user,
+            ..
+        } => format!(
+            "message channel_type={channel_type} subtype={subtype:?} bot={} user={}",
+            bot_id.is_some(),
+            user.is_some()
+        ),
+        Event::AppMention { .. } => "app_mention".to_owned(),
+        Event::Unknown { kind, .. } => kind.clone(),
+    }
+}
+
 pub fn thread_link(conversation: &Conversation) -> ContentBlock {
     ContentBlock::link(
         format!(
@@ -111,7 +129,6 @@ impl Chat {
                 channel,
                 channel_type,
                 user: Some(user),
-                bot_id: None,
                 subtype: None,
                 ts,
                 thread_ts,
@@ -124,11 +141,19 @@ impl Chat {
                 thread_ts,
                 text,
             },
-            _ => return,
+            Event::Message { .. } => {
+                tracing::debug!(event = ?event_summary(&event), "ignored a Slack event");
+                return;
+            }
+            Event::Unknown { kind, .. } => {
+                tracing::debug!(%kind, "ignored a Slack event of a kind this gateway does not handle");
+                return;
+            }
         };
         if incoming.user == self.bot_user {
             return;
         }
+        tracing::debug!(channel = %incoming.channel, ts = %incoming.ts, user = %incoming.user, "Slack message for the agent");
         self.message(incoming).await;
     }
 
@@ -291,15 +316,21 @@ impl Chat {
             return None;
         };
         let orphaned = lock(&self.orphaned).remove(conversation);
-        if orphaned {
-            self.say(
-                conversation,
-                &format!(
-                    "_The machine serving this conversation went offline. Continuing on *{}*, catching up from this thread._",
-                    render::escape(&node.name)
-                ),
-            )
-            .await;
+        let history = if incoming.thread_ts.is_some() || orphaned {
+            self.history(conversation, &incoming.ts).await
+        } else {
+            None
+        };
+        if history.is_some() {
+            let name = render::escape(&node.name);
+            let notice = if orphaned {
+                format!(
+                    "_The machine serving this conversation went offline. Continuing on *{name}*, catching up from this thread._"
+                )
+            } else {
+                format!("_Picking this conversation up on *{name}*, catching up from this thread._")
+            };
+            self.say(conversation, &notice).await;
         }
         let session_id = match self.open_session(&node, conversation).await {
             Ok(session_id) => session_id,
@@ -326,11 +357,6 @@ impl Chat {
         if let Err(err) = self.store.set_pin(&pin).await {
             tracing::warn!(error = %err, "could not pin a conversation");
         }
-        let history = if incoming.thread_ts.is_some() || orphaned {
-            self.history(conversation, &incoming.ts).await
-        } else {
-            None
-        };
         Some(Seat {
             node,
             session_id,

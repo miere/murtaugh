@@ -534,3 +534,105 @@ async fn a_standby_stays_off_slack_until_the_leader_stops_then_serves_the_same_n
     assert_eq!(rig.sim.violations(), vec![]);
     standby.cancel();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_direct_message_an_app_posted_for_a_person_is_answered() {
+    let rig = rig().await;
+    let mut laptop = rig.node(ALICE, "laptop").await;
+    let (channel, first) = rig.sim.dm(ALICE, "first").await.unwrap();
+    laptop.next_prompt().await;
+    eventually("the first reply", || {
+        rig.sim
+            .thread(&channel, &first)
+            .iter()
+            .any(|m| m.user.as_deref() == Some(BOT_USER_ID) && m.text.contains("pong to: first"))
+            .then_some(())
+    })
+    .await;
+
+    rig.sim
+        .emit(serde_json::json!({
+            "type": "message",
+            "channel": channel,
+            "channel_type": "im",
+            "user": ALICE,
+            "bot_id": "B0SOMEAPP",
+            "app_id": "A0SOMEAPP",
+            "text": "second, sent through an app",
+            "ts": "1789000000.000200",
+            "thread_ts": first,
+            "event_ts": "1789000000.000200",
+        }))
+        .await;
+    assert_eq!(laptop.next_prompt().await.1, "second, sent through an app");
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_thread_caught_up_after_a_gateway_restart_is_told_first() {
+    let mut rig = rig().await;
+    let mut laptop = rig.node(ALICE, "laptop").await;
+    let ts = rig
+        .sim
+        .mention(ALICE, GENERAL, "first question", None)
+        .await
+        .unwrap();
+    laptop.next_prompt().await;
+    rig.bot_replies(&ts, |replies| {
+        replies
+            .iter()
+            .any(|m| m.text.contains("pong to: first question"))
+    })
+    .await;
+
+    rig.shutdown.cancel();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    rig.shutdown = gateway(&rig.sim, rig._dir.path().join("murtaugh.toml"));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    'asking: loop {
+        let asked = rig
+            .sim
+            .mention(ALICE, GENERAL, "second question", Some(&ts))
+            .await
+            .unwrap();
+        loop {
+            let replies: Vec<String> = rig
+                .sim
+                .thread(GENERAL, &ts)
+                .into_iter()
+                .filter(|m| m.user.as_deref() == Some(BOT_USER_ID) && m.ts > asked)
+                .map(|m| m.text)
+                .collect();
+            if replies
+                .iter()
+                .any(|text| text.contains("pong to: second question"))
+            {
+                let notice = replies
+                    .iter()
+                    .position(|text| text.contains("Picking this conversation up on *laptop*"))
+                    .expect("no notice before the catch-up");
+                let answer = replies
+                    .iter()
+                    .position(|text| text.contains("pong to: second question"))
+                    .unwrap();
+                assert!(
+                    notice < answer,
+                    "the notice came after the answer: {replies:?}"
+                );
+                break 'asking;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "no answer: {replies:?}"
+            );
+            if replies.iter().any(|text| text.contains("No machine")) {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                continue 'asking;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    let (_, text) = laptop.next_prompt().await;
+    assert!(text.contains("first question"), "{text}");
+    rig.shutdown.cancel();
+}
