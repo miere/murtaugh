@@ -177,14 +177,15 @@ async fn serve(
             LinkEvent::Background { session_id, .. } => {
                 tracing::debug!(node = %name, %session_id, "background event with no turn open");
             }
-            LinkEvent::Attachment { transfer_id, .. } => {
-                tracing::debug!(node = %name, %transfer_id, "attachment outside a turn dropped");
+            LinkEvent::Attachment { transfer_id, bytes } => {
+                files.arrived(&selector, transfer_id, Ok(bytes));
             }
             LinkEvent::TransferFailed {
                 transfer_id,
                 reason,
             } => {
                 tracing::debug!(node = %name, %transfer_id, %reason, "transfer failed");
+                files.arrived(&selector, transfer_id, Err(reason));
             }
             LinkEvent::Unhandled { body, .. } => {
                 tracing::warn!(node = %name, subject = ?body.subject, reason = ?body.reason, "node could not handle something the gateway sent");

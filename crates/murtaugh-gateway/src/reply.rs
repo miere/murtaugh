@@ -78,6 +78,10 @@ impl Reply {
         }
     }
 
+    pub fn target(&self) -> &Target {
+        &self.target
+    }
+
     pub fn has_written(&self) -> bool {
         self.written || !self.pending.is_empty()
     }

@@ -5,8 +5,9 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use murtaugh_slack::{Event, FileRef, PostMessage, SlackClient, TaskStatus};
+use murtaugh_slack::{Event, FileRef, PostMessage, SlackClient, TaskStatus, Upload};
 use murtaugh_store::{Conversation, Pin, Store, UserId};
+use rax::attachment::Attachment;
 use rax::content::ContentBlock;
 use rax::id::SessionId;
 use rax::interaction::{DisplayAnswer, DisplayOutcome};
@@ -29,6 +30,8 @@ pub const UNAUTHORISED_REACTION: &str = "zipper_mouth_face";
 /// The subtype Slack gives a DM that carries files; it is still the person talking.
 const FILE_SHARE: &str = "file_share";
 pub const THINKING: &str = "is thinking...";
+/// The chunks precede the `attachment` event on the link, so the bytes are normally there already.
+const ATTACHMENT_WAIT: Duration = Duration::from_secs(60);
 /// Slack clears the status once a chunk lands, so it is re-asserted until the turn ends.
 pub const THINKING_REFRESH: Duration = Duration::from_secs(2);
 /// Long enough for a node to fetch the files a prompt links before accepting it.
@@ -574,9 +577,55 @@ impl Chat {
                     .text(&format!("\n\n_The turn failed: {}_", error.message))
                     .await;
             }
+            Open::Known(TurnEvent::Attachment { attachment }) => {
+                let name = attachment
+                    .filename
+                    .clone()
+                    .unwrap_or_else(|| "attachment".to_owned());
+                if let Err(reason) = self.attach(reply.target(), node, attachment).await {
+                    tracing::warn!(node = %node.name, file = %name, %reason, "could not attach a file");
+                    reply
+                        .text(&format!("\n\n_Could not attach {name}: {reason}_\n\n"))
+                        .await;
+                }
+            }
             Open::Known(TurnEvent::Complete { .. }) => {}
             other => tracing::debug!(event = ?other, "turn event not shown yet"),
         }
+    }
+
+    async fn attach(
+        &self,
+        target: &Target,
+        node: &Node,
+        attachment: Attachment,
+    ) -> Result<(), String> {
+        let bytes = self
+            .files
+            .claim(&node.selector, &attachment.transfer_id, ATTACHMENT_WAIT)
+            .await?;
+        if bytes.len() as u64 != attachment.size {
+            return Err(format!(
+                "{} bytes arrived, {} were announced",
+                bytes.len(),
+                attachment.size
+            ));
+        }
+        let upload = Upload {
+            channel: target.channel.clone(),
+            thread_ts: Some(target.thread_ts.clone()),
+            filename: attachment
+                .filename
+                .unwrap_or_else(|| "attachment".to_owned()),
+            title: attachment.title,
+            initial_comment: attachment.comment,
+            bytes,
+        };
+        self.slack
+            .upload_file(&upload)
+            .await
+            .map(drop)
+            .map_err(|err| err.to_string())
     }
 
     async fn unavailable(&self, node: &Node, id: rax::id::PromptId) {
