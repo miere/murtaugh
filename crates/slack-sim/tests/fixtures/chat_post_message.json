@@ -1,0 +1,27 @@
+{
+  "ok": true,
+  "channel": "C123ABC456",
+  "ts": "1503435956.000247",
+  "message": {
+    "type": "message",
+    "text": "Here's a message for you",
+    "user": "U123ABC456",
+    "ts": "1503435956.000247",
+    "bot_id": "B123ABC456",
+    "app_id": "A123ABC456",
+    "bot_profile": {
+      "id": "B123ABC456",
+      "deleted": false,
+      "name": "murtaugh",
+      "updated": 1700000000,
+      "app_id": "A123ABC456",
+      "icons": {
+        "image_36": "https://a.slack-edge.com/80588/img/plugins/app/bot_36.png",
+        "image_48": "https://a.slack-edge.com/80588/img/plugins/app/bot_48.png",
+        "image_72": "https://a.slack-edge.com/80588/img/plugins/app/service_72.png"
+      },
+      "team_id": "T123ABC456"
+    },
+    "team": "T123ABC456"
+  }
+}

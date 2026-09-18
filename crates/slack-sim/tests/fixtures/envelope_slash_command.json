@@ -1,0 +1,20 @@
+{
+  "payload": {
+    "token": "XXYYZZ",
+    "team_id": "T061EG9RZ",
+    "team_domain": "example",
+    "channel_id": "C0LAN2Q65",
+    "channel_name": "general",
+    "user_id": "U061F7AUR",
+    "user_name": "grace",
+    "command": "/murtaugh",
+    "text": "status",
+    "api_app_id": "A0KRD7HC3",
+    "is_enterprise_install": "false",
+    "response_url": "https://hooks.slack.com/commands/T061EG9RZ/1234567890/xYzAbC",
+    "trigger_id": "1234567890.123456789.abcdef0123456789"
+  },
+  "envelope_id": "e7f6a5b4-c3d2-4e1f-8a0b-9c8d7e6f5a4b",
+  "type": "slash_commands",
+  "accepts_response_payload": true
+}

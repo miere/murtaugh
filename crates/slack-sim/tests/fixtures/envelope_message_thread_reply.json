@@ -1,0 +1,55 @@
+{
+  "envelope_id": "7c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f",
+  "payload": {
+    "token": "XXYYZZ",
+    "team_id": "T061EG9RZ",
+    "context_team_id": "T061EG9RZ",
+    "context_enterprise_id": null,
+    "api_app_id": "A0KRD7HC3",
+    "event": {
+      "client_msg_id": "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+      "type": "message",
+      "text": "one island",
+      "user": "U061F7AUR",
+      "ts": "1483037603.017503",
+      "blocks": [
+        {
+          "type": "rich_text",
+          "block_id": "q2Hn1",
+          "elements": [
+            {
+              "type": "rich_text_section",
+              "elements": [
+                {"type": "text", "text": "one island"}
+              ]
+            }
+          ]
+        }
+      ],
+      "team": "T061EG9RZ",
+      "thread_ts": "1482960137.003543",
+      "parent_user_id": "U061F7AUR",
+      "channel": "C0LAN2Q65",
+      "event_ts": "1483037603.017503",
+      "channel_type": "channel"
+    },
+    "type": "event_callback",
+    "event_id": "Ev0PV52K22",
+    "event_time": 1483037603,
+    "authorizations": [
+      {
+        "enterprise_id": null,
+        "team_id": "T061EG9RZ",
+        "user_id": "U0LAN0Z89",
+        "is_bot": true,
+        "is_enterprise_install": false
+      }
+    ],
+    "is_ext_shared_channel": false,
+    "event_context": "4-eyJldCI6Im1lc3NhZ2UiLCJ0aWQiOiJUMDYxRUc5UloifQ"
+  },
+  "type": "events_api",
+  "accepts_response_payload": false,
+  "retry_attempt": 0,
+  "retry_reason": ""
+}
