@@ -389,3 +389,22 @@ async fn upload_file_refuses_an_empty_file_before_calling_slack() {
     ));
     assert!(sim.calls().is_empty(), "{:?}", sim.calls());
 }
+
+#[tokio::test]
+async fn an_ephemeral_message_reaches_one_person_only() {
+    let (sim, client) = setup().await;
+    client
+        .post_ephemeral(GENERAL, None, ALICE, "only you can see this")
+        .await
+        .unwrap();
+    assert_eq!(
+        sim.ephemerals(),
+        [(
+            GENERAL.to_owned(),
+            ALICE.to_owned(),
+            "only you can see this".to_owned()
+        )]
+    );
+    assert!(sim.messages(GENERAL).is_empty());
+    assert!(sim.violations().is_empty(), "{:?}", sim.violations());
+}

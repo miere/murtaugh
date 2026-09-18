@@ -211,6 +211,23 @@ impl SlackClient {
             .map(drop)
     }
 
+    /// Shown to `user` alone, in `channel` (and `thread_ts`, when given).
+    pub async fn post_ephemeral(
+        &self,
+        channel: &str,
+        thread_ts: Option<&str>,
+        user: &str,
+        text: &str,
+    ) -> Result<(), SlackError> {
+        let mut body = json!({"channel": channel, "user": user, "text": text});
+        if let Some(thread_ts) = thread_ts {
+            body["thread_ts"] = json!(thread_ts);
+        }
+        self.call::<Value>("chat.postEphemeral", Token::Bot, Body::Json(body))
+            .await
+            .map(drop)
+    }
+
     pub async fn add_reaction(
         &self,
         channel: &str,

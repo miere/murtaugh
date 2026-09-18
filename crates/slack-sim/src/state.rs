@@ -113,6 +113,7 @@ pub(crate) struct State {
     pub channel_message_events: bool,
     pub thread_statuses: HashMap<(String, String), String>,
     pub reserved: HashMap<String, crate::upload::Reserved>,
+    pub ephemerals: Vec<(String, String, String)>,
     clock: u64,
     seq: u64,
 }
@@ -136,6 +137,7 @@ impl State {
             channel_message_events: true,
             thread_statuses: HashMap::new(),
             reserved: HashMap::new(),
+            ephemerals: Vec::new(),
             clock: 0,
             seq: 0,
         };

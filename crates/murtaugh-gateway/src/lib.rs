@@ -2,6 +2,7 @@
 
 pub mod access;
 pub mod admin;
+pub mod approval;
 pub mod chat;
 pub mod cli;
 pub mod config;

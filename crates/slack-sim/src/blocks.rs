@@ -123,6 +123,7 @@ fn validate_block(block: &Value, at: &str) -> Result<(), Invalid> {
         "divider" => only_keys(obj, &["type", "block_id"], at),
         "context" => context(obj, at),
         "actions" => actions(obj, at),
+        "container" => container(obj, at),
         "header" => {
             only_keys(obj, &["type", "block_id", "text"], at)?;
             let text = obj.get("text").ok_or_else(|| {
@@ -210,6 +211,46 @@ fn section(obj: &Map<String, Value>, at: &str) -> Result<(), Invalid> {
     }
     if let Some(accessory) = obj.get("accessory") {
         element(accessory, &format!("{at}/accessory"))?;
+    }
+    Ok(())
+}
+
+/// Slack does not document this block; the shape is the Go gateway's approval card, which real
+/// Slack accepts.
+fn container(obj: &Map<String, Value>, at: &str) -> Result<(), Invalid> {
+    only_keys(
+        obj,
+        &[
+            "type",
+            "block_id",
+            "icon",
+            "title",
+            "subtitle",
+            "is_collapsible",
+            "default_collapsed",
+            "has_header_divider",
+            "width",
+            "child_blocks",
+        ],
+        at,
+    )?;
+    let title = obj
+        .get("title")
+        .ok_or_else(|| invalid(format!("missing required field: title [json-pointer:{at}]")))?;
+    text_object(title, &["plain_text"], 150, &format!("{at}/title"))?;
+    if let Some(subtitle) = obj.get("subtitle") {
+        text_object(subtitle, &["plain_text"], 3000, &format!("{at}/subtitle"))?;
+    }
+    let children = obj
+        .get("child_blocks")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            invalid(format!(
+                "must provide an array [json-pointer:{at}/child_blocks]"
+            ))
+        })?;
+    for (i, child) in children.iter().enumerate() {
+        validate_block(child, &format!("{at}/child_blocks/{i}"))?;
     }
     Ok(())
 }

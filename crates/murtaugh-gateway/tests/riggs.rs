@@ -81,6 +81,7 @@ async fn riggs_answers_a_mention_through_the_gateway() {
     let options = Options {
         slack_api: sim.api_base(),
         refresh: Duration::from_millis(100),
+        ..Options::default()
     };
     tokio::spawn({
         let shutdown = shutdown.clone();
