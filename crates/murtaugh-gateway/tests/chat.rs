@@ -10,10 +10,12 @@ use murtaugh_gateway::token;
 use murtaugh_store::{NodeToken, SqliteStore, Store, UserId};
 use rax::content::ContentBlock;
 use rax::id::{RequestId, SessionId, ToolCallId};
+use rax::resource::ReadResource;
 use rax::session::{Initialized, NodeCapabilities, PromptAccepted, SessionCreated, ToolGate};
 use rax::tool::{Decision, ToolCall, ToolKind};
 use rax::{Event, GatewayCall, GatewayReply, Open};
-use rax_tokio::node::{NodeConfig, NodeEvent, NodeHandle, NodeLink};
+use rax_tokio::CallError;
+use rax_tokio::node::{NodeConfig, NodeEvent, NodeHandle, NodeLink, Resource};
 use slack_sim::{BOT_USER_ID, GENERAL, SimMessage, SlackSim, TEAM_ID};
 use time::OffsetDateTime;
 use tokio::sync::{Mutex, mpsc};
@@ -50,8 +52,14 @@ fn user(raw: &str) -> UserId {
 /// What a scripted node saw, so a test can assert on the prompts it was given.
 #[derive(Debug, Clone)]
 enum Seen {
-    Prompt { session: SessionId, text: String },
-    Verdict { allowed: bool },
+    Prompt {
+        session: SessionId,
+        text: String,
+        links: Vec<ContentBlock>,
+    },
+    Verdict {
+        allowed: bool,
+    },
 }
 
 struct FakeNode {
@@ -61,12 +69,29 @@ struct FakeNode {
 
 impl FakeNode {
     async fn next_prompt(&mut self) -> (SessionId, String) {
+        let (session, text, _) = self.next_prompt_with_links().await;
+        (session, text)
+    }
+
+    async fn next_prompt_with_links(&mut self) -> (SessionId, String, Vec<ContentBlock>) {
         loop {
             match within(self.seen.recv()).await.unwrap() {
-                Seen::Prompt { session, text } => return (session, text),
+                Seen::Prompt {
+                    session,
+                    text,
+                    links,
+                } => return (session, text, links),
                 Seen::Verdict { .. } => {}
             }
         }
+    }
+
+    async fn read(&self, uri: &str, max_bytes: Option<u64>) -> Result<Resource, CallError> {
+        let read = ReadResource {
+            uri: uri.to_owned(),
+            max_bytes,
+        };
+        within(self.handle.read_resource(read)).await
     }
 }
 
@@ -266,9 +291,18 @@ async fn answer(
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
+            let links = prompt
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    Open::Known(link @ ContentBlock::ResourceLink { .. }) => Some(link.clone()),
+                    _ => None,
+                })
+                .collect();
             let _ = seen.send(Seen::Prompt {
                 session: prompt.session_id.clone(),
                 text: text.clone(),
+                links,
             });
             node.reply(id.clone(), GatewayReply::Prompt(PromptAccepted::default()))
                 .await
@@ -716,5 +750,114 @@ async fn the_thread_shows_the_agent_thinking_until_the_turn_ends() {
     );
     assert_eq!(rig.sim.thread_status(GENERAL, &ts), None);
     assert_eq!(rig.sim.violations(), vec![]);
+    rig.shutdown.cancel();
+}
+
+fn fault_kind(read: Result<Resource, CallError>) -> rax::ErrorKind {
+    match read {
+        Err(CallError::Fault(error)) => error.kind,
+        other => panic!("expected a fault, got {:?}", other.map(|r| r.bytes.len())),
+    }
+}
+
+async fn wait_for_turn_end(rig: &Rig, channel: &str, ts: &str, answer: &str) {
+    eventually("the turn to end", || {
+        let answered = rig
+            .sim
+            .thread(channel, ts)
+            .iter()
+            .any(|m| m.user.as_deref() == Some(BOT_USER_ID) && m.text.contains(answer));
+        let cleared = rig.sim.calls().iter().any(|c| {
+            c.method == "assistant.threads.setStatus"
+                && c.params["thread_ts"].as_str() == Some(ts)
+                && c.params["status"].as_str() == Some("")
+        });
+        (answered && cleared).then_some(())
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_shared_with_a_mention_is_readable_by_its_node_and_no_other() {
+    let rig = rig().await;
+    let mut laptop = rig.node(ALICE, "laptop").await;
+    let desktop = rig.node(ADMIN, "desktop").await;
+    let report = b"quarterly numbers: up and to the right".repeat(1000);
+
+    let (file_id, ts) = rig
+        .sim
+        .mention_with_file(
+            ALICE,
+            GENERAL,
+            "what's in this?",
+            "report.txt",
+            "text/plain",
+            &report,
+            None,
+        )
+        .await
+        .unwrap();
+    let (_, text, links) = laptop.next_prompt_with_links().await;
+    assert_eq!(text, "what's in this?");
+    let uri = format!("gateway://files/{file_id}");
+    assert_eq!(
+        links,
+        [ContentBlock::ResourceLink {
+            uri: uri.clone(),
+            name: "report.txt".into(),
+            mime_type: Some("text/plain".into()),
+            title: None,
+            description: None,
+            size: Some(report.len() as u64),
+        }]
+    );
+
+    let read = laptop.read(&uri, None).await.unwrap();
+    assert_eq!(read.bytes, report);
+    assert_eq!(read.mimetype.as_deref(), Some("text/plain"));
+    assert_eq!(
+        fault_kind(laptop.read(&uri, Some(10)).await),
+        rax::ErrorKind::TooLarge
+    );
+    assert_eq!(
+        fault_kind(desktop.read(&uri, None).await),
+        rax::ErrorKind::Forbidden
+    );
+    assert_eq!(
+        fault_kind(laptop.read("gateway://files/F0SIM999999", None).await),
+        rax::ErrorKind::Forbidden
+    );
+    wait_for_turn_end(&rig, GENERAL, &ts, "pong to: what's in this?").await;
+    assert_eq!(rig.sim.violations(), vec![]);
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_dropped_into_a_direct_message_reaches_the_node() {
+    let rig = rig().await;
+    let mut laptop = rig.node(ALICE, "laptop").await;
+    let (channel, first) = rig.sim.dm(ALICE, "hello").await.unwrap();
+    laptop.next_prompt().await;
+    wait_for_turn_end(&rig, &channel, &first, "pong to: hello").await;
+
+    let (file_id, _) = rig
+        .sim
+        .upload(
+            ALICE,
+            &channel,
+            "photo.png",
+            "image/png",
+            b"\x89PNG",
+            Some(&first),
+        )
+        .await
+        .unwrap();
+    let (_, _, links) = laptop.next_prompt_with_links().await;
+    let uri = format!("gateway://files/{file_id}");
+    assert!(
+        matches!(&links[..], [ContentBlock::ResourceLink { uri: got, .. }] if *got == uri),
+        "{links:?}"
+    );
+    assert_eq!(laptop.read(&uri, None).await.unwrap().bytes, b"\x89PNG");
     rig.shutdown.cancel();
 }

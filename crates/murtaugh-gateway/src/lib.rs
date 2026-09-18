@@ -5,6 +5,7 @@ pub mod admin;
 pub mod chat;
 pub mod cli;
 pub mod config;
+pub mod files;
 pub mod fleet;
 pub mod hub;
 pub mod launchd;

@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use murtaugh_slack::{Event, PostMessage, SlackClient, TaskStatus};
+use murtaugh_slack::{Event, FileRef, PostMessage, SlackClient, TaskStatus};
 use murtaugh_store::{Conversation, Pin, Store, UserId};
 use rax::content::ContentBlock;
 use rax::id::SessionId;
@@ -19,12 +19,15 @@ use time::OffsetDateTime;
 use tokio::time::Instant;
 
 use crate::access::Access;
+use crate::files::Files;
 use crate::fleet::{Fleet, Node};
 use crate::hub::FleetChange;
 use crate::render;
 use crate::reply::{Reply, Target};
 
 pub const UNAUTHORISED_REACTION: &str = "zipper_mouth_face";
+/// The subtype Slack gives a DM that carries files; it is still the person talking.
+const FILE_SHARE: &str = "file_share";
 pub const THINKING: &str = "is thinking...";
 /// Slack clears the status once a chunk lands, so it is re-asserted until the turn ends.
 pub const THINKING_REFRESH: Duration = Duration::from_secs(2);
@@ -37,6 +40,7 @@ pub struct Chat {
     store: Arc<dyn Store>,
     access: Access,
     fleet: Fleet,
+    files: Files,
     team: String,
     turn_timings: bool,
     orphaned: Mutex<HashSet<Conversation>>,
@@ -49,6 +53,7 @@ struct Incoming {
     ts: String,
     thread_ts: Option<String>,
     text: String,
+    files: Vec<FileRef>,
     direct: bool,
 }
 
@@ -92,22 +97,37 @@ pub fn thread_link(conversation: &Conversation) -> ContentBlock {
     )
 }
 
+/// What the chat side is built from; the gateway's run loop owns every one of them.
+pub struct Parts {
+    pub slack: SlackClient,
+    pub bot_user: String,
+    pub team: String,
+    pub store: Arc<dyn Store>,
+    pub access: Access,
+    pub fleet: Fleet,
+    pub files: Files,
+    pub turn_timings: bool,
+}
+
 impl Chat {
-    pub fn new(
-        slack: SlackClient,
-        bot_user: String,
-        team: String,
-        store: Arc<dyn Store>,
-        access: Access,
-        fleet: Fleet,
-        turn_timings: bool,
-    ) -> Arc<Self> {
+    pub fn new(parts: Parts) -> Arc<Self> {
+        let Parts {
+            slack,
+            bot_user,
+            team,
+            store,
+            access,
+            fleet,
+            files,
+            turn_timings,
+        } = parts;
         Arc::new(Self {
             slack,
             bot_user,
             store,
             access,
             fleet,
+            files,
             team,
             turn_timings,
             orphaned: Mutex::new(HashSet::new()),
@@ -124,32 +144,37 @@ impl Chat {
                 ts,
                 thread_ts,
                 text,
-                ..
+                files,
             } => Incoming {
                 user,
                 channel,
                 ts,
                 thread_ts,
                 text,
+                files,
                 direct: false,
             },
             Event::Message {
                 channel,
                 channel_type,
                 user: Some(user),
-                subtype: None,
+                subtype,
                 ts,
                 thread_ts,
                 text,
+                files,
                 ..
-            } if channel_type == "im" => Incoming {
-                user,
-                channel,
-                ts,
-                thread_ts,
-                text,
-                direct: true,
-            },
+            } if channel_type == "im" && matches!(subtype.as_deref(), None | Some(FILE_SHARE)) => {
+                Incoming {
+                    user,
+                    channel,
+                    ts,
+                    thread_ts,
+                    text,
+                    files,
+                    direct: true,
+                }
+            }
             Event::Message { .. } => {
                 tracing::debug!(event = ?event_summary(&event), "ignored a Slack event");
                 return;
@@ -241,7 +266,15 @@ impl Chat {
             words.push_str(&text);
             let prompt = GatewayCall::Prompt(Prompt {
                 session_id: seat.session_id.clone(),
-                content: vec![ContentBlock::text(words).into()],
+                content: std::iter::once(ContentBlock::text(words))
+                    .chain(
+                        incoming
+                            .files
+                            .iter()
+                            .map(|file| self.files.offer(&seat.node.selector, file)),
+                    )
+                    .map(Open::Known)
+                    .collect(),
             });
             let pending = match seat.node.link.call(prompt).await {
                 Ok(pending) => pending,
