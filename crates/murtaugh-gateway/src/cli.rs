@@ -9,7 +9,7 @@ use clap::{Args, Parser, Subcommand};
     about = "Connects Slack to the AI agents running on your nodes"
 )]
 pub struct Cli {
-    /// Bootstrap file; defaults to ~/.config/murtaugh/config.yaml
+    /// Configuration file [default: ~/.config/murtaugh/default/murtaugh.toml]
     #[arg(long, global = true, value_name = "PATH")]
     pub config: Option<PathBuf>,
     #[command(subcommand)]

@@ -99,16 +99,17 @@ async fn rig() -> Rig {
         .local_addr()
         .unwrap();
     let tokens = sim.tokens();
-    let config = dir.path().join("config.yaml");
+    let config = dir.path().join("murtaugh.toml");
     std::fs::write(
         &config,
         format!(
-            "oauth:\n  app_token: {}\n  bot_token: {}\nnodes:\n  listen: {listen}\n",
+            "[slack]\napp_token = \"{}\"\nbot_token = \"{}\"\n[nodes]\nlisten = \"{listen}\"\n",
             tokens.app, tokens.bot
         ),
     )
     .unwrap();
-    let store: Arc<dyn Store> = Arc::new(SqliteStore::open(&dir.path().join("config.db")).unwrap());
+    let store: Arc<dyn Store> =
+        Arc::new(SqliteStore::open(&dir.path().join("murtaugh.db")).unwrap());
     store.set_admin(&user(ADMIN)).await.unwrap();
     store.approve(&user(ALICE), &user(ADMIN)).await.unwrap();
     let shutdown = gateway(&sim, config);
@@ -462,11 +463,11 @@ async fn a_standby_stays_off_slack_until_the_leader_stops_then_serves_the_same_n
         .local_addr()
         .unwrap();
     let tokens = rig.sim.tokens();
-    let standby_config = rig._dir.path().join("standby.yaml");
+    let standby_config = rig._dir.path().join("standby.toml");
     std::fs::write(
         &standby_config,
         format!(
-            "oauth:\n  app_token: {}\n  bot_token: {}\ndatabase:\n  sqlite:\n    path: config.db\nnodes:\n  listen: {standby_listen}\n",
+            "[slack]\napp_token = \"{}\"\nbot_token = \"{}\"\n[database.sqlite]\npath = \"murtaugh.db\"\n[nodes]\nlisten = \"{standby_listen}\"\n",
             tokens.app, tokens.bot
         ),
     )

@@ -22,8 +22,10 @@ fn main() -> ExitCode {
 }
 
 fn config_path(flag: Option<PathBuf>) -> Result<PathBuf, String> {
-    flag.or_else(config::default_path)
-        .ok_or_else(|| "HOME is not set; pass --config".to_owned())
+    match flag {
+        Some(path) => Ok(config::absolute(&path)),
+        None => config::default_path(config::DEFAULT_PROFILE).map_err(|err| err.to_string()),
+    }
 }
 
 fn dispatch(cli: Cli) -> Result<String, String> {
@@ -36,7 +38,11 @@ fn dispatch(cli: Cli) -> Result<String, String> {
         Command::Run => runtime.block_on(murtaugh_gateway::run::run(&path)),
         Command::Validate => {
             let loaded = config::load(&path).map_err(|err| err.to_string())?;
-            Ok(format!("{} is valid", loaded.path.display()))
+            Ok(format!(
+                "{} is valid\n{}",
+                loaded.path.display(),
+                murtaugh_gateway::run::banner(&loaded)
+            ))
         }
         store_command => {
             let database = config::database(&path).map_err(|err| err.to_string())?;

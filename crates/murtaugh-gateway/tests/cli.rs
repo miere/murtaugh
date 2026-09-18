@@ -32,10 +32,10 @@ fn failed(output: Output) -> String {
 
 fn setup() -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
-    let config = dir.path().join("config.yaml");
+    let config = dir.path().join("murtaugh.toml");
     std::fs::write(
         &config,
-        "oauth:\n  app_token: ${SLACK_APP_TOKEN}\n  bot_token: ${SLACK_BOT_TOKEN}\ndatabase:\n  backend: sqlite\n",
+        "[slack]\napp_token = \"${SLACK_APP_TOKEN}\"\nbot_token = \"${SLACK_BOT_TOKEN}\"\n[database]\nbackend = \"sqlite\"\n",
     )
     .unwrap();
     (dir, config)
@@ -45,8 +45,8 @@ fn setup() -> (tempfile::TempDir, std::path::PathBuf) {
 fn validate_names_every_missing_credential_without_connecting() {
     let (_dir, config) = setup();
     let stderr = failed(gateway(&config, &["validate"]));
-    assert!(stderr.contains("oauth.app_token is not set"), "{stderr}");
-    assert!(stderr.contains("oauth.bot_token is not set"), "{stderr}");
+    assert!(stderr.contains("slack.app_token: is not set"), "{stderr}");
+    assert!(stderr.contains("slack.bot_token: is not set"), "{stderr}");
 }
 
 #[test]
