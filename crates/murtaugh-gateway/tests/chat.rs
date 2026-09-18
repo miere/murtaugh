@@ -25,6 +25,7 @@ const ALICE: &str = "U0ALICE01";
 const ADMIN: &str = "U0ADMIN01";
 const STRANGER: &str = "U0STRANGE";
 const BOB: &str = "U0BOB0001";
+const CHART: &[u8] = b"\x89PNG a very fine chart";
 
 async fn within<F: std::future::Future>(future: F) -> F::Output {
     tokio::time::timeout(Duration::from_secs(20), future)
@@ -328,6 +329,22 @@ async fn answer(
                 },
             };
             node.event(id.clone(), done).await.unwrap();
+            if text.contains("attach") {
+                let bytes = CHART.to_vec();
+                let transfer_id = node.send_attachment(&bytes).await.unwrap();
+                let lie = u64::from(text.contains("lie about"));
+                let attachment = rax::attachment::Attachment {
+                    transfer_id,
+                    size: bytes.len() as u64 + lie,
+                    filename: Some("chart.png".into()),
+                    title: Some("The chart".into()),
+                    comment: Some("Your chart".into()),
+                    mimetype: Some("image/png".into()),
+                };
+                node.event(id.clone(), Event::Attachment { attachment })
+                    .await
+                    .unwrap();
+            }
             let last = text.lines().last().unwrap_or_default().to_owned();
             let reply = Event::Message {
                 content: ContentBlock::text(format!("**{name}** says pong to: {last}")).into(),
@@ -859,5 +876,66 @@ async fn a_file_dropped_into_a_direct_message_reaches_the_node() {
         "{links:?}"
     );
     assert_eq!(laptop.read(&uri, None).await.unwrap().bytes, b"\x89PNG");
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_attachment_from_the_agent_is_uploaded_into_the_thread() {
+    let rig = rig().await;
+    let mut laptop = rig.node(ALICE, "laptop").await;
+    let ts = rig
+        .sim
+        .mention(ALICE, GENERAL, "attach a chart", None)
+        .await
+        .unwrap();
+    laptop.next_prompt().await;
+    wait_for_turn_end(&rig, GENERAL, &ts, "pong to: attach a chart").await;
+
+    let shared = rig
+        .sim
+        .thread(GENERAL, &ts)
+        .into_iter()
+        .find(|m| m.user.as_deref() == Some(BOT_USER_ID) && !m.files.is_empty())
+        .expect("no file in the thread");
+    assert_eq!(shared.text, "Your chart");
+    let file = rig.sim.file(&shared.files[0]).unwrap();
+    assert_eq!(
+        (
+            file.name.as_str(),
+            file.title.as_str(),
+            file.bytes.as_slice()
+        ),
+        ("chart.png", "The chart", CHART)
+    );
+    assert_eq!(rig.sim.violations(), vec![]);
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_attachment_whose_bytes_do_not_match_is_reported_not_uploaded() {
+    let rig = rig().await;
+    let mut laptop = rig.node(ALICE, "laptop").await;
+    let ts = rig
+        .sim
+        .mention(ALICE, GENERAL, "attach and lie about it", None)
+        .await
+        .unwrap();
+    laptop.next_prompt().await;
+    wait_for_turn_end(&rig, GENERAL, &ts, "pong to: attach and lie").await;
+
+    let thread = rig.sim.thread(GENERAL, &ts);
+    assert!(thread.iter().all(|m| m.files.is_empty()), "{thread:?}");
+    assert!(
+        thread
+            .iter()
+            .any(|m| m.text.contains("Could not attach chart.png")),
+        "{thread:?}"
+    );
+    assert!(
+        rig.sim
+            .calls()
+            .iter()
+            .all(|c| !c.method.starts_with("files.getUpload")),
+    );
     rig.shutdown.cancel();
 }
