@@ -982,6 +982,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "murtaugh-slack"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "rand 0.10.2",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "slack-sim",
+ "thiserror",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "murtaugh-store"
 version = "0.1.0"
 dependencies = [
