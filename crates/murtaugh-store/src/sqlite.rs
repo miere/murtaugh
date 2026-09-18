@@ -8,7 +8,9 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::{Conversation, Grant, NodeToken, Pin, Result, Store, StoreError, UserConfig, UserId};
+use crate::{
+    Conversation, Grant, NodeToken, Pin, Result, Store, StoreError, ToolMode, UserConfig, UserId,
+};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS settings (
@@ -23,6 +25,15 @@ CREATE TABLE IF NOT EXISTS grants (
 CREATE TABLE IF NOT EXISTS users (
     user_id TEXT PRIMARY KEY,
     allowed INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS tool_modes (
+    user_id TEXT PRIMARY KEY,
+    mode TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS tool_whitelist (
+    user_id TEXT NOT NULL,
+    tool TEXT NOT NULL,
+    PRIMARY KEY (user_id, tool)
 );
 CREATE TABLE IF NOT EXISTS node_tokens (
     selector TEXT PRIMARY KEY,
@@ -133,6 +144,39 @@ fn stamp(at: OffsetDateTime) -> Result<String> {
 
 fn parse_stamp(raw: &str) -> rusqlite::Result<OffsetDateTime> {
     OffsetDateTime::parse(raw, &Rfc3339).map_err(|err| invalid(raw, err))
+}
+
+fn user_config(db: &Connection, user: UserId) -> Result<UserConfig> {
+    let allowed: Option<bool> = db
+        .query_row(
+            "SELECT allowed FROM users WHERE user_id = ?1",
+            [user.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let mode: Option<String> = db
+        .query_row(
+            "SELECT mode FROM tool_modes WHERE user_id = ?1",
+            [user.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let mut query = db.prepare("SELECT tool FROM tool_whitelist WHERE user_id = ?1")?;
+    let whitelist = query
+        .query_map([user.as_str()], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let tool_mode = match mode {
+        Some(raw) => raw
+            .parse()
+            .map_err(|err: crate::ToolModeError| StoreError::Corrupt(err.to_string()))?,
+        None => ToolMode::default(),
+    };
+    Ok(UserConfig {
+        user,
+        allowed: allowed.unwrap_or(false),
+        tool_mode,
+        whitelist,
+    })
 }
 
 fn parse_user(raw: &str) -> rusqlite::Result<UserId> {
@@ -251,34 +295,54 @@ impl Store for SqliteStore {
 
     async fn users(&self) -> Result<Vec<UserConfig>> {
         self.run(|db| {
-            let mut query = db.prepare("SELECT user_id, allowed FROM users ORDER BY user_id")?;
-            let users = query
-                .query_map([], |row| {
-                    Ok(UserConfig {
-                        user: parse_user(&row.get::<_, String>(0)?)?,
-                        allowed: row.get(1)?,
-                    })
-                })?
-                .collect::<rusqlite::Result<_>>()?;
-            Ok(users)
+            let mut query = db.prepare(
+                "SELECT user_id FROM users UNION SELECT user_id FROM tool_modes
+                 UNION SELECT user_id FROM tool_whitelist ORDER BY user_id",
+            )?;
+            let ids = query
+                .query_map([], |row| parse_user(&row.get::<_, String>(0)?))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            ids.into_iter().map(|id| user_config(db, id)).collect()
         })
         .await
     }
 
     async fn user(&self, user: &UserId) -> Result<UserConfig> {
         let id = user.clone();
+        self.run(move |db| user_config(db, id)).await
+    }
+
+    async fn set_tool_mode(&self, user: &UserId, mode: ToolMode) -> Result<()> {
+        let user = user.to_string();
         self.run(move |db| {
-            let allowed: Option<bool> = db
-                .query_row(
-                    "SELECT allowed FROM users WHERE user_id = ?1",
-                    [id.as_str()],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            Ok(UserConfig {
-                user: id,
-                allowed: allowed.unwrap_or(false),
-            })
+            db.execute(
+                "INSERT INTO tool_modes (user_id, mode) VALUES (?1, ?2)
+                 ON CONFLICT (user_id) DO UPDATE SET mode = excluded.mode",
+                params![user, mode.as_str()],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn whitelist_tool(&self, user: &UserId, tool: &str) -> Result<bool> {
+        let (user, tool) = (user.to_string(), tool.to_owned());
+        self.run(move |db| {
+            Ok(db.execute(
+                "INSERT INTO tool_whitelist (user_id, tool) VALUES (?1, ?2) ON CONFLICT DO NOTHING",
+                params![user, tool],
+            )? > 0)
+        })
+        .await
+    }
+
+    async fn unwhitelist_tool(&self, user: &UserId, tool: &str) -> Result<bool> {
+        let (user, tool) = (user.to_string(), tool.to_owned());
+        self.run(move |db| {
+            Ok(db.execute(
+                "DELETE FROM tool_whitelist WHERE user_id = ?1 AND tool = ?2",
+                params![user, tool],
+            )? > 0)
         })
         .await
     }

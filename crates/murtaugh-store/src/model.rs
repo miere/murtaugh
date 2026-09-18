@@ -1,4 +1,6 @@
+use std::collections::BTreeSet;
 use std::fmt;
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -60,11 +62,72 @@ pub struct Grant {
     pub approved_at: OffsetDateTime,
 }
 
-/// Settings that belong to one person. `allowed` pre-authorises them on the admin's nodes.
+/// Settings that belong to one person. `allowed` pre-authorises them on the admin's nodes; the
+/// tool mode and whitelist govern the tools agents use on the nodes they own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserConfig {
     pub user: UserId,
     pub allowed: bool,
+    pub tool_mode: ToolMode,
+    pub whitelist: BTreeSet<String>,
+}
+
+impl UserConfig {
+    pub fn new(user: UserId) -> Self {
+        Self {
+            user,
+            allowed: false,
+            tool_mode: ToolMode::default(),
+            whitelist: BTreeSet::new(),
+        }
+    }
+}
+
+/// How a node owner's tools are ruled on. Under `AllowedWhitelist`, a tool off the whitelist
+/// waits for the owner's approval.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum ToolMode {
+    #[default]
+    AlwaysAllowed,
+    AllowedWhitelist,
+    Denied,
+}
+
+impl ToolMode {
+    pub const ALL: [ToolMode; 3] = [
+        ToolMode::AlwaysAllowed,
+        ToolMode::AllowedWhitelist,
+        ToolMode::Denied,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ToolMode::AlwaysAllowed => "always-allowed",
+            ToolMode::AllowedWhitelist => "allowed-whitelist",
+            ToolMode::Denied => "denied",
+        }
+    }
+}
+
+impl fmt::Display for ToolMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{0:?} is not a tool mode; use always-allowed, allowed-whitelist or denied")]
+pub struct ToolModeError(pub String);
+
+impl FromStr for ToolMode {
+    type Err = ToolModeError;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        ToolMode::ALL
+            .into_iter()
+            .find(|mode| mode.as_str() == raw.trim())
+            .ok_or_else(|| ToolModeError(raw.to_owned()))
+    }
 }
 
 /// Only the secret's hash is kept, so a leaked database cannot be replayed as a node.

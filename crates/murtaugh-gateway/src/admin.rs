@@ -5,10 +5,10 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
-use murtaugh_store::{NodeToken, Store, UserId};
+use murtaugh_store::{NodeToken, Store, ToolMode, ToolModeError, UserId};
 use time::OffsetDateTime;
 
-use crate::cli::{AdminCommand, GrantCommand, MintArgs, NodeCommand, UserCommand};
+use crate::cli::{AdminCommand, GrantCommand, MintArgs, NodeCommand, ToolsCommand, UserCommand};
 use crate::token;
 
 fn user(raw: &str) -> Result<UserId, String> {
@@ -110,6 +110,58 @@ pub async fn user_settings(store: &dyn Store, command: UserCommand) -> Result<St
                 .map(|config| format!("{}\tallowed", config.user))
                 .collect::<Vec<_>>()
                 .join("\n"))
+        }
+    }
+}
+
+pub async fn tools(store: &dyn Store, command: ToolsCommand) -> Result<String, String> {
+    match command {
+        ToolsCommand::Mode { user: raw, mode } => {
+            let owner = user(&raw)?;
+            let mode: ToolMode = mode.parse().map_err(|err: ToolModeError| err.to_string())?;
+            store
+                .set_tool_mode(&owner, mode)
+                .await
+                .map_err(|err| err.to_string())?;
+            Ok(format!("Tools on {owner}'s nodes are now {mode}."))
+        }
+        ToolsCommand::Allow { user: raw, tool } => {
+            let owner = user(&raw)?;
+            let added = store
+                .whitelist_tool(&owner, tool.trim())
+                .await
+                .map_err(|err| err.to_string())?;
+            Ok(if added {
+                format!("{} is on {owner}'s whitelist.", tool.trim())
+            } else {
+                format!("{} was already on {owner}'s whitelist.", tool.trim())
+            })
+        }
+        ToolsCommand::Disallow { user: raw, tool } => {
+            let owner = user(&raw)?;
+            let removed = store
+                .unwhitelist_tool(&owner, tool.trim())
+                .await
+                .map_err(|err| err.to_string())?;
+            Ok(if removed {
+                format!("{} is off {owner}'s whitelist.", tool.trim())
+            } else {
+                format!("{} was not on {owner}'s whitelist.", tool.trim())
+            })
+        }
+        ToolsCommand::Show { user: raw } => {
+            let config = store
+                .user(&user(&raw)?)
+                .await
+                .map_err(|err| err.to_string())?;
+            let mut lines = vec![format!("mode\t{}", config.tool_mode)];
+            lines.extend(
+                config
+                    .whitelist
+                    .iter()
+                    .map(|tool| format!("allowed\t{tool}")),
+            );
+            Ok(lines.join("\n"))
         }
     }
 }

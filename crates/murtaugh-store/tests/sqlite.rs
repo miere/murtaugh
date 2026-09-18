@@ -25,6 +25,7 @@ contract!(
     the_admin_is_unset_until_assigned,
     approving_twice_keeps_the_first_approval_and_revoking_removes_it,
     a_person_is_not_pre_authorised_until_the_admin_says_so,
+    a_node_owners_tool_rules_are_kept_apart_from_the_rest_of_their_settings,
     a_token_is_revoked_once,
     pins_are_dropped_with_their_node,
 );

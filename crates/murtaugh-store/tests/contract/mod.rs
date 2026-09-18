@@ -1,6 +1,6 @@
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use murtaugh_store::{Conversation, NodeToken, Pin, Store, UserId};
+use murtaugh_store::{Conversation, NodeToken, Pin, Store, ToolMode, UserConfig, UserId};
 use time::OffsetDateTime;
 
 pub fn user(raw: &str) -> UserId {
@@ -48,6 +48,52 @@ pub async fn a_person_is_not_pre_authorised_until_the_admin_says_so(store: &dyn 
     let users = store.users().await.unwrap();
     assert_eq!(users.len(), 1);
     assert!(!users[0].allowed);
+}
+
+pub async fn a_node_owners_tool_rules_are_kept_apart_from_the_rest_of_their_settings(
+    store: &dyn Store,
+) {
+    let owner = user("U0PERSON1");
+    let fresh = store.user(&owner).await.unwrap();
+    assert_eq!(fresh.tool_mode, ToolMode::AlwaysAllowed);
+    assert!(fresh.whitelist.is_empty());
+
+    store
+        .set_tool_mode(&owner, ToolMode::AllowedWhitelist)
+        .await
+        .unwrap();
+    assert!(store.whitelist_tool(&owner, "Bash").await.unwrap());
+    assert!(!store.whitelist_tool(&owner, "Bash").await.unwrap());
+    assert!(
+        store
+            .whitelist_tool(&owner, "mcp__slack__send")
+            .await
+            .unwrap()
+    );
+    store.set_allowed(&owner, true).await.unwrap();
+
+    let config = store.user(&owner).await.unwrap();
+    assert!(config.allowed, "setting allowed lost nothing else");
+    assert_eq!(config.tool_mode, ToolMode::AllowedWhitelist);
+    assert_eq!(
+        config
+            .whitelist
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["Bash", "mcp__slack__send"]
+    );
+    assert!(store.unwhitelist_tool(&owner, "Bash").await.unwrap());
+    assert!(!store.unwhitelist_tool(&owner, "Bash").await.unwrap());
+    store.set_tool_mode(&owner, ToolMode::Denied).await.unwrap();
+    let users = store.users().await.unwrap();
+    assert_eq!(users.len(), 1);
+    assert_eq!(users[0].tool_mode, ToolMode::Denied);
+    assert_eq!(users[0].whitelist.len(), 1);
+    assert_eq!(
+        store.user(&user("U0SOMEONE")).await.unwrap(),
+        UserConfig::new(user("U0SOMEONE"))
+    );
 }
 
 pub async fn a_token_is_revoked_once(store: &dyn Store) {

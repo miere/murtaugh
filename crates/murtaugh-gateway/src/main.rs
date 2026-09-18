@@ -63,6 +63,7 @@ fn dispatch(cli: Cli) -> Result<String, String> {
                     Command::Grant(command) => admin::grant(&*store, command).await,
                     Command::User(command) => admin::user_settings(&*store, command).await,
                     Command::Node(command) => admin::node(&*store, command).await,
+                    Command::Tools(command) => admin::tools(&*store, command).await,
                     _ => Ok(String::new()),
                 }
             })

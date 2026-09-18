@@ -43,6 +43,9 @@ pub enum Command {
     /// Node credentials and the nodes attached right now
     #[command(subcommand)]
     Node(NodeCommand),
+    /// How the tools agents use on a person's nodes are ruled on
+    #[command(subcommand)]
+    Tools(ToolsCommand),
 }
 
 #[derive(Debug, Args)]
@@ -104,6 +107,19 @@ pub enum UserCommand {
         user: String,
     },
     List,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ToolsCommand {
+    /// always-allowed (the default), allowed-whitelist (ask the owner for anything off the
+    /// whitelist) or denied
+    Mode { user: String, mode: String },
+    /// Put a tool on the owner's whitelist; the name is the one the approval card shows
+    Allow { user: String, tool: String },
+    /// Take a tool off the owner's whitelist
+    Disallow { user: String, tool: String },
+    /// The owner's mode and whitelist
+    Show { user: String },
 }
 
 #[derive(Debug, Subcommand)]
