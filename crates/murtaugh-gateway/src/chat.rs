@@ -5,13 +5,13 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use murtaugh_slack::{Event, PostMessage, SlackClient, UpdateMessage};
+use murtaugh_slack::{Event, PostMessage, SlackClient, TaskStatus};
 use murtaugh_store::{Conversation, Pin, Store, UserId};
 use rax::content::ContentBlock;
 use rax::id::SessionId;
 use rax::interaction::{DisplayAnswer, DisplayOutcome};
 use rax::session::{NewSession, Prompt};
-use rax::tool::{Decision, ToolVerdict};
+use rax::tool::{Decision, ToolCallStatus, ToolVerdict};
 use rax::{ErrorKind, Event as TurnEvent, GatewayCall, GatewayReply, Open};
 use rax_tokio::CallError;
 use rax_tokio::gateway::StreamEvents;
@@ -21,13 +21,12 @@ use tokio::time::Instant;
 use crate::access::Access;
 use crate::fleet::{Fleet, Node};
 use crate::hub::FleetChange;
-use crate::render::{self, MESSAGE_LIMIT};
+use crate::render;
+use crate::reply::{Reply, Target};
 
 pub const UNAUTHORISED_REACTION: &str = "zipper_mouth_face";
-pub const COALESCE: Duration = Duration::from_millis(800);
 /// Long enough for a node to fetch the files a prompt links before accepting it.
 pub const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
-const WORKING: &str = "_Working on it…_";
 
 pub struct Chat {
     slack: SlackClient,
@@ -35,7 +34,7 @@ pub struct Chat {
     store: Arc<dyn Store>,
     access: Access,
     fleet: Fleet,
-    coalesce: Duration,
+    team: String,
     orphaned: Mutex<HashSet<Conversation>>,
     busy: Mutex<HashSet<Conversation>>,
 }
@@ -46,6 +45,7 @@ struct Incoming {
     ts: String,
     thread_ts: Option<String>,
     text: String,
+    direct: bool,
 }
 
 struct Seat {
@@ -92,10 +92,10 @@ impl Chat {
     pub fn new(
         slack: SlackClient,
         bot_user: String,
+        team: String,
         store: Arc<dyn Store>,
         access: Access,
         fleet: Fleet,
-        coalesce: Duration,
     ) -> Arc<Self> {
         Arc::new(Self {
             slack,
@@ -103,7 +103,7 @@ impl Chat {
             store,
             access,
             fleet,
-            coalesce,
+            team,
             orphaned: Mutex::new(HashSet::new()),
             busy: Mutex::new(HashSet::new()),
         })
@@ -124,6 +124,7 @@ impl Chat {
                 ts,
                 thread_ts,
                 text,
+                direct: false,
             },
             Event::Message {
                 channel,
@@ -140,6 +141,7 @@ impl Chat {
                 ts,
                 thread_ts,
                 text,
+                direct: true,
             },
             Event::Message { .. } => {
                 tracing::debug!(event = ?event_summary(&event), "ignored a Slack event");
@@ -241,7 +243,8 @@ impl Chat {
             };
             match reply {
                 Ok(GatewayReply::Prompt(_)) => {
-                    self.stream(conversation, &seat.node, pending.events).await;
+                    self.stream(conversation, incoming, &seat.node, pending.events)
+                        .await;
                     return;
                 }
                 Err(CallError::Fault(fault))
@@ -414,19 +417,28 @@ impl Chat {
         })
     }
 
-    async fn stream(&self, conversation: &Conversation, node: &Node, mut events: StreamEvents) {
-        let mut reply = Reply::new(conversation.clone());
-        reply.show(&self.slack, WORKING).await;
-        let mut text = String::new();
-        let mut status: Option<String> = None;
-        let mut dirty = false;
-        let mut next_flush = Instant::now() + self.coalesce;
+    async fn stream(
+        &self,
+        conversation: &Conversation,
+        incoming: &Incoming,
+        node: &Node,
+        mut events: StreamEvents,
+    ) {
+        let recipient = (!incoming.direct).then(|| (self.team.clone(), incoming.user.clone()));
+        let mut reply = Reply::new(
+            self.slack.clone(),
+            Target {
+                channel: conversation.channel.clone(),
+                thread_ts: conversation.thread_ts.clone(),
+                recipient,
+            },
+        );
         loop {
+            let due = reply.due();
             let event = tokio::select! {
                 event = events.recv() => event,
-                () = tokio::time::sleep_until(next_flush), if dirty => {
-                    reply.show(&self.slack, &compose(&text, status.as_deref())).await;
-                    dirty = false;
+                () = sleep_until_due(due) => {
+                    reply.flush_due().await;
                     continue;
                 }
             };
@@ -435,20 +447,9 @@ impl Chat {
             };
             match event {
                 Open::Known(TurnEvent::Message {
-                    content: Open::Known(ContentBlock::Text { text: chunk }),
-                }) => {
-                    text.push_str(&chunk);
-                    status = None;
-                }
-                Open::Known(TurnEvent::Status { text: line }) => status = Some(line),
+                    content: Open::Known(ContentBlock::Text { text }),
+                }) => reply.text(&text).await,
                 Open::Known(TurnEvent::ToolCall { tool_call }) => {
-                    status = Some(format!(
-                        "Running {}",
-                        tool_call
-                            .title
-                            .clone()
-                            .unwrap_or_else(|| tool_call.name.clone())
-                    ));
                     let verdict = ToolVerdict {
                         id: tool_call.id.clone(),
                         decision: Decision::Allow,
@@ -456,6 +457,24 @@ impl Chat {
                     if let Err(err) = node.link.verdict(verdict).await {
                         tracing::warn!(error = %err, "could not rule on a tool call");
                     }
+                    let title = tool_call.title.as_deref().unwrap_or(&tool_call.name);
+                    reply
+                        .task(&tool_call.id.0, Some(title), TaskStatus::InProgress)
+                        .await;
+                }
+                Open::Known(TurnEvent::ToolCallUpdate { tool_call_update }) => {
+                    let status = match tool_call_update.status {
+                        ToolCallStatus::InProgress => TaskStatus::InProgress,
+                        ToolCallStatus::Completed => TaskStatus::Complete,
+                        ToolCallStatus::Failed | ToolCallStatus::Denied => TaskStatus::Error,
+                    };
+                    reply
+                        .task(
+                            &tool_call_update.id.0,
+                            tool_call_update.title.as_deref(),
+                            status,
+                        )
+                        .await;
                 }
                 Open::Known(TurnEvent::Question { question }) => {
                     self.unavailable(node, question.id).await;
@@ -465,28 +484,26 @@ impl Chat {
                     self.unavailable(node, sign_in.id).await;
                 }
                 Open::Known(TurnEvent::Error { error }) => {
-                    text.push_str(&format!("\n\n_The turn failed: {}_", error.message));
+                    reply
+                        .text(&format!("\n\n_The turn failed: {}_", error.message))
+                        .await;
                 }
                 Open::Known(TurnEvent::Complete { .. }) => {}
                 other => tracing::debug!(event = ?other, "turn event not shown yet"),
             }
-            if !dirty {
-                dirty = true;
-                next_flush = Instant::now() + self.coalesce;
-            }
         }
         if node.link.is_closed() {
-            text.push_str(&format!(
-                "\n\n_*{}* went offline before finishing this answer._",
-                node.name
-            ));
+            reply
+                .text(&format!(
+                    "\n\n_**{}** went offline before finishing this answer._",
+                    node.name
+                ))
+                .await;
         }
-        let finished = if text.trim().is_empty() {
-            "_Done, with nothing to say._".to_owned()
-        } else {
-            text
-        };
-        reply.show(&self.slack, &render::mrkdwn(&finished)).await;
+        if !reply.has_written() {
+            reply.text("_Done, with nothing to say._").await;
+        }
+        reply.finish().await;
     }
 
     async fn unavailable(&self, node: &Node, id: rax::id::PromptId) {
@@ -529,66 +546,9 @@ impl Chat {
     }
 }
 
-fn compose(text: &str, status: Option<&str>) -> String {
-    let mut shown = render::mrkdwn(text);
-    if let Some(status) = status {
-        if !shown.is_empty() {
-            shown.push_str("\n\n");
-        }
-        shown.push_str(&format!("_{}…_", render::escape(status)));
-    }
-    if shown.trim().is_empty() {
-        WORKING.to_owned()
-    } else {
-        shown
-    }
-}
-
-struct Reply {
-    conversation: Conversation,
-    posted: Vec<(String, String)>,
-}
-
-impl Reply {
-    fn new(conversation: Conversation) -> Self {
-        Self {
-            conversation,
-            posted: Vec::new(),
-        }
-    }
-
-    async fn show(&mut self, slack: &SlackClient, text: &str) {
-        for (index, part) in render::split(text, MESSAGE_LIMIT).into_iter().enumerate() {
-            match self.posted.get(index) {
-                Some((_, shown)) if *shown == part => {}
-                Some((ts, _)) => {
-                    let update = UpdateMessage {
-                        channel: self.conversation.channel.clone(),
-                        ts: ts.clone(),
-                        text: part.clone(),
-                        blocks: Vec::new(),
-                    };
-                    match slack.update_message(&update).await {
-                        Ok(()) => self.posted[index].1 = part,
-                        Err(err) => tracing::warn!(error = %err, "could not update a reply"),
-                    }
-                }
-                None => {
-                    let message = PostMessage {
-                        channel: self.conversation.channel.clone(),
-                        thread_ts: Some(self.conversation.thread_ts.clone()),
-                        text: part.clone(),
-                        blocks: Vec::new(),
-                    };
-                    match slack.post_message(&message).await {
-                        Ok(posted) => self.posted.push((posted.ts, part)),
-                        Err(err) => {
-                            tracing::warn!(error = %err, "could not post a reply");
-                            return;
-                        }
-                    }
-                }
-            }
-        }
+async fn sleep_until_due(due: Option<Instant>) {
+    match due {
+        Some(due) => tokio::time::sleep_until(due).await,
+        None => std::future::pending().await,
     }
 }

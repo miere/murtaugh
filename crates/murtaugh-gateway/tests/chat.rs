@@ -14,7 +14,7 @@ use rax::session::{Initialized, NodeCapabilities, PromptAccepted, SessionCreated
 use rax::tool::{Decision, ToolCall, ToolKind};
 use rax::{Event, GatewayCall, GatewayReply, Open};
 use rax_tokio::node::{NodeConfig, NodeEvent, NodeHandle, NodeLink};
-use slack_sim::{BOT_USER_ID, GENERAL, SimMessage, SlackSim};
+use slack_sim::{BOT_USER_ID, GENERAL, SimMessage, SlackSim, TEAM_ID};
 use time::OffsetDateTime;
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -284,6 +284,16 @@ async fn answer(
             node.event(id.clone(), Event::ToolCall { tool_call: tool })
                 .await
                 .unwrap();
+            let done = Event::ToolCallUpdate {
+                tool_call_update: rax::tool::ToolCallUpdate {
+                    id: ToolCallId("tc1".into()),
+                    status: rax::tool::ToolCallStatus::Completed,
+                    title: None,
+                    content: vec![],
+                    output: None,
+                },
+            };
+            node.event(id.clone(), done).await.unwrap();
             let last = text.lines().last().unwrap_or_default().to_owned();
             let reply = Event::Message {
                 content: ContentBlock::text(format!("**{name}** says pong to: {last}")).into(),
@@ -314,10 +324,31 @@ async fn a_mention_is_answered_in_its_thread_by_the_persons_own_node() {
                 .any(|message| message.text.contains("says pong to: ping"))
         })
         .await;
-    assert!(
-        replies
-            .iter()
-            .any(|message| message.text.contains("*laptop* says pong"))
+    let answer = replies
+        .iter()
+        .find(|message| message.text.contains("**laptop** says pong"))
+        .expect("no streamed answer");
+    let stream = eventually("the stream to stop", || {
+        rig.sim
+            .thread(GENERAL, &ts)
+            .into_iter()
+            .find(|m| m.ts == answer.ts)
+            .and_then(|m| m.stream)
+            .filter(|stream| !stream.open)
+    })
+    .await;
+    assert_eq!(
+        stream.recipient,
+        Some((TEAM_ID.to_owned(), ALICE.to_owned()))
+    );
+    assert_eq!(stream.plans, ["Task list"]);
+    assert_eq!(stream.tasks.len(), 1);
+    assert_eq!(
+        (
+            stream.tasks[0].title.as_str(),
+            stream.tasks[0].status.as_str()
+        ),
+        ("ls", "complete")
     );
     assert!(matches!(
         within(laptop.seen.recv()).await.unwrap(),
@@ -379,7 +410,7 @@ async fn a_pre_authorised_person_uses_the_admins_node_and_hears_when_none_is_up(
     rig.bot_replies(&ts, |replies| {
         replies
             .iter()
-            .any(|m| m.text.contains("*desktop* says pong"))
+            .any(|m| m.text.contains("**desktop** says pong"))
     })
     .await;
     rig.shutdown.cancel();

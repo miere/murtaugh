@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::access::{Access, Snapshot};
-use crate::chat::{COALESCE, Chat};
+use crate::chat::Chat;
 use crate::config;
 use crate::fleet::Fleet;
 use crate::hub::{self, REFRESH};
@@ -94,10 +94,10 @@ pub async fn serve(
     let chat = Chat::new(
         slack.clone(),
         identity.user_id.clone(),
+        identity.team_id.clone(),
         store.clone(),
         access,
         fleet,
-        COALESCE,
     );
     tracing::info!(listen = %hub.server.local_addr(), team = %identity.team_id, %holder, "murtaugh gateway started; waiting to lead");
     let mut seen = Seen::default();
