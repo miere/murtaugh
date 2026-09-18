@@ -215,7 +215,17 @@ async fn clicks_and_slash_commands_come_through_as_payloads() {
     match next(&mut socket).await {
         SocketEvent::Interactive(payload) => {
             assert_eq!(payload["type"], "block_actions");
-            assert_eq!(payload["actions"][0]["value"], "p1");
+            assert_eq!(
+                murtaugh_slack::Click::from_interactive(&payload),
+                Some(murtaugh_slack::Click {
+                    user: ALICE.into(),
+                    channel: GENERAL.into(),
+                    message_ts: posted.ts.clone(),
+                    thread_ts: None,
+                    action_id: "approve".into(),
+                    value: "p1".into(),
+                })
+            );
         }
         other => panic!("{other:?}"),
     }

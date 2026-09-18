@@ -266,6 +266,11 @@ impl SlackSim {
             .unwrap_or_default()
     }
 
+    /// Messages only one person saw, as (channel, user, text), oldest first.
+    pub fn ephemerals(&self) -> Vec<(String, String, String)> {
+        self.inner.lock().ephemerals.clone()
+    }
+
     pub fn violations(&self) -> Vec<Violation> {
         self.inner.lock().violations.clone()
     }
@@ -635,7 +640,12 @@ fn post_as(
 }
 
 fn find_button(msg: &SimMessage, action_id: &str) -> Option<(String, Value)> {
-    let blocks = msg.blocks.as_ref()?.as_array()?;
+    let top = msg.blocks.as_ref()?.as_array()?;
+    let nested = top
+        .iter()
+        .filter_map(|block| block.get("child_blocks").and_then(Value::as_array))
+        .flatten();
+    let blocks: Vec<&Value> = top.iter().chain(nested).collect();
     blocks.iter().enumerate().find_map(|(i, block)| {
         let elements = block.get("elements")?.as_array()?;
         let button = elements.iter().find(|e| {

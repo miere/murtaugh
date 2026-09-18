@@ -5,21 +5,23 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use murtaugh_slack::{Event, FileRef, PostMessage, SlackClient, TaskStatus, Upload};
-use murtaugh_store::{Conversation, Pin, Store, UserId};
+use murtaugh_slack::{Click, Event, FileRef, PostMessage, SlackClient, TaskStatus, Upload};
+use murtaugh_store::{Conversation, Pin, Store, ToolMode, UserConfig, UserId};
 use rax::attachment::Attachment;
 use rax::content::ContentBlock;
 use rax::id::SessionId;
 use rax::interaction::{DisplayAnswer, DisplayOutcome};
 use rax::session::{NewSession, Prompt};
-use rax::tool::{Decision, ToolCallStatus, ToolVerdict};
+use rax::tool::{Decision, DeniedBy, ToolCall, ToolCallStatus, ToolVerdict};
 use rax::{ErrorKind, Event as TurnEvent, GatewayCall, GatewayReply, Open};
 use rax_tokio::CallError;
 use rax_tokio::gateway::StreamEvents;
 use time::OffsetDateTime;
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 use crate::access::Access;
+use crate::approval::{self, Approvals};
 use crate::files::Files;
 use crate::fleet::{Fleet, Node};
 use crate::hub::FleetChange;
@@ -46,6 +48,8 @@ pub struct Chat {
     files: Files,
     team: String,
     turn_timings: bool,
+    approvals: Approvals,
+    approval_timeout: Duration,
     orphaned: Mutex<HashSet<Conversation>>,
     busy: Mutex<HashSet<Conversation>>,
 }
@@ -110,6 +114,7 @@ pub struct Parts {
     pub fleet: Fleet,
     pub files: Files,
     pub turn_timings: bool,
+    pub approval_timeout: Duration,
 }
 
 impl Chat {
@@ -123,6 +128,7 @@ impl Chat {
             fleet,
             files,
             turn_timings,
+            approval_timeout,
         } = parts;
         Arc::new(Self {
             slack,
@@ -133,6 +139,8 @@ impl Chat {
             files,
             team,
             turn_timings,
+            approvals: Approvals::default(),
+            approval_timeout,
             orphaned: Mutex::new(HashSet::new()),
             busy: Mutex::new(HashSet::new()),
         })
@@ -196,6 +204,24 @@ impl Chat {
 
     /// A departed node's pins are dropped now; the notice waits for the next message, which is
     /// when the conversation is rebuilt from its thread.
+    pub async fn on_click(self: Arc<Self>, click: Click) {
+        let Some(note) = self.approvals.click(&click) else {
+            return;
+        };
+        if let Err(err) = self
+            .slack
+            .post_ephemeral(
+                &click.channel,
+                click.thread_ts.as_deref(),
+                &click.user,
+                &note,
+            )
+            .await
+        {
+            tracing::warn!(error = %err, "could not answer a click");
+        }
+    }
+
     pub async fn on_fleet(self: Arc<Self>, change: FleetChange) {
         let FleetChange::Gone { selector } = change else {
             return;
@@ -492,6 +518,7 @@ impl Chat {
     ) -> Option<Instant> {
         let recipient = (!incoming.direct).then(|| (self.team.clone(), incoming.user.clone()));
         let mut first_output = None;
+        let turn = CancellationToken::new();
         let mut reply = Reply::new(
             self.slack.clone(),
             Target {
@@ -513,11 +540,12 @@ impl Chat {
                 break;
             };
             let written = reply.has_written();
-            self.show(&mut reply, node, event).await;
+            self.show(&mut reply, node, event, &turn).await;
             if !written && reply.has_written() {
                 first_output.get_or_insert_with(Instant::now);
             }
         }
+        turn.cancel();
         if node.link.is_closed() {
             reply
                 .text(&format!(
@@ -533,23 +561,25 @@ impl Chat {
         first_output
     }
 
-    async fn show(&self, reply: &mut Reply, node: &Node, event: Open<TurnEvent>) {
+    async fn show(
+        &self,
+        reply: &mut Reply,
+        node: &Node,
+        event: Open<TurnEvent>,
+        turn: &CancellationToken,
+    ) {
         match event {
             Open::Known(TurnEvent::Message {
                 content: Open::Known(ContentBlock::Text { text }),
             }) => reply.text(&text).await,
             Open::Known(TurnEvent::ToolCall { tool_call }) => {
-                let verdict = ToolVerdict {
-                    id: tool_call.id.clone(),
-                    decision: Decision::Allow,
-                };
-                if let Err(err) = node.link.verdict(verdict).await {
-                    tracing::warn!(error = %err, "could not rule on a tool call");
-                }
-                let title = tool_call.title.as_deref().unwrap_or(&tool_call.name);
-                reply
-                    .task(&tool_call.id.0, Some(title), TaskStatus::InProgress)
-                    .await;
+                let id = tool_call.id.0.clone();
+                let title = tool_call
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| tool_call.name.clone());
+                self.rule(reply.target(), node, tool_call, turn).await;
+                reply.task(&id, Some(&title), TaskStatus::InProgress).await;
             }
             Open::Known(TurnEvent::ToolCallUpdate { tool_call_update }) => {
                 let status = match tool_call_update.status {
@@ -591,6 +621,52 @@ impl Chat {
             }
             Open::Known(TurnEvent::Complete { .. }) => {}
             other => tracing::debug!(event = ?other, "turn event not shown yet"),
+        }
+    }
+
+    /// Allows, denies, or puts the call to the node's owner, as their tool mode says.
+    async fn rule(&self, target: &Target, node: &Node, tool: ToolCall, turn: &CancellationToken) {
+        let config = match self.store.user(&node.owner).await {
+            Ok(config) => config,
+            Err(err) => {
+                tracing::warn!(error = %err, "could not read the owner's tool rules; asking them");
+                UserConfig {
+                    tool_mode: ToolMode::AllowedWhitelist,
+                    ..UserConfig::new(node.owner.clone())
+                }
+            }
+        };
+        let decision = match config.tool_mode {
+            ToolMode::AlwaysAllowed => Decision::Allow,
+            ToolMode::AllowedWhitelist if config.whitelist.contains(&tool.name) => Decision::Allow,
+            ToolMode::Denied => Decision::Deny {
+                by: DeniedBy::Policy,
+                reason: Some("The node's owner does not allow tools.".into()),
+            },
+            ToolMode::AllowedWhitelist => {
+                let ask = approval::Ask {
+                    slack: self.slack.clone(),
+                    store: self.store.clone(),
+                    link: node.link.clone(),
+                    node_name: node.name.clone(),
+                    owner: node.owner.clone(),
+                    channel: target.channel.clone(),
+                    thread_ts: target.thread_ts.clone(),
+                    tool,
+                    timeout: self.approval_timeout,
+                    turn: turn.clone(),
+                };
+                let approvals = self.approvals.clone();
+                tokio::spawn(async move { approvals.ask(ask).await });
+                return;
+            }
+        };
+        let verdict = ToolVerdict {
+            id: tool.id,
+            decision,
+        };
+        if let Err(err) = node.link.verdict(verdict).await {
+            tracing::warn!(error = %err, "could not rule on a tool call");
         }
     }
 

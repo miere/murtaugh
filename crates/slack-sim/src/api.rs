@@ -9,7 +9,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use serde_json::{Map, Value, json};
 
-use crate::state::{APP_TOKEN, BOT_TOKEN, Fault, State, new_message};
+use crate::state::{APP_TOKEN, BOT_TOKEN, Fault, State, new_message, now_secs};
 use crate::{BOT_ID, BOT_USER_ID, Call, ChannelKind, Inner, Reaction, TEAM_ID, blocks, render};
 
 const METHODS: &[&str] = &[
@@ -17,6 +17,7 @@ const METHODS: &[&str] = &[
     "apps.connections.open",
     "chat.postMessage",
     "chat.update",
+    "chat.postEphemeral",
     "chat.startStream",
     "chat.appendStream",
     "chat.stopStream",
@@ -31,6 +32,7 @@ const JSON_METHODS: &[&str] = &[
     "auth.test",
     "chat.postMessage",
     "chat.update",
+    "chat.postEphemeral",
     "reactions.add",
 ];
 const MAX_TEXT: usize = 40_000;
@@ -257,6 +259,7 @@ fn dispatch(
         "chat.appendStream" => crate::stream::append(st, params),
         "chat.stopStream" => crate::stream::stop(st, params),
         "assistant.threads.setStatus" => crate::stream::set_status(st, params),
+        "chat.postEphemeral" => post_ephemeral(st, params),
         "reactions.add" => add_reaction(st, params),
         "conversations.replies" => replies(st, params),
         "files.getUploadURLExternal" => crate::upload::reserve(st, params),
@@ -360,6 +363,19 @@ fn post_message(st: &mut State, params: &Map<String, Value>) -> Result<Value, Ap
         .get(&id)
         .ok_or_else(|| err("channel_not_found", id.clone()))?;
     Ok(json!({"channel": id, "ts": msg.ts, "message": render::message(st, chan, &msg)}))
+}
+
+fn post_ephemeral(st: &mut State, params: &Map<String, Value>) -> Result<Value, ApiError> {
+    let id = channel(st, arg(params, "channel")?, true)?;
+    let user = arg(params, "user")?
+        .filter(|user| st.users.contains_key(user))
+        .ok_or_else(|| err("user_not_found", "`user` is not a member of the workspace"))?;
+    let content = content(params)?;
+    let text = content
+        .text
+        .ok_or_else(|| err("no_text", "an ephemeral message needs text"))?;
+    st.ephemerals.push((id, user, text));
+    Ok(json!({"message_ts": format!("{}.000000", now_secs())}))
 }
 
 fn update_message(st: &mut State, params: &Map<String, Value>) -> Result<Value, ApiError> {

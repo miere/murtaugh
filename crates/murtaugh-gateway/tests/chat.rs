@@ -105,6 +105,10 @@ struct Rig {
 }
 
 async fn rig() -> Rig {
+    rig_with(murtaugh_gateway::approval::TIMEOUT).await
+}
+
+async fn rig_with(approval_timeout: Duration) -> Rig {
     if let Ok(filter) = std::env::var("TEST_LOG") {
         let _ = tracing_subscriber::fmt()
             .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
@@ -138,7 +142,7 @@ async fn rig() -> Rig {
         Arc::new(SqliteStore::open(&dir.path().join("murtaugh.db")).unwrap());
     store.set_admin(&user(ADMIN)).await.unwrap();
     store.approve(&user(ALICE), &user(ADMIN)).await.unwrap();
-    let shutdown = gateway(&sim, config);
+    let shutdown = gateway_with(&sim, config, approval_timeout);
     Rig {
         sim,
         _dir: dir,
@@ -149,10 +153,19 @@ async fn rig() -> Rig {
 }
 
 fn gateway(sim: &SlackSim, config: std::path::PathBuf) -> CancellationToken {
+    gateway_with(sim, config, murtaugh_gateway::approval::TIMEOUT)
+}
+
+fn gateway_with(
+    sim: &SlackSim,
+    config: std::path::PathBuf,
+    approval_timeout: Duration,
+) -> CancellationToken {
     let shutdown = CancellationToken::new();
     let options = Options {
         slack_api: sim.api_base(),
         refresh: Duration::from_millis(100),
+        approval_timeout,
     };
     tokio::spawn({
         let shutdown = shutdown.clone();
@@ -197,27 +210,26 @@ impl Rig {
         })
         .unwrap();
         let (seen, receiver) = mpsc::unbounded_channel();
+        let (verdicts, _) = tokio::sync::broadcast::channel::<bool>(16);
         let (initialized, mut ready) = mpsc::channel(1);
-        let node = handle.clone();
-        let sessions = Arc::new(Mutex::new(0u32));
-        let prefix = name.to_owned();
+        let script = Script {
+            node: handle.clone(),
+            seen,
+            verdicts,
+            sessions: Arc::new(Mutex::new(0u32)),
+            name: name.to_owned(),
+            initialized,
+        };
         tokio::spawn(async move {
             while let Some(event) = events.recv().await {
                 match event {
                     NodeEvent::Request { id, call } => {
-                        tokio::spawn(answer(
-                            node.clone(),
-                            id,
-                            call,
-                            seen.clone(),
-                            sessions.clone(),
-                            prefix.clone(),
-                            initialized.clone(),
-                        ));
+                        tokio::spawn(answer(script.clone(), id, call));
                     }
                     NodeEvent::Verdict(verdict) => {
                         let allowed = matches!(verdict.decision, Decision::Allow);
-                        let _ = seen.send(Seen::Verdict { allowed });
+                        let _ = script.seen.send(Seen::Verdict { allowed });
+                        let _ = script.verdicts.send(allowed);
                     }
                     _ => {}
                 }
@@ -251,15 +263,26 @@ impl Rig {
     }
 }
 
-async fn answer(
+/// What a scripted node answers with, shared by every call it handles.
+#[derive(Clone)]
+struct Script {
     node: NodeHandle,
-    id: RequestId,
-    call: GatewayCall,
     seen: mpsc::UnboundedSender<Seen>,
+    verdicts: tokio::sync::broadcast::Sender<bool>,
     sessions: Arc<Mutex<u32>>,
     name: String,
     initialized: mpsc::Sender<()>,
-) {
+}
+
+async fn answer(script: Script, id: RequestId, call: GatewayCall) {
+    let Script {
+        node,
+        seen,
+        verdicts,
+        sessions,
+        name,
+        initialized,
+    } = script;
     match call {
         GatewayCall::Initialize(_) => {
             let reply = GatewayReply::Initialize(Initialized {
@@ -313,16 +336,26 @@ async fn answer(
                 name: "Bash".into(),
                 title: Some("ls".into()),
                 kind: ToolKind::Execute,
-                input: None,
+                input: Some(serde_json::json!({"command": "git push origin main"})),
                 content: vec![],
             };
+            let mut ruled = verdicts.subscribe();
             node.event(id.clone(), Event::ToolCall { tool_call: tool })
                 .await
                 .unwrap();
+            let allowed = tokio::time::timeout(Duration::from_secs(20), ruled.recv())
+                .await
+                .map(|verdict| verdict.unwrap_or(false))
+                .unwrap_or(false);
+            let status = if allowed {
+                rax::tool::ToolCallStatus::Completed
+            } else {
+                rax::tool::ToolCallStatus::Denied
+            };
             let done = Event::ToolCallUpdate {
                 tool_call_update: rax::tool::ToolCallUpdate {
                     id: ToolCallId("tc1".into()),
-                    status: rax::tool::ToolCallStatus::Completed,
+                    status,
                     title: None,
                     content: vec![],
                     output: None,
@@ -346,8 +379,10 @@ async fn answer(
                     .unwrap();
             }
             let last = text.lines().last().unwrap_or_default().to_owned();
+            let ruling = if allowed { "tool ran" } else { "tool refused" };
             let reply = Event::Message {
-                content: ContentBlock::text(format!("**{name}** says pong to: {last}")).into(),
+                content: ContentBlock::text(format!("**{name}** says pong to: {last} ({ruling})"))
+                    .into(),
             };
             node.event(id.clone(), reply).await.unwrap();
             node.event(id.clone(), Event::Complete { stop_reason: None })
@@ -937,5 +972,179 @@ async fn an_attachment_whose_bytes_do_not_match_is_reported_not_uploaded() {
             .iter()
             .all(|c| !c.method.starts_with("files.getUpload")),
     );
+    rig.shutdown.cancel();
+}
+
+fn approval_card(rig: &Rig, ts: &str) -> Option<SimMessage> {
+    rig.sim.thread(GENERAL, ts).into_iter().find(|m| {
+        m.blocks
+            .as_ref()
+            .is_some_and(|b| b.to_string().contains("murtaugh_approval_card"))
+    })
+}
+
+fn card_says(card: &SimMessage, text: &str) -> bool {
+    card.blocks
+        .as_ref()
+        .is_some_and(|b| b.to_string().contains(text))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_the_node_owner_can_approve_a_tool_off_their_whitelist() {
+    let rig = rig().await;
+    rig.store
+        .set_tool_mode(&user(ALICE), murtaugh_store::ToolMode::AllowedWhitelist)
+        .await
+        .unwrap();
+    let mut laptop = rig.node(ALICE, "laptop").await;
+    let ts = rig
+        .sim
+        .mention(ALICE, GENERAL, "push it", None)
+        .await
+        .unwrap();
+    laptop.next_prompt().await;
+    let card = eventually("the approval card", || approval_card(&rig, &ts)).await;
+    assert!(card_says(
+        &card,
+        "Waiting on <@U0ALICE01>'s approval. Denied automatically in 30 minutes."
+    ));
+    assert!(card_says(
+        &card,
+        "The agent on laptop wants to use the 'Bash' tool"
+    ));
+    assert!(card_says(&card, "git push origin main"));
+
+    rig.sim
+        .click(
+            BOB,
+            GENERAL,
+            &card.ts,
+            murtaugh_gateway::approval::ALLOW_ONCE,
+        )
+        .await
+        .unwrap();
+    eventually("the note to Bob", || {
+        rig.sim
+            .ephemerals()
+            .iter()
+            .any(|(_, who, text)| who == BOB && text.contains("Only <@U0ALICE01> can decide"))
+            .then_some(())
+    })
+    .await;
+    assert!(approval_card(&rig, &ts).is_some_and(|c| card_says(&c, "Approval Needed")));
+
+    rig.sim
+        .click(
+            ALICE,
+            GENERAL,
+            &card.ts,
+            murtaugh_gateway::approval::ALLOW_ONCE,
+        )
+        .await
+        .unwrap();
+    wait_for_turn_end(&rig, GENERAL, &ts, "pong to: push it (tool ran)").await;
+    let settled = approval_card(&rig, &ts).unwrap();
+    assert!(
+        card_says(&settled, "Approved by <@U0ALICE01>."),
+        "{:?}",
+        settled.blocks
+    );
+    assert!(
+        !card_says(&settled, "tool_approval_once"),
+        "the buttons stayed"
+    );
+    assert!(
+        rig.store
+            .user(&user(ALICE))
+            .await
+            .unwrap()
+            .whitelist
+            .is_empty()
+    );
+    assert_eq!(rig.sim.violations(), vec![]);
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn always_allow_whitelists_the_tool_so_the_next_call_runs_unasked() {
+    let rig = rig().await;
+    rig.store
+        .set_tool_mode(&user(ALICE), murtaugh_store::ToolMode::AllowedWhitelist)
+        .await
+        .unwrap();
+    let mut laptop = rig.node(ALICE, "laptop").await;
+    let ts = rig
+        .sim
+        .mention(ALICE, GENERAL, "first", None)
+        .await
+        .unwrap();
+    laptop.next_prompt().await;
+    let card = eventually("the approval card", || approval_card(&rig, &ts)).await;
+    rig.sim
+        .click(
+            ALICE,
+            GENERAL,
+            &card.ts,
+            murtaugh_gateway::approval::ALLOW_ALWAYS,
+        )
+        .await
+        .unwrap();
+    wait_for_turn_end(&rig, GENERAL, &ts, "pong to: first (tool ran)").await;
+    assert!(card_says(
+        &approval_card(&rig, &ts).unwrap(),
+        "added *Bash* to their whitelist"
+    ));
+    assert!(
+        rig.store
+            .user(&user(ALICE))
+            .await
+            .unwrap()
+            .whitelist
+            .contains("Bash")
+    );
+
+    let second = rig
+        .sim
+        .mention(ALICE, GENERAL, "second", None)
+        .await
+        .unwrap();
+    laptop.next_prompt().await;
+    wait_for_turn_end(&rig, GENERAL, &second, "pong to: second (tool ran)").await;
+    assert!(approval_card(&rig, &second).is_none());
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unanswered_approval_is_denied_when_it_times_out() {
+    let rig = rig_with(Duration::from_millis(300)).await;
+    rig.store
+        .set_tool_mode(&user(ALICE), murtaugh_store::ToolMode::AllowedWhitelist)
+        .await
+        .unwrap();
+    let mut laptop = rig.node(ALICE, "laptop").await;
+    let ts = rig.sim.mention(ALICE, GENERAL, "wait", None).await.unwrap();
+    laptop.next_prompt().await;
+    wait_for_turn_end(&rig, GENERAL, &ts, "pong to: wait (tool refused)").await;
+    let card = eventually("the card to settle", || {
+        approval_card(&rig, &ts).filter(|c| card_says(c, "Approval Timed Out"))
+    })
+    .await;
+    assert!(card_says(&card, "No answer from <@U0ALICE01>"));
+    assert_eq!(rig.sim.violations(), vec![]);
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_owner_in_denied_mode_has_every_tool_refused_without_a_card() {
+    let rig = rig().await;
+    rig.store
+        .set_tool_mode(&user(ALICE), murtaugh_store::ToolMode::Denied)
+        .await
+        .unwrap();
+    let mut laptop = rig.node(ALICE, "laptop").await;
+    let ts = rig.sim.mention(ALICE, GENERAL, "try", None).await.unwrap();
+    laptop.next_prompt().await;
+    wait_for_turn_end(&rig, GENERAL, &ts, "pong to: try (tool refused)").await;
+    assert!(approval_card(&rig, &ts).is_none());
     rig.shutdown.cancel();
 }

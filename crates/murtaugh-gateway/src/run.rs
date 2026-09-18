@@ -5,13 +5,14 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use murtaugh_slack::{SlackClient, SocketEvent, SocketMode, Tokens};
+use murtaugh_slack::{Click, SlackClient, SocketEvent, SocketMode, Tokens};
 use murtaugh_store::{Leader, Lease};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::access::{Access, Snapshot};
+use crate::approval;
 use crate::chat::{self, Chat};
 use crate::config;
 use crate::files::Files;
@@ -25,6 +26,18 @@ pub struct Options {
     pub slack_api: Url,
     /// How soon a CLI change to access reaches this gateway.
     pub refresh: Duration,
+    /// How long a tool approval waits for the node's owner before denying.
+    pub approval_timeout: Duration,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            slack_api: Url::parse(SLACK_API).unwrap_or_else(|_| unreachable!()),
+            refresh: REFRESH,
+            approval_timeout: approval::TIMEOUT,
+        }
+    }
 }
 
 pub async fn run(path: &Path) -> Result<String, String> {
@@ -36,7 +49,7 @@ pub async fn run(path: &Path) -> Result<String, String> {
     spawn_signals(shutdown.clone())?;
     let options = Options {
         slack_api,
-        refresh: REFRESH,
+        ..Options::default()
     };
     serve(path, options, shutdown).await?;
     Ok(String::new())
@@ -103,6 +116,7 @@ pub async fn serve(
         fleet,
         files,
         turn_timings: config.log.turn_timings,
+        approval_timeout: options.approval_timeout,
     });
     tracing::info!(listen = %hub.server.local_addr(), team = %identity.team_id, %holder, "murtaugh gateway started; waiting to lead");
     let mut seen = Seen::default();
@@ -186,6 +200,11 @@ async fn serve_as_leader(
                 Some(SocketEvent::Event(envelope)) => {
                     if seen.first_time(&envelope.event_id) {
                         tokio::spawn(chat.clone().on_event(envelope.event));
+                    }
+                }
+                Some(SocketEvent::Interactive(payload)) => {
+                    if let Some(click) = Click::from_interactive(&payload) {
+                        tokio::spawn(chat.clone().on_click(click));
                     }
                 }
                 Some(_) => {}
