@@ -252,6 +252,7 @@ pub(crate) fn new_message(user: Option<&str>, text: &str) -> SimMessage {
         files: Vec::new(),
         reactions: Vec::<Reaction>::new(),
         edited: false,
+        stream: None,
     }
 }
 

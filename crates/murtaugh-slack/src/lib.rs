@@ -5,12 +5,16 @@ mod blocks;
 mod error;
 mod events;
 mod socket;
+mod stream;
 mod web;
 
 pub use blocks::{Block, Button, ButtonStyle, Text, mrkdwn};
 pub use error::SlackError;
 pub use events::{Event, EventEnvelope, FileRef, SocketEvent};
 pub use socket::SocketMode;
+pub use stream::{
+    Chunk, STREAM_FINALIZED, STREAMING_UNSUPPORTED, StartStream, TaskDisplayMode, TaskStatus,
+};
 pub use web::{
     DEFAULT_API_BASE, FileInfo, Identity, Message, PostMessage, Posted, SlackClient, Tokens,
     UpdateMessage,

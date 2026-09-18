@@ -12,6 +12,7 @@ use url::Url;
 use crate::blocks::Block;
 use crate::error::SlackError;
 use crate::events::FileRef;
+use crate::stream::{Chunk, StartStream};
 
 pub const DEFAULT_API_BASE: &str = "https://slack.com/api/";
 const DEFAULT_MAX_RETRIES: u32 = 3;
@@ -32,6 +33,21 @@ impl fmt::Debug for Tokens {
             .field("bot", &redact(&self.bot))
             .finish()
     }
+}
+
+fn chunks_json(chunks: &[Chunk]) -> Result<String, SlackError> {
+    serde_json::to_string(chunks).map_err(|source| SlackError::Decode {
+        method: "chunks".into(),
+        source,
+    })
+}
+
+fn mode(mode: crate::stream::TaskDisplayMode) -> String {
+    match mode {
+        crate::stream::TaskDisplayMode::Plan => "plan",
+        crate::stream::TaskDisplayMode::Timeline => "timeline",
+    }
+    .to_owned()
 }
 
 fn redact(token: &str) -> String {
@@ -238,6 +254,46 @@ impl SlackClient {
             }
         }
         Ok(out)
+    }
+
+    pub async fn start_stream(&self, start: &StartStream) -> Result<Posted, SlackError> {
+        let mut params = vec![
+            ("channel", start.channel.clone()),
+            ("thread_ts", start.thread_ts.clone()),
+            ("task_display_mode", mode(start.task_display_mode)),
+        ];
+        if let Some((team, user)) = &start.recipient {
+            params.push(("recipient_team_id", team.clone()));
+            params.push(("recipient_user_id", user.clone()));
+        }
+        if !start.chunks.is_empty() {
+            params.push(("chunks", chunks_json(&start.chunks)?));
+        }
+        self.call("chat.startStream", Token::Bot, Body::Form(params))
+            .await
+    }
+
+    pub async fn append_stream(
+        &self,
+        channel: &str,
+        ts: &str,
+        chunks: &[Chunk],
+    ) -> Result<(), SlackError> {
+        let params = vec![
+            ("channel", channel.to_owned()),
+            ("ts", ts.to_owned()),
+            ("chunks", chunks_json(chunks)?),
+        ];
+        self.call::<Value>("chat.appendStream", Token::Bot, Body::Form(params))
+            .await
+            .map(drop)
+    }
+
+    pub async fn stop_stream(&self, channel: &str, ts: &str) -> Result<(), SlackError> {
+        let params = vec![("channel", channel.to_owned()), ("ts", ts.to_owned())];
+        self.call::<Value>("chat.stopStream", Token::Bot, Body::Form(params))
+            .await
+            .map(drop)
     }
 
     pub async fn file_info(&self, file_id: &str) -> Result<FileInfo, SlackError> {
