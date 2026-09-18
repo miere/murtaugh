@@ -7,13 +7,14 @@ mod render;
 mod socket;
 mod state;
 mod stream;
+mod upload;
 
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use axum::Router;
-use axum::routing::{any, get};
+use axum::routing::{any, get, post};
 use serde_json::Value;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
@@ -94,6 +95,17 @@ pub struct SimMessage {
     pub stream: Option<SimStream>,
 }
 
+/// A file as the workspace holds it, whoever shared it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SimFile {
+    pub id: String,
+    pub name: String,
+    pub title: String,
+    pub mimetype: String,
+    pub bytes: Vec<u8>,
+    pub user: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SimStream {
     pub open: bool,
@@ -172,6 +184,7 @@ impl SlackSim {
             .route("/link/", get(socket::link))
             .route("/files-pri/{team_file}/download/{name}", get(api::download))
             .route("/signin", get(api::signin))
+            .route("/upload/v1/{file_id}", post(upload::receive))
             .with_state(inner.clone());
         let shutdown = inner.shutdown.clone();
         let server = tokio::spawn(async move {
@@ -339,6 +352,17 @@ impl SlackSim {
     /// Slack also sends a `message` event for a mention when the app subscribes to channel
     /// messages; on by default.
     /// The "is thinking..." line under a thread, while one is showing.
+    pub fn file(&self, id: &str) -> Option<SimFile> {
+        self.inner.lock().files.get(id).map(|file| SimFile {
+            id: file.id.clone(),
+            name: file.name.clone(),
+            title: file.title.clone().unwrap_or_else(|| file.name.clone()),
+            mimetype: file.mimetype.clone(),
+            bytes: file.bytes.clone(),
+            user: file.user.clone(),
+        })
+    }
+
     pub fn thread_status(&self, channel: &str, thread_ts: &str) -> Option<String> {
         self.inner
             .lock()
@@ -535,6 +559,7 @@ impl SlackSim {
         let file = File {
             id: id.clone(),
             name: name.to_owned(),
+            title: None,
             mimetype: mimetype.to_owned(),
             bytes: bytes.to_vec(),
             user: user.to_owned(),

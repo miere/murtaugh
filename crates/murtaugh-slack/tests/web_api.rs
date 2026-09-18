@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use murtaugh_slack::{
     Block, Button, ButtonStyle, FileInfo, PostMessage, SlackClient, SlackError, Text, Tokens,
-    UpdateMessage, mrkdwn,
+    UpdateMessage, Upload, mrkdwn,
 };
 use serde_json::json;
 use slack_sim::{ALICE, BOT_ID, BOT_USER_ID, GENERAL, SECRET, SlackSim, TEAM_ID};
@@ -333,4 +333,59 @@ fn blocks_serialise_to_slack_json() {
             "value": "1"
         }]})
     );
+}
+
+#[tokio::test]
+async fn upload_file_shares_the_bytes_into_a_thread_with_a_comment() {
+    let (sim, client) = setup().await;
+    let root = sim
+        .mention(ALICE, GENERAL, "make me a chart", None)
+        .await
+        .unwrap();
+    let file_id = client
+        .upload_file(&Upload {
+            channel: GENERAL.into(),
+            thread_ts: Some(root.clone()),
+            filename: "chart.png".into(),
+            title: Some("The chart".into()),
+            initial_comment: Some("Here you go".into()),
+            bytes: b"\x89PNG fake".to_vec(),
+        })
+        .await
+        .unwrap();
+    let file = sim.file(&file_id).expect("the file was never shared");
+    assert_eq!(
+        (
+            file.name.as_str(),
+            file.title.as_str(),
+            file.bytes.as_slice()
+        ),
+        ("chart.png", "The chart", b"\x89PNG fake".as_slice())
+    );
+    assert_eq!(file.user, BOT_USER_ID);
+    let shared = sim
+        .thread(GENERAL, &root)
+        .into_iter()
+        .find(|m| m.files == [file_id.clone()])
+        .expect("no message in the thread carries the file");
+    assert_eq!(shared.text, "Here you go");
+    assert!(sim.violations().is_empty(), "{:?}", sim.violations());
+}
+
+#[tokio::test]
+async fn upload_file_refuses_an_empty_file_before_calling_slack() {
+    let (sim, client) = setup().await;
+    let upload = Upload {
+        channel: GENERAL.into(),
+        thread_ts: None,
+        filename: "empty.txt".into(),
+        title: None,
+        initial_comment: None,
+        bytes: Vec::new(),
+    };
+    assert!(matches!(
+        client.upload_file(&upload).await,
+        Err(SlackError::Upload { .. })
+    ));
+    assert!(sim.calls().is_empty(), "{:?}", sim.calls());
 }

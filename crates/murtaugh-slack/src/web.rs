@@ -107,6 +107,17 @@ pub struct FileInfo {
     pub url_private_download: String,
 }
 
+/// A file to share; with a `thread_ts` it lands in that thread, `initial_comment` above it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Upload {
+    pub channel: String,
+    pub thread_ts: Option<String>,
+    pub filename: String,
+    pub title: Option<String>,
+    pub initial_comment: Option<String>,
+    pub bytes: Vec<u8>,
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum Token {
     App,
@@ -361,6 +372,70 @@ impl SlackClient {
             ));
         }
         Ok(res.bytes().await.map_err(http)?.to_vec())
+    }
+
+    /// Slack's external upload: reserve an id, send the bytes to the URL it gives, then share.
+    /// Returns the new file's id.
+    pub async fn upload_file(&self, upload: &Upload) -> Result<String, SlackError> {
+        #[derive(Deserialize)]
+        struct Reserved {
+            upload_url: String,
+            file_id: String,
+        }
+        if upload.bytes.is_empty() {
+            return Err(SlackError::Upload {
+                filename: upload.filename.clone(),
+                reason: "Slack refuses empty files".into(),
+            });
+        }
+        let reserve = vec![
+            ("filename", upload.filename.clone()),
+            ("length", upload.bytes.len().to_string()),
+        ];
+        let reserved: Reserved = self
+            .call(
+                "files.getUploadURLExternal",
+                Token::Bot,
+                Body::Form(reserve),
+            )
+            .await?;
+        let http = |source| SlackError::Http {
+            method: "files.upload".into(),
+            source,
+        };
+        let part = reqwest::multipart::Part::bytes(upload.bytes.clone())
+            .file_name(upload.filename.clone());
+        self.inner
+            .http
+            .post(&reserved.upload_url)
+            .header(AUTHORIZATION, format!("Bearer {}", self.inner.tokens.bot))
+            .multipart(reqwest::multipart::Form::new().part("file", part))
+            .send()
+            .await
+            .map_err(http)?
+            .error_for_status()
+            .map_err(http)?;
+        let title = upload.title.as_deref().unwrap_or(&upload.filename);
+        let mut share = vec![
+            (
+                "files",
+                json!([{"id": reserved.file_id, "title": title}]).to_string(),
+            ),
+            ("channel_id", upload.channel.clone()),
+        ];
+        if let Some(thread_ts) = &upload.thread_ts {
+            share.push(("thread_ts", thread_ts.clone()));
+        }
+        if let Some(comment) = upload.initial_comment.as_ref().filter(|c| !c.is_empty()) {
+            share.push(("initial_comment", comment.clone()));
+        }
+        self.call::<Value>(
+            "files.completeUploadExternal",
+            Token::Bot,
+            Body::Form(share),
+        )
+        .await?;
+        Ok(reserved.file_id)
     }
 
     pub(crate) async fn open_connection(&self) -> Result<String, SlackError> {

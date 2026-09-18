@@ -23,7 +23,7 @@ pub(crate) fn file(state: &State, file: &File) -> Value {
         "created": file.created,
         "timestamp": file.created,
         "name": file.name,
-        "title": file.name,
+        "title": file.title.as_deref().unwrap_or(&file.name),
         "mimetype": file.mimetype,
         "filetype": kind,
         "pretty_type": pretty,

@@ -66,6 +66,7 @@ impl Channel {
 pub(crate) struct File {
     pub id: String,
     pub name: String,
+    pub title: Option<String>,
     pub mimetype: String,
     pub bytes: Vec<u8>,
     pub user: String,
@@ -111,6 +112,7 @@ pub(crate) struct State {
     pub replies_page_size: usize,
     pub channel_message_events: bool,
     pub thread_statuses: HashMap<(String, String), String>,
+    pub reserved: HashMap<String, crate::upload::Reserved>,
     clock: u64,
     seq: u64,
 }
@@ -133,6 +135,7 @@ impl State {
             replies_page_size: 1000,
             channel_message_events: true,
             thread_statuses: HashMap::new(),
+            reserved: HashMap::new(),
             clock: 0,
             seq: 0,
         };

@@ -579,3 +579,46 @@ async fn wait_for_call_sees_past_calls_and_reports_what_arrived() {
         other => panic!("expected a timeout, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn an_external_upload_must_send_what_it_declared_before_it_is_shared() {
+    let sim = sim().await;
+    let bot = sim.tokens().bot;
+    let reserved = form_call(
+        &sim,
+        "files.getUploadURLExternal",
+        Some(&bot),
+        &[("filename", "a.txt"), ("length", "10")],
+    )
+    .await;
+    let file_id = reserved["file_id"].as_str().unwrap();
+    let files = json!([{"id": file_id}]).to_string();
+    let early = form_call(
+        &sim,
+        "files.completeUploadExternal",
+        Some(&bot),
+        &[("files", &files), ("channel_id", GENERAL)],
+    )
+    .await;
+    assert_eq!(early["error"], "file_not_found", "{early}");
+
+    let part = reqwest::multipart::Part::bytes(b"short".to_vec()).file_name("a.txt");
+    let status = reqwest::Client::new()
+        .post(reserved["upload_url"].as_str().unwrap())
+        .bearer_auth(&bot)
+        .multipart(reqwest::multipart::Form::new().part("file", part))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert!(status.is_success());
+    let shared = form_call(
+        &sim,
+        "files.completeUploadExternal",
+        Some(&bot),
+        &[("files", &files), ("channel_id", GENERAL)],
+    )
+    .await;
+    assert_eq!(shared["files"][0]["id"], file_id, "{shared}");
+    assert_eq!(errors(&sim), ["file_not_found", "length_mismatch"]);
+}
