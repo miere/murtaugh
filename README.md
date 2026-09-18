@@ -4,6 +4,23 @@ Murtaugh is a Slack gateway for AI agents. People talk to it in Slack; the agent
 such as [Riggs](https://github.com/miere/riggs), which connect to it over
 [RAX](https://github.com/miere/rax-protocol).
 
+## Installing
+
+Releases carry a `murtaugh-gateway` binary for Apple silicon (`aarch64-apple-darwin`), Intel Macs
+(`x86_64-apple-darwin`) and Linux (`x86_64-unknown-linux-gnu`). The repository is private, so
+download with `gh`:
+
+```sh
+target=aarch64-apple-darwin
+gh release download --repo miere/murtaugh --pattern "*-$target.tar.gz*"
+shasum -a 256 -c murtaugh-gateway-*-$target.tar.gz.sha256
+tar -xzf murtaugh-gateway-*-$target.tar.gz
+install -m 0755 murtaugh-gateway-*-$target/murtaugh-gateway ~/.local/bin/
+```
+
+`~/.local/bin` is on the PATH of the LaunchAgent that `murtaugh-gateway launchd` writes. To build
+from source instead: `cargo install --locked --git ssh://git@github.com/miere/murtaugh murtaugh-gateway`.
+
 ## Creating the Slack app
 
 ```sh
@@ -100,6 +117,13 @@ from the thread.
 | `murtaugh-store` | Where the gateway keeps its configuration: SQLite on one machine, Firestore for a cluster. |
 | `murtaugh-slack` | A Slack client: Socket Mode and the Web API methods the gateway calls. |
 | `slack-sim` | A fake Slack that validates and records every call, for testing without a workspace. |
+
+## Releasing
+
+Push a tag such as `v0.1.0`. The release workflow builds every target, stamps the version from the
+tag, and publishes the archives with their SHA-256 sums. Both workflows need a `RAX_READ_TOKEN`
+secret that can read `miere/rax-rs`, since Cargo fetches the RAX crates from that private
+repository.
 
 ## Testing
 

@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Let Cargo fetch the private RAX crates
+        env:
+          RAX_READ_TOKEN: ${{ secrets.RAX_READ_TOKEN }}
+        run: |
+          test -n "$RAX_READ_TOKEN" || { echo "::error::Set the RAX_READ_TOKEN secret: a token that can read miere/rax-rs"; exit 1; }
+          git config --global url."https://x-access-token:${RAX_READ_TOKEN}@github.com/miere/".insteadOf "https://github.com/miere/"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Start the Firestore emulator
+        run: |
+          docker run -d --name firestore -p 8080:8080 gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators \
+            gcloud emulators firestore start --host-port=0.0.0.0:8080
+          for _ in $(seq 60); do curl -sf localhost:8080 >/dev/null && exit 0; sleep 2; done
+          docker logs firestore; exit 1
+      - run: cargo test --workspace --locked
+        env:
+          FIRESTORE_EMULATOR_HOST: localhost:8080
