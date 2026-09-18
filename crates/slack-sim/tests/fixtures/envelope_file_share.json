@@ -1,0 +1,75 @@
+{
+  "envelope_id": "9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b",
+  "payload": {
+    "token": "XXYYZZ",
+    "team_id": "T061EG9RZ",
+    "context_team_id": "T061EG9RZ",
+    "context_enterprise_id": null,
+    "api_app_id": "A0KRD7HC3",
+    "event": {
+      "type": "message",
+      "text": "",
+      "files": [
+        {
+          "id": "F0S43PZDF",
+          "created": 1531763342,
+          "timestamp": 1531763342,
+          "name": "report.pdf",
+          "title": "report.pdf",
+          "mimetype": "application/pdf",
+          "filetype": "pdf",
+          "pretty_type": "PDF",
+          "user": "U061F7AUR",
+          "user_team": "T061EG9RZ",
+          "editable": false,
+          "size": 137531,
+          "mode": "hosted",
+          "is_external": false,
+          "external_type": "",
+          "is_public": true,
+          "public_url_shared": false,
+          "display_as_bot": false,
+          "username": "",
+          "url_private": "https://files.slack.com/files-pri/T061EG9RZ-F0S43PZDF/report.pdf",
+          "url_private_download": "https://files.slack.com/files-pri/T061EG9RZ-F0S43PZDF/download/report.pdf",
+          "media_display_type": "unknown",
+          "permalink": "https://example.slack.com/files/U061F7AUR/F0S43PZDF/report.pdf",
+          "permalink_public": "https://slack-files.com/T061EG9RZ-F0S43PZDF-3ce6b8e1d6",
+          "channels": ["C0LAN2Q65"],
+          "groups": [],
+          "ims": [],
+          "comments_count": 0,
+          "has_rich_preview": false,
+          "file_access": "visible"
+        }
+      ],
+      "upload": false,
+      "user": "U061F7AUR",
+      "display_as_bot": false,
+      "ts": "1531763342.000100",
+      "team": "T061EG9RZ",
+      "channel": "C0LAN2Q65",
+      "subtype": "file_share",
+      "event_ts": "1531763342.000100",
+      "channel_type": "channel"
+    },
+    "type": "event_callback",
+    "event_id": "Ev0PV52K23",
+    "event_time": 1531763342,
+    "authorizations": [
+      {
+        "enterprise_id": null,
+        "team_id": "T061EG9RZ",
+        "user_id": "U0LAN0Z89",
+        "is_bot": true,
+        "is_enterprise_install": false
+      }
+    ],
+    "is_ext_shared_channel": false,
+    "event_context": "4-eyJldCI6Im1lc3NhZ2UiLCJ0aWQiOiJUMDYxRUc5UloifQ"
+  },
+  "type": "events_api",
+  "accepts_response_payload": false,
+  "retry_attempt": 0,
+  "retry_reason": ""
+}

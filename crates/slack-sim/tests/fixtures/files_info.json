@@ -1,0 +1,39 @@
+{
+  "ok": true,
+  "file": {
+    "id": "F0S43PZDF",
+    "created": 1531763342,
+    "timestamp": 1531763342,
+    "name": "report.pdf",
+    "title": "report.pdf",
+    "mimetype": "application/pdf",
+    "filetype": "pdf",
+    "pretty_type": "PDF",
+    "user": "U061F7AUR",
+    "user_team": "T061EG9RZ",
+    "editable": false,
+    "size": 137531,
+    "mode": "hosted",
+    "is_external": false,
+    "external_type": "",
+    "is_public": true,
+    "public_url_shared": false,
+    "display_as_bot": false,
+    "username": "",
+    "url_private": "https://files.slack.com/files-pri/T061EG9RZ-F0S43PZDF/report.pdf",
+    "url_private_download": "https://files.slack.com/files-pri/T061EG9RZ-F0S43PZDF/download/report.pdf",
+    "media_display_type": "unknown",
+    "permalink": "https://example.slack.com/files/U061F7AUR/F0S43PZDF/report.pdf",
+    "permalink_public": "https://slack-files.com/T061EG9RZ-F0S43PZDF-3ce6b8e1d6",
+    "channels": ["C0T8SE4AU"],
+    "groups": [],
+    "ims": [],
+    "comments_count": 0,
+    "has_rich_preview": false,
+    "file_access": "visible"
+  },
+  "comments": [],
+  "response_metadata": {
+    "next_cursor": ""
+  }
+}

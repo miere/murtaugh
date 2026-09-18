@@ -1,0 +1,85 @@
+{
+  "envelope_id": "b1c2d3e4-f5a6-4b7c-8d9e-0f1a2b3c4d5e",
+  "payload": {
+    "type": "block_actions",
+    "user": {
+      "id": "U061F7AUR",
+      "username": "grace",
+      "name": "grace",
+      "team_id": "T061EG9RZ"
+    },
+    "api_app_id": "A0KRD7HC3",
+    "token": "XXYYZZ",
+    "container": {
+      "type": "message",
+      "message_ts": "1548261231.000200",
+      "channel_id": "C0LAN2Q65",
+      "is_ephemeral": false
+    },
+    "trigger_id": "12321423423.333649436676.d8c1bb837935619ccad0f624c448ffb3",
+    "team": {
+      "id": "T061EG9RZ",
+      "domain": "example"
+    },
+    "enterprise": null,
+    "is_enterprise_install": false,
+    "channel": {
+      "id": "C0LAN2Q65",
+      "name": "general"
+    },
+    "message": {
+      "type": "message",
+      "text": "Approve the plan?",
+      "user": "U0LAN0Z89",
+      "ts": "1548261231.000200",
+      "bot_id": "B0LAN0Z88",
+      "app_id": "A0KRD7HC3",
+      "bot_profile": {
+        "id": "B0LAN0Z88",
+        "deleted": false,
+        "name": "murtaugh",
+        "updated": 1700000000,
+        "app_id": "A0KRD7HC3",
+        "icons": {
+          "image_36": "https://a.slack-edge.com/80588/img/plugins/app/bot_36.png",
+          "image_48": "https://a.slack-edge.com/80588/img/plugins/app/bot_48.png",
+          "image_72": "https://a.slack-edge.com/80588/img/plugins/app/service_72.png"
+        },
+        "team_id": "T061EG9RZ"
+      },
+      "team": "T061EG9RZ",
+      "blocks": [
+        {
+          "type": "actions",
+          "block_id": "plan",
+          "elements": [
+            {
+              "type": "button",
+              "text": {"type": "plain_text", "text": "Approve", "emoji": true},
+              "action_id": "approve",
+              "value": "plan-1",
+              "style": "primary"
+            }
+          ]
+        }
+      ]
+    },
+    "state": {
+      "values": {}
+    },
+    "response_url": "https://hooks.slack.com/actions/T061EG9RZ/548261231/pOqEgk2JrzmYnYl0Ygfqb3Xg",
+    "actions": [
+      {
+        "action_id": "approve",
+        "block_id": "plan",
+        "text": {"type": "plain_text", "text": "Approve", "emoji": true},
+        "value": "plan-1",
+        "style": "primary",
+        "type": "button",
+        "action_ts": "1548261233.000000"
+      }
+    ]
+  },
+  "type": "interactive",
+  "accepts_response_payload": false
+}

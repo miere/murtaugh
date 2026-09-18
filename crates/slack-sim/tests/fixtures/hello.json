@@ -1,0 +1,12 @@
+{
+  "type": "hello",
+  "num_connections": 1,
+  "debug_info": {
+    "host": "applink-7fc4fdbb64-4x5xq",
+    "build_number": 10,
+    "approximate_connection_time": 18060
+  },
+  "connection_info": {
+    "app_id": "A01K58AR4RF"
+  }
+}

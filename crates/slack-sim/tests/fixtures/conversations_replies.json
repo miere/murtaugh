@@ -1,0 +1,32 @@
+{
+  "ok": true,
+  "messages": [
+    {
+      "type": "message",
+      "text": "island",
+      "user": "U061F7AUR",
+      "ts": "1482960137.003543",
+      "team": "T061EG9RZ",
+      "thread_ts": "1482960137.003543",
+      "reply_count": 2,
+      "reply_users_count": 1,
+      "latest_reply": "1483051909.018632",
+      "reply_users": ["U061F7AUR"],
+      "is_locked": false,
+      "subscribed": false
+    },
+    {
+      "type": "message",
+      "text": "one island",
+      "user": "U061F7AUR",
+      "ts": "1483037603.017503",
+      "team": "T061EG9RZ",
+      "thread_ts": "1482960137.003543",
+      "parent_user_id": "U061F7AUR"
+    }
+  ],
+  "has_more": true,
+  "response_metadata": {
+    "next_cursor": "bmV4dF90czoxNDg0Njc4MjkwNTE3MDkx"
+  }
+}
