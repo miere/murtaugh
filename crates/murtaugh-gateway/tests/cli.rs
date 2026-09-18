@@ -110,3 +110,36 @@ fn a_channel_id_is_never_accepted_as_a_person() {
     let stderr = failed(gateway(&config, &["admin", "set", "C0123ABCD"]));
     assert!(stderr.contains("not a Slack user id"), "{stderr}");
 }
+
+#[test]
+fn a_node_owners_tool_mode_and_whitelist_are_set_from_the_cli() {
+    let (_dir, config) = setup();
+    assert_eq!(
+        ok(gateway(&config, &["tools", "show", "U0PERSON1"])).trim(),
+        "mode\talways-allowed"
+    );
+    let stderr = failed(gateway(
+        &config,
+        &["tools", "mode", "U0PERSON1", "sometimes"],
+    ));
+    assert!(stderr.contains("allowed-whitelist"), "{stderr}");
+
+    ok(gateway(
+        &config,
+        &["tools", "mode", "U0PERSON1", "allowed-whitelist"],
+    ));
+    assert!(ok(gateway(&config, &["tools", "allow", "U0PERSON1", "Bash"])).contains("is on"));
+    assert!(ok(gateway(&config, &["tools", "allow", "U0PERSON1", "Bash"])).contains("already"));
+    ok(gateway(&config, &["tools", "allow", "U0PERSON1", "Read"]));
+    assert!(
+        ok(gateway(
+            &config,
+            &["tools", "disallow", "U0PERSON1", "Read"]
+        ))
+        .contains("is off")
+    );
+    assert_eq!(
+        ok(gateway(&config, &["tools", "show", "U0PERSON1"])).trim(),
+        "mode\tallowed-whitelist\nallowed\tBash"
+    );
+}

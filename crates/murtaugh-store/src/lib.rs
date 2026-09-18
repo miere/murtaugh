@@ -10,7 +10,9 @@ use async_trait::async_trait;
 
 pub use firestore::{FirestoreLeader, FirestoreOptions, FirestoreStore};
 pub use leader::{Leader, Lease, SqliteLeader};
-pub use model::{Conversation, Grant, NodeToken, Pin, UserConfig, UserId, UserIdError};
+pub use model::{
+    Conversation, Grant, NodeToken, Pin, ToolMode, ToolModeError, UserConfig, UserId, UserIdError,
+};
 pub use sqlite::{LeaderLock, SqliteStore};
 
 #[derive(Debug, thiserror::Error)]
@@ -55,6 +57,11 @@ pub trait Store: Send + Sync + 'static {
     async fn users(&self) -> Result<Vec<UserConfig>>;
     async fn user(&self, user: &UserId) -> Result<UserConfig>;
     async fn set_allowed(&self, user: &UserId, allowed: bool) -> Result<()>;
+    async fn set_tool_mode(&self, user: &UserId, mode: ToolMode) -> Result<()>;
+    /// Returns whether the tool was not on the owner's whitelist before.
+    async fn whitelist_tool(&self, user: &UserId, tool: &str) -> Result<bool>;
+    /// Returns whether the tool was on the owner's whitelist.
+    async fn unwhitelist_tool(&self, user: &UserId, tool: &str) -> Result<bool>;
 
     async fn node_tokens(&self) -> Result<Vec<NodeToken>>;
     async fn add_node_token(&self, token: &NodeToken) -> Result<()>;

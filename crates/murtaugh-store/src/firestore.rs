@@ -7,7 +7,9 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::leader::{Leader, Lease};
-use crate::{Conversation, Grant, NodeToken, Pin, Result, Store, StoreError, UserConfig, UserId};
+use crate::{
+    Conversation, Grant, NodeToken, Pin, Result, Store, StoreError, ToolMode, UserConfig, UserId,
+};
 
 const SCOPE: &str = "https://www.googleapis.com/auth/datastore";
 const DEFAULT_COLLECTION: &str = "murtaugh";
@@ -217,6 +219,30 @@ impl FirestoreStore {
         json!({"update": {"name": self.name(relative), "fields": fields}})
     }
 
+    /// Writes one field of a person's settings and leaves the others as they are.
+    async fn set_user_field(&self, user: &UserId, field: &str, value: Value) -> Result<()> {
+        let mut write = self.update(
+            &format!("users/{user}"),
+            json!({"user_id": string(user.as_str()), field: value}),
+        );
+        write["updateMask"] = json!({"fieldPaths": ["user_id", field]});
+        self.commit(vec![write]).await.map(drop)
+    }
+
+    /// An array transform, so two approvals landing together cannot drop each other's tool.
+    async fn change_whitelist(&self, user: &UserId, tool: &str, transform: &str) -> Result<()> {
+        let mut write = self.update(
+            &format!("users/{user}"),
+            json!({"user_id": string(user.as_str())}),
+        );
+        write["updateMask"] = json!({"fieldPaths": ["user_id"]});
+        write["updateTransforms"] = json!([{
+            "fieldPath": "tool_whitelist",
+            transform: {"values": [string(tool)]},
+        }]);
+        self.commit(vec![write]).await.map(drop)
+    }
+
     fn delete(&self, relative: &str) -> Value {
         json!({"delete": self.name(relative)})
     }
@@ -291,6 +317,36 @@ fn doc(document: Value) -> Doc {
             .unwrap_or_default()
             .to_owned(),
     }
+}
+
+fn user_of(user: UserId, doc: &Doc) -> Result<UserConfig> {
+    let tool_mode = match doc
+        .fields
+        .get("tool_mode")
+        .and_then(|v| v["stringValue"].as_str())
+    {
+        Some(raw) => raw
+            .parse()
+            .map_err(|err: crate::ToolModeError| StoreError::Corrupt(err.to_string()))?,
+        None => ToolMode::default(),
+    };
+    let whitelist = doc
+        .fields
+        .get("tool_whitelist")
+        .and_then(|v| v["arrayValue"]["values"].as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|v| v["stringValue"].as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(UserConfig {
+        user,
+        allowed: doc.bool("allowed"),
+        tool_mode,
+        whitelist,
+    })
 }
 
 fn string(value: &str) -> Value {
@@ -453,34 +509,41 @@ impl Store for FirestoreStore {
             .list("users")
             .await?
             .iter()
-            .map(|(_, doc)| {
-                Ok(UserConfig {
-                    user: doc.user("user_id")?,
-                    allowed: doc.bool("allowed"),
-                })
-            })
+            .map(|(_, doc)| user_of(doc.user("user_id")?, doc))
             .collect::<Result<Vec<_>>>()?;
         users.sort_by(|a, b| a.user.cmp(&b.user));
         Ok(users)
     }
 
     async fn user(&self, user: &UserId) -> Result<UserConfig> {
-        let allowed = self
-            .get(&format!("users/{user}"))
-            .await?
-            .is_some_and(|doc| doc.bool("allowed"));
-        Ok(UserConfig {
-            user: user.clone(),
-            allowed,
-        })
+        match self.get(&format!("users/{user}")).await? {
+            Some(doc) => user_of(user.clone(), &doc),
+            None => Ok(UserConfig::new(user.clone())),
+        }
     }
 
     async fn set_allowed(&self, user: &UserId, allowed: bool) -> Result<()> {
-        let write = self.update(
-            &format!("users/{user}"),
-            json!({"user_id": string(user.as_str()), "allowed": {"booleanValue": allowed}}),
-        );
-        self.commit(vec![write]).await.map(drop)
+        self.set_user_field(user, "allowed", json!({"booleanValue": allowed}))
+            .await
+    }
+
+    async fn set_tool_mode(&self, user: &UserId, mode: ToolMode) -> Result<()> {
+        self.set_user_field(user, "tool_mode", string(mode.as_str()))
+            .await
+    }
+
+    async fn whitelist_tool(&self, user: &UserId, tool: &str) -> Result<bool> {
+        let before = self.user(user).await?.whitelist.contains(tool);
+        self.change_whitelist(user, tool, "appendMissingElements")
+            .await?;
+        Ok(!before)
+    }
+
+    async fn unwhitelist_tool(&self, user: &UserId, tool: &str) -> Result<bool> {
+        let before = self.user(user).await?.whitelist.contains(tool);
+        self.change_whitelist(user, tool, "removeAllFromArray")
+            .await?;
+        Ok(before)
     }
 
     async fn node_tokens(&self) -> Result<Vec<NodeToken>> {
