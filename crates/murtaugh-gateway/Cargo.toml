@@ -1,0 +1,42 @@
+[package]
+name = "murtaugh-gateway"
+description = "The Murtaugh Slack gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "murtaugh-gateway"
+path = "src/main.rs"
+
+[dependencies]
+murtaugh-slack.workspace = true
+murtaugh-store.workspace = true
+rax.workspace = true
+rax-tokio.workspace = true
+base64.workspace = true
+clap.workspace = true
+hex.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio = { workspace = true, features = ["signal"] }
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+rax-sim.workspace = true
+slack-sim.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true
