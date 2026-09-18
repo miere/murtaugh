@@ -296,6 +296,28 @@ impl SlackClient {
             .map(drop)
     }
 
+    /// Slack's "is thinking..." line under a thread; an empty status clears it. Slack also
+    /// clears it by itself once the bot posts or streams into the thread.
+    pub async fn set_thread_status(
+        &self,
+        channel: &str,
+        thread_ts: &str,
+        status: &str,
+    ) -> Result<(), SlackError> {
+        let params = vec![
+            ("channel_id", channel.to_owned()),
+            ("thread_ts", thread_ts.to_owned()),
+            ("status", status.to_owned()),
+        ];
+        self.call::<Value>(
+            "assistant.threads.setStatus",
+            Token::Bot,
+            Body::Form(params),
+        )
+        .await
+        .map(drop)
+    }
+
     pub async fn file_info(&self, file_id: &str) -> Result<FileInfo, SlackError> {
         #[derive(Deserialize)]
         struct Info {

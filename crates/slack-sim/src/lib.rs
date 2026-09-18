@@ -338,6 +338,15 @@ impl SlackSim {
 
     /// Slack also sends a `message` event for a mention when the app subscribes to channel
     /// messages; on by default.
+    /// The "is thinking..." line under a thread, while one is showing.
+    pub fn thread_status(&self, channel: &str, thread_ts: &str) -> Option<String> {
+        self.inner
+            .lock()
+            .thread_statuses
+            .get(&(channel.to_owned(), thread_ts.to_owned()))
+            .cloned()
+    }
+
     pub fn set_channel_message_events(&self, enabled: bool) {
         self.inner.lock().channel_message_events = enabled;
     }

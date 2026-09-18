@@ -98,6 +98,7 @@ pub async fn serve(
         store.clone(),
         access,
         fleet,
+        config.log.turn_timings,
     );
     tracing::info!(listen = %hub.server.local_addr(), team = %identity.team_id, %holder, "murtaugh gateway started; waiting to lead");
     let mut seen = Seen::default();

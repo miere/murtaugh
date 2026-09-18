@@ -128,6 +128,7 @@ pub(crate) fn start(st: &mut State, params: &Map<String, Value>) -> Result<Value
         ));
     }
     let chunks = chunks(params, false)?;
+    st.thread_statuses.remove(&(id.clone(), thread_ts.clone()));
     let mut msg = new_message(Some(BOT_USER_ID), "");
     msg.bot_id = Some(BOT_ID.to_owned());
     let mut stream = SimStream {
@@ -190,4 +191,40 @@ pub(crate) fn stop(st: &mut State, params: &Map<String, Value>) -> Result<Value,
         stream.open = false;
     }
     Ok(json!({"channel": id, "ts": ts}))
+}
+
+pub(crate) fn set_status(st: &mut State, params: &Map<String, Value>) -> Result<Value, ApiError> {
+    let id = channel(st, arg(params, "channel_id")?, true)?;
+    let thread_ts = arg(params, "thread_ts")?.ok_or_else(|| {
+        err(
+            "invalid_arguments",
+            "assistant.threads.setStatus needs a thread_ts",
+        )
+    })?;
+    let status = match params.get("status") {
+        Some(Value::String(status)) => status.clone(),
+        _ => {
+            return Err(err(
+                "invalid_arguments",
+                "status must be given, empty to clear it",
+            ));
+        }
+    };
+    let known = st
+        .channels
+        .get(&id)
+        .is_some_and(|c| c.find(&thread_ts).is_some());
+    if !known {
+        return Err(err(
+            "thread_not_found",
+            format!("thread_ts {thread_ts} is not a message in {id}"),
+        ));
+    }
+    let key = (id, thread_ts);
+    if status.is_empty() {
+        st.thread_statuses.remove(&key);
+    } else {
+        st.thread_statuses.insert(key, status);
+    }
+    Ok(json!({}))
 }

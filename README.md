@@ -61,6 +61,7 @@ listen = "127.0.0.1:7443"          # put a TLS terminator in front; nodes dial w
 [log]
 level = "info"                     # trace, debug, info, warn or error
 format = "text"                    # or "json"
+turn_timings = false               # true logs, per turn, how long the node took to accept and answer
 ```
 
 `${VAR}` is read from the environment first, then from `env_file` (by default a `.env` beside the

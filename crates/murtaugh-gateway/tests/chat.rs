@@ -572,14 +572,18 @@ async fn a_direct_message_an_app_posted_for_a_person_is_answered() {
     let mut laptop = rig.node(ALICE, "laptop").await;
     let (channel, first) = rig.sim.dm(ALICE, "first").await.unwrap();
     laptop.next_prompt().await;
-    eventually("the first reply", || {
-        rig.sim
-            .thread(&channel, &first)
-            .iter()
-            .any(|m| m.user.as_deref() == Some(BOT_USER_ID) && m.text.contains("pong to: first"))
-            .then_some(())
+    eventually("the first turn to end", || {
+        let answered =
+            rig.sim.thread(&channel, &first).iter().any(|m| {
+                m.user.as_deref() == Some(BOT_USER_ID) && m.text.contains("pong to: first")
+            });
+        let cleared = rig.sim.calls().iter().any(|c| {
+            c.method == "assistant.threads.setStatus" && c.params["status"].as_str() == Some("")
+        });
+        (answered && cleared).then_some(())
     })
     .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
     rig.sim
         .emit(serde_json::json!({
@@ -665,5 +669,52 @@ async fn a_thread_caught_up_after_a_gateway_restart_is_told_first() {
     }
     let (_, text) = laptop.next_prompt().await;
     assert!(text.contains("first question"), "{text}");
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_thread_shows_the_agent_thinking_until_the_turn_ends() {
+    let rig = rig().await;
+    let mut laptop = rig.node(ALICE, "laptop").await;
+    let ts = rig
+        .sim
+        .mention(ALICE, GENERAL, "think", None)
+        .await
+        .unwrap();
+    laptop.next_prompt().await;
+    rig.bot_replies(&ts, |replies| {
+        replies.iter().any(|m| m.text.contains("pong to: think"))
+    })
+    .await;
+
+    let order: Vec<String> = eventually("the status to be cleared", || {
+        let calls: Vec<String> = rig
+            .sim
+            .calls()
+            .into_iter()
+            .filter(|c| c.params.to_string().contains(&ts))
+            .filter_map(|c| match c.method.as_str() {
+                "assistant.threads.setStatus" => Some(format!(
+                    "status:{}",
+                    c.params["status"].as_str().unwrap_or_default()
+                )),
+                "chat.startStream" => Some("stream".into()),
+                _ => None,
+            })
+            .collect();
+        (calls.last().map(String::as_str) == Some("status:")).then_some(calls)
+    })
+    .await;
+    assert_eq!(
+        order.first().map(String::as_str),
+        Some("status:is thinking...")
+    );
+    let streamed = order.iter().position(|c| c == "stream").expect("no stream");
+    assert!(
+        streamed > 0,
+        "the status came after the reply started: {order:?}"
+    );
+    assert_eq!(rig.sim.thread_status(GENERAL, &ts), None);
+    assert_eq!(rig.sim.violations(), vec![]);
     rig.shutdown.cancel();
 }
