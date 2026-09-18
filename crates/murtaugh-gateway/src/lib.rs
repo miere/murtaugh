@@ -9,6 +9,7 @@ pub mod fleet;
 pub mod hub;
 pub mod launchd;
 pub mod logging;
+pub mod manifest;
 pub mod render;
 pub mod run;
 pub mod token;
