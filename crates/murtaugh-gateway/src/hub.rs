@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::access::{Access, Snapshot};
+use crate::files::Files;
 use crate::fleet::{Fleet, Node};
 
 pub const REFRESH: Duration = Duration::from_secs(5);
@@ -33,7 +34,7 @@ pub fn capabilities() -> GatewayCapabilities {
         plan: false,
         sign_in: false,
         resource_schemes: vec!["chat".into()],
-        readable_schemes: Vec::new(),
+        readable_schemes: vec![crate::files::SCHEME.into()],
     }
 }
 
@@ -46,12 +47,13 @@ pub async fn start(
     listen: SocketAddr,
     access: Access,
     fleet: Fleet,
+    files: Files,
     shutdown: CancellationToken,
 ) -> std::io::Result<Hub> {
     let (server, new_links) =
         GatewayServer::bind(listen, access.clone(), GatewayConfig::default()).await?;
     let (changes, receiver) = mpsc::channel(64);
-    tokio::spawn(accept(new_links, access, fleet, changes, shutdown));
+    tokio::spawn(accept(new_links, access, fleet, files, changes, shutdown));
     Ok(Hub {
         server,
         changes: receiver,
@@ -91,6 +93,7 @@ async fn accept(
     mut new_links: NewLinks,
     access: Access,
     fleet: Fleet,
+    files: Files,
     changes: mpsc::Sender<FleetChange>,
     shutdown: CancellationToken,
 ) {
@@ -107,6 +110,7 @@ async fn accept(
             events,
             access.clone(),
             fleet.clone(),
+            files.clone(),
             changes.clone(),
         ));
     }
@@ -117,6 +121,7 @@ async fn serve(
     mut events: LinkEvents,
     access: Access,
     fleet: Fleet,
+    files: Files,
     changes: mpsc::Sender<FleetChange>,
 ) {
     let selector = link.identity().0.clone();
@@ -160,6 +165,13 @@ async fn serve(
             LinkEvent::Resumed => {
                 tracing::info!(node = %name, "node resumed");
                 fleet.set_connected(&selector, attachment, true);
+            }
+            LinkEvent::Request {
+                id,
+                call: NodeCall::ReadResource(read),
+            } => {
+                let (files, link, selector) = (files.clone(), link.clone(), selector.clone());
+                tokio::spawn(async move { files.serve(&link, &selector, id, read).await });
             }
             LinkEvent::Request { id, call } => answer(&link, &name, id, call).await,
             LinkEvent::Background { session_id, .. } => {
@@ -222,13 +234,7 @@ async fn answer(link: &GatewayLink, name: &str, id: rax::id::RequestId, call: No
             );
             link.fault(id, unsupported).await
         }
-        NodeCall::ReadResource(read) => {
-            let gone = Error::new(
-                ErrorKind::Forbidden,
-                format!("this gateway never sent {}", read.uri),
-            );
-            link.fault(id, gone).await
-        }
+        NodeCall::ReadResource(_) => return,
     };
     if let Err(err) = sent {
         tracing::debug!(node = %name, error = %err, "could not answer a node call");

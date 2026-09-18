@@ -48,6 +48,7 @@ async fn rig() -> Rig {
         "127.0.0.1:0".parse().unwrap(),
         access.clone(),
         fleet.clone(),
+        murtaugh_gateway::files::Files::default(),
         shutdown.clone(),
     )
     .await

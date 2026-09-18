@@ -359,22 +359,41 @@ impl SlackSim {
         text: &str,
         thread_ts: Option<&str>,
     ) -> Result<String, SimError> {
-        let mention = format!("<@{BOT_USER_ID}>");
-        let text = if text.contains(&mention) {
-            text.to_owned()
-        } else {
-            format!("{mention} {text}")
-        };
+        let msg = new_message(Some(user), &with_mention(text));
+        self.post_mention(user, channel, msg, thread_ts)
+    }
+
+    /// A file shared with a message that mentions the bot, as one Slack message.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn mention_with_file(
+        &self,
+        user: &str,
+        channel: &str,
+        text: &str,
+        name: &str,
+        mimetype: &str,
+        bytes: &[u8],
+        thread_ts: Option<&str>,
+    ) -> Result<(String, String), SimError> {
+        let file_id = self.store_file(user, channel, name, mimetype, bytes)?;
+        let mut msg = new_message(Some(user), &with_mention(text));
+        msg.subtype = Some("file_share".to_owned());
+        msg.files = vec![file_id.clone()];
+        let ts = self.post_mention(user, channel, msg, thread_ts)?;
+        Ok((file_id, ts))
+    }
+
+    fn post_mention(
+        &self,
+        user: &str,
+        channel: &str,
+        msg: SimMessage,
+        thread_ts: Option<&str>,
+    ) -> Result<String, SimError> {
         let mut envelopes = Vec::new();
         let ts = {
             let mut st = self.inner.lock();
-            let msg = post_as(
-                &mut st,
-                user,
-                channel,
-                new_message(Some(user), &text),
-                thread_ts,
-            )?;
+            let msg = post_as(&mut st, user, channel, msg, thread_ts)?;
             let (kind, member) = channel_facts(&st, channel)?;
             if member
                 && kind != ChannelKind::Im
@@ -425,24 +444,7 @@ impl SlackSim {
         bytes: &[u8],
         thread_ts: Option<&str>,
     ) -> Result<(String, String), SimError> {
-        let file_id = {
-            let mut st = self.inner.lock();
-            if !st.channels.contains_key(channel) {
-                return Err(SimError::UnknownChannel(channel.to_owned()));
-            }
-            let id = format!("F0SIM{:06}", st.next_seq());
-            let file = File {
-                id: id.clone(),
-                name: name.to_owned(),
-                mimetype: mimetype.to_owned(),
-                bytes: bytes.to_vec(),
-                user: user.to_owned(),
-                created: state::now_secs(),
-                channel: channel.to_owned(),
-            };
-            st.files.insert(id.clone(), file);
-            id
-        };
+        let file_id = self.store_file(user, channel, name, mimetype, bytes)?;
         let mut msg = new_message(Some(user), "");
         msg.subtype = Some("file_share".to_owned());
         msg.files = vec![file_id.clone()];
@@ -517,6 +519,32 @@ impl SlackSim {
         id
     }
 
+    fn store_file(
+        &self,
+        user: &str,
+        channel: &str,
+        name: &str,
+        mimetype: &str,
+        bytes: &[u8],
+    ) -> Result<String, SimError> {
+        let mut st = self.inner.lock();
+        if !st.channels.contains_key(channel) {
+            return Err(SimError::UnknownChannel(channel.to_owned()));
+        }
+        let id = format!("F0SIM{:06}", st.next_seq());
+        let file = File {
+            id: id.clone(),
+            name: name.to_owned(),
+            mimetype: mimetype.to_owned(),
+            bytes: bytes.to_vec(),
+            user: user.to_owned(),
+            created: state::now_secs(),
+            channel: channel.to_owned(),
+        };
+        st.files.insert(id.clone(), file);
+        Ok(id)
+    }
+
     fn post_user_message(
         &self,
         user: &str,
@@ -542,6 +570,15 @@ impl SlackSim {
         for envelope in envelopes {
             socket::deliver(&self.inner, envelope);
         }
+    }
+}
+
+fn with_mention(text: &str) -> String {
+    let mention = format!("<@{BOT_USER_ID}>");
+    if text.contains(&mention) {
+        text.to_owned()
+    } else {
+        format!("{mention} {text}")
     }
 }
 

@@ -12,8 +12,9 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::access::{Access, Snapshot};
-use crate::chat::Chat;
+use crate::chat::{self, Chat};
 use crate::config;
+use crate::files::Files;
 use crate::fleet::Fleet;
 use crate::hub::{self, REFRESH};
 
@@ -75,10 +76,12 @@ pub async fn serve(
     }
     let access = Access::reloading(snapshot, store.clone());
     let fleet = Fleet::default();
+    let files = Files::new(slack.clone());
     let mut hub = hub::start(
         config.listen,
         access.clone(),
         fleet.clone(),
+        files.clone(),
         shutdown.clone(),
     )
     .await
@@ -91,15 +94,16 @@ pub async fn serve(
         options.refresh,
         shutdown.clone(),
     ));
-    let chat = Chat::new(
-        slack.clone(),
-        identity.user_id.clone(),
-        identity.team_id.clone(),
-        store.clone(),
+    let chat = Chat::new(chat::Parts {
+        slack: slack.clone(),
+        bot_user: identity.user_id.clone(),
+        team: identity.team_id.clone(),
+        store: store.clone(),
         access,
         fleet,
-        config.log.turn_timings,
-    );
+        files,
+        turn_timings: config.log.turn_timings,
+    });
     tracing::info!(listen = %hub.server.local_addr(), team = %identity.team_id, %holder, "murtaugh gateway started; waiting to lead");
     let mut seen = Seen::default();
     loop {
