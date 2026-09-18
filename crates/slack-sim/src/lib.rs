@@ -6,6 +6,7 @@ mod blocks;
 mod render;
 mod socket;
 mod state;
+mod stream;
 
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -89,6 +90,25 @@ pub struct SimMessage {
     pub files: Vec<String>,
     pub reactions: Vec<Reaction>,
     pub edited: bool,
+    /// Set on a message made by `chat.startStream`; the text above is its Markdown so far.
+    pub stream: Option<SimStream>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SimStream {
+    pub open: bool,
+    pub task_display_mode: String,
+    pub recipient: Option<(String, String)>,
+    pub plans: Vec<String>,
+    pub tasks: Vec<SimTask>,
+}
+
+/// A task card, as its latest `task_update` left it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SimTask {
+    pub id: String,
+    pub title: String,
+    pub status: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -209,6 +229,19 @@ impl SlackSim {
             .get(channel)
             .and_then(|c| c.thread_root(ts).map(|root| c.thread(&root)))
             .unwrap_or_default()
+    }
+
+    /// Ends a stream the way Slack does on its own, so the next append is refused.
+    pub fn finalize_stream(&self, channel: &str, ts: &str) {
+        let mut st = self.inner.lock();
+        if let Some(stream) = st
+            .channels
+            .get_mut(channel)
+            .and_then(|c| c.find_mut(ts))
+            .and_then(|m| m.stream.as_mut())
+        {
+            stream.open = false;
+        }
     }
 
     pub fn reactions(&self, channel: &str, ts: &str) -> Vec<String> {

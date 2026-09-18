@@ -17,6 +17,9 @@ const METHODS: &[&str] = &[
     "apps.connections.open",
     "chat.postMessage",
     "chat.update",
+    "chat.startStream",
+    "chat.appendStream",
+    "chat.stopStream",
     "reactions.add",
     "conversations.replies",
     "files.info",
@@ -35,7 +38,7 @@ pub(crate) struct ApiError {
     violation: bool,
 }
 
-fn err(code: &str, detail: impl Into<String>) -> ApiError {
+pub(crate) fn err(code: &str, detail: impl Into<String>) -> ApiError {
     ApiError {
         code: code.to_owned(),
         detail: detail.into(),
@@ -43,7 +46,7 @@ fn err(code: &str, detail: impl Into<String>) -> ApiError {
     }
 }
 
-fn benign(code: &str) -> ApiError {
+pub(crate) fn benign(code: &str) -> ApiError {
     ApiError {
         code: code.to_owned(),
         detail: String::new(),
@@ -247,13 +250,16 @@ fn dispatch(
         }
         "chat.postMessage" => post_message(st, params),
         "chat.update" => update_message(st, params),
+        "chat.startStream" => crate::stream::start(st, params),
+        "chat.appendStream" => crate::stream::append(st, params),
+        "chat.stopStream" => crate::stream::stop(st, params),
         "reactions.add" => add_reaction(st, params),
         "conversations.replies" => replies(st, params),
         _ => file_info(st, params),
     }
 }
 
-fn arg(params: &Map<String, Value>, key: &str) -> Result<Option<String>, ApiError> {
+pub(crate) fn arg(params: &Map<String, Value>, key: &str) -> Result<Option<String>, ApiError> {
     match params.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(s)) => Ok(Some(s.clone())),
@@ -264,7 +270,7 @@ fn arg(params: &Map<String, Value>, key: &str) -> Result<Option<String>, ApiErro
     }
 }
 
-fn channel(st: &mut State, id: Option<String>, write: bool) -> Result<String, ApiError> {
+pub(crate) fn channel(st: &mut State, id: Option<String>, write: bool) -> Result<String, ApiError> {
     let id = id.ok_or_else(|| err("channel_not_found", "no channel was given"))?;
     let id = if id.starts_with('U') && st.users.contains_key(&id) && write {
         st.im_for(&id)
