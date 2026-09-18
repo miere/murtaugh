@@ -73,7 +73,7 @@ pub async fn serve(
             "this gateway has no admin yet; run `murtaugh-gateway admin set <slack user id>`"
         );
     }
-    let access = Access::new(snapshot);
+    let access = Access::reloading(snapshot, store.clone());
     let fleet = Fleet::default();
     let mut hub = hub::start(
         config.listen,

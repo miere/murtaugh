@@ -2,10 +2,12 @@
 //! live gateway without a restart. Lookups are synchronous because RAX authenticates mid-handshake.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use murtaugh_store::{NodeToken, Store, StoreError, UserId};
 use rax_tokio::gateway::{Authenticator, NodeIdentity};
+use tokio::runtime::{Handle, RuntimeFlavor};
 
 use crate::token;
 
@@ -89,17 +91,85 @@ impl Snapshot {
     }
 }
 
+/// Bounds how often a stranger's token can make the gateway read the store.
+pub const RELOAD_AT_MOST_EVERY: Duration = Duration::from_secs(1);
+
+struct Reload {
+    store: Arc<dyn Store>,
+    handle: Handle,
+    last: Mutex<Option<Instant>>,
+}
+
 /// Cheap to clone; every clone sees the latest snapshot.
 #[derive(Clone, Default)]
 pub struct Access {
     current: Arc<RwLock<Arc<Snapshot>>>,
+    reload: Option<Arc<Reload>>,
 }
 
 impl Access {
     pub fn new(snapshot: Snapshot) -> Self {
         Self {
             current: Arc::new(RwLock::new(Arc::new(snapshot))),
+            reload: None,
         }
+    }
+
+    /// Also reads the store when a node presents a token minted since the last refresh, so a node
+    /// started straight after `node mint` is admitted instead of refused for good.
+    pub fn reloading(snapshot: Snapshot, store: Arc<dyn Store>) -> Self {
+        Self {
+            reload: Some(Arc::new(Reload {
+                store,
+                handle: Handle::current(),
+                last: Mutex::new(None),
+            })),
+            ..Self::new(snapshot)
+        }
+    }
+
+    fn admit_new(&self, presented: &str) -> Option<String> {
+        let reload = self.reload.as_ref()?;
+        let selector = token::parse(presented)?.selector;
+        if self.snapshot().tokens.contains_key(&selector) {
+            return None;
+        }
+        if reload.handle.runtime_flavor() != RuntimeFlavor::MultiThread {
+            return None;
+        }
+        {
+            let mut last = reload
+                .last
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if last.is_some_and(|at| at.elapsed() < RELOAD_AT_MOST_EVERY) {
+                return None;
+            }
+            *last = Some(Instant::now());
+        }
+        let fresh = tokio::task::block_in_place(|| {
+            reload.handle.block_on(Snapshot::load(&*reload.store))
+        })
+        .map_err(|err| tracing::warn!(error = %err, "could not read the store to admit a new node"))
+        .ok()?;
+        let admitted = fresh.authenticate(presented)?;
+        let record = fresh.tokens.get(&admitted)?.clone();
+        let mut current = self
+            .current
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut next = Snapshot {
+            admin: current.admin.clone(),
+            grants: current.grants.clone(),
+            allowed: current.allowed.clone(),
+            tokens: current.tokens.clone(),
+        };
+        if fresh.grants.contains(&record.owner) {
+            next.grants.insert(record.owner.clone());
+        }
+        next.tokens.insert(admitted.clone(), record);
+        *current = Arc::new(next);
+        Some(admitted)
     }
 
     pub fn snapshot(&self) -> Arc<Snapshot> {
@@ -128,7 +198,10 @@ impl Access {
 
 impl Authenticator for Access {
     fn authenticate(&self, token: &str) -> Option<NodeIdentity> {
-        self.snapshot().authenticate(token).map(NodeIdentity)
+        self.snapshot()
+            .authenticate(token)
+            .or_else(|| self.admit_new(token))
+            .map(NodeIdentity)
     }
 }
 

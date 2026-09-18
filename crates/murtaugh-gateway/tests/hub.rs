@@ -41,7 +41,7 @@ async fn rig() -> Rig {
         .approve(&user("U0PERSON1"), &user("U0ADMIN01"))
         .await
         .unwrap();
-    let access = Access::new(Snapshot::load(&*store).await.unwrap());
+    let access = Access::reloading(Snapshot::load(&*store).await.unwrap(), store.clone());
     let fleet = Fleet::default();
     let shutdown = CancellationToken::new();
     let hub = hub::start(
@@ -64,6 +64,14 @@ async fn rig() -> Rig {
 
 impl Rig {
     async fn mint(&self, owner: &str) -> (String, String) {
+        let minted = self.mint_quietly(owner).await;
+        self.access
+            .replace(Snapshot::load(&*self.store).await.unwrap());
+        minted
+    }
+
+    /// Only the store hears about it, as when the CLI mints while the gateway runs.
+    async fn mint_quietly(&self, owner: &str) -> (String, String) {
         let minted = token::mint();
         self.store
             .add_node_token(&NodeToken {
@@ -76,8 +84,6 @@ impl Rig {
             })
             .await
             .unwrap();
-        self.access
-            .replace(Snapshot::load(&*self.store).await.unwrap());
         (minted.selector, minted.token)
     }
 
@@ -179,6 +185,33 @@ async fn a_forged_token_never_gets_a_link() {
     let rig = rig().await;
     let (_, token) = rig.mint("U0PERSON1").await;
     let (_node, mut events) = rig.dial(&format!("{token}forged"));
+    assert!(matches!(
+        within(events.recv()).await,
+        Some(NodeEvent::CredentialRejected)
+    ));
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_started_right_after_its_token_is_minted_is_admitted() {
+    let mut rig = rig().await;
+    let (selector, token) = rig.mint_quietly("U0PERSON1").await;
+    let (node, mut events) = rig.dial(&token);
+    answer_initialize(&node, &mut events).await;
+    assert_eq!(
+        within(rig.hub.changes.recv()).await.unwrap(),
+        FleetChange::Attached { selector }
+    );
+    node.close().await;
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_token_revoked_before_it_first_dials_is_still_refused() {
+    let rig = rig().await;
+    let (selector, token) = rig.mint_quietly("U0PERSON1").await;
+    rig.store.revoke_node_token(&selector).await.unwrap();
+    let (_node, mut events) = rig.dial(&token);
     assert!(matches!(
         within(events.recv()).await,
         Some(NodeEvent::CredentialRejected)

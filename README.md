@@ -84,7 +84,8 @@ murtaugh-gateway grant revoke U0456ALICE              # her nodes are disconnect
 murtaugh-gateway node revoke <selector>               # one node is disconnected
 ```
 
-A grant is per person, and every node that person runs shares it. Hand node tokens over in
+A grant is per person, and every node that person runs shares it. A node can dial as soon as
+its token is minted: the gateway checks the store for a token it has not seen yet. Hand node tokens over in
 person: the gateway never shows one twice. Someone with no node of their own and no
 pre-authorisation gets a 🤐 reaction and nothing else.
 

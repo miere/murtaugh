@@ -162,7 +162,6 @@ impl Rig {
             })
             .await
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(300)).await;
         let (handle, mut events) = NodeLink::start(NodeConfig {
             endpoints: gateways.iter().map(|addr| format!("ws://{addr}")).collect(),
             token: minted.token,
