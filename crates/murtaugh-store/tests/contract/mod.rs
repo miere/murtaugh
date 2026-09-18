@@ -1,0 +1,101 @@
+#![allow(dead_code, clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+use murtaugh_store::{Conversation, NodeToken, Pin, Store, UserId};
+use time::OffsetDateTime;
+
+pub fn user(raw: &str) -> UserId {
+    UserId::parse(raw).unwrap()
+}
+
+fn thread(ts: &str) -> Conversation {
+    Conversation {
+        channel: "C0123ABCD".into(),
+        thread_ts: ts.into(),
+    }
+}
+
+fn stamp() -> OffsetDateTime {
+    OffsetDateTime::from_unix_timestamp(1_789_000_000).unwrap()
+}
+
+pub async fn the_admin_is_unset_until_assigned(store: &dyn Store) {
+    assert_eq!(store.admin().await.unwrap(), None);
+    store.set_admin(&user("U0ADMIN01")).await.unwrap();
+    assert_eq!(store.admin().await.unwrap(), Some(user("U0ADMIN01")));
+}
+
+pub async fn approving_twice_keeps_the_first_approval_and_revoking_removes_it(store: &dyn Store) {
+    let first = store
+        .approve(&user("U0PERSON1"), &user("U0ADMIN01"))
+        .await
+        .unwrap();
+    let again = store
+        .approve(&user("U0PERSON1"), &user("U0OTHER01"))
+        .await
+        .unwrap();
+    assert_eq!(first, again);
+    assert_eq!(store.grants().await.unwrap(), [first]);
+    assert!(store.revoke(&user("U0PERSON1")).await.unwrap());
+    assert!(!store.revoke(&user("U0PERSON1")).await.unwrap());
+    assert!(store.grants().await.unwrap().is_empty());
+}
+
+pub async fn a_person_is_not_pre_authorised_until_the_admin_says_so(store: &dyn Store) {
+    assert!(!store.user(&user("U0PERSON1")).await.unwrap().allowed);
+    store.set_allowed(&user("U0PERSON1"), true).await.unwrap();
+    assert!(store.user(&user("U0PERSON1")).await.unwrap().allowed);
+    store.set_allowed(&user("U0PERSON1"), false).await.unwrap();
+    let users = store.users().await.unwrap();
+    assert_eq!(users.len(), 1);
+    assert!(!users[0].allowed);
+}
+
+pub async fn a_token_is_revoked_once(store: &dyn Store) {
+    let token = NodeToken {
+        selector: "0123456789abcdef".into(),
+        secret_hash: "hash".into(),
+        owner: user("U0PERSON1"),
+        name: "laptop".into(),
+        created_at: stamp(),
+        revoked_at: None,
+    };
+    store.add_node_token(&token).await.unwrap();
+    assert_eq!(
+        store.node_tokens().await.unwrap(),
+        std::slice::from_ref(&token)
+    );
+    assert!(
+        store.add_node_token(&token).await.is_err(),
+        "a selector was reused"
+    );
+    assert!(store.revoke_node_token(&token.selector).await.unwrap());
+    assert!(!store.revoke_node_token(&token.selector).await.unwrap());
+    assert!(!store.revoke_node_token("ffffffffffffffff").await.unwrap());
+    assert!(store.node_tokens().await.unwrap()[0].revoked_at.is_some());
+}
+
+pub async fn pins_are_dropped_with_their_node(store: &dyn Store) {
+    for (ts, node) in [("1.1", "n1"), ("2.2", "n1"), ("3.3", "n2")] {
+        store
+            .set_pin(&Pin {
+                conversation: thread(ts),
+                node: node.into(),
+                session_id: format!("s-{ts}"),
+                user: user("U0PERSON1"),
+                pinned_at: stamp(),
+            })
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        store.pin(&thread("1.1")).await.unwrap().unwrap().session_id,
+        "s-1.1"
+    );
+    let mut dropped = store.remove_pins_on("n1").await.unwrap();
+    dropped.sort_by(|a, b| a.thread_ts.cmp(&b.thread_ts));
+    assert_eq!(dropped, [thread("1.1"), thread("2.2")]);
+    assert_eq!(store.pin(&thread("1.1")).await.unwrap(), None);
+    assert_eq!(store.pin(&thread("3.3")).await.unwrap().unwrap().node, "n2");
+    store.remove_pin(&thread("3.3")).await.unwrap();
+    assert!(store.pins().await.unwrap().is_empty());
+}

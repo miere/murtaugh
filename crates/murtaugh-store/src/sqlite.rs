@@ -1,0 +1,433 @@
+use std::fs::{File, OpenOptions};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
+
+use async_trait::async_trait;
+use rusqlite::{Connection, OptionalExtension, Row, params};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
+
+use crate::{Conversation, Grant, NodeToken, Pin, Result, Store, StoreError, UserConfig, UserId};
+
+const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS grants (
+    user_id TEXT PRIMARY KEY,
+    approved_by TEXT NOT NULL,
+    approved_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS users (
+    user_id TEXT PRIMARY KEY,
+    allowed INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS node_tokens (
+    selector TEXT PRIMARY KEY,
+    secret_hash TEXT NOT NULL,
+    owner TEXT NOT NULL,
+    name TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    revoked_at TEXT
+);
+CREATE TABLE IF NOT EXISTS pins (
+    channel TEXT NOT NULL,
+    thread_ts TEXT NOT NULL,
+    node TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    pinned_at TEXT NOT NULL,
+    PRIMARY KEY (channel, thread_ts)
+);
+CREATE INDEX IF NOT EXISTS pins_by_node ON pins (node);
+";
+
+const ADMIN: &str = "admin";
+
+/// A database file on this machine. Any number of processes may open it; only one may hold
+/// [`LeaderLock`], which is what keeps a second gateway off the same Slack app.
+#[derive(Clone)]
+pub struct SqliteStore {
+    connection: Arc<Mutex<Connection>>,
+}
+
+/// Held for as long as this process serves Slack; the OS releases it if the process dies.
+#[derive(Debug)]
+pub struct LeaderLock {
+    _file: File,
+}
+
+impl SqliteStore {
+    pub fn open(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| StoreError::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        let connection = Connection::open(path)?;
+        connection.busy_timeout(Duration::from_secs(5))?;
+        connection.pragma_update(None, "journal_mode", "WAL")?;
+        connection.pragma_update(None, "foreign_keys", "ON")?;
+        connection.execute_batch(SCHEMA)?;
+        Ok(Self {
+            connection: Arc::new(Mutex::new(connection)),
+        })
+    }
+
+    pub fn lock_leader(path: &Path) -> Result<LeaderLock> {
+        let lock_path = lock_path(path);
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|source| StoreError::Io {
+                path: lock_path.clone(),
+                source,
+            })?;
+        match file.try_lock() {
+            Ok(()) => Ok(LeaderLock { _file: file }),
+            Err(std::fs::TryLockError::WouldBlock) => Err(StoreError::Locked(path.to_path_buf())),
+            Err(std::fs::TryLockError::Error(source)) => Err(StoreError::Io {
+                path: lock_path,
+                source,
+            }),
+        }
+    }
+
+    async fn run<T, F>(&self, work: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
+    {
+        let connection = self.connection.clone();
+        tokio::task::spawn_blocking(move || work(&mut guard(&connection)))
+            .await
+            .map_err(|err| StoreError::Task(err.to_string()))?
+    }
+}
+
+fn guard(connection: &Mutex<Connection>) -> MutexGuard<'_, Connection> {
+    connection
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn lock_path(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".lock");
+    path.with_file_name(name)
+}
+
+fn now() -> OffsetDateTime {
+    OffsetDateTime::now_utc()
+}
+
+fn stamp(at: OffsetDateTime) -> Result<String> {
+    at.format(&Rfc3339)
+        .map_err(|err| StoreError::Corrupt(err.to_string()))
+}
+
+fn parse_stamp(raw: &str) -> rusqlite::Result<OffsetDateTime> {
+    OffsetDateTime::parse(raw, &Rfc3339).map_err(|err| invalid(raw, err))
+}
+
+fn parse_user(raw: &str) -> rusqlite::Result<UserId> {
+    UserId::parse(raw).map_err(|err| invalid(raw, err))
+}
+
+fn invalid(raw: &str, err: impl std::fmt::Display) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        0,
+        rusqlite::types::Type::Text,
+        format!("{raw:?}: {err}").into(),
+    )
+}
+
+fn grant_row(row: &Row<'_>) -> rusqlite::Result<Grant> {
+    Ok(Grant {
+        user: parse_user(&row.get::<_, String>(0)?)?,
+        approved_by: parse_user(&row.get::<_, String>(1)?)?,
+        approved_at: parse_stamp(&row.get::<_, String>(2)?)?,
+    })
+}
+
+fn token_row(row: &Row<'_>) -> rusqlite::Result<NodeToken> {
+    Ok(NodeToken {
+        selector: row.get(0)?,
+        secret_hash: row.get(1)?,
+        owner: parse_user(&row.get::<_, String>(2)?)?,
+        name: row.get(3)?,
+        created_at: parse_stamp(&row.get::<_, String>(4)?)?,
+        revoked_at: row
+            .get::<_, Option<String>>(5)?
+            .map(|raw| parse_stamp(&raw))
+            .transpose()?,
+    })
+}
+
+fn pin_row(row: &Row<'_>) -> rusqlite::Result<Pin> {
+    Ok(Pin {
+        conversation: Conversation {
+            channel: row.get(0)?,
+            thread_ts: row.get(1)?,
+        },
+        node: row.get(2)?,
+        session_id: row.get(3)?,
+        user: parse_user(&row.get::<_, String>(4)?)?,
+        pinned_at: parse_stamp(&row.get::<_, String>(5)?)?,
+    })
+}
+
+const PIN_COLUMNS: &str = "channel, thread_ts, node, session_id, user_id, pinned_at";
+
+#[async_trait]
+impl Store for SqliteStore {
+    async fn admin(&self) -> Result<Option<UserId>> {
+        self.run(|db| {
+            let raw: Option<String> = db
+                .query_row(
+                    "SELECT value FROM settings WHERE key = ?1",
+                    [ADMIN],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            Ok(raw.map(|raw| parse_user(&raw)).transpose()?)
+        })
+        .await
+    }
+
+    async fn set_admin(&self, user: &UserId) -> Result<()> {
+        let user = user.to_string();
+        self.run(move |db| {
+            db.execute(
+                "INSERT INTO settings (key, value) VALUES (?1, ?2)
+                 ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                params![ADMIN, user],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn grants(&self) -> Result<Vec<Grant>> {
+        self.run(|db| {
+            let mut query = db.prepare(
+                "SELECT user_id, approved_by, approved_at FROM grants ORDER BY approved_at",
+            )?;
+            let grants = query
+                .query_map([], grant_row)?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(grants)
+        })
+        .await
+    }
+
+    async fn approve(&self, user: &UserId, by: &UserId) -> Result<Grant> {
+        let (user, by, at) = (user.to_string(), by.to_string(), stamp(now())?);
+        self.run(move |db| {
+            db.execute(
+                "INSERT INTO grants (user_id, approved_by, approved_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (user_id) DO NOTHING",
+                params![user, by, at],
+            )?;
+            Ok(db.query_row(
+                "SELECT user_id, approved_by, approved_at FROM grants WHERE user_id = ?1",
+                [&user],
+                grant_row,
+            )?)
+        })
+        .await
+    }
+
+    async fn revoke(&self, user: &UserId) -> Result<bool> {
+        let user = user.to_string();
+        self.run(move |db| Ok(db.execute("DELETE FROM grants WHERE user_id = ?1", [user])? > 0))
+            .await
+    }
+
+    async fn users(&self) -> Result<Vec<UserConfig>> {
+        self.run(|db| {
+            let mut query = db.prepare("SELECT user_id, allowed FROM users ORDER BY user_id")?;
+            let users = query
+                .query_map([], |row| {
+                    Ok(UserConfig {
+                        user: parse_user(&row.get::<_, String>(0)?)?,
+                        allowed: row.get(1)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(users)
+        })
+        .await
+    }
+
+    async fn user(&self, user: &UserId) -> Result<UserConfig> {
+        let id = user.clone();
+        self.run(move |db| {
+            let allowed: Option<bool> = db
+                .query_row(
+                    "SELECT allowed FROM users WHERE user_id = ?1",
+                    [id.as_str()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            Ok(UserConfig {
+                user: id,
+                allowed: allowed.unwrap_or(false),
+            })
+        })
+        .await
+    }
+
+    async fn set_allowed(&self, user: &UserId, allowed: bool) -> Result<()> {
+        let user = user.to_string();
+        self.run(move |db| {
+            db.execute(
+                "INSERT INTO users (user_id, allowed) VALUES (?1, ?2)
+                 ON CONFLICT (user_id) DO UPDATE SET allowed = excluded.allowed",
+                params![user, allowed],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn node_tokens(&self) -> Result<Vec<NodeToken>> {
+        self.run(|db| {
+            let mut query = db.prepare(
+                "SELECT selector, secret_hash, owner, name, created_at, revoked_at
+                 FROM node_tokens ORDER BY created_at",
+            )?;
+            let tokens = query
+                .query_map([], token_row)?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(tokens)
+        })
+        .await
+    }
+
+    async fn add_node_token(&self, token: &NodeToken) -> Result<()> {
+        let token = token.clone();
+        let created = stamp(token.created_at)?;
+        let revoked = token.revoked_at.map(stamp).transpose()?;
+        self.run(move |db| {
+            db.execute(
+                "INSERT INTO node_tokens (selector, secret_hash, owner, name, created_at, revoked_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    token.selector,
+                    token.secret_hash,
+                    token.owner.as_str(),
+                    token.name,
+                    created,
+                    revoked
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn revoke_node_token(&self, selector: &str) -> Result<bool> {
+        let (selector, at) = (selector.to_owned(), stamp(now())?);
+        self.run(move |db| {
+            let revoked = db.execute(
+                "UPDATE node_tokens SET revoked_at = ?2 WHERE selector = ?1 AND revoked_at IS NULL",
+                params![selector, at],
+            )?;
+            Ok(revoked > 0)
+        })
+        .await
+    }
+
+    async fn pin(&self, conversation: &Conversation) -> Result<Option<Pin>> {
+        let conversation = conversation.clone();
+        self.run(move |db| {
+            Ok(db
+                .query_row(
+                    &format!(
+                        "SELECT {PIN_COLUMNS} FROM pins WHERE channel = ?1 AND thread_ts = ?2"
+                    ),
+                    params![conversation.channel, conversation.thread_ts],
+                    pin_row,
+                )
+                .optional()?)
+        })
+        .await
+    }
+
+    async fn set_pin(&self, pin: &Pin) -> Result<()> {
+        let pin = pin.clone();
+        let at = stamp(pin.pinned_at)?;
+        self.run(move |db| {
+            db.execute(
+                &format!(
+                    "INSERT INTO pins ({PIN_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                     ON CONFLICT (channel, thread_ts) DO UPDATE SET node = excluded.node,
+                       session_id = excluded.session_id, user_id = excluded.user_id,
+                       pinned_at = excluded.pinned_at"
+                ),
+                params![
+                    pin.conversation.channel,
+                    pin.conversation.thread_ts,
+                    pin.node,
+                    pin.session_id,
+                    pin.user.as_str(),
+                    at
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn remove_pin(&self, conversation: &Conversation) -> Result<()> {
+        let conversation = conversation.clone();
+        self.run(move |db| {
+            db.execute(
+                "DELETE FROM pins WHERE channel = ?1 AND thread_ts = ?2",
+                params![conversation.channel, conversation.thread_ts],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn remove_pins_on(&self, node: &str) -> Result<Vec<Conversation>> {
+        let node = node.to_owned();
+        self.run(move |db| {
+            let tx = db.transaction()?;
+            let removed = {
+                let mut query =
+                    tx.prepare("SELECT channel, thread_ts FROM pins WHERE node = ?1")?;
+                query
+                    .query_map([&node], |row| {
+                        Ok(Conversation {
+                            channel: row.get(0)?,
+                            thread_ts: row.get(1)?,
+                        })
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            tx.execute("DELETE FROM pins WHERE node = ?1", [&node])?;
+            tx.commit()?;
+            Ok(removed)
+        })
+        .await
+    }
+
+    async fn pins(&self) -> Result<Vec<Pin>> {
+        self.run(|db| {
+            let mut query = db.prepare(&format!("SELECT {PIN_COLUMNS} FROM pins"))?;
+            let pins = query
+                .query_map([], pin_row)?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(pins)
+        })
+        .await
+    }
+}
