@@ -7,6 +7,7 @@ pub mod cli;
 pub mod config;
 pub mod fleet;
 pub mod hub;
+pub mod launchd;
 pub mod logging;
 pub mod render;
 pub mod run;

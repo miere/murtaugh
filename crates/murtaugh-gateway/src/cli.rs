@@ -2,11 +2,14 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
+use crate::config::DEFAULT_PROFILE;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "murtaugh-gateway",
-    version,
-    about = "Connects Slack to the AI agents running on your nodes"
+    about = "Connects Slack to the AI agents running on your nodes",
+    arg_required_else_help = true,
+    disable_version_flag = true
 )]
 pub struct Cli {
     /// Configuration file [default: ~/.config/murtaugh/default/murtaugh.toml]
@@ -22,6 +25,10 @@ pub enum Command {
     Run,
     /// Check the bootstrap file without connecting to anything
     Validate,
+    /// Write a macOS LaunchAgent that keeps `murtaugh-gateway run` alive
+    Launchd(LaunchdArgs),
+    /// Print the version, or check GitHub for a newer release
+    Version(VersionArgs),
     /// Who administers this gateway
     #[command(subcommand)]
     Admin(AdminCommand),
@@ -34,6 +41,26 @@ pub enum Command {
     /// Node credentials and the nodes attached right now
     #[command(subcommand)]
     Node(NodeCommand),
+}
+
+#[derive(Debug, Args)]
+pub struct LaunchdArgs {
+    /// Names the job murtaugh.<alias> and picks the profile's default config path
+    #[arg(long, default_value = DEFAULT_PROFILE)]
+    pub alias: String,
+    /// The murtaugh-gateway binary launchd runs [default: this binary]
+    #[arg(long, value_name = "PATH")]
+    pub binary_path: Option<PathBuf>,
+    /// Replace an existing plist
+    #[arg(long)]
+    pub update_existing: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct VersionArgs {
+    /// Ask GitHub whether a newer release exists; set GH_TOKEN, as the repository is private
+    #[arg(long)]
+    pub check: bool,
 }
 
 #[derive(Debug, Subcommand)]

@@ -47,6 +47,18 @@ murtaugh-gateway validate
 murtaugh-gateway run
 ```
 
+On macOS, `murtaugh-gateway launchd` writes a LaunchAgent that starts the gateway at login and
+restarts it if it stops. `--alias` names both the job (`murtaugh.<alias>`) and the profile it runs:
+
+```sh
+murtaugh-gateway launchd --alias default
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/murtaugh.default.plist
+```
+
+It never replaces an existing plist unless you pass `--update-existing`. Logs go to
+`~/Library/Logs/murtaugh/`. `murtaugh-gateway version --check` tells you whether a newer release
+exists; the repository is private, so set `GH_TOKEN` (for example `GH_TOKEN=$(gh auth token)`).
+
 ## Who may use it
 
 Everything below changes the store directly and reaches a running gateway within seconds.
