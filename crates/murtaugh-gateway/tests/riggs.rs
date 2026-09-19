@@ -131,7 +131,10 @@ async fn riggs_answers_a_mention_through_the_gateway() {
                 tokio::time::Instant::now() < deadline,
                 "no answer from Riggs; replies: {replies:?}"
             );
-            if replies.iter().any(|text| text.contains("No machine")) {
+            if replies
+                .iter()
+                .any(|text| text == "No machine available" || text == "Machine offline")
+            {
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 continue 'asking;
             }

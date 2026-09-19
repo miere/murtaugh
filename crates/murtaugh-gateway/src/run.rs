@@ -93,11 +93,13 @@ pub async fn serve(
     let access = Access::reloading(snapshot, store.clone());
     let fleet = Fleet::default();
     let files = Files::new(slack.clone());
+    let credentials = crate::alerts::Credentials::new(slack.clone());
     let mut hub = hub::start(
         config.listen,
         access.clone(),
         fleet.clone(),
         files.clone(),
+        credentials,
         shutdown.clone(),
     )
     .await

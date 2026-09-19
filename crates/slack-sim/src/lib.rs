@@ -266,6 +266,16 @@ impl SlackSim {
             .unwrap_or_default()
     }
 
+    /// The bot's DM with `user`, once anyone has opened it.
+    pub fn im_channel(&self, user: &str) -> Option<String> {
+        let mut st = self.inner.lock();
+        let id = st.im_for(user);
+        st.channels
+            .get(&id)
+            .is_some_and(|c| !c.messages.is_empty())
+            .then_some(id)
+    }
+
     /// Messages only one person saw, as (channel, user, text), oldest first.
     pub fn ephemerals(&self) -> Vec<(String, String, String)> {
         self.inner.lock().ephemerals.clone()
