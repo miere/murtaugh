@@ -69,6 +69,9 @@ pub struct SignIns {
     slack: Option<SlackClient>,
     access: Access,
     open: Arc<Mutex<HashMap<String, Open>>>,
+    /// Posts and redraws run one at a time from the latest state, so a slow redraw never
+    /// overwrites a newer one.
+    drawing: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl SignIns {
@@ -77,6 +80,7 @@ impl SignIns {
             slack,
             access,
             open: Arc::default(),
+            drawing: Arc::default(),
         }
     }
 
@@ -99,6 +103,7 @@ impl SignIns {
             .slack
             .as_ref()
             .ok_or_else(|| unreachable("this gateway cannot reach Slack".into()))?;
+        let _drawing = self.drawing.lock().await;
         let busy = self
             .open()
             .values()
@@ -115,7 +120,7 @@ impl SignIns {
             Stage::Pending
         };
         let key = key(&node.selector, &request.id.0);
-        let mut open = Open {
+        let open = Open {
             url: request.url.clone(),
             node,
             request,
@@ -133,25 +138,39 @@ impl SignIns {
             text: fallback(&open),
             blocks: vec![owner_card(&open, &key)],
         };
-        open.card = slack
-            .post_message(&card)
-            .await
-            .map_err(|err| unreachable(format!("could not reach the node's owner: {err}")))?;
-        if let Some((channel, thread_ts)) = thread {
-            let note = PostMessage {
-                channel,
-                thread_ts: Some(thread_ts),
-                text: fallback(&open),
-                blocks: vec![thread_card(&open)],
-            };
+        let note = thread.map(|(channel, thread_ts)| PostMessage {
+            channel,
+            thread_ts: Some(thread_ts),
+            text: fallback(&open),
+            blocks: vec![thread_card(&open)],
+        });
+        // Registered before posting, so a click on the card always finds it.
+        self.open().insert(key.clone(), open);
+        match slack.post_message(&card).await {
+            Ok(posted) => {
+                if let Some(open) = self.open().get_mut(&key) {
+                    open.card = posted;
+                }
+            }
+            Err(err) => {
+                self.open().remove(&key);
+                return Err(unreachable(format!(
+                    "could not reach the node's owner: {err}"
+                )));
+            }
+        }
+        if let Some(note) = note {
             match slack.post_message(&note).await {
-                Ok(posted) => open.note = Some(posted),
+                Ok(posted) => {
+                    if let Some(open) = self.open().get_mut(&key) {
+                        open.note = Some(posted);
+                    }
+                }
                 Err(err) => {
                     tracing::warn!(error = %err, "could not tell the thread about a sign-in")
                 }
             }
         }
-        self.open().insert(key, open);
         Ok(())
     }
 
@@ -194,6 +213,13 @@ impl SignIns {
             answer(&node.link, id, outcome, None, note).await;
         }
         self.redraw(&key).await;
+    }
+
+    /// Whether a sign-in on this node is still waiting on its owner.
+    pub fn pending_for(&self, selector: &str) -> bool {
+        self.open()
+            .values()
+            .any(|open| open.node.selector == selector && !open.stage.is_terminal())
     }
 
     /// A click on an owner's card. Returns the note to show the clicker alone, if any.
@@ -245,12 +271,16 @@ impl SignIns {
         let Some(slack) = &self.slack else {
             return;
         };
+        let _drawing = self.drawing.lock().await;
         let (updates, done) = {
             let all = self.open();
             let Some(open) = all.get(key) else {
                 return;
             };
-            let mut updates = vec![update(&open.card, fallback(open), owner_card(open, key))];
+            let mut updates = Vec::new();
+            if !open.card.ts.is_empty() {
+                updates.push(update(&open.card, fallback(open), owner_card(open, key)));
+            }
             if let Some(note) = &open.note {
                 updates.push(update(note, fallback(open), thread_card(open)));
             }
