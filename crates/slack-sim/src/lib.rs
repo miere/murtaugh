@@ -579,12 +579,25 @@ impl SlackSim {
         command: &str,
         text: &str,
     ) -> Result<(), SimError> {
+        self.slash_in_thread(user, channel, None, command, text)
+            .await
+    }
+
+    /// A slash command typed into a thread's reply box, which Slack reports with its `thread_ts`.
+    pub async fn slash_in_thread(
+        &self,
+        user: &str,
+        channel: &str,
+        thread_ts: Option<&str>,
+        command: &str,
+        text: &str,
+    ) -> Result<(), SimError> {
         let envelope = {
             let mut st = self.inner.lock();
             if !st.users.contains_key(user) {
                 return Err(SimError::UnknownUser(user.to_owned()));
             }
-            render::slash_command(&mut st, user, channel, command, text)
+            render::slash_command(&mut st, user, channel, command, text, thread_ts)
                 .ok_or_else(|| SimError::UnknownChannel(channel.to_owned()))?
         };
         socket::deliver(&self.inner, envelope);

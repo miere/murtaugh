@@ -341,6 +341,7 @@ pub(crate) fn slash_command(
     channel: &str,
     command: &str,
     text: &str,
+    thread_ts: Option<&str>,
 ) -> Option<Value> {
     let envelope_id = state.uuid();
     let trigger_id = format!("{}.{}.sim", state.next_seq(), now_secs());
@@ -355,7 +356,7 @@ pub(crate) fn slash_command(
         crate::ChannelKind::Im => "directmessage".to_owned(),
         _ => channel.name.clone(),
     };
-    Some(json!({
+    let mut envelope = json!({
         "payload": {
             "token": VERIFICATION_TOKEN,
             "team_id": TEAM_ID,
@@ -374,7 +375,11 @@ pub(crate) fn slash_command(
         "envelope_id": envelope_id,
         "type": "slash_commands",
         "accepts_response_payload": true,
-    }))
+    });
+    if let Some(thread_ts) = thread_ts {
+        envelope["payload"]["thread_ts"] = json!(thread_ts);
+    }
+    Some(envelope)
 }
 
 pub(crate) fn hello(connections: usize) -> Value {

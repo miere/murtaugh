@@ -108,10 +108,33 @@ struct Rig {
 }
 
 async fn rig() -> Rig {
-    rig_with(murtaugh_gateway::approval::TIMEOUT).await
+    rig_tuned(Tuning::default()).await
 }
 
 async fn rig_with(approval_timeout: Duration) -> Rig {
+    rig_tuned(Tuning {
+        approval_timeout,
+        ..Tuning::default()
+    })
+    .await
+}
+
+#[derive(Clone, Copy)]
+struct Tuning {
+    approval_timeout: Duration,
+    turn_idle_timeout: Duration,
+}
+
+impl Default for Tuning {
+    fn default() -> Self {
+        Self {
+            approval_timeout: murtaugh_gateway::approval::TIMEOUT,
+            turn_idle_timeout: murtaugh_gateway::chat::TURN_IDLE_TIMEOUT,
+        }
+    }
+}
+
+async fn rig_tuned(tuning: Tuning) -> Rig {
     if let Ok(filter) = std::env::var("TEST_LOG") {
         let _ = tracing_subscriber::fmt()
             .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
@@ -145,7 +168,7 @@ async fn rig_with(approval_timeout: Duration) -> Rig {
         Arc::new(SqliteStore::open(&dir.path().join("murtaugh.db")).unwrap());
     store.set_admin(&user(ADMIN)).await.unwrap();
     store.approve(&user(ALICE), &user(ADMIN)).await.unwrap();
-    let shutdown = gateway_with(&sim, config, approval_timeout);
+    let shutdown = gateway_with(&sim, config, tuning);
     Rig {
         sim,
         _dir: dir,
@@ -156,20 +179,17 @@ async fn rig_with(approval_timeout: Duration) -> Rig {
 }
 
 fn gateway(sim: &SlackSim, config: std::path::PathBuf) -> CancellationToken {
-    gateway_with(sim, config, murtaugh_gateway::approval::TIMEOUT)
+    gateway_with(sim, config, Tuning::default())
 }
 
-fn gateway_with(
-    sim: &SlackSim,
-    config: std::path::PathBuf,
-    approval_timeout: Duration,
-) -> CancellationToken {
+fn gateway_with(sim: &SlackSim, config: std::path::PathBuf, tuning: Tuning) -> CancellationToken {
     let shutdown = CancellationToken::new();
     let options = Options {
         slack_api: sim.api_base(),
         refresh: Duration::from_millis(100),
-        approval_timeout,
+        approval_timeout: tuning.approval_timeout,
         prompt_timeout: murtaugh_gateway::prompts::TIMEOUT,
+        turn_idle_timeout: tuning.turn_idle_timeout,
     };
     tokio::spawn({
         let shutdown = shutdown.clone();
@@ -216,12 +236,14 @@ impl Rig {
         let (seen, receiver) = mpsc::unbounded_channel();
         let (verdicts, _) = tokio::sync::broadcast::channel::<bool>(16);
         let (answers, _) = tokio::sync::broadcast::channel::<DisplayAnswer>(16);
+        let (cancels, _) = tokio::sync::broadcast::channel::<SessionId>(16);
         let (initialized, mut ready) = mpsc::channel(1);
         let script = Script {
             node: handle.clone(),
             seen,
             verdicts,
             answers: answers.clone(),
+            cancels,
             sessions: Arc::new(Mutex::new(0u32)),
             name: name.to_owned(),
             initialized,
@@ -280,6 +302,7 @@ struct Script {
     seen: mpsc::UnboundedSender<Seen>,
     verdicts: tokio::sync::broadcast::Sender<bool>,
     answers: tokio::sync::broadcast::Sender<DisplayAnswer>,
+    cancels: tokio::sync::broadcast::Sender<SessionId>,
     sessions: Arc<Mutex<u32>>,
     name: String,
     initialized: mpsc::Sender<()>,
@@ -291,6 +314,7 @@ async fn answer(script: Script, id: RequestId, call: GatewayCall) {
         seen,
         verdicts,
         answers,
+        cancels,
         sessions,
         name,
         initialized,
@@ -306,6 +330,10 @@ async fn answer(script: Script, id: RequestId, call: GatewayCall) {
             });
             node.reply(id, reply).await.unwrap();
             let _ = initialized.send(()).await;
+        }
+        GatewayCall::Cancel(target) => {
+            let _ = cancels.send(target.session_id);
+            node.reply(id, GatewayReply::Cancel).await.unwrap();
         }
         GatewayCall::RenewCredential => {
             let reply = GatewayReply::RenewCredential(rax::credential::CredentialRenewal::Started);
@@ -347,6 +375,41 @@ async fn answer(script: Script, id: RequestId, call: GatewayCall) {
             node.reply(id.clone(), GatewayReply::Prompt(PromptAccepted::default()))
                 .await
                 .unwrap();
+            if text.contains("silent") || text.contains("slow") {
+                let mut cancelled = cancels.subscribe();
+                let session = prompt.session_id.clone();
+                if text.contains("slow") {
+                    let started = Event::Message {
+                        content: ContentBlock::text("Working on it slowly…").into(),
+                    };
+                    node.event(id.clone(), started).await.unwrap();
+                }
+                let waited = tokio::time::timeout(Duration::from_secs(20), async {
+                    while let Ok(which) = cancelled.recv().await {
+                        if which == session {
+                            return;
+                        }
+                    }
+                })
+                .await;
+                let reason = if waited.is_ok() {
+                    "cancelled"
+                } else {
+                    "never cancelled"
+                };
+                // A real agent takes a moment to wind a cancelled turn down.
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                let _ = seen.send(Seen::Prompt {
+                    session: session.clone(),
+                    text: format!("<{reason}>"),
+                    links: vec![],
+                });
+                node.event(id.clone(), Event::Complete { stop_reason: None })
+                    .await
+                    .unwrap();
+                node.end(id).await.unwrap();
+                return;
+            }
             let tool = ToolCall {
                 id: ToolCallId("tc1".into()),
                 name: "Bash".into(),
@@ -1683,5 +1746,176 @@ async fn the_home_tab_shows_the_version_and_the_viewers_nodes_or_all_for_the_adm
     assert!(stranger.contains("don't have access"));
     assert!(!stranger.contains("laptop"));
     assert_eq!(rig.sim.violations(), vec![]);
+    rig.shutdown.cancel();
+}
+
+async fn next_cancel(node: &mut FakeNode) -> String {
+    loop {
+        let (_, text) = node.next_prompt().await;
+        if text.starts_with('<') {
+            return text;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_mid_turn_interrupts_it_and_the_waiting_ones_run_together() {
+    let rig = rig().await;
+    rig.store.set_allowed(&user(BOB), true).await.unwrap();
+    let mut laptop = rig.node(ALICE, "laptop").await;
+    let ts = rig
+        .sim
+        .mention(ALICE, GENERAL, "slow job", None)
+        .await
+        .unwrap();
+    assert_eq!(laptop.next_prompt().await.1, "slow job");
+    rig.bot_replies(&ts, |r| r.iter().any(|m| m.text.contains("slowly")))
+        .await;
+
+    rig.sim
+        .mention(ALICE, GENERAL, "actually, do this", Some(&ts))
+        .await
+        .unwrap();
+    rig.sim
+        .mention(BOB, GENERAL, "and this too", Some(&ts))
+        .await
+        .unwrap();
+    assert_eq!(next_cancel(&mut laptop).await, "<cancelled>");
+    let (_, merged) = laptop.next_prompt().await;
+    assert!(
+        merged == "<@U0ALICE01>: actually, do this\n\n<@U0BOB0001>: and this too",
+        "{merged}"
+    );
+    let replies = rig
+        .bot_replies(&ts, |r| r.iter().any(|m| m.text.contains("pong to:")))
+        .await;
+    assert!(
+        replies
+            .iter()
+            .any(|m| m.text.contains("_Interrupted by a newer message._")),
+        "{:?}",
+        replies.iter().map(|m| &m.text).collect::<Vec<_>>()
+    );
+    assert_eq!(rig.sim.violations(), vec![]);
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stop_inside_a_thread_cancels_its_turn_and_nothing_else_runs() {
+    let rig = rig().await;
+    let mut laptop = rig.node(ALICE, "laptop").await;
+    let ts = rig
+        .sim
+        .mention(ALICE, GENERAL, "slow job", None)
+        .await
+        .unwrap();
+    laptop.next_prompt().await;
+    rig.bot_replies(&ts, |r| r.iter().any(|m| m.text.contains("slowly")))
+        .await;
+
+    rig.sim.slash(ALICE, GENERAL, "/stop", "").await.unwrap();
+    rig.sim
+        .slash_in_thread(ALICE, GENERAL, Some(&ts), "/carmen", "stop")
+        .await
+        .unwrap();
+    assert_eq!(next_cancel(&mut laptop).await, "<cancelled>");
+    let replies = rig
+        .bot_replies(&ts, |r| r.iter().any(|m| m.text.contains("_Stopped._")))
+        .await;
+    assert!(!replies.iter().any(|m| m.text.contains("pong to:")));
+    rig.sim
+        .slash_in_thread(ALICE, GENERAL, Some(&ts), "/stop", "")
+        .await
+        .unwrap();
+    let notes = eventually("the three notes", || {
+        let mut notes: Vec<String> = rig
+            .sim
+            .ephemerals()
+            .into_iter()
+            .filter(|(_, who, _)| who == ALICE)
+            .map(|(_, _, text)| text)
+            .collect();
+        notes.sort();
+        (notes.len() == 3).then_some(notes)
+    })
+    .await;
+    assert_eq!(
+        notes,
+        [
+            "Nothing to stop.",
+            "Stopped.",
+            "Use it inside the thread you want to stop."
+        ]
+    );
+    rig.sim
+        .slash_in_thread(STRANGER, GENERAL, Some(&ts), "/stop", "")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        rig.sim
+            .ephemerals()
+            .iter()
+            .all(|(_, who, _)| who != STRANGER)
+    );
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_the_agent_goes_silent_on_is_stopped_after_the_idle_timeout() {
+    let rig = rig_tuned(Tuning {
+        turn_idle_timeout: Duration::from_millis(400),
+        ..Tuning::default()
+    })
+    .await;
+    let mut laptop = rig.node(ALICE, "laptop").await;
+    let ts = rig
+        .sim
+        .mention(ALICE, GENERAL, "go silent", None)
+        .await
+        .unwrap();
+    laptop.next_prompt().await;
+    assert_eq!(next_cancel(&mut laptop).await, "<cancelled>");
+    rig.bot_replies(&ts, |r| r.iter().any(|m| m.text.contains("went quiet")))
+        .await;
+
+    let next = rig
+        .sim
+        .mention(ALICE, GENERAL, "hello again", Some(&ts))
+        .await
+        .unwrap();
+    assert_eq!(laptop.next_prompt().await.1, "hello again");
+    let _ = next;
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_card_waiting_on_a_person_keeps_a_silent_turn_alive() {
+    let rig = rig_tuned(Tuning {
+        turn_idle_timeout: Duration::from_millis(300),
+        ..Tuning::default()
+    })
+    .await;
+    let mut laptop = rig.node(ALICE, "laptop").await;
+    let ts = rig
+        .sim
+        .mention(ALICE, GENERAL, "ask me", None)
+        .await
+        .unwrap();
+    laptop.next_prompt().await;
+    let card = eventually("the question card", || prompt_card(&rig, &ts)).await;
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    assert!(
+        !rig.sim
+            .thread(GENERAL, &ts)
+            .iter()
+            .any(|m| m.text.contains("went quiet")),
+        "the turn was stopped while a card waited"
+    );
+    rig.sim
+        .click(ALICE, GENERAL, &card.ts, murtaugh_gateway::prompts::CHAT)
+        .await
+        .unwrap();
+    wait_for_turn_end(&rig, GENERAL, &ts, "[Chat {} None").await;
     rig.shutdown.cancel();
 }

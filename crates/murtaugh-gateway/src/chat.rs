@@ -1,7 +1,8 @@
 //! A conversation is a Slack thread pinned to one node's session. This turns Slack messages into
 //! RAX prompts and streams each turn back into the thread.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -11,11 +12,11 @@ use rax::attachment::Attachment;
 use rax::content::ContentBlock;
 use rax::id::SessionId;
 use rax::interaction::{DisplayAnswer, DisplayOutcome};
-use rax::session::{NewSession, Prompt};
+use rax::session::{NewSession, Prompt, SessionRef};
 use rax::tool::{Decision, DeniedBy, ToolCall, ToolCallStatus, ToolVerdict};
 use rax::{ErrorKind, Event as TurnEvent, GatewayCall, GatewayReply, Open};
 use rax_tokio::CallError;
-use rax_tokio::gateway::StreamEvents;
+use rax_tokio::gateway::{GatewayLink, StreamEvents};
 use time::OffsetDateTime;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -35,6 +36,8 @@ pub const UNAUTHORISED_REACTION: &str = "zipper_mouth_face";
 /// The subtype Slack gives a DM that carries files; it is still the person talking.
 const FILE_SHARE: &str = "file_share";
 pub const THINKING: &str = "is thinking...";
+/// The Go gateway's `request_timeout`: silence, not length, is what stops a turn.
+pub const TURN_IDLE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// The chunks precede the `attachment` event on the link, so the bytes are normally there already.
 const ATTACHMENT_WAIT: Duration = Duration::from_secs(60);
 /// Slack clears the status once a chunk lands, so it is re-asserted until the turn ends.
@@ -57,9 +60,11 @@ pub struct Chat {
     prompt_timeout: Duration,
     sign_ins: SignIns,
     orphaned: Mutex<HashSet<Conversation>>,
-    busy: Mutex<HashSet<Conversation>>,
+    turns: Mutex<HashMap<Conversation, Running>>,
+    turn_idle_timeout: Duration,
 }
 
+#[derive(Clone)]
 struct Incoming {
     user: String,
     channel: String,
@@ -124,6 +129,7 @@ pub struct Parts {
     pub approval_timeout: Duration,
     pub prompt_timeout: Duration,
     pub sign_ins: SignIns,
+    pub turn_idle_timeout: Duration,
 }
 
 impl Chat {
@@ -140,6 +146,7 @@ impl Chat {
             approval_timeout,
             prompt_timeout,
             sign_ins,
+            turn_idle_timeout,
         } = parts;
         Arc::new(Self {
             slack,
@@ -156,7 +163,8 @@ impl Chat {
             prompt_timeout,
             sign_ins,
             orphaned: Mutex::new(HashSet::new()),
-            busy: Mutex::new(HashSet::new()),
+            turns: Mutex::new(HashMap::new()),
+            turn_idle_timeout,
         })
     }
 
@@ -316,29 +324,135 @@ impl Chat {
                 .clone()
                 .unwrap_or_else(|| incoming.ts.clone()),
         };
-        if !lock(&self.busy).insert(conversation.clone()) {
-            self.say(
-                &conversation,
-                "_Still on your last message. Send this again once I've answered._",
-            )
-            .await;
+        let cancel = {
+            let mut turns = lock(&self.turns);
+            match turns.get_mut(&conversation) {
+                Some(running) => {
+                    running.queued.push(incoming.clone());
+                    Some(running.interrupt(INTERRUPTED))
+                }
+                None => {
+                    turns.insert(conversation.clone(), Running::default());
+                    None
+                }
+            }
+        };
+        if let Some(cancel) = cancel {
+            if let Some((link, session_id)) = cancel {
+                cancel_turn(link, session_id);
+            }
             return;
         }
-        let thinking = Thinking::start(self.slack.clone(), &conversation);
-        let timing = self.converse(&user, &conversation, &incoming).await;
-        thinking.stop().await;
-        lock(&self.busy).remove(&conversation);
-        if self.turn_timings
-            && let Some(timing) = timing
+        let (mut user, mut incoming, mut received) = (user, incoming, received);
+        loop {
+            let thinking = Thinking::start(self.slack.clone(), &conversation);
+            let timing = self.converse(&user, &conversation, &incoming).await;
+            thinking.stop().await;
+            if self.turn_timings
+                && let Some(timing) = timing
+            {
+                let ms = |at: Option<Instant>| at.map(|at| at.duration_since(received).as_millis());
+                tracing::info!(
+                    node = %timing.node,
+                    accepted_ms = ?ms(Some(timing.accepted)),
+                    first_output_ms = ?ms(timing.first_output),
+                    finished_ms = received.elapsed().as_millis(),
+                    "turn timing: from the Slack event to the node accepting, its first output, and the end"
+                );
+            }
+            let queued = {
+                let mut turns = lock(&self.turns);
+                let queued = turns
+                    .get_mut(&conversation)
+                    .map(|running| std::mem::take(&mut running.queued))
+                    .unwrap_or_default();
+                if queued.is_empty() {
+                    turns.remove(&conversation);
+                } else {
+                    turns.insert(conversation.clone(), Running::default());
+                }
+                queued
+            };
+            let Some(next) = self.merge(queued) else {
+                return;
+            };
+            let Ok(next_user) = UserId::parse(&next.user) else {
+                lock(&self.turns).remove(&conversation);
+                return;
+            };
+            (user, incoming, received) = (next_user, next, Instant::now());
+        }
+    }
+
+    /// Messages that arrived during a turn, as one: each on its own paragraph, named when more
+    /// than one person spoke.
+    fn merge(&self, mut queued: Vec<Incoming>) -> Option<Incoming> {
+        // Events are handled concurrently, so arrival order is not Slack's order.
+        queued.sort_by(|a, b| a.ts.cmp(&b.ts));
+        let last = queued.last()?.clone();
+        let speakers: HashSet<&str> = queued.iter().map(|i| i.user.as_str()).collect();
+        let text = queued
+            .iter()
+            .map(|i| {
+                let words = self.strip_mention(&i.text);
+                if speakers.len() > 1 {
+                    format!("<@{}>: {words}", i.user)
+                } else {
+                    words
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let files = queued.iter().flat_map(|i| i.files.clone()).collect();
+        Some(Incoming {
+            text,
+            files,
+            ..last
+        })
+    }
+
+    /// `/stop`, or any of the app's commands with the text `stop`, typed inside a thread.
+    pub async fn on_slash(self: Arc<Self>, payload: serde_json::Value) {
+        let text = |key: &str| payload[key].as_str().unwrap_or_default().trim().to_owned();
+        let (command, words) = (text("command"), text("text"));
+        let stop = command.eq_ignore_ascii_case("/stop")
+            || words
+                .split_whitespace()
+                .next()
+                .is_some_and(|word| word.eq_ignore_ascii_case("stop"));
+        let (user, channel) = (text("user_id"), text("channel_id"));
+        if !stop || !UserId::parse(&user).is_ok_and(|u| self.access.snapshot().may_chat(&u)) {
+            return;
+        }
+        let thread_ts = payload["thread_ts"].as_str().map(str::to_owned);
+        let note = match &thread_ts {
+            None => "Use it inside the thread you want to stop.".to_owned(),
+            Some(thread_ts) => {
+                let conversation = Conversation {
+                    channel: channel.clone(),
+                    thread_ts: thread_ts.clone(),
+                };
+                let cancel = lock(&self.turns).get_mut(&conversation).map(|running| {
+                    running.queued.clear();
+                    running.interrupt(STOPPED)
+                });
+                match cancel {
+                    Some(cancel) => {
+                        if let Some((link, session_id)) = cancel {
+                            cancel_turn(link, session_id);
+                        }
+                        "Stopped.".to_owned()
+                    }
+                    None => "Nothing to stop.".to_owned(),
+                }
+            }
+        };
+        if let Err(err) = self
+            .slack
+            .post_ephemeral(&channel, thread_ts.as_deref(), &user, &note)
+            .await
         {
-            let ms = |at: Option<Instant>| at.map(|at| at.duration_since(received).as_millis());
-            tracing::info!(
-                node = %timing.node,
-                accepted_ms = ?ms(Some(timing.accepted)),
-                first_output_ms = ?ms(timing.first_output),
-                finished_ms = received.elapsed().as_millis(),
-                "turn timing: from the Slack event to the node accepting, its first output, and the end"
-            );
+            tracing::warn!(error = %err, "could not answer a slash command");
         }
     }
 
@@ -395,8 +509,15 @@ impl Chat {
             match reply {
                 Ok(GatewayReply::Prompt(_)) => {
                     let accepted = Instant::now();
+                    self.started(conversation, &seat.node, &seat.session_id);
                     let first_output = self
-                        .stream(conversation, incoming, &seat.node, pending.events)
+                        .stream(
+                            conversation,
+                            incoming,
+                            &seat.node,
+                            &seat.session_id,
+                            pending.events,
+                        )
                         .await;
                     return Some(TurnTiming {
                         node: seat.node.name.clone(),
@@ -413,7 +534,7 @@ impl Chat {
                 Err(CallError::Fault(fault)) if fault.kind == ErrorKind::SessionBusy => {
                     self.say(
                         conversation,
-                        "_Still on your last message. Send this again once I've answered._",
+                        "_The machine is still busy with this conversation; try again in a moment._",
                     )
                     .await;
                     return None;
@@ -571,16 +692,35 @@ impl Chat {
         })
     }
 
+    /// Lets a message or `/stop` that arrives from now on cancel the turn, and cancels at once
+    /// if one already did.
+    fn started(&self, conversation: &Conversation, node: &Node, session_id: &SessionId) {
+        let cancel = lock(&self.turns).get_mut(conversation).and_then(|running| {
+            running.session = Some((node.link.clone(), session_id.clone()));
+            running
+                .marker
+                .is_some()
+                .then(|| running.session.clone())
+                .flatten()
+        });
+        if let Some((link, session_id)) = cancel {
+            cancel_turn(link, session_id);
+        }
+    }
+
     async fn stream(
         &self,
         conversation: &Conversation,
         incoming: &Incoming,
         node: &Node,
+        session_id: &SessionId,
         mut events: StreamEvents,
     ) -> Option<Instant> {
         let recipient = (!incoming.direct).then(|| (self.team.clone(), incoming.user.clone()));
         let mut first_output = None;
-        let turn = CancellationToken::new();
+        let turn = Turn::default();
+        let mut active = Instant::now();
+        let mut stalled = false;
         let mut reply = Reply::new(
             self.slack.clone(),
             Target {
@@ -597,18 +737,40 @@ impl Chat {
                     reply.flush_due().await;
                     continue;
                 }
+                () = tokio::time::sleep_until(active + self.turn_idle_timeout) => {
+                    if turn.waiting() || self.sign_ins.pending_for(&node.selector) {
+                        active = Instant::now();
+                        continue;
+                    }
+                    stalled = true;
+                    break;
+                }
             };
             let Some(event) = event else {
                 break;
             };
+            active = Instant::now();
             let written = reply.has_written();
             self.show(&mut reply, node, event, &turn).await;
             if !written && reply.has_written() {
                 first_output.get_or_insert_with(Instant::now);
             }
         }
-        turn.cancel();
-        if node.link.is_closed() {
+        turn.token.cancel();
+        let marker = lock(&self.turns)
+            .get(conversation)
+            .and_then(|running| running.marker);
+        if stalled {
+            cancel_turn(node.link.clone(), session_id.clone());
+            reply
+                .text(&format!(
+                    "\n\n_The agent went quiet for {}, so I stopped this turn._",
+                    span(self.turn_idle_timeout)
+                ))
+                .await;
+        } else if let Some(marker) = marker {
+            reply.text(&format!("\n\n_{marker}_")).await;
+        } else if node.link.is_closed() {
             reply
                 .text(&format!(
                     "\n\n_**{}** went offline before finishing this answer._",
@@ -623,13 +785,7 @@ impl Chat {
         first_output
     }
 
-    async fn show(
-        &self,
-        reply: &mut Reply,
-        node: &Node,
-        event: Open<TurnEvent>,
-        turn: &CancellationToken,
-    ) {
+    async fn show(&self, reply: &mut Reply, node: &Node, event: Open<TurnEvent>, turn: &Turn) {
         match event {
             Open::Known(TurnEvent::Message {
                 content: Open::Known(ContentBlock::Text { text }),
@@ -706,7 +862,7 @@ impl Chat {
     }
 
     /// Allows, denies, or puts the call to the node's owner, as their tool mode says.
-    async fn rule(&self, target: &Target, node: &Node, tool: ToolCall, turn: &CancellationToken) {
+    async fn rule(&self, target: &Target, node: &Node, tool: ToolCall, turn: &Turn) {
         let config = match self.store.user(&node.owner).await {
             Ok(config) => config,
             Err(err) => {
@@ -735,10 +891,14 @@ impl Chat {
                     thread_ts: target.thread_ts.clone(),
                     tool,
                     timeout: self.approval_timeout,
-                    turn: turn.clone(),
+                    turn: turn.token.clone(),
                 };
                 let approvals = self.approvals.clone();
-                tokio::spawn(async move { approvals.ask(ask).await });
+                let waiting = turn.wait();
+                tokio::spawn(async move {
+                    approvals.ask(ask).await;
+                    drop(waiting);
+                });
                 return;
             }
         };
@@ -751,7 +911,7 @@ impl Chat {
         }
     }
 
-    fn put(&self, target: &Target, node: &Node, asked: Asked, turn: &CancellationToken) {
+    fn put(&self, target: &Target, node: &Node, asked: Asked, turn: &Turn) {
         let put = prompts::Put {
             slack: self.slack.clone(),
             link: node.link.clone(),
@@ -759,10 +919,14 @@ impl Chat {
             thread_ts: target.thread_ts.clone(),
             asked,
             timeout: self.prompt_timeout,
-            turn: turn.clone(),
+            turn: turn.token.clone(),
         };
         let prompts = self.prompts.clone();
-        tokio::spawn(async move { prompts.put(put).await });
+        let waiting = turn.wait();
+        tokio::spawn(async move {
+            prompts.put(put).await;
+            drop(waiting);
+        });
     }
 
     async fn attach(
@@ -870,6 +1034,77 @@ fn no_machine(orphaned: bool) -> Alert {
             next_steps: Some(next_steps.into()),
             ..Alert::default()
         }
+    }
+}
+
+const INTERRUPTED: &str = "Interrupted by a newer message.";
+const STOPPED: &str = "Stopped.";
+
+/// A conversation with a turn under way: the session a newer message or `/stop` cancels, and
+/// the messages that arrived meanwhile, which run together once the turn ends.
+#[derive(Default)]
+struct Running {
+    session: Option<(GatewayLink, SessionId)>,
+    queued: Vec<Incoming>,
+    /// Set once the turn was cancelled, to say why at the end of its reply.
+    marker: Option<&'static str>,
+}
+
+impl Running {
+    /// Returns the session to cancel, unless it was already cancelled or has not started.
+    fn interrupt(&mut self, marker: &'static str) -> Option<(GatewayLink, SessionId)> {
+        if self.marker.is_some() {
+            return None;
+        }
+        self.marker = Some(marker);
+        self.session.clone()
+    }
+}
+
+fn cancel_turn(link: GatewayLink, session_id: SessionId) {
+    tokio::spawn(async move {
+        let cancel = GatewayCall::Cancel(SessionRef { session_id });
+        match link.call(cancel).await {
+            Ok(pending) => {
+                let _ = pending.reply.await;
+            }
+            Err(err) => tracing::debug!(error = %err, "could not cancel a turn"),
+        }
+    });
+}
+
+/// One turn's cards: dismissed together when it ends, and while any waits on a person the
+/// turn is not idle.
+#[derive(Default)]
+struct Turn {
+    token: CancellationToken,
+    waiting: Arc<AtomicUsize>,
+}
+
+struct Waiting(Arc<AtomicUsize>);
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl Turn {
+    fn wait(&self) -> Waiting {
+        self.waiting.fetch_add(1, Ordering::SeqCst);
+        Waiting(self.waiting.clone())
+    }
+
+    fn waiting(&self) -> bool {
+        self.waiting.load(Ordering::SeqCst) > 0
+    }
+}
+
+fn span(duration: Duration) -> String {
+    match duration.as_secs() {
+        s if s >= 120 => format!("{} minutes", s / 60),
+        60..=119 => "a minute".to_owned(),
+        s => format!("{s} seconds"),
     }
 }
 

@@ -12,7 +12,14 @@
     "bot_user": {
       "display_name": "Murtaugh",
       "always_online": true
-    }
+    },
+    "slash_commands": [
+      {
+        "command": "/stop",
+        "description": "Stop the agent's current turn in this thread",
+        "should_escape": false
+      }
+    ]
   },
   "oauth_config": {
     "scopes": {
@@ -21,6 +28,7 @@
         "assistant:write",
         "channels:history",
         "chat:write",
+        "commands",
         "files:read",
         "files:write",
         "groups:history",
