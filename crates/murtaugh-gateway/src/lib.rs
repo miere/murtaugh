@@ -9,6 +9,7 @@ pub mod cli;
 pub mod config;
 pub mod files;
 pub mod fleet;
+pub mod home;
 pub mod hub;
 pub mod launchd;
 pub mod logging;

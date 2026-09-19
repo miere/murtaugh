@@ -96,6 +96,7 @@ fn event_summary(event: &Event) -> String {
             user.is_some()
         ),
         Event::AppMention { .. } => "app_mention".to_owned(),
+        Event::AppHomeOpened { tab, .. } => format!("app_home_opened tab={tab}"),
         Event::Unknown { kind, .. } => kind.clone(),
     }
 }
@@ -203,6 +204,12 @@ impl Chat {
                 tracing::debug!(event = ?event_summary(&event), "ignored a Slack event");
                 return;
             }
+            Event::AppHomeOpened { user, tab } => {
+                if tab == "home" {
+                    self.show_home(&user).await;
+                }
+                return;
+            }
             Event::Unknown { kind, .. } => {
                 tracing::debug!(%kind, "ignored a Slack event of a kind this gateway does not handle");
                 return;
@@ -268,6 +275,16 @@ impl Chat {
                 render::escape(&node.name)
             ),
         })
+    }
+
+    async fn show_home(&self, viewer: &str) {
+        let Ok(viewer) = UserId::parse(viewer) else {
+            return;
+        };
+        let blocks = crate::home::view(&viewer, &self.access.snapshot(), &self.fleet.summaries());
+        if let Err(err) = self.slack.publish_home(viewer.as_str(), &blocks).await {
+            tracing::warn!(error = %err, "could not publish the Home tab");
+        }
     }
 
     pub async fn on_fleet(self: Arc<Self>, change: FleetChange) {
