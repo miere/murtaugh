@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use murtaugh_store::Store;
 use rax::session::{GatewayCapabilities, Initialize, PROTOCOL_VERSION};
-use rax::{Error, ErrorKind, GatewayCall, GatewayReply, NodeCall, NodeReply};
+use rax::{GatewayCall, GatewayReply, NodeCall, NodeReply};
 use rax_tokio::gateway::{
     GatewayConfig, GatewayLink, GatewayServer, LinkEvent, LinkEvents, NewLink, NewLinks,
 };
@@ -18,6 +18,7 @@ use crate::access::{Access, Snapshot};
 use crate::alerts::{Credentials, Reporter};
 use crate::files::Files;
 use crate::fleet::{Fleet, Node};
+use crate::signin::{self, SignIns};
 
 pub const REFRESH: Duration = Duration::from_secs(5);
 pub const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -33,7 +34,7 @@ pub fn capabilities() -> GatewayCapabilities {
     GatewayCapabilities {
         question: true,
         plan: true,
-        sign_in: false,
+        sign_in: true,
         resource_schemes: vec!["chat".into()],
         readable_schemes: vec![crate::files::SCHEME.into()],
     }
@@ -50,6 +51,7 @@ pub async fn start(
     fleet: Fleet,
     files: Files,
     credentials: Credentials,
+    sign_ins: SignIns,
     shutdown: CancellationToken,
 ) -> std::io::Result<Hub> {
     let (server, new_links) =
@@ -60,6 +62,7 @@ pub async fn start(
         fleet,
         files,
         credentials,
+        sign_ins,
         changes,
     };
     tokio::spawn(accept(new_links, serving, shutdown));
@@ -105,6 +108,7 @@ struct Serving {
     fleet: Fleet,
     files: Files,
     credentials: Credentials,
+    sign_ins: SignIns,
     changes: mpsc::Sender<FleetChange>,
 }
 
@@ -127,6 +131,7 @@ async fn serve(link: GatewayLink, mut events: LinkEvents, serving: Serving) {
         fleet,
         files,
         credentials,
+        sign_ins,
         changes,
     } = serving;
     let selector = link.identity().0.clone();
@@ -193,7 +198,33 @@ async fn serve(link: GatewayLink, mut events: LinkEvents, serving: Serving) {
                     tracing::debug!(node = %name, error = %err, "could not answer a node call");
                 }
             }
-            LinkEvent::Request { id, call } => answer(&link, &name, id, call).await,
+            LinkEvent::Request {
+                id,
+                call: NodeCall::SignIn(request),
+            } => {
+                let node = signin::Node {
+                    selector: selector.clone(),
+                    name: name.clone(),
+                    owner: owner.clone(),
+                    link: link.clone(),
+                };
+                let sent = match sign_ins.raise(node, request, None).await {
+                    Ok(()) => link.reply(id, NodeReply::SignIn).await,
+                    Err(error) => link.fault(id, error).await,
+                };
+                if let Err(err) = sent {
+                    tracing::debug!(node = %name, error = %err, "could not answer a node call");
+                }
+            }
+            LinkEvent::Request {
+                id,
+                call: NodeCall::SignInSettled(settled),
+            } => {
+                sign_ins.settle(&selector, settled).await;
+                if let Err(err) = link.reply(id, NodeReply::SignInSettled).await {
+                    tracing::debug!(node = %name, error = %err, "could not answer a node call");
+                }
+            }
             LinkEvent::Background { session_id, .. } => {
                 tracing::debug!(node = %name, %session_id, "background event with no turn open");
             }
@@ -239,21 +270,5 @@ async fn initialize(link: &GatewayLink) -> Result<rax::session::NodeCapabilities
             initialized.protocol_version
         )),
         other => Err(format!("answered initialize with {other:?}")),
-    }
-}
-
-async fn answer(link: &GatewayLink, name: &str, id: rax::id::RequestId, call: NodeCall) {
-    let sent = match call {
-        NodeCall::SignIn(_) | NodeCall::SignInSettled(_) => {
-            let unsupported = Error::new(
-                ErrorKind::Unsupported,
-                "this gateway cannot show sign-ins yet",
-            );
-            link.fault(id, unsupported).await
-        }
-        NodeCall::ReadResource(_) | NodeCall::CredentialHealth(_) => return,
-    };
-    if let Err(err) = sent {
-        tracing::debug!(node = %name, error = %err, "could not answer a node call");
     }
 }

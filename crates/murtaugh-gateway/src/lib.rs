@@ -17,6 +17,7 @@ pub mod prompts;
 pub mod render;
 pub mod reply;
 pub mod run;
+pub mod signin;
 pub mod tls;
 pub mod token;
 pub mod version;

@@ -94,12 +94,14 @@ pub async fn serve(
     let fleet = Fleet::default();
     let files = Files::new(slack.clone());
     let credentials = crate::alerts::Credentials::new(slack.clone());
+    let sign_ins = crate::signin::SignIns::new(Some(slack.clone()), access.clone());
     let mut hub = hub::start(
         config.listen,
         access.clone(),
         fleet.clone(),
         files.clone(),
         credentials,
+        sign_ins.clone(),
         shutdown.clone(),
     )
     .await
@@ -123,6 +125,7 @@ pub async fn serve(
         turn_timings: config.log.turn_timings,
         approval_timeout: options.approval_timeout,
         prompt_timeout: options.prompt_timeout,
+        sign_ins,
     });
     tracing::info!(listen = %hub.server.local_addr(), team = %identity.team_id, %holder, "murtaugh gateway started; waiting to lead");
     let mut seen = Seen::default();
