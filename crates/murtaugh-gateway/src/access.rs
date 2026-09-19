@@ -100,6 +100,13 @@ impl Snapshot {
 
 /// Bounds how often a stranger's token can make the gateway read the store.
 pub const RELOAD_AT_MOST_EVERY: Duration = Duration::from_secs(1);
+/// Time for a booked read to land before a waiting token looks again.
+const RECHECK_MARGIN: Duration = Duration::from_millis(250);
+
+enum Plan {
+    Read(Duration),
+    Recheck(Duration),
+}
 
 struct Reload {
     store: Arc<dyn Store>,
@@ -144,18 +151,39 @@ impl Access {
         if reload.handle.runtime_flavor() != RuntimeFlavor::MultiThread {
             return None;
         }
-        {
+        // Reads stay at most one a second: a token that arrives inside the window waits for the
+        // next slot, or, if a read is already booked, for that read and checks again.
+        let plan = {
             let mut last = reload
                 .last
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if last.is_some_and(|at| at.elapsed() < RELOAD_AT_MOST_EVERY) {
-                return None;
+            let now = Instant::now();
+            match *last {
+                Some(booked) if booked > now => Plan::Recheck(booked - now + RECHECK_MARGIN),
+                Some(done) if now < done + RELOAD_AT_MOST_EVERY => {
+                    let slot = done + RELOAD_AT_MOST_EVERY;
+                    *last = Some(slot);
+                    Plan::Read(slot - now)
+                }
+                _ => {
+                    *last = Some(now);
+                    Plan::Read(Duration::ZERO)
+                }
             }
-            *last = Some(Instant::now());
-        }
+        };
+        let wait = match plan {
+            Plan::Recheck(wait) => {
+                tokio::task::block_in_place(|| reload.handle.block_on(tokio::time::sleep(wait)));
+                return self.snapshot().authenticate(presented);
+            }
+            Plan::Read(wait) => wait,
+        };
         let fresh = tokio::task::block_in_place(|| {
-            reload.handle.block_on(Snapshot::load(&*reload.store))
+            reload.handle.block_on(async {
+                tokio::time::sleep(wait).await;
+                Snapshot::load(&*reload.store).await
+            })
         })
         .map_err(|err| tracing::warn!(error = %err, "could not read the store to admit a new node"))
         .ok()?;

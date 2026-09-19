@@ -210,6 +210,29 @@ async fn a_node_started_right_after_its_token_is_minted_is_admitted() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn two_nodes_minted_and_started_within_a_second_are_both_admitted() {
+    let mut rig = rig().await;
+    let (first, token) = rig.mint_quietly("U0PERSON1").await;
+    let (laptop, mut laptop_events) = rig.dial(&token);
+    answer_initialize(&laptop, &mut laptop_events).await;
+    assert_eq!(
+        within(rig.hub.changes.recv()).await.unwrap(),
+        FleetChange::Attached { selector: first }
+    );
+
+    let (second, token) = rig.mint_quietly("U0PERSON1").await;
+    let (desktop, mut desktop_events) = rig.dial(&token);
+    answer_initialize(&desktop, &mut desktop_events).await;
+    assert_eq!(
+        within(rig.hub.changes.recv()).await.unwrap(),
+        FleetChange::Attached { selector: second }
+    );
+    laptop.close().await;
+    desktop.close().await;
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_token_revoked_before_it_first_dials_is_still_refused() {
     let rig = rig().await;
     let (selector, token) = rig.mint_quietly("U0PERSON1").await;
