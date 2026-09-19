@@ -224,6 +224,7 @@ async fn clicks_and_slash_commands_come_through_as_payloads() {
                     thread_ts: None,
                     action_id: "approve".into(),
                     value: "p1".into(),
+                    values: json!({}),
                 })
             );
         }

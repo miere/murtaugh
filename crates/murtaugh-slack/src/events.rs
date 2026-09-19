@@ -146,6 +146,8 @@ pub struct Click {
     pub thread_ts: Option<String>,
     pub action_id: String,
     pub value: String,
+    /// The message's inputs as they stood: `state.values`, keyed by block id, then action id.
+    pub values: Value,
 }
 
 impl Click {
@@ -164,6 +166,7 @@ impl Click {
             thread_ts: text(&payload["message"]["thread_ts"]),
             action_id: text(&action["action_id"])?,
             value: text(&action["value"]).unwrap_or_default(),
+            values: payload["state"]["values"].clone(),
         })
     }
 }

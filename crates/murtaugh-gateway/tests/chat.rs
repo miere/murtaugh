@@ -9,7 +9,9 @@ use murtaugh_gateway::run::{self, Options};
 use murtaugh_gateway::token;
 use murtaugh_store::{NodeToken, SqliteStore, Store, UserId};
 use rax::content::ContentBlock;
+use rax::id::PromptId;
 use rax::id::{RequestId, SessionId, ToolCallId};
+use rax::interaction::{DisplayAnswer, PlanRequest, Question, QuestionOption, QuestionRequest};
 use rax::resource::ReadResource;
 use rax::session::{Initialized, NodeCapabilities, PromptAccepted, SessionCreated, ToolGate};
 use rax::tool::{Decision, ToolCall, ToolKind};
@@ -166,6 +168,7 @@ fn gateway_with(
         slack_api: sim.api_base(),
         refresh: Duration::from_millis(100),
         approval_timeout,
+        prompt_timeout: murtaugh_gateway::prompts::TIMEOUT,
     };
     tokio::spawn({
         let shutdown = shutdown.clone();
@@ -211,11 +214,13 @@ impl Rig {
         .unwrap();
         let (seen, receiver) = mpsc::unbounded_channel();
         let (verdicts, _) = tokio::sync::broadcast::channel::<bool>(16);
+        let (answers, _) = tokio::sync::broadcast::channel::<DisplayAnswer>(16);
         let (initialized, mut ready) = mpsc::channel(1);
         let script = Script {
             node: handle.clone(),
             seen,
             verdicts,
+            answers,
             sessions: Arc::new(Mutex::new(0u32)),
             name: name.to_owned(),
             initialized,
@@ -230,6 +235,9 @@ impl Rig {
                         let allowed = matches!(verdict.decision, Decision::Allow);
                         let _ = script.seen.send(Seen::Verdict { allowed });
                         let _ = script.verdicts.send(allowed);
+                    }
+                    NodeEvent::Answer(answer) => {
+                        let _ = script.answers.send(answer);
                     }
                     _ => {}
                 }
@@ -269,6 +277,7 @@ struct Script {
     node: NodeHandle,
     seen: mpsc::UnboundedSender<Seen>,
     verdicts: tokio::sync::broadcast::Sender<bool>,
+    answers: tokio::sync::broadcast::Sender<DisplayAnswer>,
     sessions: Arc<Mutex<u32>>,
     name: String,
     initialized: mpsc::Sender<()>,
@@ -279,6 +288,7 @@ async fn answer(script: Script, id: RequestId, call: GatewayCall) {
         node,
         seen,
         verdicts,
+        answers,
         sessions,
         name,
         initialized,
@@ -379,10 +389,68 @@ async fn answer(script: Script, id: RequestId, call: GatewayCall) {
                     .unwrap();
             }
             let last = text.lines().last().unwrap_or_default().to_owned();
+            let mut heard = String::new();
+            let asked = if text.contains("ask me") {
+                Some(Event::Question {
+                    question: QuestionRequest {
+                        id: PromptId("q1".into()),
+                        title: Some("Pick a database".into()),
+                        questions: vec![
+                            Question {
+                                key: "db".into(),
+                                header: Some("Storage".into()),
+                                question: "Which database?".into(),
+                                options: vec![
+                                    QuestionOption {
+                                        label: "Postgres".into(),
+                                        description: Some("The big one".into()),
+                                    },
+                                    QuestionOption {
+                                        label: "SQLite".into(),
+                                        description: None,
+                                    },
+                                ],
+                                multi_select: false,
+                            },
+                            Question {
+                                key: "notes".into(),
+                                header: None,
+                                question: "Anything else?".into(),
+                                options: vec![],
+                                multi_select: false,
+                            },
+                        ],
+                    },
+                })
+            } else if text.contains("plan") {
+                Some(Event::Plan {
+                    plan: PlanRequest {
+                        id: PromptId("p1".into()),
+                        title: None,
+                        plan: "1. Drop the table\n2. Rebuild it".into(),
+                    },
+                })
+            } else {
+                None
+            };
+            if let Some(asked) = asked {
+                let mut answered = answers.subscribe();
+                node.event(id.clone(), asked).await.unwrap();
+                let answer = tokio::time::timeout(Duration::from_secs(20), answered.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                heard = format!(
+                    " [{:?} {:?} {:?} by {:?}]",
+                    answer.outcome, answer.answers, answer.choice, answer.user_id
+                );
+            }
             let ruling = if allowed { "tool ran" } else { "tool refused" };
             let reply = Event::Message {
-                content: ContentBlock::text(format!("**{name}** says pong to: {last} ({ruling})"))
-                    .into(),
+                content: ContentBlock::text(format!(
+                    "**{name}** says pong to: {last} ({ruling}){heard}"
+                ))
+                .into(),
             };
             node.event(id.clone(), reply).await.unwrap();
             node.event(id.clone(), Event::Complete { stop_reason: None })
@@ -1146,5 +1214,143 @@ async fn an_owner_in_denied_mode_has_every_tool_refused_without_a_card() {
     laptop.next_prompt().await;
     wait_for_turn_end(&rig, GENERAL, &ts, "pong to: try (tool refused)").await;
     assert!(approval_card(&rig, &ts).is_none());
+    rig.shutdown.cancel();
+}
+
+fn prompt_card(rig: &Rig, ts: &str) -> Option<SimMessage> {
+    rig.sim.thread(GENERAL, ts).into_iter().find(|m| {
+        m.blocks
+            .as_ref()
+            .is_some_and(|b| b.to_string().contains("murtaugh_prompt_card"))
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_question_is_answered_in_place_once_every_question_has_an_answer() {
+    let rig = rig().await;
+    let mut laptop = rig.node(ALICE, "laptop").await;
+    let ts = rig
+        .sim
+        .mention(ALICE, GENERAL, "ask me", None)
+        .await
+        .unwrap();
+    laptop.next_prompt().await;
+    let card = eventually("the question card", || prompt_card(&rig, &ts)).await;
+    assert!(card_says(&card, "1. Storage - Which database?"));
+    assert!(card_says(&card, "_Postgres_ - The big one"));
+    assert!(card_says(&card, "plain_text_input"));
+
+    let only_db = serde_json::json!({
+        "prompt_q:0": {"prompt_answer": {"type": "radio_buttons", "selected_option": {"value": "0"}}},
+    });
+    rig.sim
+        .click_with_state(
+            ALICE,
+            GENERAL,
+            &card.ts,
+            murtaugh_gateway::prompts::SUBMIT,
+            only_db,
+        )
+        .await
+        .unwrap();
+    eventually("the note about the missing answer", || {
+        rig.sim
+            .ephemerals()
+            .iter()
+            .any(|(_, who, text)| who == ALICE && text == "One question still needs an answer.")
+            .then_some(())
+    })
+    .await;
+
+    rig.sim
+        .click(STRANGER, GENERAL, &card.ts, murtaugh_gateway::prompts::CHAT)
+        .await
+        .unwrap();
+    eventually("the note to the stranger", || {
+        rig.sim
+            .ephemerals()
+            .iter()
+            .any(|(_, who, _)| who == STRANGER)
+            .then_some(())
+    })
+    .await;
+
+    let both = serde_json::json!({
+        "prompt_q:0": {"prompt_answer": {"type": "radio_buttons", "selected_option": {"value": "0"}}},
+        "prompt_q:1": {"prompt_answer": {"type": "plain_text_input", "value": "Use WAL"}},
+    });
+    rig.sim
+        .click_with_state(
+            ALICE,
+            GENERAL,
+            &card.ts,
+            murtaugh_gateway::prompts::SUBMIT,
+            both,
+        )
+        .await
+        .unwrap();
+    wait_for_turn_end(
+        &rig,
+        GENERAL,
+        &ts,
+        r#"[Answered {"db": ["Postgres"], "notes": ["Use WAL"]} None by Some("U0ALICE01")]"#,
+    )
+    .await;
+    let settled = prompt_card(&rig, &ts).unwrap();
+    assert!(card_says(&settled, "*✓* Postgres"), "{:?}", settled.blocks);
+    assert!(card_says(&settled, "Answered by <@U0ALICE01>"));
+    assert!(!card_says(&settled, "prompt_submit"), "the buttons stayed");
+    assert_eq!(rig.sim.violations(), vec![]);
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plan_is_approved_from_its_card() {
+    let rig = rig().await;
+    let mut laptop = rig.node(ALICE, "laptop").await;
+    let ts = rig
+        .sim
+        .mention(ALICE, GENERAL, "make a plan", None)
+        .await
+        .unwrap();
+    laptop.next_prompt().await;
+    let card = eventually("the plan card", || prompt_card(&rig, &ts)).await;
+    assert!(card_says(&card, "Plan Ready for Review"));
+    assert!(card_says(&card, "1. Drop the table"));
+    rig.sim
+        .click(ALICE, GENERAL, &card.ts, murtaugh_gateway::prompts::PROCEED)
+        .await
+        .unwrap();
+    wait_for_turn_end(&rig, GENERAL, &ts, r#"Some(Proceed) by Some("U0ALICE01")]"#).await;
+    let settled = prompt_card(&rig, &ts).unwrap();
+    assert!(
+        card_says(&settled, "Approved by <@U0ALICE01>"),
+        "{:?}",
+        settled.blocks
+    );
+    assert_eq!(rig.sim.violations(), vec![]);
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn chat_about_this_hands_the_question_back_to_the_conversation() {
+    let rig = rig().await;
+    let mut laptop = rig.node(ALICE, "laptop").await;
+    let ts = rig
+        .sim
+        .mention(ALICE, GENERAL, "ask me", None)
+        .await
+        .unwrap();
+    laptop.next_prompt().await;
+    let card = eventually("the question card", || prompt_card(&rig, &ts)).await;
+    rig.sim
+        .click(ALICE, GENERAL, &card.ts, murtaugh_gateway::prompts::CHAT)
+        .await
+        .unwrap();
+    wait_for_turn_end(&rig, GENERAL, &ts, "[Chat {} None").await;
+    assert!(card_says(
+        &prompt_card(&rig, &ts).unwrap(),
+        "Raised by <@U0ALICE01>"
+    ));
     rig.shutdown.cancel();
 }

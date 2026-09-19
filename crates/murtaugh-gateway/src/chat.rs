@@ -25,6 +25,7 @@ use crate::approval::{self, Approvals};
 use crate::files::Files;
 use crate::fleet::{Fleet, Node};
 use crate::hub::FleetChange;
+use crate::prompts::{self, Asked, Prompts};
 use crate::render;
 use crate::reply::{Reply, Target};
 
@@ -50,6 +51,8 @@ pub struct Chat {
     turn_timings: bool,
     approvals: Approvals,
     approval_timeout: Duration,
+    prompts: Prompts,
+    prompt_timeout: Duration,
     orphaned: Mutex<HashSet<Conversation>>,
     busy: Mutex<HashSet<Conversation>>,
 }
@@ -115,6 +118,7 @@ pub struct Parts {
     pub files: Files,
     pub turn_timings: bool,
     pub approval_timeout: Duration,
+    pub prompt_timeout: Duration,
 }
 
 impl Chat {
@@ -129,6 +133,7 @@ impl Chat {
             files,
             turn_timings,
             approval_timeout,
+            prompt_timeout,
         } = parts;
         Arc::new(Self {
             slack,
@@ -141,6 +146,8 @@ impl Chat {
             turn_timings,
             approvals: Approvals::default(),
             approval_timeout,
+            prompts: Prompts::default(),
+            prompt_timeout,
             orphaned: Mutex::new(HashSet::new()),
             busy: Mutex::new(HashSet::new()),
         })
@@ -205,7 +212,14 @@ impl Chat {
     /// A departed node's pins are dropped now; the notice waits for the next message, which is
     /// when the conversation is rebuilt from its thread.
     pub async fn on_click(self: Arc<Self>, click: Click) {
-        let Some(note) = self.approvals.click(&click) else {
+        let note = if click.action_id.starts_with("tool_approval") {
+            self.approvals.click(&click)
+        } else {
+            let may_answer =
+                UserId::parse(&click.user).is_ok_and(|user| self.access.snapshot().may_chat(&user));
+            self.prompts.click(&click, may_answer)
+        };
+        let Some(note) = note else {
             return;
         };
         if let Err(err) = self
@@ -596,9 +610,11 @@ impl Chat {
                     .await;
             }
             Open::Known(TurnEvent::Question { question }) => {
-                self.unavailable(node, question.id).await;
+                self.put(reply.target(), node, Asked::Questions(question), turn);
             }
-            Open::Known(TurnEvent::Plan { plan }) => self.unavailable(node, plan.id).await,
+            Open::Known(TurnEvent::Plan { plan }) => {
+                self.put(reply.target(), node, Asked::Plan(plan), turn);
+            }
             Open::Known(TurnEvent::SignIn { sign_in }) => {
                 self.unavailable(node, sign_in.id).await;
             }
@@ -668,6 +684,20 @@ impl Chat {
         if let Err(err) = node.link.verdict(verdict).await {
             tracing::warn!(error = %err, "could not rule on a tool call");
         }
+    }
+
+    fn put(&self, target: &Target, node: &Node, asked: Asked, turn: &CancellationToken) {
+        let put = prompts::Put {
+            slack: self.slack.clone(),
+            link: node.link.clone(),
+            channel: target.channel.clone(),
+            thread_ts: target.thread_ts.clone(),
+            asked,
+            timeout: self.prompt_timeout,
+            turn: turn.clone(),
+        };
+        let prompts = self.prompts.clone();
+        tokio::spawn(async move { prompts.put(put).await });
     }
 
     async fn attach(

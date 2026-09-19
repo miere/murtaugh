@@ -489,6 +489,26 @@ impl SlackSim {
         ts: &str,
         action_id: &str,
     ) -> Result<(), SimError> {
+        self.click_with_state(
+            user,
+            channel,
+            ts,
+            action_id,
+            Value::Object(Default::default()),
+        )
+        .await
+    }
+
+    /// Clicks a button with the message's inputs filled in: `values` is the payload's
+    /// `state.values`, keyed by block id, then action id.
+    pub async fn click_with_state(
+        &self,
+        user: &str,
+        channel: &str,
+        ts: &str,
+        action_id: &str,
+        values: Value,
+    ) -> Result<(), SimError> {
         let envelope = {
             let mut st = self.inner.lock();
             if !st.users.contains_key(user) {
@@ -509,7 +529,7 @@ impl SlackSim {
                     ts: ts.to_owned(),
                     action_id: action_id.to_owned(),
                 })?;
-            render::block_actions(&mut st, user, channel, &msg, &block_id, &button)
+            render::block_actions(&mut st, user, channel, &msg, &block_id, &button, values)
                 .ok_or_else(|| SimError::UnknownChannel(channel.to_owned()))?
         };
         socket::deliver(&self.inner, envelope);
