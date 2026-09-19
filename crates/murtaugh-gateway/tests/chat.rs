@@ -68,6 +68,7 @@ enum Seen {
 struct FakeNode {
     handle: NodeHandle,
     seen: mpsc::UnboundedReceiver<Seen>,
+    answers: tokio::sync::broadcast::Sender<DisplayAnswer>,
 }
 
 impl FakeNode {
@@ -220,7 +221,7 @@ impl Rig {
             node: handle.clone(),
             seen,
             verdicts,
-            answers,
+            answers: answers.clone(),
             sessions: Arc::new(Mutex::new(0u32)),
             name: name.to_owned(),
             initialized,
@@ -250,6 +251,7 @@ impl Rig {
         FakeNode {
             handle,
             seen: receiver,
+            answers,
         }
     }
 
@@ -437,6 +439,39 @@ async fn answer(script: Script, id: RequestId, call: GatewayCall) {
             } else {
                 None
             };
+            if text.contains("sign me in") {
+                use rax::interaction::{SignInRequest, SignInSettled, SignInState};
+                let mut answered = answers.subscribe();
+                let request = SignInRequest {
+                    id: PromptId("t1".into()),
+                    tool: "claude".into(),
+                    url: None,
+                    needs_code: false,
+                    command: Some("claude login".into()),
+                };
+                node.event(id.clone(), Event::SignIn { sign_in: request })
+                    .await
+                    .unwrap();
+                let answer = tokio::time::timeout(Duration::from_secs(20), answered.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let settled = SignInSettled {
+                    id: PromptId("t1".into()),
+                    state: SignInState::Success,
+                    reason: None,
+                    url: None,
+                };
+                node.event(
+                    id.clone(),
+                    Event::SignInSettled {
+                        sign_in_settled: settled,
+                    },
+                )
+                .await
+                .unwrap();
+                heard = format!(" [sign-in {:?}]", answer.outcome);
+            }
             if let Some(asked) = asked {
                 let mut answered = answers.subscribe();
                 node.event(id.clone(), asked).await.unwrap();
@@ -1432,6 +1467,168 @@ async fn a_failing_credential_is_told_to_the_owner_by_dm_and_settled_on_recovery
     assert_eq!(cards.len(), 1);
     assert_eq!(cards[0].text, "A credential on laptop recovered");
     assert!(!card_says(&cards[0], "credential_renew"));
+    assert_eq!(rig.sim.violations(), vec![]);
+    rig.shutdown.cancel();
+}
+
+fn dm_card(rig: &Rig, user: &str, marker: &str) -> Option<SimMessage> {
+    let dm = rig.sim.im_channel(user)?;
+    rig.sim.messages(&dm).into_iter().find(|m| {
+        m.blocks
+            .as_ref()
+            .is_some_and(|b| b.to_string().contains(marker))
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sign_in_is_worked_through_by_the_owner_alone_in_their_dm() {
+    use rax::interaction::{SignInRequest, SignInSettled, SignInState};
+    let rig = rig().await;
+    let laptop = rig.node(ALICE, "laptop").await;
+    let mut answers = laptop.answers.subscribe();
+    let request = SignInRequest {
+        id: PromptId("s1".into()),
+        tool: "claude".into(),
+        url: None,
+        needs_code: true,
+        command: Some("claude setup-token".into()),
+    };
+    within(laptop.handle.call(rax::NodeCall::SignIn(request.clone())))
+        .await
+        .unwrap();
+    let busy = within(laptop.handle.call(rax::NodeCall::SignIn(request))).await;
+    assert!(
+        matches!(&busy, Err(rax_tokio::CallError::Fault(e)) if e.kind == rax::ErrorKind::Credential),
+        "{busy:?}"
+    );
+    let dm = rig.sim.im_channel(ALICE).unwrap();
+    let card = eventually("the owner's card", || {
+        dm_card(&rig, ALICE, "murtaugh_signin_card")
+    })
+    .await;
+    assert!(card_says(&card, "claude setup-token"));
+    assert!(card_says(&card, "signin_approve"));
+
+    rig.sim
+        .click(BOB, &dm, &card.ts, murtaugh_gateway::signin::APPROVE)
+        .await
+        .unwrap();
+    rig.sim
+        .click(ALICE, &dm, &card.ts, murtaugh_gateway::signin::APPROVE)
+        .await
+        .unwrap();
+    let approved = within(answers.recv()).await.unwrap();
+    assert_eq!(approved.outcome, rax::interaction::DisplayOutcome::Approved);
+    assert!(
+        rig.sim
+            .ephemerals()
+            .iter()
+            .any(|(_, who, text)| who == BOB && text.contains("Only <@U0ALICE01>"))
+    );
+
+    let settle = |state: SignInState, url: Option<&str>| {
+        rax::NodeCall::SignInSettled(SignInSettled {
+            id: PromptId("s1".into()),
+            state,
+            reason: None,
+            url: url.map(str::to_owned),
+        })
+    };
+    within(laptop.handle.call(settle(
+        SignInState::Ready,
+        Some("https://claude.ai/oauth?x=1"),
+    )))
+    .await
+    .unwrap();
+    let card = dm_card(&rig, ALICE, "murtaugh_signin_card").unwrap();
+    assert!(card_says(&card, "https://claude.ai/oauth?x=1"));
+    assert!(card_says(&card, "signin_code_input"));
+
+    let code = serde_json::json!({
+        "signin_code_input": {"signin_code_value": {"type": "plain_text_input", "value": " ABC-123 "}},
+    });
+    rig.sim
+        .click_with_state(
+            ALICE,
+            &dm,
+            &card.ts,
+            murtaugh_gateway::signin::SUBMIT_CODE,
+            code,
+        )
+        .await
+        .unwrap();
+    let answered = within(answers.recv()).await.unwrap();
+    assert_eq!(answered.code.as_deref(), Some("ABC-123"));
+
+    within(laptop.handle.call(settle(SignInState::Confirming, None)))
+        .await
+        .unwrap();
+    let confirmed = within(answers.recv()).await.unwrap();
+    assert_eq!(
+        confirmed.outcome,
+        rax::interaction::DisplayOutcome::Approved
+    );
+    within(laptop.handle.call(settle(SignInState::Success, None)))
+        .await
+        .unwrap();
+    let card = dm_card(&rig, ALICE, "murtaugh_signin_card").unwrap();
+    assert!(
+        card_says(&card, "Authentication succeeded."),
+        "{:?}",
+        card.blocks
+    );
+    assert!(!card_says(&card, "signin_deny"), "the buttons stayed");
+    assert_eq!(rig.sim.violations(), vec![]);
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sign_in_raised_in_a_turn_tells_the_thread_and_goes_to_the_owner() {
+    let rig = rig().await;
+    rig.store.set_allowed(&user(BOB), true).await.unwrap();
+    let mut desktop = rig.node(ADMIN, "desktop").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let ts = rig
+        .sim
+        .mention(BOB, GENERAL, "sign me in", None)
+        .await
+        .unwrap();
+    desktop.next_prompt().await;
+    let note = eventually("the note in the thread", || {
+        rig.sim.thread(GENERAL, &ts).into_iter().find(|m| {
+            m.blocks
+                .as_ref()
+                .is_some_and(|b| b.to_string().contains("murtaugh_signin_card"))
+        })
+    })
+    .await;
+    assert!(card_says(
+        &note,
+        "<@U0ADMIN01> has been sent a direct message"
+    ));
+    assert!(
+        !card_says(&note, "claude login"),
+        "the command leaked into the thread"
+    );
+
+    let dm = rig.sim.im_channel(ADMIN).unwrap();
+    let card = dm_card(&rig, ADMIN, "murtaugh_signin_card").unwrap();
+    rig.sim
+        .click(ADMIN, &dm, &card.ts, murtaugh_gateway::signin::APPROVE)
+        .await
+        .unwrap();
+    wait_for_turn_end(&rig, GENERAL, &ts, "[sign-in Approved]").await;
+    let note = rig
+        .sim
+        .thread(GENERAL, &ts)
+        .into_iter()
+        .find(|m| m.ts == note.ts)
+        .unwrap();
+    assert!(
+        card_says(&note, "completed the sign-in"),
+        "{:?}",
+        note.blocks
+    );
     assert_eq!(rig.sim.violations(), vec![]);
     rig.shutdown.cancel();
 }

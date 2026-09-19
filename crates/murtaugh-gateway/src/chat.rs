@@ -29,6 +29,7 @@ use crate::hub::FleetChange;
 use crate::prompts::{self, Asked, Prompts};
 use crate::render;
 use crate::reply::{Reply, Target};
+use crate::signin::{self, SignIns};
 
 pub const UNAUTHORISED_REACTION: &str = "zipper_mouth_face";
 /// The subtype Slack gives a DM that carries files; it is still the person talking.
@@ -54,6 +55,7 @@ pub struct Chat {
     approval_timeout: Duration,
     prompts: Prompts,
     prompt_timeout: Duration,
+    sign_ins: SignIns,
     orphaned: Mutex<HashSet<Conversation>>,
     busy: Mutex<HashSet<Conversation>>,
 }
@@ -120,6 +122,7 @@ pub struct Parts {
     pub turn_timings: bool,
     pub approval_timeout: Duration,
     pub prompt_timeout: Duration,
+    pub sign_ins: SignIns,
 }
 
 impl Chat {
@@ -135,6 +138,7 @@ impl Chat {
             turn_timings,
             approval_timeout,
             prompt_timeout,
+            sign_ins,
         } = parts;
         Arc::new(Self {
             slack,
@@ -149,6 +153,7 @@ impl Chat {
             approval_timeout,
             prompts: Prompts::default(),
             prompt_timeout,
+            sign_ins,
             orphaned: Mutex::new(HashSet::new()),
             busy: Mutex::new(HashSet::new()),
         })
@@ -215,6 +220,8 @@ impl Chat {
     pub async fn on_click(self: Arc<Self>, click: Click) {
         let note = if click.action_id == alerts::RENEW {
             self.renew(&click).await
+        } else if click.action_id.starts_with("signin_") {
+            self.sign_ins.click(&click).await
         } else if click.action_id.starts_with("tool_approval") {
             self.approvals.click(&click)
         } else {
@@ -640,7 +647,24 @@ impl Chat {
                 self.put(reply.target(), node, Asked::Plan(plan), turn);
             }
             Open::Known(TurnEvent::SignIn { sign_in }) => {
-                self.unavailable(node, sign_in.id).await;
+                let id = sign_in.id.clone();
+                let raised_by = signin::Node {
+                    selector: node.selector.clone(),
+                    name: node.name.clone(),
+                    owner: node.owner.clone(),
+                    link: node.link.clone(),
+                };
+                let thread = Some((
+                    reply.target().channel.clone(),
+                    reply.target().thread_ts.clone(),
+                ));
+                if let Err(err) = self.sign_ins.raise(raised_by, sign_in, thread).await {
+                    tracing::warn!(error = %err.message, "could not show a sign-in");
+                    self.unavailable(node, id).await;
+                }
+            }
+            Open::Known(TurnEvent::SignInSettled { sign_in_settled }) => {
+                self.sign_ins.settle(&node.selector, sign_in_settled).await;
             }
             Open::Known(TurnEvent::Error { error }) => {
                 reply
