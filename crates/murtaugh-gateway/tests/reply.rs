@@ -97,6 +97,18 @@ async fn a_stream_slack_finalized_mid_answer_carries_on_in_a_new_message() {
 }
 
 #[tokio::test]
+async fn a_stream_that_expired_while_idle_carries_on_in_a_new_message() {
+    let (sim, mut reply, thread) = setup().await;
+    reply.text("Asked for approval.\n").await;
+    sim.fail("chat.appendStream", "message_not_found");
+    reply.text("Denied, so I stopped.\n").await;
+    reply.finish().await;
+    let texts: Vec<String> = answers(&sim, &thread).into_iter().map(|a| a.text).collect();
+    assert_eq!(texts, ["Asked for approval.\n", "Denied, so I stopped.\n"]);
+    assert!(sim.violations().is_empty(), "{:?}", sim.violations());
+}
+
+#[tokio::test]
 async fn task_cards_open_a_plan_settle_and_share_the_message_with_text() {
     let (sim, mut reply, thread) = setup().await;
     reply

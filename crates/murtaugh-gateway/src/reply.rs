@@ -19,6 +19,9 @@ pub const FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 const FLUSH_MIN_CHARS: usize = 24;
 pub const TASK_INTERVAL: Duration = Duration::from_secs(1);
 const PLAN_TITLE: &str = "Task list";
+/// What Slack says to an append on a stream left idle too long, as one waiting on a tool
+/// approval is; the message itself stays.
+const STREAM_EXPIRED: &str = "message_not_found";
 const TASK_TITLE: &str = "Tool call";
 
 /// Where the reply goes and whom it answers. `recipient` is (team, user), left out in DMs.
@@ -186,7 +189,7 @@ impl Reply {
         let (channel, ts) = (stream.channel.clone(), stream.ts.clone());
         match self.slack.append_stream(&channel, &ts, &chunks).await {
             Ok(()) => true,
-            Err(err) if is(&err, STREAM_FINALIZED) || is(&err, "msg_too_long") => {
+            Err(err) if closed(&err) || is(&err, "msg_too_long") => {
                 self.rollover().await;
                 let chunks = self.reopen_plan_for(chunks);
                 let Mode::Streaming(Some(stream)) = &self.mode else {
@@ -266,7 +269,7 @@ impl Reply {
             tracing::debug!(error = %err, "could not close a code fence before rolling over");
         }
         if let Err(err) = self.slack.stop_stream(&channel, &ts).await
-            && !is(&err, STREAM_FINALIZED)
+            && !closed(&err)
         {
             tracing::debug!(error = %err, "could not stop a stream before rolling over");
         }
@@ -343,7 +346,7 @@ impl Reply {
         if let Mode::Streaming(Some(stream)) = &self.mode {
             let (channel, ts) = (stream.channel.clone(), stream.ts.clone());
             if let Err(err) = self.slack.stop_stream(&channel, &ts).await
-                && !is(&err, STREAM_FINALIZED)
+                && !closed(&err)
             {
                 tracing::warn!(error = %err, "could not stop a streamed reply");
             }
@@ -391,6 +394,11 @@ impl Reply {
             }
         }
     }
+}
+
+/// The stream can take no more, though a new message would.
+fn closed(err: &SlackError) -> bool {
+    is(err, STREAM_FINALIZED) || is(err, STREAM_EXPIRED)
 }
 
 fn is(err: &SlackError, code: &str) -> bool {
