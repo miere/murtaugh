@@ -42,6 +42,8 @@ pub enum Event {
         text: String,
         files: Vec<FileRef>,
     },
+    /// Someone opened one of the app's tabs; `tab` is `home` or `messages`.
+    AppHomeOpened { user: String, tab: String },
     /// Any other event type, or a known one Slack sent in a shape this crate cannot read.
     Unknown { kind: String, raw: Value },
 }
@@ -65,6 +67,13 @@ struct AppMentionJson {
     text: String,
     #[serde(default)]
     files: Vec<FileRef>,
+}
+
+#[derive(Deserialize)]
+struct AppHomeJson {
+    user: String,
+    #[serde(default)]
+    tab: String,
 }
 
 #[derive(Deserialize)]
@@ -112,6 +121,14 @@ impl Event {
                 text: e.text,
                 files: e.files,
             }),
+            "app_home_opened" => {
+                AppHomeJson::deserialize(&raw)
+                    .ok()
+                    .map(|e| Event::AppHomeOpened {
+                        user: e.user,
+                        tab: e.tab,
+                    })
+            }
             _ => None,
         };
         decoded.unwrap_or(Event::Unknown { kind, raw })

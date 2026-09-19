@@ -40,6 +40,7 @@ pub struct Summary {
     pub owner: UserId,
     pub name: String,
     pub sessions: usize,
+    pub connected: bool,
 }
 
 impl Fleet {
@@ -128,6 +129,7 @@ impl Fleet {
                 owner: entry.node.owner.clone(),
                 name: entry.node.name.clone(),
                 sessions: entry.sessions,
+                connected: entry.node.connected,
             })
             .collect();
         summaries.sort_by(|a, b| a.name.cmp(&b.name));

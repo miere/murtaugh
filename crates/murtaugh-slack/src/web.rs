@@ -228,6 +228,15 @@ impl SlackClient {
             .map(drop)
     }
 
+    /// Replaces what `user` sees on the app's Home tab.
+    pub async fn publish_home(&self, user: &str, blocks: &[Block]) -> Result<(), SlackError> {
+        let body =
+            json!({"user_id": user, "view": {"type": "home", "blocks": blocks_json(blocks)}});
+        self.call::<Value>("views.publish", Token::Bot, Body::Json(body))
+            .await
+            .map(drop)
+    }
+
     pub async fn add_reaction(
         &self,
         channel: &str,

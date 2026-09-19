@@ -18,6 +18,7 @@ const METHODS: &[&str] = &[
     "chat.postMessage",
     "chat.update",
     "chat.postEphemeral",
+    "views.publish",
     "chat.startStream",
     "chat.appendStream",
     "chat.stopStream",
@@ -33,6 +34,7 @@ const JSON_METHODS: &[&str] = &[
     "chat.postMessage",
     "chat.update",
     "chat.postEphemeral",
+    "views.publish",
     "reactions.add",
 ];
 const MAX_TEXT: usize = 40_000;
@@ -260,6 +262,7 @@ fn dispatch(
         "chat.stopStream" => crate::stream::stop(st, params),
         "assistant.threads.setStatus" => crate::stream::set_status(st, params),
         "chat.postEphemeral" => post_ephemeral(st, params),
+        "views.publish" => publish_view(st, params),
         "reactions.add" => add_reaction(st, params),
         "conversations.replies" => replies(st, params),
         "files.getUploadURLExternal" => crate::upload::reserve(st, params),
@@ -376,6 +379,38 @@ fn post_ephemeral(st: &mut State, params: &Map<String, Value>) -> Result<Value, 
         .ok_or_else(|| err("no_text", "an ephemeral message needs text"))?;
     st.ephemerals.push((id, user, text));
     Ok(json!({"message_ts": format!("{}.000000", now_secs())}))
+}
+
+fn publish_view(st: &mut State, params: &Map<String, Value>) -> Result<Value, ApiError> {
+    let user = arg(params, "user_id")?
+        .filter(|user| st.users.contains_key(user))
+        .ok_or_else(|| {
+            err(
+                "user_not_found",
+                "`user_id` is not a member of the workspace",
+            )
+        })?;
+    let view = params
+        .get("view")
+        .and_then(Value::as_object)
+        .ok_or_else(|| err("invalid_arguments", "`view` must be an object"))?;
+    if view.get("type").and_then(Value::as_str) != Some("home") {
+        return Err(err(
+            "invalid_arguments",
+            "a published view must be of type `home`",
+        ));
+    }
+    let raw = view.get("blocks").cloned().unwrap_or(Value::Array(vec![]));
+    let parsed = blocks::parse(&raw).map_err(|e| err(e.code, e.detail))?;
+    if parsed.len() > 100 {
+        return Err(err(
+            "invalid_arguments",
+            "a home view holds at most 100 blocks",
+        ));
+    }
+    blocks::validate(&parsed).map_err(|e| err(e.code, e.detail))?;
+    st.homes.insert(user.clone(), Value::Array(parsed.clone()));
+    Ok(json!({"view": {"id": format!("V{}", st.next_seq()), "type": "home", "blocks": parsed}}))
 }
 
 fn update_message(st: &mut State, params: &Map<String, Value>) -> Result<Value, ApiError> {

@@ -114,6 +114,7 @@ pub(crate) struct State {
     pub thread_statuses: HashMap<(String, String), String>,
     pub reserved: HashMap<String, crate::upload::Reserved>,
     pub ephemerals: Vec<(String, String, String)>,
+    pub homes: HashMap<String, Value>,
     clock: u64,
     seq: u64,
 }
@@ -138,6 +139,7 @@ impl State {
             thread_statuses: HashMap::new(),
             reserved: HashMap::new(),
             ephemerals: Vec::new(),
+            homes: HashMap::new(),
             clock: 0,
             seq: 0,
         };

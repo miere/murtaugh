@@ -40,6 +40,13 @@ impl Snapshot {
         })
     }
 
+    /// Every credential not revoked, whether or not its node is attached.
+    pub fn live_nodes(&self) -> impl Iterator<Item = &NodeToken> {
+        self.tokens
+            .values()
+            .filter(|token| token.revoked_at.is_none())
+    }
+
     pub fn admin(&self) -> Option<&UserId> {
         self.admin.as_ref()
     }

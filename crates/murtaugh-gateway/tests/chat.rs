@@ -1632,3 +1632,56 @@ async fn a_sign_in_raised_in_a_turn_tells_the_thread_and_goes_to_the_owner() {
     assert_eq!(rig.sim.violations(), vec![]);
     rig.shutdown.cancel();
 }
+
+async fn home_of(rig: &Rig, user: &str) -> String {
+    rig.sim.open_home(user).await.unwrap();
+    eventually("the Home tab", || {
+        rig.sim.home(user).map(|home| home.to_string())
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_home_tab_shows_the_version_and_the_viewers_nodes_or_all_for_the_admin() {
+    let rig = rig().await;
+    let _laptop = rig.node(ALICE, "laptop").await;
+    let _desktop = rig.node(ADMIN, "desktop").await;
+    rig.store
+        .add_node_token(&NodeToken {
+            selector: "0000000000000000".into(),
+            secret_hash: "x".into(),
+            owner: user(ALICE),
+            name: "old-mac".into(),
+            created_at: OffsetDateTime::now_utc(),
+            revoked_at: None,
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let alice = home_of(&rig, ALICE).await;
+    assert!(
+        alice.contains(murtaugh_gateway::version::VERSION),
+        "{alice}"
+    );
+    assert!(alice.contains("Your nodes"));
+    assert!(alice.contains("*laptop*") && alice.contains("Connected · 0 live conversations"));
+    assert!(alice.contains("*old-mac*") && alice.contains("Offline"));
+    assert!(
+        !alice.contains("desktop"),
+        "Alice sees someone else's node: {alice}"
+    );
+
+    let admin = home_of(&rig, ADMIN).await;
+    assert!(admin.contains("All nodes"));
+    assert!(
+        admin.contains("*desktop*") && admin.contains("*laptop* · <@U0ALICE01>"),
+        "{admin}"
+    );
+
+    let stranger = home_of(&rig, STRANGER).await;
+    assert!(stranger.contains("don't have access"));
+    assert!(!stranger.contains("laptop"));
+    assert_eq!(rig.sim.violations(), vec![]);
+    rig.shutdown.cancel();
+}

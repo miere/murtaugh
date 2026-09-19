@@ -276,6 +276,32 @@ impl SlackSim {
             .then_some(id)
     }
 
+    /// The blocks `user` last saw published on the app's Home tab.
+    pub fn home(&self, user: &str) -> Option<Value> {
+        self.inner.lock().homes.get(user).cloned()
+    }
+
+    /// `user` opens the app's Home tab.
+    pub async fn open_home(&self, user: &str) -> Result<(), SimError> {
+        let envelope = {
+            let mut st = self.inner.lock();
+            if !st.users.contains_key(user) {
+                return Err(SimError::UnknownUser(user.to_owned()));
+            }
+            let channel = st.im_for(user);
+            let event = serde_json::json!({
+                "type": "app_home_opened",
+                "user": user,
+                "channel": channel,
+                "tab": "home",
+                "event_ts": format!("{}.000100", state::now_secs()),
+            });
+            render::events_api(&mut st, event)
+        };
+        socket::deliver(&self.inner, envelope);
+        Ok(())
+    }
+
     /// Messages only one person saw, as (channel, user, text), oldest first.
     pub fn ephemerals(&self) -> Vec<(String, String, String)> {
         self.inner.lock().ephemerals.clone()
