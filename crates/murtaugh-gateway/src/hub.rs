@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::access::{Access, Snapshot};
+use crate::alerts::{Credentials, Reporter};
 use crate::files::Files;
 use crate::fleet::{Fleet, Node};
 
@@ -48,12 +49,20 @@ pub async fn start(
     access: Access,
     fleet: Fleet,
     files: Files,
+    credentials: Credentials,
     shutdown: CancellationToken,
 ) -> std::io::Result<Hub> {
     let (server, new_links) =
         GatewayServer::bind(listen, access.clone(), GatewayConfig::default()).await?;
     let (changes, receiver) = mpsc::channel(64);
-    tokio::spawn(accept(new_links, access, fleet, files, changes, shutdown));
+    let serving = Serving {
+        access,
+        fleet,
+        files,
+        credentials,
+        changes,
+    };
+    tokio::spawn(accept(new_links, serving, shutdown));
     Ok(Hub {
         server,
         changes: receiver,
@@ -89,14 +98,17 @@ pub async fn refresh(
     }
 }
 
-async fn accept(
-    mut new_links: NewLinks,
+/// What every node's link is served with.
+#[derive(Clone)]
+struct Serving {
     access: Access,
     fleet: Fleet,
     files: Files,
+    credentials: Credentials,
     changes: mpsc::Sender<FleetChange>,
-    shutdown: CancellationToken,
-) {
+}
+
+async fn accept(mut new_links: NewLinks, serving: Serving, shutdown: CancellationToken) {
     loop {
         let new_link = tokio::select! {
             new_link = new_links.recv() => new_link,
@@ -105,25 +117,18 @@ async fn accept(
         let Some(NewLink { link, events }) = new_link else {
             return;
         };
-        tokio::spawn(serve(
-            link,
-            events,
-            access.clone(),
-            fleet.clone(),
-            files.clone(),
-            changes.clone(),
-        ));
+        tokio::spawn(serve(link, events, serving.clone()));
     }
 }
 
-async fn serve(
-    link: GatewayLink,
-    mut events: LinkEvents,
-    access: Access,
-    fleet: Fleet,
-    files: Files,
-    changes: mpsc::Sender<FleetChange>,
-) {
+async fn serve(link: GatewayLink, mut events: LinkEvents, serving: Serving) {
+    let Serving {
+        access,
+        fleet,
+        files,
+        credentials,
+        changes,
+    } = serving;
     let selector = link.identity().0.clone();
     let snapshot = access.snapshot();
     let (Some(owner), Some(name)) = (
@@ -144,7 +149,7 @@ async fn serve(
     tracing::info!(node = %name, %owner, tool_gate = ?capabilities.tool_gate, "node attached");
     let attachment = fleet.attach(Node {
         selector: selector.clone(),
-        owner,
+        owner: owner.clone(),
         name: name.clone(),
         link: link.clone(),
         capabilities,
@@ -172,6 +177,21 @@ async fn serve(
             } => {
                 let (files, link, selector) = (files.clone(), link.clone(), selector.clone());
                 tokio::spawn(async move { files.serve(&link, &selector, id, read).await });
+            }
+            LinkEvent::Request {
+                id,
+                call: NodeCall::CredentialHealth(health),
+            } => {
+                tracing::info!(node = %name, credential = %health.credential, degraded = health.degraded, reason = ?health.reason, "node credential health");
+                let from = Reporter {
+                    selector: &selector,
+                    name: &name,
+                    owner: &owner,
+                };
+                credentials.report(from, &health).await;
+                if let Err(err) = link.reply(id, NodeReply::CredentialHealth).await {
+                    tracing::debug!(node = %name, error = %err, "could not answer a node call");
+                }
             }
             LinkEvent::Request { id, call } => answer(&link, &name, id, call).await,
             LinkEvent::Background { session_id, .. } => {
@@ -224,10 +244,6 @@ async fn initialize(link: &GatewayLink) -> Result<rax::session::NodeCapabilities
 
 async fn answer(link: &GatewayLink, name: &str, id: rax::id::RequestId, call: NodeCall) {
     let sent = match call {
-        NodeCall::CredentialHealth(health) => {
-            tracing::info!(node = %name, credential = %health.credential, degraded = health.degraded, reason = ?health.reason, "node credential health");
-            link.reply(id, NodeReply::CredentialHealth).await
-        }
         NodeCall::SignIn(_) | NodeCall::SignInSettled(_) => {
             let unsupported = Error::new(
                 ErrorKind::Unsupported,
@@ -235,7 +251,7 @@ async fn answer(link: &GatewayLink, name: &str, id: rax::id::RequestId, call: No
             );
             link.fault(id, unsupported).await
         }
-        NodeCall::ReadResource(_) => return,
+        NodeCall::ReadResource(_) | NodeCall::CredentialHealth(_) => return,
     };
     if let Err(err) = sent {
         tracing::debug!(node = %name, error = %err, "could not answer a node call");

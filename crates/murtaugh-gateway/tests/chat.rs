@@ -305,6 +305,10 @@ async fn answer(script: Script, id: RequestId, call: GatewayCall) {
             node.reply(id, reply).await.unwrap();
             let _ = initialized.send(()).await;
         }
+        GatewayCall::RenewCredential => {
+            let reply = GatewayReply::RenewCredential(rax::credential::CredentialRenewal::Started);
+            node.reply(id, reply).await.unwrap();
+        }
         GatewayCall::NewSession(_) => {
             let mut count = sessions.lock().await;
             *count += 1;
@@ -552,9 +556,7 @@ async fn a_pre_authorised_person_uses_the_admins_node_and_hears_when_none_is_up(
         .await
         .unwrap();
     rig.bot_replies(&ts, |replies| {
-        replies
-            .iter()
-            .any(|m| m.text.contains("No machine can take this conversation"))
+        replies.iter().any(|m| m.text == "No machine available")
     })
     .await;
 
@@ -708,7 +710,10 @@ async fn a_standby_stays_off_slack_until_the_leader_stops_then_serves_the_same_n
                 tokio::time::Instant::now() < deadline,
                 "the standby never answered; replies: {replies:?}"
             );
-            if replies.iter().any(|text| text.contains("No machine")) {
+            if replies
+                .iter()
+                .any(|text| text == "No machine available" || text == "Machine offline")
+            {
                 tokio::time::sleep(Duration::from_millis(300)).await;
                 continue 'asking;
             }
@@ -814,7 +819,10 @@ async fn a_thread_caught_up_after_a_gateway_restart_is_told_first() {
                 tokio::time::Instant::now() < deadline,
                 "no answer: {replies:?}"
             );
-            if replies.iter().any(|text| text.contains("No machine")) {
+            if replies
+                .iter()
+                .any(|text| text == "No machine available" || text == "Machine offline")
+            {
                 tokio::time::sleep(Duration::from_millis(300)).await;
                 continue 'asking;
             }
@@ -1352,5 +1360,78 @@ async fn chat_about_this_hands_the_question_back_to_the_conversation() {
         &prompt_card(&rig, &ts).unwrap(),
         "Raised by <@U0ALICE01>"
     ));
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_thread_whose_machine_left_with_no_other_gets_a_machine_offline_card() {
+    let rig = rig().await;
+    let mut laptop = rig.node(ALICE, "laptop").await;
+    let ts = rig
+        .sim
+        .mention(ALICE, GENERAL, "first", None)
+        .await
+        .unwrap();
+    laptop.next_prompt().await;
+    wait_for_turn_end(&rig, GENERAL, &ts, "pong to: first").await;
+
+    laptop.handle.close().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    rig.sim
+        .mention(ALICE, GENERAL, "still there?", Some(&ts))
+        .await
+        .unwrap();
+    let card = eventually("the offline card", || {
+        rig.sim
+            .thread(GENERAL, &ts)
+            .into_iter()
+            .find(|m| m.text == "Machine offline")
+    })
+    .await;
+    assert!(card_says(&card, "murtaugh_alert_card"));
+    assert!(card_says(&card, "no other machine you may use"));
+    assert_eq!(rig.sim.violations(), vec![]);
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failing_credential_is_told_to_the_owner_by_dm_and_settled_on_recovery() {
+    let rig = rig().await;
+    let laptop = rig.node(ALICE, "laptop").await;
+    let health = |degraded: bool| rax::credential::CredentialHealth {
+        credential: "claude".into(),
+        degraded,
+        reason: degraded.then(|| "token expired".to_owned()),
+        since: None,
+        expires_at: None,
+    };
+    let call = rax::NodeCall::CredentialHealth(health(true));
+    within(laptop.handle.call(call)).await.unwrap();
+    within(
+        laptop
+            .handle
+            .call(rax::NodeCall::CredentialHealth(health(true))),
+    )
+    .await
+    .unwrap();
+    let dm = rig.sim.im_channel(ALICE).expect("no DM with the owner");
+    let cards = rig.sim.messages(&dm);
+    assert_eq!(cards.len(), 1, "a repeat report posted a second card");
+    assert_eq!(cards[0].text, "A credential on laptop is failing");
+    assert!(card_says(&cards[0], "token expired"));
+    assert!(card_says(&cards[0], "credential_renew"));
+
+    within(
+        laptop
+            .handle
+            .call(rax::NodeCall::CredentialHealth(health(false))),
+    )
+    .await
+    .unwrap();
+    let cards = rig.sim.messages(&dm);
+    assert_eq!(cards.len(), 1);
+    assert_eq!(cards[0].text, "A credential on laptop recovered");
+    assert!(!card_says(&cards[0], "credential_renew"));
+    assert_eq!(rig.sim.violations(), vec![]);
     rig.shutdown.cancel();
 }

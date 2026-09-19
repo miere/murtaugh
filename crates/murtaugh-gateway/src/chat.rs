@@ -21,6 +21,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::access::Access;
+use crate::alerts::{self, Alert, Level};
 use crate::approval::{self, Approvals};
 use crate::files::Files;
 use crate::fleet::{Fleet, Node};
@@ -212,7 +213,9 @@ impl Chat {
     /// A departed node's pins are dropped now; the notice waits for the next message, which is
     /// when the conversation is rebuilt from its thread.
     pub async fn on_click(self: Arc<Self>, click: Click) {
-        let note = if click.action_id.starts_with("tool_approval") {
+        let note = if click.action_id == alerts::RENEW {
+            self.renew(&click).await
+        } else if click.action_id.starts_with("tool_approval") {
             self.approvals.click(&click)
         } else {
             let may_answer =
@@ -234,6 +237,30 @@ impl Chat {
         {
             tracing::warn!(error = %err, "could not answer a click");
         }
+    }
+
+    /// The owner asked a node to sign in again from its credential alert.
+    async fn renew(&self, click: &Click) -> Option<String> {
+        let Some(node) = self.fleet.get(&click.value) else {
+            return Some("That machine is not connected right now.".into());
+        };
+        if node.owner.as_str() != click.user {
+            return Some(format!("Only <@{}> can do that.", node.owner));
+        }
+        let asked = match node.link.call(GatewayCall::RenewCredential).await {
+            Ok(pending) => pending.reply.await.map_err(|err| err.to_string()),
+            Err(err) => Err(err.to_string()),
+        };
+        Some(match asked {
+            Ok(GatewayReply::RenewCredential(renewal)) => {
+                alerts::renewal_note(&render::escape(&node.name), renewal)
+            }
+            Ok(other) => format!("*{}* answered oddly: {other:?}", render::escape(&node.name)),
+            Err(reason) => format!(
+                "*{}* could not start a sign-in: {reason}",
+                render::escape(&node.name)
+            ),
+        })
     }
 
     pub async fn on_fleet(self: Arc<Self>, change: FleetChange) {
@@ -417,11 +444,8 @@ impl Chat {
         }
         let snapshot = self.access.snapshot();
         let Some(node) = self.fleet.assign(user, &snapshot) else {
-            self.say(
-                conversation,
-                "_No machine can take this conversation right now: none of the nodes you may use is connected._",
-            )
-            .await;
+            let orphaned = lock(&self.orphaned).contains(conversation);
+            self.alert(conversation, &no_machine(orphaned)).await;
             return None;
         };
         let orphaned = lock(&self.orphaned).remove(conversation);
@@ -761,6 +785,13 @@ impl Chat {
         }
     }
 
+    async fn alert(&self, conversation: &Conversation, alert: &Alert) {
+        let message = alert.message(&conversation.channel, Some(&conversation.thread_ts));
+        if let Err(err) = self.slack.post_message(&message).await {
+            tracing::warn!(error = %err, "could not post an alert in a thread");
+        }
+    }
+
     async fn say(&self, conversation: &Conversation, text: &str) {
         let message = PostMessage {
             channel: conversation.channel.clone(),
@@ -770,6 +801,33 @@ impl Chat {
         };
         if let Err(err) = self.slack.post_message(&message).await {
             tracing::warn!(error = %err, "could not post in a thread");
+        }
+    }
+}
+
+fn no_machine(orphaned: bool) -> Alert {
+    let next_steps =
+        "Start a node (`riggs run`) and try again, or ask the gateway admin to let you use theirs.";
+    if orphaned {
+        Alert {
+            level: Some(Level::Warn),
+            title: "Machine offline".into(),
+            subtitle: Some("The machine this conversation was running on is offline.".into()),
+            reason: Some(
+                "It is not connected, and no other machine you may use can take the conversation over."
+                    .into(),
+            ),
+            next_steps: Some(next_steps.into()),
+            ..Alert::default()
+        }
+    } else {
+        Alert {
+            level: Some(Level::Warn),
+            title: "No machine available".into(),
+            subtitle: Some("No machine is available to run this conversation.".into()),
+            reason: Some("None of the machines you may use is connected.".into()),
+            next_steps: Some(next_steps.into()),
+            ..Alert::default()
         }
     }
 }
