@@ -28,6 +28,8 @@ pub struct Options {
     pub refresh: Duration,
     /// How long a tool approval waits for the node's owner before denying.
     pub approval_timeout: Duration,
+    /// How long a question or plan card waits for an answer.
+    pub prompt_timeout: Duration,
 }
 
 impl Default for Options {
@@ -36,6 +38,7 @@ impl Default for Options {
             slack_api: Url::parse(SLACK_API).unwrap_or_else(|_| unreachable!()),
             refresh: REFRESH,
             approval_timeout: approval::TIMEOUT,
+            prompt_timeout: crate::prompts::TIMEOUT,
         }
     }
 }
@@ -117,6 +120,7 @@ pub async fn serve(
         files,
         turn_timings: config.log.turn_timings,
         approval_timeout: options.approval_timeout,
+        prompt_timeout: options.prompt_timeout,
     });
     tracing::info!(listen = %hub.server.local_addr(), team = %identity.team_id, %holder, "murtaugh gateway started; waiting to lead");
     let mut seen = Seen::default();

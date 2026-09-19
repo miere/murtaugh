@@ -30,8 +30,8 @@ pub enum FleetChange {
 
 pub fn capabilities() -> GatewayCapabilities {
     GatewayCapabilities {
-        question: false,
-        plan: false,
+        question: true,
+        plan: true,
         sign_in: false,
         resource_schemes: vec!["chat".into()],
         readable_schemes: vec![crate::files::SCHEME.into()],

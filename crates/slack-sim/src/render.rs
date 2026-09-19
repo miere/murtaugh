@@ -284,6 +284,7 @@ pub(crate) fn block_actions(
     msg: &SimMessage,
     block_id: &str,
     button: &Value,
+    values: Value,
 ) -> Option<Value> {
     let envelope_id = state.uuid();
     let trigger_id = format!("{}.{}.sim", state.next_seq(), now_secs());
@@ -325,7 +326,7 @@ pub(crate) fn block_actions(
             "is_enterprise_install": false,
             "channel": {"id": channel.id, "name": channel.name},
             "message": message(state, channel, msg),
-            "state": {"values": {}},
+            "state": {"values": values},
             "response_url": format!("https://hooks.slack.com/actions/{}/{}/sim", TEAM_ID, now_secs()),
             "actions": [Value::Object(action)],
         },
