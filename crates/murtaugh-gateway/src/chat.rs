@@ -874,6 +874,7 @@ impl Chat {
             }
         };
         let decision = match config.tool_mode {
+            _ if talks_to_people(&tool.name) => Decision::Allow,
             ToolMode::AlwaysAllowed => Decision::Allow,
             ToolMode::AllowedWhitelist if config.whitelist.contains(&tool.name) => Decision::Allow,
             ToolMode::Denied => Decision::Deny {
@@ -1035,6 +1036,19 @@ fn no_machine(orphaned: bool) -> Alert {
             ..Alert::default()
         }
     }
+}
+
+/// The node's own tools for reaching the people in the conversation. They do nothing to the
+/// owner's machine, so asking the owner's permission to ask them a question helps nobody.
+const TALKING_TOOLS: [&str; 4] = [
+    "mcp__riggs__ask",
+    "mcp__riggs__present_plan",
+    "mcp__riggs__attach",
+    "mcp__riggs__auth",
+];
+
+fn talks_to_people(tool: &str) -> bool {
+    TALKING_TOOLS.contains(&tool)
 }
 
 const INTERRUPTED: &str = "Interrupted by a newer message.";
