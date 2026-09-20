@@ -412,7 +412,11 @@ async fn answer(script: Script, id: RequestId, call: GatewayCall) {
             }
             let tool = ToolCall {
                 id: ToolCallId("tc1".into()),
-                name: "Bash".into(),
+                name: if text.contains("no approval") {
+                    "mcp__riggs__ask".into()
+                } else {
+                    "Bash".into()
+                },
                 title: Some("ls".into()),
                 kind: ToolKind::Execute,
                 input: Some(serde_json::json!({"command": "git push origin main"})),
@@ -1236,6 +1240,30 @@ async fn only_the_node_owner_can_approve_a_tool_off_their_whitelist() {
             .is_empty()
     );
     assert_eq!(rig.sim.violations(), vec![]);
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_nodes_own_talking_tools_never_wait_for_approval() {
+    let rig = rig().await;
+    rig.store
+        .set_tool_mode(&user(ALICE), murtaugh_store::ToolMode::AllowedWhitelist)
+        .await
+        .unwrap();
+    let mut laptop = rig.node(ALICE, "laptop").await;
+    let ts = rig
+        .sim
+        .mention(ALICE, GENERAL, "ask me, no approval", None)
+        .await
+        .unwrap();
+    laptop.next_prompt().await;
+    let card = eventually("the question card", || prompt_card(&rig, &ts)).await;
+    assert!(approval_card(&rig, &ts).is_none(), "the question was gated");
+    rig.sim
+        .click(ALICE, GENERAL, &card.ts, murtaugh_gateway::prompts::CHAT)
+        .await
+        .unwrap();
+    wait_for_turn_end(&rig, GENERAL, &ts, "[Chat {} None").await;
     rig.shutdown.cancel();
 }
 
