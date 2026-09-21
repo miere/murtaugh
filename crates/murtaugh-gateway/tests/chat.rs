@@ -991,6 +991,79 @@ async fn only_a_machine_that_is_not_the_admins_says_it_picked_a_thread_up() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_thread_moves_to_the_machine_the_menu_picked_and_catches_it_up() {
+    let rig = rig().await;
+    let mut laptop = rig.node(ALICE, "laptop").await;
+    let ts = rig
+        .sim
+        .mention(ALICE, GENERAL, "first question", None)
+        .await
+        .unwrap();
+    laptop.next_prompt().await;
+    rig.bot_replies(&ts, |replies| {
+        replies
+            .iter()
+            .any(|m| m.text.contains("pong to: first question"))
+    })
+    .await;
+    let mut desktop = rig.node(ALICE, "desktop").await;
+
+    rig.sim
+        .mention(ALICE, GENERAL, "/node", Some(&ts))
+        .await
+        .unwrap();
+    let menu = eventually("the node menu", || {
+        rig.sim
+            .ephemeral_messages()
+            .into_iter()
+            .rev()
+            .find(|e| e.user == ALICE && !e.blocks.is_empty())
+    })
+    .await;
+    assert_eq!(menu.thread_ts.as_deref(), Some(ts.as_str()));
+    let options = menu
+        .blocks
+        .iter()
+        .find_map(|block| block["elements"][0]["options"].as_array().cloned())
+        .expect("the menu offered nothing");
+    let names: Vec<&str> = options
+        .iter()
+        .filter_map(|o| o["text"]["text"].as_str())
+        .collect();
+    assert_eq!(names, ["desktop", "laptop"], "{options:?}");
+    let pick = options
+        .iter()
+        .find(|o| o["text"]["text"] == "desktop")
+        .and_then(|o| o["value"].as_str())
+        .unwrap()
+        .to_owned();
+
+    rig.sim
+        .choose(ALICE, murtaugh_gateway::picker::CHOOSE, &pick)
+        .await
+        .unwrap();
+    eventually("the move to be confirmed", || {
+        rig.sim
+            .ephemerals()
+            .into_iter()
+            .find(|(_, user, text)| user == ALICE && text.contains("now runs on *desktop*"))
+    })
+    .await;
+
+    rig.sim
+        .mention(ALICE, GENERAL, "second question", Some(&ts))
+        .await
+        .unwrap();
+    let (_, text) = desktop.next_prompt().await;
+    assert!(text.contains("second question"), "{text}");
+    assert!(
+        text.contains("first question"),
+        "the new machine was not caught up: {text}"
+    );
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_thread_shows_the_agent_thinking_until_the_turn_ends() {
     let rig = rig().await;
     let mut laptop = rig.node(ALICE, "laptop").await;

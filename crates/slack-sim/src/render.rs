@@ -277,6 +277,62 @@ pub(crate) fn events_api(state: &mut State, event: Value) -> Value {
     })
 }
 
+/// An ephemeral message has no timestamp Slack will echo and no `message` to attach, so the only
+/// thing naming the thread is the container. Anything an app needs back must ride on the action.
+pub(crate) fn ephemeral_select(
+    state: &mut State,
+    user: &str,
+    ephemeral: &crate::SimEphemeral,
+    block_id: &str,
+    action_id: &str,
+    option: &Value,
+) -> Option<Value> {
+    let envelope_id = state.uuid();
+    let trigger_id = format!("{}.{}.sim", state.next_seq(), now_secs());
+    let message_ts = format!("{}.000000", now_secs());
+    let state: &State = state;
+    let channel = state.channels.get(&ephemeral.channel)?;
+    let user_name = state
+        .users
+        .get(user)
+        .map(|u| u.name.clone())
+        .unwrap_or_default();
+    let mut container = Map::new();
+    container.insert("type".into(), json!("message"));
+    container.insert("message_ts".into(), json!(message_ts));
+    container.insert("channel_id".into(), json!(channel.id));
+    container.insert("is_ephemeral".into(), json!(true));
+    if let Some(thread_ts) = &ephemeral.thread_ts {
+        container.insert("thread_ts".into(), json!(thread_ts));
+    }
+    Some(json!({
+        "envelope_id": envelope_id,
+        "payload": {
+            "type": "block_actions",
+            "user": {"id": user, "username": user_name, "name": user_name, "team_id": TEAM_ID},
+            "api_app_id": APP_ID,
+            "token": VERIFICATION_TOKEN,
+            "container": Value::Object(container),
+            "trigger_id": trigger_id,
+            "team": {"id": TEAM_ID, "domain": "slacksim"},
+            "enterprise": null,
+            "is_enterprise_install": false,
+            "channel": {"id": channel.id, "name": channel.name},
+            "state": {"values": {}},
+            "response_url": format!("https://hooks.slack.com/actions/{}/{}/sim", TEAM_ID, now_secs()),
+            "actions": [{
+                "type": "static_select",
+                "action_id": action_id,
+                "block_id": block_id,
+                "selected_option": option,
+                "action_ts": format!("{}.000000", now_secs()),
+            }],
+        },
+        "type": "interactive",
+        "accepts_response_payload": false,
+    }))
+}
+
 pub(crate) fn block_actions(
     state: &mut State,
     user: &str,

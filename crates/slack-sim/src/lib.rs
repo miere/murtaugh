@@ -95,6 +95,17 @@ pub struct SimMessage {
     pub stream: Option<SimStream>,
 }
 
+/// An ephemeral message is shown to one person and kept nowhere Slack will admit to: it has no
+/// timestamp to act on and never appears in a channel's history.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SimEphemeral {
+    pub channel: String,
+    pub user: String,
+    pub text: String,
+    pub thread_ts: Option<String>,
+    pub blocks: Vec<Value>,
+}
+
 /// A file as the workspace holds it, whoever shared it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SimFile {
@@ -304,7 +315,48 @@ impl SlackSim {
 
     /// Messages only one person saw, as (channel, user, text), oldest first.
     pub fn ephemerals(&self) -> Vec<(String, String, String)> {
+        self.inner
+            .lock()
+            .ephemerals
+            .iter()
+            .map(|e| (e.channel.clone(), e.user.clone(), e.text.clone()))
+            .collect()
+    }
+
+    /// The same messages with everything Slack was actually sent, newest last.
+    pub fn ephemeral_messages(&self) -> Vec<SimEphemeral> {
         self.inner.lock().ephemerals.clone()
+    }
+
+    /// Chooses an option from a menu on the most recent ephemeral message shown to `user`,
+    /// delivering the `block_actions` envelope Slack sends back. Unlike a click on a posted
+    /// message, the payload carries no `message`: there is none to carry.
+    pub async fn choose(&self, user: &str, action_id: &str, option: &str) -> Result<(), SimError> {
+        let envelope = {
+            let mut st = self.inner.lock();
+            if !st.users.contains_key(user) {
+                return Err(SimError::UnknownUser(user.to_owned()));
+            }
+            let found = st
+                .ephemerals
+                .iter()
+                .rev()
+                .find(|e| e.user == user && find_option(e, action_id, option).is_some())
+                .cloned()
+                .ok_or_else(|| SimError::UnknownAction {
+                    ts: option.to_owned(),
+                    action_id: action_id.to_owned(),
+                })?;
+            let (block_id, selected) =
+                find_option(&found, action_id, option).ok_or_else(|| SimError::UnknownAction {
+                    ts: option.to_owned(),
+                    action_id: action_id.to_owned(),
+                })?;
+            render::ephemeral_select(&mut st, user, &found, &block_id, action_id, &selected)
+                .ok_or_else(|| SimError::UnknownChannel(found.channel.clone()))?
+        };
+        socket::deliver(&self.inner, envelope);
+        Ok(())
     }
 
     pub fn violations(&self) -> Vec<Violation> {
@@ -706,6 +758,26 @@ fn post_as(
             channel: channel.to_owned(),
             ts: thread_ts.unwrap_or_default().to_owned(),
         })
+}
+
+/// The block holding a menu and the option with this value, if the menu offers it.
+fn find_option(ephemeral: &SimEphemeral, action_id: &str, option: &str) -> Option<(String, Value)> {
+    ephemeral.blocks.iter().enumerate().find_map(|(i, block)| {
+        let elements = block.get("elements")?.as_array()?;
+        let menu = elements
+            .iter()
+            .find(|e| e.get("action_id").and_then(Value::as_str) == Some(action_id))?;
+        let chosen = menu
+            .get("options")?
+            .as_array()?
+            .iter()
+            .find(|o| o.get("value").and_then(Value::as_str) == Some(option))?;
+        let block_id = block
+            .get("block_id")
+            .and_then(Value::as_str)
+            .map_or_else(|| format!("sim{i}"), str::to_owned);
+        Some((block_id, chosen.clone()))
+    })
 }
 
 fn find_button(msg: &SimMessage, action_id: &str) -> Option<(String, Value)> {

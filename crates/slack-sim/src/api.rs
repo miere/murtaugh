@@ -377,7 +377,14 @@ fn post_ephemeral(st: &mut State, params: &Map<String, Value>) -> Result<Value, 
     let text = content
         .text
         .ok_or_else(|| err("no_text", "an ephemeral message needs text"))?;
-    st.ephemerals.push((id, user, text));
+    let thread_ts = arg(params, "thread_ts")?;
+    st.ephemerals.push(crate::SimEphemeral {
+        channel: id,
+        user,
+        text,
+        thread_ts,
+        blocks: content.blocks.unwrap_or_default(),
+    });
     Ok(json!({"message_ts": format!("{}.000000", now_secs())}))
 }
 
