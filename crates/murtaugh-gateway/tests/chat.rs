@@ -936,6 +936,60 @@ async fn a_thread_caught_up_after_a_gateway_restart_is_told_first() {
     rig.shutdown.cancel();
 }
 
+/// Both halves in one test, because a catch-up that found no history would announce nothing either
+/// way and leave the silence proving nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn only_a_machine_that_is_not_the_admins_says_it_picked_a_thread_up() {
+    let rig = rig().await;
+    let mut hangar = rig.node(ADMIN, "hangar").await;
+    let mut laptop = rig.node(ALICE, "laptop").await;
+
+    let quiet = rig
+        .sim
+        .say(ADMIN, GENERAL, "thinking out loud", None)
+        .await
+        .unwrap();
+    rig.sim
+        .mention(ADMIN, GENERAL, "what do you reckon?", Some(&quiet))
+        .await
+        .unwrap();
+    hangar.next_prompt().await;
+    let replies = rig
+        .bot_replies(&quiet, |replies| {
+            replies.iter().any(|m| m.text.contains("pong to:"))
+        })
+        .await;
+    assert!(
+        !replies
+            .iter()
+            .any(|m| m.text.contains("Picking this conversation up")),
+        "the admin's own machine announced itself: {replies:?}"
+    );
+
+    let loud = rig
+        .sim
+        .say(ALICE, GENERAL, "thinking out loud", None)
+        .await
+        .unwrap();
+    rig.sim
+        .mention(ALICE, GENERAL, "what do you reckon?", Some(&loud))
+        .await
+        .unwrap();
+    laptop.next_prompt().await;
+    let replies = rig
+        .bot_replies(&loud, |replies| {
+            replies.iter().any(|m| m.text.contains("pong to:"))
+        })
+        .await;
+    assert!(
+        replies
+            .iter()
+            .any(|m| m.text.contains("Picking this conversation up on *laptop*")),
+        "somebody else's machine said nothing: {replies:?}"
+    );
+    rig.shutdown.cancel();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_thread_shows_the_agent_thinking_until_the_turn_ends() {
     let rig = rig().await;
