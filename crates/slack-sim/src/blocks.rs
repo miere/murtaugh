@@ -125,10 +125,18 @@ fn validate_block(block: &Value, at: &str) -> Result<(), Invalid> {
         "actions" => actions(obj, at),
         "container" => container(obj, at),
         "header" => {
-            only_keys(obj, &["type", "block_id", "text"], at)?;
+            only_keys(obj, &["type", "block_id", "text", "level"], at)?;
             let text = obj.get("text").ok_or_else(|| {
                 invalid(format!("missing required field: text [json-pointer:{at}]"))
             })?;
+            // `level` is optional and sets the heading, H1 to H4.
+            if let Some(level) = obj.get("level")
+                && !matches!(level.as_u64(), Some(1..=4))
+            {
+                return Err(invalid(format!(
+                    "must be an integer between 1 and 4 [json-pointer:{at}/level]"
+                )));
+            }
             text_object(text, &["plain_text"], 150, &format!("{at}/text"))
         }
         k if SHALLOW_TYPES.contains(&k) => Ok(()),
