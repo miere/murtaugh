@@ -6,7 +6,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
     ALICE, BOB, BOT_USER_ID, Call, ChannelKind, GENERAL, PRIVATE, RANDOM, Reaction, SECRET,
-    SimMessage, Violation,
+    SimEphemeral, SimMessage, Violation,
 };
 
 pub(crate) const APP_TOKEN: &str = "xapp-1-A0SIM0001-1-slacksimapptoken";
@@ -113,7 +113,7 @@ pub(crate) struct State {
     pub channel_message_events: bool,
     pub thread_statuses: HashMap<(String, String), String>,
     pub reserved: HashMap<String, crate::upload::Reserved>,
-    pub ephemerals: Vec<(String, String, String)>,
+    pub ephemerals: Vec<SimEphemeral>,
     pub homes: HashMap<String, Value>,
     clock: u64,
     seq: u64,

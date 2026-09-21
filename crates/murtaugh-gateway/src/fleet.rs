@@ -90,22 +90,33 @@ impl Fleet {
     /// back; never a mix. Least live sessions wins, and the choice counts as a session at once.
     pub fn assign(&self, user: &UserId, access: &Snapshot) -> Option<Node> {
         let mut nodes = self.nodes();
-        let pick = |owners: &[UserId], nodes: &HashMap<String, Entry>| {
-            nodes
-                .values()
-                .filter(|entry| entry.node.connected && owners.contains(&entry.node.owner))
-                .min_by(|a, b| {
-                    a.sessions
-                        .cmp(&b.sessions)
-                        .then_with(|| a.node.selector.cmp(&b.node.selector))
-                })
-                .map(|entry| entry.node.selector.clone())
-        };
-        let own = pick(std::slice::from_ref(user), &nodes);
-        let selector = own.or_else(|| pick(&access.fallback_owners(user), &nodes))?;
+        let selector = serving(user, access, &nodes)
+            .min_by(|a, b| {
+                a.sessions
+                    .cmp(&b.sessions)
+                    .then_with(|| a.node.selector.cmp(&b.node.selector))
+            })
+            .map(|entry| entry.node.selector.clone())?;
         let entry = nodes.get_mut(&selector)?;
         entry.sessions += 1;
         Some(entry.node.clone())
+    }
+
+    /// The nodes a person may move a thread onto, by name. Drawn from the same set `assign` picks
+    /// from, so a picker cannot offer a machine that assignment would refuse.
+    pub fn choices(&self, user: &UserId, access: &Snapshot) -> Vec<Summary> {
+        let nodes = self.nodes();
+        let mut choices: Vec<Summary> = serving(user, access, &nodes)
+            .map(|entry| Summary {
+                selector: entry.node.selector.clone(),
+                owner: entry.node.owner.clone(),
+                name: entry.node.name.clone(),
+                sessions: entry.sessions,
+                connected: entry.node.connected,
+            })
+            .collect();
+        choices.sort_by(|a, b| a.name.cmp(&b.name));
+        choices
     }
 
     pub fn session_ended(&self, selector: &str) {
@@ -135,4 +146,26 @@ impl Fleet {
         summaries.sort_by(|a, b| a.name.cmp(&b.name));
         summaries
     }
+}
+
+/// Own nodes shadow the fallback entirely: somebody with a machine of their own never lands on
+/// another person's, so neither may the picker put them there.
+fn serving<'a>(
+    user: &UserId,
+    access: &Snapshot,
+    nodes: &'a HashMap<String, Entry>,
+) -> impl Iterator<Item = &'a Entry> {
+    let live = |owner: &UserId| {
+        nodes
+            .values()
+            .any(|entry| entry.node.connected && &entry.node.owner == owner)
+    };
+    let owners = if live(user) {
+        vec![user.clone()]
+    } else {
+        access.fallback_owners(user)
+    };
+    nodes
+        .values()
+        .filter(move |entry| entry.node.connected && owners.contains(&entry.node.owner))
 }

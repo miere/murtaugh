@@ -4,15 +4,17 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
     Stop,
+    Node,
 }
 
 /// Every verb the gateway claims; anything else is left for the node.
-const COMMANDS: &[Command] = &[Command::Stop];
+const COMMANDS: &[Command] = &[Command::Stop, Command::Node];
 
 impl Command {
     pub fn verb(self) -> &'static str {
         match self {
             Command::Stop => "stop",
+            Command::Node => "node",
         }
     }
 }
@@ -74,6 +76,14 @@ mod tests {
     #[test]
     fn a_direct_message_needs_no_mention_to_command() {
         assert_eq!(read("/stop"), Some(Command::Stop));
+    }
+
+    #[test]
+    fn every_claimed_verb_is_read_the_same_way() {
+        assert_eq!(read("<@U0MURTAUGH> /node"), Some(Command::Node));
+        assert_eq!(read("/NODE"), Some(Command::Node));
+        assert_eq!(read("<@U0MURTAUGH> `/node`"), None);
+        assert_eq!(read("<@U0MURTAUGH> /node hangar"), None);
     }
 
     #[test]

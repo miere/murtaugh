@@ -14,6 +14,7 @@ pub mod hub;
 pub mod launchd;
 pub mod logging;
 pub mod manifest;
+pub mod picker;
 pub mod prompts;
 pub mod render;
 pub mod reply;

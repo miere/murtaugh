@@ -219,9 +219,25 @@ impl SlackClient {
         user: &str,
         text: &str,
     ) -> Result<(), SlackError> {
+        self.post_ephemeral_blocks(channel, thread_ts, user, text, &[])
+            .await
+    }
+
+    /// `text` is still required: it is what a notification and an unsupported client show.
+    pub async fn post_ephemeral_blocks(
+        &self,
+        channel: &str,
+        thread_ts: Option<&str>,
+        user: &str,
+        text: &str,
+        blocks: &[Block],
+    ) -> Result<(), SlackError> {
         let mut body = json!({"channel": channel, "user": user, "text": text});
         if let Some(thread_ts) = thread_ts {
             body["thread_ts"] = json!(thread_ts);
+        }
+        if !blocks.is_empty() {
+            body["blocks"] = blocks_json(blocks);
         }
         self.call::<Value>("chat.postEphemeral", Token::Bot, Body::Json(body))
             .await

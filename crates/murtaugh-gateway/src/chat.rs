@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use murtaugh_slack::{Click, Event, FileRef, PostMessage, SlackClient, TaskStatus, Upload};
+use murtaugh_slack::{Block, Click, Event, FileRef, PostMessage, SlackClient, TaskStatus, Upload};
 use murtaugh_store::{Conversation, Pin, Store, ToolMode, UserConfig, UserId};
 use rax::attachment::Attachment;
 use rax::content::ContentBlock;
@@ -27,6 +27,7 @@ use crate::approval::{self, Approvals};
 use crate::files::Files;
 use crate::fleet::{Fleet, Node};
 use crate::hub::FleetChange;
+use crate::picker;
 use crate::prompts::{self, Asked, Prompts};
 use crate::render;
 use crate::reply::{Reply, Target};
@@ -61,6 +62,9 @@ pub struct Chat {
     prompt_timeout: Duration,
     sign_ins: SignIns,
     orphaned: Mutex<HashSet<Conversation>>,
+    /// Threads `/node` moved, which catch up from the thread on their next turn even though they
+    /// are pinned: the machine they moved to has none of the conversation.
+    moved: Mutex<HashSet<Conversation>>,
     turns: Mutex<HashMap<Conversation, Running>>,
     turn_idle_timeout: Duration,
 }
@@ -164,6 +168,7 @@ impl Chat {
             prompt_timeout,
             sign_ins,
             orphaned: Mutex::new(HashSet::new()),
+            moved: Mutex::new(HashSet::new()),
             turns: Mutex::new(HashMap::new()),
             turn_idle_timeout,
         })
@@ -238,6 +243,8 @@ impl Chat {
             self.renew(&click).await
         } else if click.action_id.starts_with("signin_") {
             self.sign_ins.click(&click).await
+        } else if click.action_id == picker::CHOOSE {
+            self.move_thread(&click).await
         } else if click.action_id.starts_with("tool_approval") {
             self.approvals.click(&click)
         } else {
@@ -260,6 +267,74 @@ impl Chat {
         {
             tracing::warn!(error = %err, "could not answer a click");
         }
+    }
+
+    /// Someone picked the machine a thread should run on. The turn in flight is stopped rather
+    /// than carried across: its answer would land in a thread the new machine knows nothing about.
+    async fn move_thread(&self, click: &Click) -> Option<String> {
+        let Ok(user) = UserId::parse(&click.user) else {
+            return None;
+        };
+        let snapshot = self.access.snapshot();
+        if !snapshot.may_chat(&user) {
+            return None;
+        }
+        let Some((conversation, selector)) = picker::chosen(&click.value) else {
+            return Some("That menu is out of date. Ask me `/node` again.".to_owned());
+        };
+        if !self
+            .fleet
+            .choices(&user, &snapshot)
+            .iter()
+            .any(|choice| choice.selector == selector)
+        {
+            return Some("That machine is not yours to run this on.".to_owned());
+        }
+        let Some(node) = self.fleet.get(&selector).filter(|node| node.connected) else {
+            return Some("That machine is not connected right now.".to_owned());
+        };
+        let name = render::escape(&node.name);
+        let pinned = match self.store.pin(&conversation).await {
+            Ok(pinned) => pinned,
+            Err(err) => {
+                tracing::warn!(error = %err, "could not read a conversation's pin to move it");
+                return Some(format!("I could not move this thread to *{name}*."));
+            }
+        };
+        if pinned.as_ref().is_some_and(|pin| pin.node == selector) {
+            return Some(format!("This thread is already running on *{name}*."));
+        }
+        self.stop(&conversation);
+        if let Some(pin) = &pinned {
+            if let Err(err) = self.store.remove_pin(&conversation).await {
+                tracing::warn!(error = %err, "could not drop a pin to move a conversation");
+            }
+            self.fleet.session_ended(&pin.node);
+        }
+        let session_id = match self.open_session(&node, &conversation).await {
+            Ok(session_id) => session_id,
+            Err(reason) => {
+                // The old pin is already gone, so the next message is assigned a machine afresh.
+                return Some(format!("*{name}* could not take this thread: {reason}"));
+            }
+        };
+        self.fleet.session_resumed(&selector);
+        let pin = Pin {
+            conversation: conversation.clone(),
+            node: selector,
+            session_id: session_id.0,
+            // Whose conversation it is was fixed when it started; moving it does not make it the
+            // chooser's, and anyone in the thread may move it.
+            user: pinned.map_or(user, |pin| pin.user),
+            pinned_at: OffsetDateTime::now_utc(),
+        };
+        if let Err(err) = self.store.set_pin(&pin).await {
+            tracing::warn!(error = %err, "could not pin a moved conversation");
+        }
+        lock(&self.moved).insert(conversation);
+        Some(format!(
+            "This thread now runs on *{name}*. It will catch up from the thread on your next message."
+        ))
     }
 
     /// The owner asked a node to sign in again from its credential alert.
@@ -421,30 +496,51 @@ impl Chat {
     /// Every path posts a note, because it is the only sign the message was read as a command
     /// rather than passed to the node as a prompt.
     async fn command(&self, command: Command, incoming: &Incoming) {
-        let note = match &incoming.thread_ts {
-            None => format!("`{command}` only works inside a thread."),
+        let (note, blocks) = match &incoming.thread_ts {
+            None => (
+                format!("`{command}` only works inside a thread."),
+                Vec::new(),
+            ),
             Some(thread_ts) => {
                 let conversation = Conversation {
                     channel: incoming.channel.clone(),
                     thread_ts: thread_ts.clone(),
                 };
                 match command {
-                    Command::Stop => self.stop(&conversation),
+                    Command::Stop => (self.stop(&conversation), Vec::new()),
+                    Command::Node => self.picker(&incoming.user, &conversation),
                 }
             }
         };
         if let Err(err) = self
             .slack
-            .post_ephemeral(
+            .post_ephemeral_blocks(
                 &incoming.channel,
                 incoming.thread_ts.as_deref(),
                 &incoming.user,
                 &note,
+                &blocks,
             )
             .await
         {
             tracing::warn!(error = %err, "could not answer a thread-scoped command");
         }
+    }
+
+    /// Only the machines this person would be assigned anyway, so the menu cannot offer one the
+    /// choice would then refuse.
+    fn picker(&self, user: &str, conversation: &Conversation) -> (String, Vec<Block>) {
+        let Ok(user) = UserId::parse(user) else {
+            return ("I could not tell who you are.".to_owned(), Vec::new());
+        };
+        let choices = self.fleet.choices(&user, &self.access.snapshot());
+        if choices.is_empty() {
+            return ("No machine is connected right now.".to_owned(), Vec::new());
+        }
+        (
+            picker::PROMPT.to_owned(),
+            picker::view(conversation, &choices),
+        )
     }
 
     /// Whatever queued behind the turn goes too, so a follow-up does not start the instant the
@@ -620,10 +716,15 @@ impl Chat {
         };
         if let Some(pin) = &pinned {
             if let Some(node) = self.fleet.get(&pin.node).filter(|node| node.connected) {
+                let moved = lock(&self.moved).remove(conversation);
+                let history = match moved {
+                    true => self.history(conversation, &incoming.ts).await,
+                    false => None,
+                };
                 return Some(Seat {
                     node,
                     session_id: SessionId(pin.session_id.clone()),
-                    history: None,
+                    history,
                 });
             }
             let _ = self.store.remove_pin(conversation).await;
