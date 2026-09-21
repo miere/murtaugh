@@ -642,15 +642,22 @@ impl Chat {
         } else {
             None
         };
-        if history.is_some() {
-            let name = render::escape(&node.name);
-            let notice = if orphaned {
+        // Which of the admin's own machines took a thread is not news; a machine going offline is,
+        // and whose machine picked the thread up matters once somebody else's can.
+        let notice = match (history.is_some(), orphaned) {
+            (false, _) => None,
+            (true, true) => Some(format!(
+                "_The machine serving this conversation went offline. Continuing on *{}*, catching up from this thread._",
+                render::escape(&node.name)
+            )),
+            (true, false) => (snapshot.admin() != Some(&node.owner)).then(|| {
                 format!(
-                    "_The machine serving this conversation went offline. Continuing on *{name}*, catching up from this thread._"
+                    "_Picking this conversation up on *{}*, catching up from this thread._",
+                    render::escape(&node.name)
                 )
-            } else {
-                format!("_Picking this conversation up on *{name}*, catching up from this thread._")
-            };
+            }),
+        };
+        if let Some(notice) = notice {
             self.say(conversation, &notice).await;
         }
         let session_id = match self.open_session(&node, conversation).await {
