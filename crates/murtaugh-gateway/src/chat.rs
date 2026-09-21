@@ -31,6 +31,7 @@ use crate::prompts::{self, Asked, Prompts};
 use crate::render;
 use crate::reply::{Reply, Target};
 use crate::signin::{self, SignIns};
+use crate::thread_commands::{self, Command};
 
 pub const UNAUTHORISED_REACTION: &str = "zipper_mouth_face";
 /// The subtype Slack gives a DM that carries files; it is still the person talking.
@@ -317,6 +318,12 @@ impl Chat {
                 .await;
             return;
         }
+        // Read before the message is queued behind a running turn: a moment later and `/stop`
+        // cancels that turn, then runs as the prompt replacing it.
+        if let Some(command) = thread_commands::parse(&incoming.text, &self.bot_user) {
+            self.command(command, &incoming).await;
+            return;
+        }
         let conversation = Conversation {
             channel: incoming.channel.clone(),
             thread_ts: incoming
@@ -411,7 +418,55 @@ impl Chat {
         })
     }
 
-    /// `/stop`, or any of the app's commands with the text `stop`, typed inside a thread.
+    /// Every path posts a note, because it is the only sign the message was read as a command
+    /// rather than passed to the node as a prompt.
+    async fn command(&self, command: Command, incoming: &Incoming) {
+        let note = match &incoming.thread_ts {
+            None => format!("`{command}` only works inside a thread."),
+            Some(thread_ts) => {
+                let conversation = Conversation {
+                    channel: incoming.channel.clone(),
+                    thread_ts: thread_ts.clone(),
+                };
+                match command {
+                    Command::Stop => self.stop(&conversation),
+                }
+            }
+        };
+        if let Err(err) = self
+            .slack
+            .post_ephemeral(
+                &incoming.channel,
+                incoming.thread_ts.as_deref(),
+                &incoming.user,
+                &note,
+            )
+            .await
+        {
+            tracing::warn!(error = %err, "could not answer a thread-scoped command");
+        }
+    }
+
+    /// Whatever queued behind the turn goes too, so a follow-up does not start the instant the
+    /// turn it was waiting on is stopped.
+    fn stop(&self, conversation: &Conversation) -> String {
+        let cancel = lock(&self.turns).get_mut(conversation).map(|running| {
+            running.queued.clear();
+            running.interrupt(STOPPED)
+        });
+        match cancel {
+            Some(cancel) => {
+                if let Some((link, session_id)) = cancel {
+                    cancel_turn(link, session_id);
+                }
+                STOPPED.to_owned()
+            }
+            None => "Nothing to stop.".to_owned(),
+        }
+    }
+
+    /// `/stop`, or any of the app's commands with the text `stop`. Slack will not run one inside
+    /// a thread, so from a channel the useful answer is where the verb belongs.
     pub async fn on_slash(self: Arc<Self>, payload: serde_json::Value) {
         let text = |key: &str| payload[key].as_str().unwrap_or_default().trim().to_owned();
         let (command, words) = (text("command"), text("text"));
@@ -426,26 +481,14 @@ impl Chat {
         }
         let thread_ts = payload["thread_ts"].as_str().map(str::to_owned);
         let note = match &thread_ts {
-            None => "Use it inside the thread you want to stop.".to_owned(),
-            Some(thread_ts) => {
-                let conversation = Conversation {
-                    channel: channel.clone(),
-                    thread_ts: thread_ts.clone(),
-                };
-                let cancel = lock(&self.turns).get_mut(&conversation).map(|running| {
-                    running.queued.clear();
-                    running.interrupt(STOPPED)
-                });
-                match cancel {
-                    Some(cancel) => {
-                        if let Some((link, session_id)) = cancel {
-                            cancel_turn(link, session_id);
-                        }
-                        "Stopped.".to_owned()
-                    }
-                    None => "Nothing to stop.".to_owned(),
-                }
-            }
+            None => format!(
+                "Slack does not run slash commands inside threads. Mention me with `{}` in the thread you want to stop.",
+                Command::Stop
+            ),
+            Some(thread_ts) => self.stop(&Conversation {
+                channel: channel.clone(),
+                thread_ts: thread_ts.clone(),
+            }),
         };
         if let Err(err) = self
             .slack

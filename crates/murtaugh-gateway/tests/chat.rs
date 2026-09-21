@@ -1871,8 +1871,8 @@ async fn stop_inside_a_thread_cancels_its_turn_and_nothing_else_runs() {
         notes,
         [
             "Nothing to stop.",
-            "Stopped.",
-            "Use it inside the thread you want to stop."
+            "Slack does not run slash commands inside threads. Mention me with `/stop` in the thread you want to stop.",
+            "Stopped."
         ]
     );
     rig.sim
@@ -1886,6 +1886,75 @@ async fn stop_inside_a_thread_cancels_its_turn_and_nothing_else_runs() {
             .iter()
             .all(|(_, who, _)| who != STRANGER)
     );
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mentioned_stop_cancels_the_turn_and_never_reaches_the_node() {
+    let rig = rig().await;
+    let mut laptop = rig.node(ALICE, "laptop").await;
+    let ts = rig
+        .sim
+        .mention(ALICE, GENERAL, "slow job", None)
+        .await
+        .unwrap();
+    laptop.next_prompt().await;
+    rig.bot_replies(&ts, |r| r.iter().any(|m| m.text.contains("slowly")))
+        .await;
+
+    rig.sim
+        .mention(ALICE, GENERAL, "/stop", Some(&ts))
+        .await
+        .unwrap();
+    assert_eq!(next_cancel(&mut laptop).await, "<cancelled>");
+    let replies = rig
+        .bot_replies(&ts, |r| r.iter().any(|m| m.text.contains("_Stopped._")))
+        .await;
+    assert!(!replies.iter().any(|m| m.text.contains("pong to:")));
+    // The gateway answered it, so it is never sent on as the prompt that replaces the turn.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), laptop.next_prompt())
+            .await
+            .is_err()
+    );
+
+    // The same verb at the root of a channel has no turn to act on, and says so.
+    rig.sim
+        .mention(ALICE, GENERAL, "/stop", None)
+        .await
+        .unwrap();
+    let notes = eventually("both notes", || {
+        let mut notes: Vec<String> = rig
+            .sim
+            .ephemerals()
+            .into_iter()
+            .filter(|(_, who, _)| who == ALICE)
+            .map(|(_, _, text)| text)
+            .collect();
+        notes.sort();
+        (notes.len() == 2).then_some(notes)
+    })
+    .await;
+    assert_eq!(notes, ["Stopped.", "`/stop` only works inside a thread."]);
+    assert_eq!(rig.sim.violations(), vec![]);
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_command_in_backticks_is_a_prompt_the_node_answers() {
+    let rig = rig().await;
+    let mut laptop = rig.node(ALICE, "laptop").await;
+    let ts = rig
+        .sim
+        .mention(ALICE, GENERAL, "`/stop`", None)
+        .await
+        .unwrap();
+    assert_eq!(laptop.next_prompt().await.1, "`/stop`");
+    rig.bot_replies(&ts, |r| r.iter().any(|m| m.text.contains("pong to:")))
+        .await;
+    // Nothing was intercepted, so nobody was told a command had run.
+    assert_eq!(rig.sim.ephemerals(), vec![]);
+    assert_eq!(rig.sim.violations(), vec![]);
     rig.shutdown.cancel();
 }
 
