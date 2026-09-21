@@ -19,6 +19,7 @@ pub mod render;
 pub mod reply;
 pub mod run;
 pub mod signin;
+pub mod thread_commands;
 pub mod tls;
 pub mod token;
 pub mod version;
