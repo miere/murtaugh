@@ -170,6 +170,9 @@ async fn blocks_are_validated_like_slack() {
         {"type": "actions", "elements": [
             {"type": "button", "text": {"type": "plain_text", "text": "Go"}, "action_id": "go", "value": "1", "style": "danger"}
         ]},
+        {"type": "header", "text": {"type": "plain_text", "text": "H1"}, "level": 1},
+        {"type": "header", "text": {"type": "plain_text", "text": "H4"}, "level": 4},
+        {"type": "header", "text": {"type": "plain_text", "text": "no level"}},
     ]);
     let res = bot(
         &sim,
@@ -204,6 +207,9 @@ async fn blocks_are_validated_like_slack() {
             {"type": "button", "text": {"type": "plain_text", "text": "A"}, "action_id": "same"},
             {"type": "button", "text": {"type": "plain_text", "text": "B"}, "action_id": "same"}
         ]}]),
+        json!([{"type": "header", "text": {"type": "plain_text", "text": "H"}, "level": 0}]),
+        json!([{"type": "header", "text": {"type": "plain_text", "text": "H"}, "level": 5}]),
+        json!([{"type": "header", "text": {"type": "plain_text", "text": "H"}, "level": "1"}]),
     ];
     for blocks in &cases {
         let res = bot(

@@ -26,6 +26,7 @@ pub fn view(conversation: &Conversation, choices: &[Summary]) -> Vec<Block> {
         Block::Raw(json!({
             "type": "header",
             "text": {"type": "plain_text", "text": PROMPT, "emoji": false},
+            "level": 1,
         })),
         Block::Raw(json!({
             "type": "actions",
@@ -96,6 +97,7 @@ mod tests {
             .to_json()
             .to_string();
         assert!(json.contains(PROMPT), "{json}");
+        assert_eq!(blocks[0].to_json()["level"], 1, "{json}");
         assert!(
             json.contains("\"Hangar\"") && json.contains("\"MacBook\""),
             "{json}"
