@@ -1,4 +1,4 @@
-//! The bootstrap file, `~/.config/murtaugh/<profile>/murtaugh.toml`: Slack credentials, where the
+//! The bootstrap file, `~/.config/murtaugh/<alias>/murtaugh.toml`: Slack credentials, where the
 //! configuration store lives, and where nodes dial. Everything else is in the store.
 
 use std::collections::BTreeMap;
@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 pub const FILE_NAME: &str = "murtaugh.toml";
-pub const DEFAULT_PROFILE: &str = "default";
+pub const DEFAULT_ALIAS: &str = "default";
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:7443";
 const DEFAULT_DATABASE: &str = "murtaugh.db";
 const DEFAULT_ENV_FILE: &str = ".env";
@@ -181,9 +181,9 @@ pub fn home() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-pub fn default_path(profile: &str) -> Result<PathBuf, ConfigError> {
+pub fn default_path(alias: &str) -> Result<PathBuf, ConfigError> {
     let home = home().ok_or(ConfigError::NoHome)?;
-    Ok(home.join(".config/murtaugh").join(profile).join(FILE_NAME))
+    Ok(home.join(".config/murtaugh").join(alias).join(FILE_NAME))
 }
 
 pub fn absolute(path: &Path) -> PathBuf {
@@ -224,7 +224,7 @@ fn expand_home(raw: &str) -> PathBuf {
     }
 }
 
-/// Relative paths are resolved against the configuration's folder, so a profile is self-contained.
+/// Relative paths are resolved against the configuration's folder, so an alias is self-contained.
 fn resolve(dir: &Path, raw: &str) -> PathBuf {
     let path = expand_home(raw.trim());
     if path.is_absolute() {
@@ -481,7 +481,7 @@ bot_token = "xoxb-1"
     }
 
     #[test]
-    fn a_minimal_profile_resolves_every_default_against_its_folder() {
+    fn a_minimal_alias_resolves_every_default_against_its_folder() {
         let (dir, path) = write(GOOD);
         let config = load(&path).unwrap();
         assert_eq!(config.dir, dir.path());
@@ -504,7 +504,7 @@ bot_token = "xoxb-1"
     }
 
     #[test]
-    fn the_default_path_is_per_profile() {
+    fn the_default_path_is_per_alias() {
         let path = default_path("work").unwrap();
         assert!(
             path.ends_with(".config/murtaugh/work/murtaugh.toml"),
@@ -552,7 +552,7 @@ level = "loud"
     }
 
     #[test]
-    fn secrets_come_from_the_env_file_beside_the_profile() {
+    fn secrets_come_from_the_env_file_beside_the_alias() {
         let (dir, path) = write(
             "[slack]\napp_token = \"${MURTAUGH_TEST_APP}\"\nbot_token = \"${MURTAUGH_TEST_BOT}\"\n",
         );
@@ -575,7 +575,7 @@ level = "loud"
     }
 
     #[test]
-    fn firestore_paths_resolve_against_the_profile_and_admin_commands_need_no_slack() {
+    fn firestore_paths_resolve_against_the_alias_and_admin_commands_need_no_slack() {
         let (dir, path) = write(
             "[database]\nbackend = \"firestore\"\n[database.firestore]\ncollection = \"team\"\ncredentials_file = \"sa.json\"\n",
         );

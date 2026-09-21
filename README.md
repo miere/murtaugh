@@ -35,9 +35,9 @@ token) and create the app-level token (**Basic Information → App-Level Tokens*
 
 ## Running the gateway
 
-The gateway reads one small TOML file per profile, by default
+The gateway reads one small TOML file per alias, by default
 `~/.config/murtaugh/default/murtaugh.toml` (`--config PATH` points elsewhere). Relative paths in it
-are resolved against its folder, so each profile keeps its own database, `.env` and logs apart. It
+are resolved against its folder, so each alias keeps its own database, `.env` and logs apart. It
 holds only the Slack credentials, where the configuration store lives, and where nodes dial:
 
 ```toml
@@ -77,17 +77,45 @@ murtaugh-gateway validate
 murtaugh-gateway run
 ```
 
-On macOS, `murtaugh-gateway launchd` writes a LaunchAgent that starts the gateway at login and
-restarts it if it stops. `--alias` names both the job (`murtaugh.<alias>`) and the profile it runs:
+On macOS, `murtaugh-gateway launchd` manages a LaunchAgent that starts the gateway at login and
+restarts it if it stops:
 
 ```sh
-murtaugh-gateway launchd --alias default
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/murtaugh.default.plist
+murtaugh-gateway launchd install     # write the LaunchAgent
+murtaugh-gateway launchd start       # hand it to launchd
+murtaugh-gateway launchd status      # is it loaded, is it running, what did it exit with
+murtaugh-gateway launchd restart     # shut the gateway down cleanly, then start it again
+murtaugh-gateway launchd stop        # take it off launchd
+murtaugh-gateway launchd uninstall   # stop it and delete the LaunchAgent
 ```
 
-It never replaces an existing plist unless you pass `--update-existing`. Logs go to
-`~/Library/Logs/murtaugh/`. `murtaugh-gateway version --check` tells you whether a newer release
-exists; the repository is private, so set `GH_TOKEN` (for example `GH_TOKEN=$(gh auth token)`).
+`status` is the one to reach for when launchd is being unhelpful — it digs the pid, the last exit
+code and the log paths out of `launchctl print`, and tells "never installed" apart from "installed
+but not loaded":
+
+```
+murtaugh.default is running (pid 4812).
+  LaunchAgent: /Users/you/Library/LaunchAgents/murtaugh.default.plist
+  last exit:   0
+  out log:     /Users/you/Library/Logs/murtaugh/murtaugh.default.out.log
+  err log:     /Users/you/Library/Logs/murtaugh/murtaugh.default.err.log
+```
+
+`--alias NAME` picks which gateway you mean: it names both the job (`murtaugh.<alias>`) and the
+configuration at `~/.config/murtaugh/<alias>/murtaugh.toml`. It is global, so it goes with `run`
+and `validate` too, and it defaults to `default`.
+
+`install` never replaces an existing plist unless you pass `--update-existing`, and it is the only
+one of the six that reads a configuration — the others act on the job `--alias` names, and refuse
+`--config` rather than quietly ignoring it.
+
+`stop` and a plain `restart` unload the job, which asks the gateway to shut down cleanly: launchd
+sends SIGTERM and waits out `ExitTimeOut` (20 seconds unless you set it in the plist) before
+killing it. `murtaugh-gateway launchd restart --force` skips the wait and kills the process.
+
+Logs go to `~/Library/Logs/murtaugh/`. `murtaugh-gateway version --check` tells you whether a newer
+release exists; the repository is private, so set `GH_TOKEN` (for example
+`GH_TOKEN=$(gh auth token)`).
 
 ## Who may use it
 

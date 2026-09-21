@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
-use crate::config::DEFAULT_PROFILE;
+use crate::config::DEFAULT_ALIAS;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -12,9 +12,12 @@ use crate::config::DEFAULT_PROFILE;
     disable_version_flag = true
 )]
 pub struct Cli {
-    /// Configuration file [default: ~/.config/murtaugh/default/murtaugh.toml]
+    /// Configuration file [default: ~/.config/murtaugh/<alias>/murtaugh.toml]
     #[arg(long, global = true, value_name = "PATH")]
     pub config: Option<PathBuf>,
+    /// Which gateway to act on: the launchd job murtaugh.<alias> and ~/.config/murtaugh/<alias>
+    #[arg(long, global = true, default_value = DEFAULT_ALIAS, value_name = "NAME")]
+    pub alias: String,
     #[command(subcommand)]
     pub command: Command,
 }
@@ -25,8 +28,9 @@ pub enum Command {
     Run,
     /// Check the bootstrap file without connecting to anything
     Validate,
-    /// Write a macOS LaunchAgent that keeps `murtaugh-gateway run` alive
-    Launchd(LaunchdArgs),
+    /// Manage the macOS LaunchAgent that keeps `murtaugh-gateway run` alive
+    #[command(subcommand)]
+    Launchd(LaunchdCommand),
     /// Print the version, or check GitHub for a newer release
     Version(VersionArgs),
     /// Print the Slack app manifest to paste into api.slack.com/apps → "Create New App"
@@ -48,17 +52,37 @@ pub enum Command {
     Tools(ToolsCommand),
 }
 
+#[derive(Debug, Subcommand)]
+pub enum LaunchdCommand {
+    /// Write the LaunchAgent for this alias
+    Install(InstallArgs),
+    /// Stop the job and delete its LaunchAgent
+    Uninstall,
+    /// Hand the job to launchd, which starts it and keeps it alive
+    Start,
+    /// Take the job off launchd, letting the gateway shut down cleanly
+    Stop,
+    /// Shut the gateway down cleanly and hand the job back to launchd
+    Restart(RestartArgs),
+    /// Say whether launchd has the job, whether it is running, and where its logs are
+    Status,
+}
+
 #[derive(Debug, Args)]
-pub struct LaunchdArgs {
-    /// Names the job murtaugh.<alias> and picks the profile's default config path
-    #[arg(long, default_value = DEFAULT_PROFILE)]
-    pub alias: String,
+pub struct InstallArgs {
     /// The murtaugh-gateway binary launchd runs [default: this binary]
     #[arg(long, value_name = "PATH")]
     pub binary_path: Option<PathBuf>,
     /// Replace an existing plist
     #[arg(long)]
     pub update_existing: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct RestartArgs {
+    /// Kill the gateway instead of waiting for it to shut down cleanly
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, Args)]
@@ -143,4 +167,53 @@ pub struct MintArgs {
     /// Write the token to this file (mode 0600) instead of printing it
     #[arg(long, value_name = "PATH")]
     pub token_file: Option<PathBuf>,
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+
+    use clap::CommandFactory;
+
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(std::iter::once("murtaugh-gateway").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn the_definition_is_consistent() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn the_alias_defaults_and_is_global() {
+        assert_eq!(parse(&["validate"]).unwrap().alias, "default");
+        assert_eq!(parse(&["--alias", "work", "run"]).unwrap().alias, "work");
+        assert_eq!(
+            parse(&["launchd", "restart", "--alias", "work"])
+                .unwrap()
+                .alias,
+            "work"
+        );
+    }
+
+    #[test]
+    fn a_restart_is_graceful_unless_forced() {
+        for (args, forced) in [
+            (&["launchd", "restart"][..], false),
+            (&["launchd", "restart", "--force"][..], true),
+        ] {
+            let Command::Launchd(LaunchdCommand::Restart(restart)) = parse(args).unwrap().command
+            else {
+                panic!("expected launchd restart")
+            };
+            assert_eq!(restart.force, forced);
+        }
+    }
+
+    #[test]
+    fn launchd_on_its_own_asks_for_a_verb() {
+        assert_eq!(parse(&["launchd"]).unwrap_err().exit_code(), 2);
+    }
 }

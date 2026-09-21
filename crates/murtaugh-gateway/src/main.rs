@@ -1,9 +1,9 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use murtaugh_gateway::cli::{Cli, Command, LaunchdArgs, VersionArgs};
-use murtaugh_gateway::launchd::{self, Plan};
+use murtaugh_gateway::cli::{Cli, Command, InstallArgs, LaunchdCommand, VersionArgs};
+use murtaugh_gateway::launchd::{self, Job, Launchctl, Plan};
 use murtaugh_gateway::logging::redact;
 use murtaugh_gateway::version::{self, GitHub, VERSION};
 use murtaugh_gateway::{admin, config, open_store};
@@ -25,21 +25,21 @@ fn main() -> ExitCode {
     }
 }
 
-fn config_path(flag: Option<PathBuf>, profile: &str) -> Result<PathBuf, String> {
+fn config_path(flag: Option<PathBuf>, alias: &str) -> Result<PathBuf, String> {
     match flag {
         Some(path) => Ok(config::absolute(&path)),
-        None => config::default_path(profile).map_err(|err| err.to_string()),
+        None => config::default_path(alias).map_err(|err| err.to_string()),
     }
 }
 
 fn dispatch(cli: Cli) -> Result<String, String> {
     match cli.command {
-        Command::Launchd(args) => return install_launchd(cli.config, args),
+        Command::Launchd(command) => return launchd_command(cli.config, &cli.alias, command),
         Command::Version(args) => return print_version(args),
         Command::SlackManifest(args) => return murtaugh_gateway::manifest::render(&args.name),
         _ => {}
     }
-    let path = config_path(cli.config, config::DEFAULT_PROFILE)?;
+    let path = config_path(cli.config, &cli.alias)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -71,11 +71,42 @@ fn dispatch(cli: Cli) -> Result<String, String> {
     }
 }
 
-fn install_launchd(flag: Option<PathBuf>, args: LaunchdArgs) -> Result<String, String> {
+fn launchd_command(
+    flag: Option<PathBuf>,
+    alias: &str,
+    command: LaunchdCommand,
+) -> Result<String, String> {
     launchd::ensure_macos().map_err(|err| err.to_string())?;
-    let config = config_path(flag, &args.alias)?;
     let home =
         config::home().ok_or("HOME is not set, so there is no LaunchAgents folder to write to")?;
+    let job = Job::new(alias, home).map_err(|err| err.to_string())?;
+    if let LaunchdCommand::Install(args) = command {
+        return install_launchd(flag, job, args);
+    }
+    // Only install reads the configuration; the rest address the job --alias names.
+    if flag.is_some() {
+        return Err(format!(
+            "--config only applies to `murtaugh-gateway launchd install`; {} acts on the job --alias names",
+            job.label()
+        ));
+    }
+    if let LaunchdCommand::Status = command {
+        let status = launchd::status(&job, &Launchctl).map_err(|err| err.to_string())?;
+        return Ok(status.to_string());
+    }
+    let outcome = match command {
+        LaunchdCommand::Install(_) | LaunchdCommand::Status => unreachable!("handled above"),
+        LaunchdCommand::Uninstall => launchd::uninstall(&job, &Launchctl),
+        LaunchdCommand::Start => launchd::start(&job, &Launchctl),
+        LaunchdCommand::Stop => launchd::stop(&job, &Launchctl),
+        LaunchdCommand::Restart(args) => launchd::restart(&job, &Launchctl, args.force),
+    }
+    .map_err(|err| err.to_string())?;
+    Ok(outcome.message(&job.label()))
+}
+
+fn install_launchd(flag: Option<PathBuf>, job: Job, args: InstallArgs) -> Result<String, String> {
+    let config = config_path(flag, job.alias())?;
     let binary = match args.binary_path {
         Some(path) => config::absolute(&path),
         None => std::env::current_exe().map_err(|err| {
@@ -83,10 +114,9 @@ fn install_launchd(flag: Option<PathBuf>, args: LaunchdArgs) -> Result<String, S
         })?,
     };
     let plan = Plan {
-        alias: args.alias,
+        job,
         binary,
         config,
-        home,
     };
     let installed = launchd::install(&plan, args.update_existing).map_err(|err| err.to_string())?;
     let verb = if installed.replaced {
@@ -101,19 +131,23 @@ fn install_launchd(flag: Option<PathBuf>, args: LaunchdArgs) -> Result<String, S
     );
     if !plan.config.exists() {
         out.push_str(&format!(
-            "\nNote: {} does not exist yet; create it before loading the job.",
+            "\nNote: {} does not exist yet; create it before starting the job.",
             plan.config.display()
         ));
     }
     out.push_str(&format!(
-        "\nLoad it with: launchctl bootstrap gui/$(id -u) {}",
-        quote(&installed.path)
+        "\nStart it with: murtaugh-gateway launchd start{}",
+        alias_flag(&plan.job)
     ));
     Ok(out)
 }
 
-fn quote(path: &Path) -> String {
-    format!("'{}'", path.display().to_string().replace('\'', r"'\''"))
+fn alias_flag(job: &Job) -> String {
+    if job.alias() == config::DEFAULT_ALIAS {
+        String::new()
+    } else {
+        format!(" --alias {}", job.alias())
+    }
 }
 
 fn print_version(args: VersionArgs) -> Result<String, String> {
