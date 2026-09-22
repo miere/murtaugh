@@ -1,7 +1,8 @@
 //! Alert cards, ported from the Go gateway's: a collapsible container with a level icon, a title,
-//! and a body of reason, text and next steps. Used for a machine that cannot take a conversation
-//! and for a node's failing credential, which goes to the node's owner by DM and is edited in
-//! place when it recovers.
+//! and a body of reason, text and next steps. Used for a machine that cannot take a conversation,
+//! for a machine that fails one of its messages ([`crate::faults`] builds those), and for a node's
+//! failing credential, which goes to the node's owner by DM and is edited in place when it
+//! recovers.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -253,7 +254,7 @@ fn span(seconds: i64) -> String {
     }
 }
 
-fn clip(text: &str, max: usize) -> String {
+pub(crate) fn clip(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_owned();
     }
