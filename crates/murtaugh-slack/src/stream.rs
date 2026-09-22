@@ -18,27 +18,46 @@ pub enum TaskStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PlanTask {
+    pub task_id: String,
+    pub title: String,
+    pub status: TaskStatus,
+}
+
+/// A message may hold only one of Slack's own plan blocks, so task lists are sent as blocks of
+/// our own instead; re-sending one with a `block_id` already in the message rewrites it in place.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", rename = "plan")]
+pub struct PlanBlock {
+    pub block_id: String,
+    pub title: String,
+    pub tasks: Vec<PlanTask>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Chunk {
-    MarkdownText {
-        text: String,
-    },
-    TaskUpdate {
-        id: String,
-        title: String,
-        status: TaskStatus,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        details: Option<String>,
-    },
-    /// Opens the task list that following task updates are drawn in.
-    PlanUpdate {
-        title: String,
-    },
+    MarkdownText { text: String },
+    Blocks { blocks: Vec<PlanBlock> },
 }
 
 impl Chunk {
     pub fn markdown(text: impl Into<String>) -> Self {
         Self::MarkdownText { text: text.into() }
+    }
+
+    pub fn plan(
+        block_id: impl Into<String>,
+        title: impl Into<String>,
+        tasks: Vec<PlanTask>,
+    ) -> Self {
+        Self::Blocks {
+            blocks: vec![PlanBlock {
+                block_id: block_id.into(),
+                title: title.into(),
+                tasks,
+            }],
+        }
     }
 }
 

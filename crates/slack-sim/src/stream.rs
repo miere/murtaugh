@@ -4,15 +4,17 @@ use serde_json::{Map, Value, json};
 
 use crate::api::{ApiError, arg, benign, channel, err};
 use crate::state::{State, new_message};
-use crate::{BOT_ID, BOT_USER_ID, ChannelKind, SimStream, SimTask, render};
+use crate::{BOT_ID, BOT_USER_ID, ChannelKind, SimPlanBlock, SimStream, SimTask, render};
 
 pub(crate) const MAX_STREAM_TEXT: usize = 12_000;
 const STATUSES: [&str; 4] = ["pending", "in_progress", "complete", "error"];
+const MAX_PLAN_TASKS: usize = 50;
 
 enum Chunk {
     Text(String),
     Task(SimTask),
     Plan(String),
+    Blocks(Vec<SimPlanBlock>),
 }
 
 fn chunks(params: &Map<String, Value>, required: bool) -> Result<Vec<Chunk>, ApiError> {
@@ -66,11 +68,60 @@ fn chunk(item: &Value) -> Result<Chunk, ApiError> {
                 status: status.to_owned(),
             }))
         }
+        Some("blocks") => {
+            let Some(Value::Array(blocks)) = item.get("blocks") else {
+                return Err(err(
+                    "invalid_chunks",
+                    "a blocks chunk needs a `blocks` array",
+                ));
+            };
+            blocks
+                .iter()
+                .map(plan_block)
+                .collect::<Result<_, _>>()
+                .map(Chunk::Blocks)
+        }
         other => Err(err(
             "invalid_chunks",
             format!("unknown chunk type {other:?}"),
         )),
     }
+}
+
+fn plan_block(item: &Value) -> Result<SimPlanBlock, ApiError> {
+    if item.get("type").and_then(Value::as_str) != Some("plan") {
+        return Err(err("invalid_blocks", "only plan blocks may be streamed"));
+    }
+    let Some(Value::Array(tasks)) = item.get("tasks") else {
+        return Err(err("invalid_blocks", "a plan block needs a `tasks` array"));
+    };
+    if tasks.len() > MAX_PLAN_TASKS {
+        return Err(err(
+            "invalid_blocks",
+            format!("a plan block holds {MAX_PLAN_TASKS} tasks at most"),
+        ));
+    }
+    Ok(SimPlanBlock {
+        block_id: field(item, "block_id", "plan")?.to_owned(),
+        title: field(item, "title", "plan")?.to_owned(),
+        tasks: tasks
+            .iter()
+            .map(|task| {
+                let status = field(task, "status", "task")?;
+                if !STATUSES.contains(&status) {
+                    return Err(err(
+                        "invalid_blocks",
+                        format!("task status {status:?} is not one of {STATUSES:?}"),
+                    ));
+                }
+                Ok(SimTask {
+                    id: field(task, "task_id", "task")?.to_owned(),
+                    title: field(task, "title", "task")?.to_owned(),
+                    status: status.to_owned(),
+                })
+            })
+            .collect::<Result<_, _>>()?,
+    })
 }
 
 fn apply(text: &mut String, stream: &mut SimStream, chunks: Vec<Chunk>) -> Result<(), ApiError> {
@@ -83,6 +134,18 @@ fn apply(text: &mut String, stream: &mut SimStream, chunks: Vec<Chunk>) -> Resul
                 Some(known) => *known = task,
                 None => stream.tasks.push(task),
             },
+            Chunk::Blocks(blocks) => {
+                for block in blocks {
+                    match stream
+                        .plan_blocks
+                        .iter_mut()
+                        .find(|b| b.block_id == block.block_id)
+                    {
+                        Some(known) => *known = block,
+                        None => stream.plan_blocks.push(block),
+                    }
+                }
+            }
         }
     }
     let len = next.chars().count();
@@ -137,6 +200,7 @@ pub(crate) fn start(st: &mut State, params: &Map<String, Value>) -> Result<Value
         recipient,
         plans: Vec::new(),
         tasks: Vec::new(),
+        plan_blocks: Vec::new(),
     };
     apply(&mut msg.text, &mut stream, chunks)?;
     msg.stream = Some(stream);

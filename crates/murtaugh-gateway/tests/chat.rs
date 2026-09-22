@@ -601,13 +601,11 @@ async fn a_mention_is_answered_in_its_thread_by_the_persons_own_node() {
         stream.recipient,
         Some((TEAM_ID.to_owned(), ALICE.to_owned()))
     );
-    assert_eq!(stream.plans, ["Task list"]);
-    assert_eq!(stream.tasks.len(), 1);
+    assert_eq!(stream.plan_blocks.len(), 1);
+    let tasks = &stream.plan_blocks[0].tasks;
+    assert_eq!(tasks.len(), 1);
     assert_eq!(
-        (
-            stream.tasks[0].title.as_str(),
-            stream.tasks[0].status.as_str()
-        ),
+        (tasks[0].title.as_str(), tasks[0].status.as_str()),
         ("ls", "complete")
     );
     assert!(matches!(

@@ -1,8 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use murtaugh_slack::{
-    Chunk, PostMessage, STREAM_FINALIZED, SlackClient, SlackError, StartStream, TaskDisplayMode,
-    TaskStatus, Tokens,
+    Chunk, PlanTask, PostMessage, STREAM_FINALIZED, SlackClient, SlackError, StartStream,
+    TaskDisplayMode, TaskStatus, Tokens,
 };
 use slack_sim::{ALICE, GENERAL, SlackSim, TEAM_ID};
 
@@ -25,17 +25,16 @@ fn start(channel: &str, thread_ts: &str, chunks: Vec<Chunk>) -> StartStream {
         channel: channel.into(),
         thread_ts: thread_ts.into(),
         recipient: Some((TEAM_ID.into(), ALICE.into())),
-        task_display_mode: TaskDisplayMode::Plan,
+        task_display_mode: TaskDisplayMode::Timeline,
         chunks,
     }
 }
 
-fn task(id: &str, status: TaskStatus) -> Chunk {
-    Chunk::TaskUpdate {
-        id: id.into(),
+fn task(id: &str, status: TaskStatus) -> PlanTask {
+    PlanTask {
+        task_id: id.into(),
         title: format!("Run {id}"),
         status,
-        details: None,
     }
 }
 
@@ -47,14 +46,13 @@ fn api_error(result: Result<impl std::fmt::Debug, SlackError>) -> String {
 }
 
 #[tokio::test]
-async fn a_stream_carries_markdown_and_task_cards_into_one_threaded_message() {
+async fn a_stream_carries_markdown_and_plan_blocks_into_one_threaded_message() {
     let (sim, client, thread) = setup().await;
-    let chunks = vec![
-        Chunk::PlanUpdate {
-            title: "Task list".into(),
-        },
-        task("t1", TaskStatus::InProgress),
-    ];
+    let chunks = vec![Chunk::plan(
+        "beat-1",
+        "Task list",
+        vec![task("t1", TaskStatus::InProgress)],
+    )];
     let posted = client
         .start_stream(&start(GENERAL, &thread, chunks))
         .await
@@ -67,7 +65,14 @@ async fn a_stream_carries_markdown_and_task_cards_into_one_threaded_message() {
         .append_stream(
             GENERAL,
             &posted.ts,
-            &[task("t1", TaskStatus::Complete), Chunk::markdown("world")],
+            &[
+                Chunk::plan(
+                    "beat-1",
+                    "Task list",
+                    vec![task("t1", TaskStatus::Complete)],
+                ),
+                Chunk::markdown("world"),
+            ],
         )
         .await
         .unwrap();
@@ -82,10 +87,53 @@ async fn a_stream_carries_markdown_and_task_cards_into_one_threaded_message() {
     assert_eq!(message.text, "**Hello**, world");
     let stream = message.stream.unwrap();
     assert!(!stream.open);
-    assert_eq!(stream.plans, ["Task list"]);
-    assert_eq!(stream.tasks.len(), 1);
-    assert_eq!(stream.tasks[0].status, "complete");
-    assert_eq!(stream.task_display_mode, "plan");
+    // The second send of beat-1 rewrites the block rather than adding a second one.
+    assert_eq!(stream.plan_blocks.len(), 1);
+    assert_eq!(stream.plan_blocks[0].title, "Task list");
+    assert_eq!(stream.plan_blocks[0].tasks.len(), 1);
+    assert_eq!(stream.plan_blocks[0].tasks[0].status, "complete");
+    assert_eq!(stream.task_display_mode, "timeline");
+    assert!(sim.violations().is_empty(), "{:?}", sim.violations());
+}
+
+#[tokio::test]
+async fn each_beat_keeps_its_own_plan_block() {
+    let (sim, client, thread) = setup().await;
+    let posted = client
+        .start_stream(&start(GENERAL, &thread, vec![Chunk::markdown("first, ")]))
+        .await
+        .unwrap();
+    for (block, id) in [("beat-1", "t1"), ("beat-2", "t2")] {
+        client
+            .append_stream(
+                GENERAL,
+                &posted.ts,
+                &[Chunk::plan(
+                    block,
+                    "Task list",
+                    vec![task(id, TaskStatus::Complete)],
+                )],
+            )
+            .await
+            .unwrap();
+        client
+            .append_stream(GENERAL, &posted.ts, &[Chunk::markdown("then, ")])
+            .await
+            .unwrap();
+    }
+
+    let message = sim
+        .thread(GENERAL, &thread)
+        .into_iter()
+        .find(|m| m.ts == posted.ts)
+        .unwrap();
+    let stream = message.stream.unwrap();
+    let blocks: Vec<&str> = stream
+        .plan_blocks
+        .iter()
+        .map(|b| b.block_id.as_str())
+        .collect();
+    assert_eq!(blocks, ["beat-1", "beat-2"]);
     assert!(sim.violations().is_empty(), "{:?}", sim.violations());
 }
 

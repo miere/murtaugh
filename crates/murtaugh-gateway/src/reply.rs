@@ -1,11 +1,14 @@
 //! One turn's reply, streamed into its thread with Slack's streaming messages: the agent's words
-//! as Markdown, and a task card per tool call. Ported from the Go gateway's stream writer.
+//! as Markdown, and the tool calls between them as task lists.
+//!
+//! Tools are grouped into beats — the run of calls since the agent last said something — and each
+//! beat is drawn as its own plan block, so a list sits where its tools actually ran rather than
+//! every tool in the turn collapsing into one list at the top.
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use murtaugh_slack::{
-    Chunk, PostMessage, STREAM_FINALIZED, STREAMING_UNSUPPORTED, SlackClient, SlackError,
+    Chunk, PlanTask, PostMessage, STREAM_FINALIZED, STREAMING_UNSUPPORTED, SlackClient, SlackError,
     StartStream, TaskDisplayMode, TaskStatus, UpdateMessage,
 };
 use tokio::time::Instant;
@@ -18,7 +21,7 @@ const STREAM_MIN_ROOM: usize = 512;
 pub const FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 const FLUSH_MIN_CHARS: usize = 24;
 pub const TASK_INTERVAL: Duration = Duration::from_secs(1);
-const PLAN_TITLE: &str = "Task list";
+const BEAT_TITLE: &str = "Task list";
 /// What Slack says to an append on a stream left idle too long, as one waiting on a tool
 /// approval is; the message itself stays.
 const STREAM_EXPIRED: &str = "message_not_found";
@@ -36,7 +39,6 @@ struct Stream {
     channel: String,
     ts: String,
     spent: usize,
-    plan_open: bool,
 }
 
 enum Mode {
@@ -48,10 +50,17 @@ enum Mode {
     },
 }
 
-struct Task {
-    title: String,
-    status: TaskStatus,
+/// The tool calls since the agent last spoke, drawn as one plan block.
+struct Beat {
+    block_id: String,
+    tasks: Vec<PlanTask>,
     flushed: Option<Instant>,
+}
+
+impl Beat {
+    fn chunk(&self) -> Chunk {
+        Chunk::plan(&self.block_id, BEAT_TITLE, self.tasks.clone())
+    }
 }
 
 pub struct Reply {
@@ -62,7 +71,8 @@ pub struct Reply {
     flushes: usize,
     last_flush: Instant,
     fence: Fence,
-    tasks: HashMap<String, Task>,
+    beats: Vec<Beat>,
+    open: Option<usize>,
     written: bool,
 }
 
@@ -76,7 +86,8 @@ impl Reply {
             flushes: 0,
             last_flush: Instant::now(),
             fence: Fence::default(),
-            tasks: HashMap::new(),
+            beats: Vec::new(),
+            open: None,
             written: false,
         }
     }
@@ -135,6 +146,8 @@ impl Reply {
         self.flushes += 1;
         self.last_flush = Instant::now();
         self.written = true;
+        // Words end the run of tool calls they follow, so the next one opens a list of its own.
+        self.open = None;
         match &mut self.mode {
             Mode::Streaming(_) => self.paint(&text).await,
             Mode::Buffered { text: all, .. } => {
@@ -191,7 +204,6 @@ impl Reply {
             Ok(()) => true,
             Err(err) if closed(&err) || is(&err, "msg_too_long") => {
                 self.rollover().await;
-                let chunks = self.reopen_plan_for(chunks);
                 let Mode::Streaming(Some(stream)) = &self.mode else {
                     return self.start(chunks).await;
                 };
@@ -216,19 +228,16 @@ impl Reply {
             channel: self.target.channel.clone(),
             thread_ts: self.target.thread_ts.clone(),
             recipient: self.target.recipient.clone(),
-            task_display_mode: TaskDisplayMode::Plan,
+            // Slack's own plan block is a singleton per message; we place our own instead.
+            task_display_mode: TaskDisplayMode::Timeline,
             chunks: chunks.clone(),
         };
         match self.slack.start_stream(&start).await {
             Ok(posted) => {
-                let plan_open = chunks
-                    .iter()
-                    .any(|chunk| matches!(chunk, Chunk::PlanUpdate { .. }));
                 self.mode = Mode::Streaming(Some(Stream {
                     channel: posted.channel,
                     ts: posted.ts,
                     spent: 0,
-                    plan_open,
                 }));
                 true
             }
@@ -282,62 +291,57 @@ impl Reply {
         self.fence.rolled_over();
     }
 
-    fn reopen_plan_for(&mut self, chunks: Vec<Chunk>) -> Vec<Chunk> {
-        let has_task = chunks
-            .iter()
-            .any(|chunk| matches!(chunk, Chunk::TaskUpdate { .. }));
-        let open = matches!(&self.mode, Mode::Streaming(Some(stream)) if stream.plan_open);
-        if !has_task || open {
-            return chunks;
-        }
-        if let Mode::Streaming(Some(stream)) = &mut self.mode {
-            stream.plan_open = true;
-        }
-        let mut with_plan = vec![Chunk::PlanUpdate {
-            title: PLAN_TITLE.into(),
-        }];
-        with_plan.extend(chunks);
-        with_plan
-    }
-
-    /// Settled states always go out; a running task is redrawn at most once a `TASK_INTERVAL`.
+    /// Settled states always go out; a running beat is redrawn at most once a `TASK_INTERVAL`.
     pub async fn task(&mut self, id: &str, title: Option<&str>, status: TaskStatus) {
         if matches!(self.mode, Mode::Buffered { .. }) {
             return;
         }
-        let task = self.tasks.entry(id.to_owned()).or_insert_with(|| Task {
-            title: TASK_TITLE.into(),
-            status,
-            flushed: None,
-        });
-        if let Some(title) = title.map(str::trim).filter(|title| !title.is_empty()) {
-            task.title = title.to_owned();
-        }
-        task.status = status;
-        let settled = matches!(status, TaskStatus::Complete | TaskStatus::Error);
-        if !settled && task.flushed.is_some_and(|at| at.elapsed() < TASK_INTERVAL) {
-            return;
-        }
-        task.flushed = Some(Instant::now());
-        let chunk = Chunk::TaskUpdate {
-            id: id.to_owned(),
-            title: task.title.clone(),
-            status,
-            details: None,
-        };
+        // Any words still pending belong before this tool, and close the beat it would join.
         let pending = self.pending.len();
         self.emit(pending).await;
-        let chunks = match &self.mode {
-            Mode::Streaming(None) => vec![
-                Chunk::PlanUpdate {
-                    title: PLAN_TITLE.into(),
-                },
-                chunk,
-            ],
-            _ => self.reopen_plan_for(vec![chunk]),
+        // A tool already on a list settles there, however much the agent has said since.
+        let known = self
+            .beats
+            .iter()
+            .position(|beat| beat.tasks.iter().any(|task| task.task_id == id));
+        let at = match known.or(self.open) {
+            Some(at) => at,
+            None => {
+                self.beats.push(Beat {
+                    block_id: format!("beat-{}", self.beats.len() + 1),
+                    tasks: Vec::new(),
+                    flushed: None,
+                });
+                let at = self.beats.len() - 1;
+                self.open = Some(at);
+                at
+            }
         };
+        let settled = matches!(status, TaskStatus::Complete | TaskStatus::Error);
+        let title = title.map(str::trim).filter(|title| !title.is_empty());
+        let Some(beat) = self.beats.get_mut(at) else {
+            return;
+        };
+        match beat.tasks.iter_mut().find(|task| task.task_id == id) {
+            Some(known) => {
+                if let Some(title) = title {
+                    known.title = title.to_owned();
+                }
+                known.status = status;
+            }
+            None => beat.tasks.push(PlanTask {
+                task_id: id.to_owned(),
+                title: title.unwrap_or(TASK_TITLE).to_owned(),
+                status,
+            }),
+        }
+        if !settled && beat.flushed.is_some_and(|at| at.elapsed() < TASK_INTERVAL) {
+            return;
+        }
+        beat.flushed = Some(Instant::now());
+        let chunk = beat.chunk();
         self.written = true;
-        self.append(chunks).await;
+        self.append(vec![chunk]).await;
     }
 
     pub async fn finish(&mut self) {
