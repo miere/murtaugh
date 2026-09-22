@@ -6,7 +6,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use murtaugh_slack::{Block, Click, Event, FileRef, PostMessage, SlackClient, TaskStatus, Upload};
+use murtaugh_slack::{
+    Block, Click, Event, FileRef, PostMessage, SlackClient, TaskStatus, Text, Upload,
+};
 use murtaugh_store::{Conversation, Pin, Store, ToolMode, UserConfig, UserId};
 use rax::attachment::Attachment;
 use rax::content::ContentBlock;
@@ -549,8 +551,8 @@ impl Chat {
         )
     }
 
-    /// No note once a turn is stopping: the end of its reply carries the marker, which tells the
-    /// whole thread. Whatever queued behind it goes too, so the next message does not start now.
+    /// No note once a turn is stopping: the notice after its reply says so, which tells the whole
+    /// thread. Whatever queued behind it goes too, so the next message does not start now.
     fn stop(&self, conversation: &Conversation) -> Option<String> {
         let cancel = lock(&self.turns).get_mut(conversation).map(|running| {
             running.queued.clear();
@@ -635,9 +637,12 @@ impl Chat {
             let pending = match seat.node.link.call(prompt).await {
                 Ok(pending) => pending,
                 Err(err) => {
-                    self.say(
+                    self.notice(
                         conversation,
-                        &format!("_I couldn't reach *{}*: {err}_", seat.node.name),
+                        &format!(
+                            "I couldn't reach _*{}*_: {err}",
+                            render::escape(&seat.node.name)
+                        ),
                     )
                     .await;
                     return None;
@@ -646,9 +651,12 @@ impl Chat {
             let reply = match tokio::time::timeout(PROMPT_TIMEOUT, pending.reply).await {
                 Ok(reply) => reply,
                 Err(_) => {
-                    self.say(
+                    self.notice(
                         conversation,
-                        &format!("_*{}* did not take this message in time._", seat.node.name),
+                        &format!(
+                            "_*{}*_ did not take this message in time.",
+                            render::escape(&seat.node.name)
+                        ),
                     )
                     .await;
                     return None;
@@ -680,9 +688,9 @@ impl Chat {
                     self.forget(conversation, &seat.node).await;
                 }
                 Err(CallError::Fault(fault)) if fault.kind == ErrorKind::SessionBusy => {
-                    self.say(
+                    self.notice(
                         conversation,
-                        "_The machine is still busy with this conversation; try again in a moment._",
+                        "the machine is still busy with this conversation; try again in a moment.",
                     )
                     .await;
                     return None;
@@ -692,9 +700,12 @@ impl Chat {
                     return None;
                 }
                 Err(err) => {
-                    self.say(
+                    self.notice(
                         conversation,
-                        &format!("_*{}* could not take this message: {err}_", seat.node.name),
+                        &format!(
+                            "_*{}*_ could not take this message: {err}",
+                            render::escape(&seat.node.name)
+                        ),
                     )
                     .await;
                     return None;
@@ -757,27 +768,27 @@ impl Chat {
         let notice = match (history.is_some(), orphaned) {
             (false, _) => None,
             (true, true) => Some(format!(
-                "_The machine serving this conversation went offline. Continuing on *{}*, catching up from this thread._",
+                "the machine serving this conversation went offline. Continuing on _*{}*_, catching up from this thread.",
                 render::escape(&node.name)
             )),
             (true, false) => (snapshot.admin() != Some(&node.owner)).then(|| {
                 format!(
-                    "_Picking this conversation up on *{}*, catching up from this thread._",
+                    "picking this conversation up on _*{}*_, catching up from this thread.",
                     render::escape(&node.name)
                 )
             }),
         };
         if let Some(notice) = notice {
-            self.say(conversation, &notice).await;
+            self.notice(conversation, &notice).await;
         }
         let session_id = match self.open_session(&node, conversation).await {
             Ok(session_id) => session_id,
             Err(reason) => {
                 self.fleet.session_ended(&node.selector);
-                self.say(
+                self.notice(
                     conversation,
                     &format!(
-                        "_*{}* could not start a conversation: {reason}_",
+                        "_*{}*_ could not start a conversation: {reason}",
                         render::escape(&node.name)
                     ),
                 )
@@ -920,28 +931,30 @@ impl Chat {
         let marker = lock(&self.turns)
             .get(conversation)
             .and_then(|running| running.marker);
-        if stalled {
+        // How a turn ended is the gateway talking, not the agent, so it follows the answer as a
+        // notice of its own rather than as a last italic line inside it.
+        let ending = if stalled {
             cancel_turn(node.link.clone(), session_id.clone());
-            reply
-                .text(&format!(
-                    "\n\n_The agent went quiet for {}, so I stopped this turn._",
-                    span(self.turn_idle_timeout)
-                ))
-                .await;
+            Some(format!(
+                "the agent went quiet for {}, so I stopped this turn.",
+                span(self.turn_idle_timeout)
+            ))
         } else if let Some(marker) = marker {
-            reply.text(&format!("\n\n_{marker}_")).await;
+            Some(marker.to_owned())
         } else if node.link.is_closed() {
-            reply
-                .text(&format!(
-                    "\n\n_**{}** went offline before finishing this answer._",
-                    node.name
-                ))
-                .await;
-        }
-        if !reply.has_written() {
-            reply.text("_Done, with nothing to say._").await;
-        }
+            Some(format!(
+                "_*{}*_ went offline before finishing this answer.",
+                render::escape(&node.name)
+            ))
+        } else if !reply.has_written() {
+            Some("done, with nothing to say.".to_owned())
+        } else {
+            None
+        };
         reply.finish().await;
+        if let Some(ending) = ending {
+            self.notice(conversation, &ending).await;
+        }
         first_output
     }
 
@@ -1158,17 +1171,26 @@ impl Chat {
         }
     }
 
-    async fn say(&self, conversation: &Conversation, text: &str) {
+    /// The gateway talking about itself rather than answering: a context block, so a note about
+    /// a machine never reads like something the agent said.
+    async fn notice(&self, conversation: &Conversation, body: &str) {
+        let text = notice(body);
         let message = PostMessage {
             channel: conversation.channel.clone(),
             thread_ts: Some(conversation.thread_ts.clone()),
-            text: text.to_owned(),
-            blocks: Vec::new(),
+            text: text.clone(),
+            blocks: vec![Block::Context(vec![Text::Mrkdwn(text)])],
         };
         if let Err(err) = self.slack.post_message(&message).await {
             tracing::warn!(error = %err, "could not post in a thread");
         }
     }
+}
+
+/// Every gateway notice wears the same label, so one is told from an answer at a glance. The
+/// `text` carries it too: it is what a notification and an unformatted client show.
+fn notice(body: &str) -> String {
+    format!("_*Notice*_: {body}")
 }
 
 fn no_machine(orphaned: bool) -> Alert {
@@ -1211,8 +1233,8 @@ fn talks_to_people(tool: &str) -> bool {
     TALKING_TOOLS.contains(&tool)
 }
 
-const INTERRUPTED: &str = "Interrupted by a newer message.";
-const STOPPED: &str = "Stopped.";
+const INTERRUPTED: &str = "interrupted by a newer message.";
+const STOPPED: &str = "stopped.";
 
 /// A conversation with a turn under way: the session a newer message or `/stop` cancels, and
 /// the messages that arrived meanwhile, which run together once the turn ends.
@@ -1220,7 +1242,7 @@ const STOPPED: &str = "Stopped.";
 struct Running {
     session: Option<(GatewayLink, SessionId)>,
     queued: Vec<Incoming>,
-    /// Set once the turn was cancelled, to say why at the end of its reply.
+    /// Set once the turn was cancelled, to say why in the notice after its reply.
     marker: Option<&'static str>,
 }
 
