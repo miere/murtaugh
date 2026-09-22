@@ -109,7 +109,7 @@ async fn a_stream_that_expired_while_idle_carries_on_in_a_new_message() {
 }
 
 #[tokio::test]
-async fn task_cards_open_a_plan_settle_and_share_the_message_with_text() {
+async fn a_tool_settles_on_its_own_beat_however_much_the_agent_says_after_it() {
     let (sim, mut reply, thread) = setup().await;
     reply
         .task("t1", Some("Read a file"), TaskStatus::InProgress)
@@ -126,24 +126,31 @@ async fn task_cards_open_a_plan_settle_and_share_the_message_with_text() {
     let answers = answers(&sim, &thread);
     assert_eq!(answers.len(), 1);
     let stream = answers[0].stream.clone().unwrap();
-    assert_eq!(stream.plans, ["Task list"]);
-    let tasks: Vec<(String, String, String)> = stream
-        .tasks
+    let beats: Vec<String> = stream
+        .plan_blocks
         .into_iter()
-        .map(|t| (t.id, t.title, t.status))
+        .map(|block| {
+            let tasks: Vec<String> = block
+                .tasks
+                .into_iter()
+                .map(|t| format!("{} {} {}", t.id, t.title, t.status))
+                .collect();
+            format!("{}: {}", block.block_id, tasks.join("; "))
+        })
         .collect();
+    // t1 started before the text and settles on beat-1; only t2 opens beat-2.
     assert_eq!(
-        tasks,
+        beats,
         [
-            ("t1".into(), "Read a file".into(), "complete".into()),
-            ("t2".into(), "Run tests".into(), "error".into()),
+            "beat-1: t1 Read a file complete",
+            "beat-2: t2 Run tests error",
         ]
     );
     assert_eq!(answers[0].text, "It says hello.");
     let task_calls = sim
         .calls()
         .iter()
-        .filter(|c| c.params.to_string().contains("task_update"))
+        .filter(|c| c.params.to_string().contains("\\\"type\\\":\\\"plan\\\""))
         .count();
     assert_eq!(
         task_calls, 4,

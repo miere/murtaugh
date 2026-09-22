@@ -124,6 +124,7 @@ pub struct SimStream {
     pub recipient: Option<(String, String)>,
     pub plans: Vec<String>,
     pub tasks: Vec<SimTask>,
+    pub plan_blocks: Vec<SimPlanBlock>,
 }
 
 /// A task card, as its latest `task_update` left it.
@@ -132,6 +133,15 @@ pub struct SimTask {
     pub id: String,
     pub title: String,
     pub status: String,
+}
+
+/// A plan block sent as a `blocks` chunk. Slack rewrites one whose `block_id` the message already
+/// carries rather than appending a second copy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SimPlanBlock {
+    pub block_id: String,
+    pub title: String,
+    pub tasks: Vec<SimTask>,
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -13,7 +13,8 @@ pub use error::SlackError;
 pub use events::{Click, Event, EventEnvelope, FileRef, SocketEvent};
 pub use socket::SocketMode;
 pub use stream::{
-    Chunk, STREAM_FINALIZED, STREAMING_UNSUPPORTED, StartStream, TaskDisplayMode, TaskStatus,
+    Chunk, PlanBlock, PlanTask, STREAM_FINALIZED, STREAMING_UNSUPPORTED, StartStream,
+    TaskDisplayMode, TaskStatus,
 };
 pub use web::{
     DEFAULT_API_BASE, FileInfo, Identity, Message, PostMessage, Posted, SlackClient, Tokens,
