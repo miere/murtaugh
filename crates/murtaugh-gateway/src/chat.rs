@@ -26,6 +26,7 @@ use tokio_util::sync::CancellationToken;
 use crate::access::Access;
 use crate::alerts::{self, Alert, Level};
 use crate::approval::{self, Approvals};
+use crate::faults::{self, Refusal};
 use crate::files::Files;
 use crate::fleet::{Fleet, Node};
 use crate::hub::FleetChange;
@@ -315,9 +316,12 @@ impl Chat {
         }
         let session_id = match self.open_session(&node, &conversation).await {
             Ok(session_id) => session_id,
-            Err(reason) => {
+            Err(refusal) => {
                 // The old pin is already gone, so the next message is assigned a machine afresh.
-                return Some(format!("*{name}* could not take this thread: {reason}"));
+                return Some(format!(
+                    "*{name}* could not take this thread. {}",
+                    faults::line(&refusal)
+                ));
             }
         };
         self.fleet.session_resumed(&selector);
@@ -637,26 +641,17 @@ impl Chat {
             let pending = match seat.node.link.call(prompt).await {
                 Ok(pending) => pending,
                 Err(err) => {
-                    self.notice(
-                        conversation,
-                        &format!(
-                            "I couldn't reach _*{}*_: {err}",
-                            render::escape(&seat.node.name)
-                        ),
-                    )
-                    .await;
+                    self.alert(conversation, &faults::unreachable(&seat.node.name, &err))
+                        .await;
                     return None;
                 }
             };
             let reply = match tokio::time::timeout(PROMPT_TIMEOUT, pending.reply).await {
                 Ok(reply) => reply,
                 Err(_) => {
-                    self.notice(
+                    self.alert(
                         conversation,
-                        &format!(
-                            "_*{}*_ did not take this message in time.",
-                            render::escape(&seat.node.name)
-                        ),
+                        &faults::silent(&seat.node.name, PROMPT_TIMEOUT),
                     )
                     .await;
                     return None;
@@ -688,24 +683,23 @@ impl Chat {
                     self.forget(conversation, &seat.node).await;
                 }
                 Err(CallError::Fault(fault)) if fault.kind == ErrorKind::SessionBusy => {
-                    self.notice(
-                        conversation,
-                        "the machine is still busy with this conversation; try again in a moment.",
-                    )
-                    .await;
+                    self.alert(conversation, &faults::busy(&seat.node.name))
+                        .await;
                     return None;
                 }
                 Ok(other) => {
                     tracing::warn!(reply = ?other, "a prompt was answered with the wrong reply");
+                    self.alert(
+                        conversation,
+                        &faults::not_taken(&seat.node.name, &Refusal::Mismatched),
+                    )
+                    .await;
                     return None;
                 }
                 Err(err) => {
-                    self.notice(
+                    self.alert(
                         conversation,
-                        &format!(
-                            "_*{}*_ could not take this message: {err}",
-                            render::escape(&seat.node.name)
-                        ),
+                        &faults::not_taken(&seat.node.name, &Refusal::Failed(err)),
                     )
                     .await;
                     return None;
@@ -783,16 +777,10 @@ impl Chat {
         }
         let session_id = match self.open_session(&node, conversation).await {
             Ok(session_id) => session_id,
-            Err(reason) => {
+            Err(refusal) => {
                 self.fleet.session_ended(&node.selector);
-                self.notice(
-                    conversation,
-                    &format!(
-                        "_*{}*_ could not start a conversation: {reason}",
-                        render::escape(&node.name)
-                    ),
-                )
-                .await;
+                self.alert(conversation, &faults::no_session(&node.name, &refusal))
+                    .await;
                 return None;
             }
         };
@@ -817,15 +805,18 @@ impl Chat {
         &self,
         node: &Node,
         conversation: &Conversation,
-    ) -> Result<SessionId, String> {
+    ) -> Result<SessionId, Refusal> {
         let call = GatewayCall::NewSession(NewSession {
             context: vec![Open::Known(thread_link(conversation))],
         });
-        let pending = node.link.call(call).await.map_err(|err| err.to_string())?;
+        let pending = node.link.call(call).await?;
         match pending.reply.await {
             Ok(GatewayReply::NewSession(created)) => Ok(created.session_id),
-            Ok(other) => Err(format!("answered with {other:?}")),
-            Err(err) => Err(err.to_string()),
+            Ok(other) => {
+                tracing::warn!(reply = ?other, "a new session was answered with the wrong reply");
+                Err(Refusal::Mismatched)
+            }
+            Err(err) => Err(Refusal::Failed(err)),
         }
     }
 
@@ -892,6 +883,8 @@ impl Chat {
         let turn = Turn::default();
         let mut active = Instant::now();
         let mut stalled = false;
+        // The first fault is the diagnosis; anything after it is fallout from the same cause.
+        let mut failure: Option<rax::Error> = None;
         let mut reply = Reply::new(
             self.slack.clone(),
             Target {
@@ -922,7 +915,9 @@ impl Chat {
             };
             active = Instant::now();
             let written = reply.has_written();
-            self.show(&mut reply, node, event, &turn).await;
+            if let Some(reported) = self.show(&mut reply, node, event, &turn).await {
+                failure.get_or_insert(reported);
+            }
             if !written && reply.has_written() {
                 first_output.get_or_insert_with(Instant::now);
             }
@@ -946,19 +941,33 @@ impl Chat {
                 "_*{}*_ went offline before finishing this answer.",
                 render::escape(&node.name)
             ))
-        } else if !reply.has_written() {
+        } else if !reply.has_written() && failure.is_none() {
             Some("done, with nothing to say.".to_owned())
         } else {
             None
         };
         reply.finish().await;
+        // A fault is the gateway's to explain, so it follows the answer as its own card rather
+        // than as a last italic line inside the agent's words.
+        if let Some(reported) = &failure {
+            self.alert(conversation, &faults::turn_failed(&node.name, reported))
+                .await;
+        }
         if let Some(ending) = ending {
             self.notice(conversation, &ending).await;
         }
         first_output
     }
 
-    async fn show(&self, reply: &mut Reply, node: &Node, event: Open<TurnEvent>, turn: &Turn) {
+    /// Draws one event into the reply, and hands back the fault the turn reported, if it did:
+    /// that one is not the agent talking, so it is not written into what the agent said.
+    async fn show(
+        &self,
+        reply: &mut Reply,
+        node: &Node,
+        event: Open<TurnEvent>,
+        turn: &Turn,
+    ) -> Option<rax::Error> {
         match event {
             Open::Known(TurnEvent::Message {
                 content: Open::Known(ContentBlock::Text { text }),
@@ -1012,11 +1021,7 @@ impl Chat {
             Open::Known(TurnEvent::SignInSettled { sign_in_settled }) => {
                 self.sign_ins.settle(&node.selector, sign_in_settled).await;
             }
-            Open::Known(TurnEvent::Error { error }) => {
-                reply
-                    .text(&format!("\n\n_The turn failed: {}_", error.message))
-                    .await;
-            }
+            Open::Known(TurnEvent::Error { error }) => return Some(error),
             Open::Known(TurnEvent::Attachment { attachment }) => {
                 let name = attachment
                     .filename
@@ -1032,6 +1037,7 @@ impl Chat {
             Open::Known(TurnEvent::Complete { .. }) => {}
             other => tracing::debug!(event = ?other, "turn event not shown yet"),
         }
+        None
     }
 
     /// Allows, denies, or puts the call to the node's owner, as their tool mode says.
@@ -1296,7 +1302,7 @@ impl Turn {
     }
 }
 
-fn span(duration: Duration) -> String {
+pub(crate) fn span(duration: Duration) -> String {
     match duration.as_secs() {
         s if s >= 120 => format!("{} minutes", s / 60),
         60..=119 => "a minute".to_owned(),

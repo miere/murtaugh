@@ -372,9 +372,36 @@ async fn answer(script: Script, id: RequestId, call: GatewayCall) {
                 text: text.clone(),
                 links,
             });
+            if text.contains("refuse this") {
+                let provider = rax::error::ProviderFailure {
+                    kind: "overloaded_error".into(),
+                    provider: Some("anthropic".into()),
+                    status_code: Some(529),
+                    message: None,
+                    retryable: true,
+                };
+                let error = rax::Error::new(
+                    rax::ErrorKind::Provider { provider },
+                    "<@U0ALICE01> upstream said: Overloaded",
+                );
+                node.fault(id, error).await.unwrap();
+                return;
+            }
             node.reply(id.clone(), GatewayReply::Prompt(PromptAccepted::default()))
                 .await
                 .unwrap();
+            if text.contains("fail mid-answer") {
+                let started = Event::Message {
+                    content: ContentBlock::text("Half an answer…").into(),
+                };
+                node.event(id.clone(), started).await.unwrap();
+                let error = rax::Error::new(rax::ErrorKind::ToolCeiling, "40 tool calls used");
+                node.event(id.clone(), Event::Error { error })
+                    .await
+                    .unwrap();
+                node.end(id).await.unwrap();
+                return;
+            }
             if text.contains("silent") || text.contains("slow") {
                 let mut cancelled = cancels.subscribe();
                 let session = prompt.session_id.clone();
@@ -1641,6 +1668,78 @@ async fn a_thread_whose_machine_left_with_no_other_gets_a_machine_offline_card()
     .await;
     assert!(card_says(&card, "murtaugh_alert_card"));
     assert!(card_says(&card, "no other machine you may use"));
+    assert_eq!(rig.sim.violations(), vec![]);
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_message_gets_a_card_that_diagnoses_it_rather_than_dumping_it() {
+    let rig = rig().await;
+    let mut laptop = rig.node(ALICE, "laptop").await;
+    let ts = rig
+        .sim
+        .mention(ALICE, GENERAL, "refuse this", None)
+        .await
+        .unwrap();
+    laptop.next_prompt().await;
+
+    let card = eventually("the refusal card", || {
+        rig.sim
+            .thread(GENERAL, &ts)
+            .into_iter()
+            .find(|m| m.text == "laptop could not take this message")
+    })
+    .await;
+
+    assert!(card_says(&card, "murtaugh_alert_card"));
+    // The kind carried the status and the verdict on retrying, so the card says both.
+    assert!(card_says(&card, "HTTP 529"));
+    assert!(card_says(&card, "overloaded_error"));
+    assert!(card_says(&card, "retryable"));
+    // The producer's own words are kept as the detail, with their mention defused.
+    assert!(card_says(&card, "upstream said: Overloaded"));
+    assert!(card_says(&card, "&lt;@U0ALICE01&gt;"));
+    // Nothing anywhere in the thread names the transport it came over.
+    let thread = rig.sim.thread(GENERAL, &ts);
+    assert!(
+        !format!("{thread:?}").contains("rax-tokio"),
+        "the wire's own wording reached Slack"
+    );
+    assert_eq!(rig.sim.violations(), vec![]);
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_that_fails_partway_keeps_its_answer_and_gets_a_card_of_its_own() {
+    let rig = rig().await;
+    let mut laptop = rig.node(ALICE, "laptop").await;
+    let ts = rig
+        .sim
+        .mention(ALICE, GENERAL, "fail mid-answer", None)
+        .await
+        .unwrap();
+    laptop.next_prompt().await;
+
+    let card = eventually("the failure card", || {
+        rig.sim
+            .thread(GENERAL, &ts)
+            .into_iter()
+            .find(|m| m.text == "laptop could not finish this answer")
+    })
+    .await;
+    assert!(card_says(&card, "every tool call"));
+    assert!(card_says(&card, "40 tool calls used"));
+
+    let thread = rig.sim.thread(GENERAL, &ts);
+    let answer = thread
+        .iter()
+        .find(|m| m.text.contains("Half an answer"))
+        .expect("the half-answer went missing");
+    // The fault is the gateway talking, so it is not pasted inside what the agent said.
+    assert!(!answer.text.contains("The turn failed"));
+    assert!(!answer.text.contains("40 tool calls used"));
+    // And a turn that said something and then failed is not also "done, with nothing to say".
+    assert!(!thread.iter().any(|m| m.text.contains("nothing to say")));
     assert_eq!(rig.sim.violations(), vec![]);
     rig.shutdown.cancel();
 }

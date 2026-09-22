@@ -7,6 +7,7 @@ pub mod approval;
 pub mod chat;
 pub mod cli;
 pub mod config;
+pub mod faults;
 pub mod files;
 pub mod fleet;
 pub mod home;
