@@ -1982,7 +1982,9 @@ async fn stop_inside_a_thread_cancels_its_turn_and_nothing_else_runs() {
         .slash_in_thread(ALICE, GENERAL, Some(&ts), "/stop", "")
         .await
         .unwrap();
-    let notes = eventually("the three notes", || {
+    // The stop that landed said so in the thread, so only the two that could not stop anything
+    // are worth a note.
+    let notes = eventually("both notes", || {
         let mut notes: Vec<String> = rig
             .sim
             .ephemerals()
@@ -1991,7 +1993,7 @@ async fn stop_inside_a_thread_cancels_its_turn_and_nothing_else_runs() {
             .map(|(_, _, text)| text)
             .collect();
         notes.sort();
-        (notes.len() == 3).then_some(notes)
+        (notes.len() == 2).then_some(notes)
     })
     .await;
     assert_eq!(
@@ -1999,7 +2001,6 @@ async fn stop_inside_a_thread_cancels_its_turn_and_nothing_else_runs() {
         [
             "Nothing to stop.",
             "Slack does not run slash commands inside threads. Mention me with `/stop` in the thread you want to stop.",
-            "Stopped."
         ]
     );
     rig.sim
@@ -2050,19 +2051,19 @@ async fn a_mentioned_stop_cancels_the_turn_and_never_reaches_the_node() {
         .mention(ALICE, GENERAL, "/stop", None)
         .await
         .unwrap();
-    let notes = eventually("both notes", || {
-        let mut notes: Vec<String> = rig
+    // One note, not two: the stop itself was answered by the marker in the thread.
+    let notes = eventually("the note", || {
+        let notes: Vec<String> = rig
             .sim
             .ephemerals()
             .into_iter()
             .filter(|(_, who, _)| who == ALICE)
             .map(|(_, _, text)| text)
             .collect();
-        notes.sort();
-        (notes.len() == 2).then_some(notes)
+        (notes.len() == 1).then_some(notes)
     })
     .await;
-    assert_eq!(notes, ["Stopped.", "`/stop` only works inside a thread."]);
+    assert_eq!(notes, ["`/stop` only works inside a thread."]);
     assert_eq!(rig.sim.violations(), vec![]);
     rig.shutdown.cancel();
 }
