@@ -493,12 +493,12 @@ impl Chat {
         })
     }
 
-    /// Every path posts a note, because it is the only sign the message was read as a command
-    /// rather than passed to the node as a prompt.
+    /// A path that leaves nothing in the thread posts a note, because it is then the only sign
+    /// the message was read as a command rather than passed to the node as a prompt.
     async fn command(&self, command: Command, incoming: &Incoming) {
         let (note, blocks) = match &incoming.thread_ts {
             None => (
-                format!("`{command}` only works inside a thread."),
+                Some(format!("`{command}` only works inside a thread.")),
                 Vec::new(),
             ),
             Some(thread_ts) => {
@@ -508,9 +508,15 @@ impl Chat {
                 };
                 match command {
                     Command::Stop => (self.stop(&conversation), Vec::new()),
-                    Command::Node => self.picker(&incoming.user, &conversation),
+                    Command::Node => {
+                        let (note, blocks) = self.picker(&incoming.user, &conversation);
+                        (Some(note), blocks)
+                    }
                 }
             }
+        };
+        let Some(note) = note else {
+            return;
         };
         if let Err(err) = self
             .slack
@@ -543,9 +549,9 @@ impl Chat {
         )
     }
 
-    /// Whatever queued behind the turn goes too, so a follow-up does not start the instant the
-    /// turn it was waiting on is stopped.
-    fn stop(&self, conversation: &Conversation) -> String {
+    /// No note once a turn is stopping: the end of its reply carries the marker, which tells the
+    /// whole thread. Whatever queued behind it goes too, so the next message does not start now.
+    fn stop(&self, conversation: &Conversation) -> Option<String> {
         let cancel = lock(&self.turns).get_mut(conversation).map(|running| {
             running.queued.clear();
             running.interrupt(STOPPED)
@@ -555,9 +561,9 @@ impl Chat {
                 if let Some((link, session_id)) = cancel {
                     cancel_turn(link, session_id);
                 }
-                STOPPED.to_owned()
+                None
             }
-            None => "Nothing to stop.".to_owned(),
+            None => Some("Nothing to stop.".to_owned()),
         }
     }
 
@@ -577,14 +583,17 @@ impl Chat {
         }
         let thread_ts = payload["thread_ts"].as_str().map(str::to_owned);
         let note = match &thread_ts {
-            None => format!(
+            None => Some(format!(
                 "Slack does not run slash commands inside threads. Mention me with `{}` in the thread you want to stop.",
                 Command::Stop
-            ),
+            )),
             Some(thread_ts) => self.stop(&Conversation {
                 channel: channel.clone(),
                 thread_ts: thread_ts.clone(),
             }),
+        };
+        let Some(note) = note else {
+            return;
         };
         if let Err(err) = self
             .slack
