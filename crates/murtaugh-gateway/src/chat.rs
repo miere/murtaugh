@@ -49,6 +49,12 @@ const ATTACHMENT_WAIT: Duration = Duration::from_secs(60);
 pub const THINKING_REFRESH: Duration = Duration::from_secs(2);
 /// Long enough for a node to fetch the files a prompt links before accepting it.
 pub const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long a `Send Again` button stays live. Past this the conversation has almost certainly
+/// moved on, and replaying a message into it would be a surprise rather than a retry.
+const RETRY_TTL: Duration = Duration::from_secs(30 * 60);
+/// A ceiling on messages kept back for a button, so a gateway nobody clicks does not hold every
+/// failure it has ever seen.
+const RETRIES_MOST: usize = 256;
 
 pub struct Chat {
     slack: SlackClient,
@@ -70,6 +76,23 @@ pub struct Chat {
     moved: Mutex<HashSet<Conversation>>,
     turns: Mutex<HashMap<Conversation, Running>>,
     turn_idle_timeout: Duration,
+    /// Messages a retryable failure left on the table, by the id their card's button carries.
+    retries: Mutex<HashMap<String, Offer>>,
+}
+
+/// Something the gateway must say about a turn once the agent has finished saying its piece.
+enum Aftermath {
+    /// The turn reported a fault of its own partway through.
+    Failed(rax::Error),
+    /// A file the agent sent whose bytes never arrived whole.
+    Unattached { name: String, reason: String },
+}
+
+/// A message held back so its card can send it again, and who may press the button.
+struct Offer {
+    user: UserId,
+    incoming: Incoming,
+    at: Instant,
 }
 
 #[derive(Clone)]
@@ -174,6 +197,7 @@ impl Chat {
             moved: Mutex::new(HashSet::new()),
             turns: Mutex::new(HashMap::new()),
             turn_idle_timeout,
+            retries: Mutex::new(HashMap::new()),
         })
     }
 
@@ -244,6 +268,8 @@ impl Chat {
     pub async fn on_click(self: Arc<Self>, click: Click) {
         let note = if click.action_id == alerts::RENEW {
             self.renew(&click).await
+        } else if click.action_id == faults::SEND_AGAIN {
+            self.send_again(&click)
         } else if click.action_id.starts_with("signin_") {
             self.sign_ins.click(&click).await
         } else if click.action_id == picker::CHOOSE {
@@ -270,6 +296,68 @@ impl Chat {
         {
             tracing::warn!(error = %err, "could not answer a click");
         }
+    }
+
+    /// Keeps a failed message so a card's button can send it again, and hands back the id that
+    /// button carries. Keying by the message means a conversation that fails twice over the same
+    /// message holds it once, and pressing either card's button sends that one message.
+    fn offer_retry(&self, user: &UserId, incoming: &Incoming) -> String {
+        let id = format!("{}/{}", incoming.channel, incoming.ts);
+        let mut retries = lock(&self.retries);
+        retries.retain(|_, offer| offer.at.elapsed() < RETRY_TTL);
+        while retries.len() >= RETRIES_MOST {
+            let oldest = retries
+                .iter()
+                .min_by_key(|(_, offer)| offer.at)
+                .map(|(id, _)| id.clone());
+            match oldest {
+                Some(oldest) => drop(retries.remove(&oldest)),
+                None => break,
+            }
+        }
+        retries.insert(
+            id.clone(),
+            Offer {
+                user: user.clone(),
+                incoming: incoming.clone(),
+                at: Instant::now(),
+            },
+        );
+        id
+    }
+
+    /// Sends a failed message again from its card. The offer is taken rather than read, so one
+    /// card sends one message however many times it is pressed, and the turn runs on its own: a
+    /// click is answered in seconds and a turn is not.
+    fn send_again(self: &Arc<Self>, click: &Click) -> Option<String> {
+        let lapsed = "That message is no longer on offer. Send it again in the thread.";
+        let Ok(user) = UserId::parse(&click.user) else {
+            return None;
+        };
+        if !self.access.snapshot().may_chat(&user) {
+            return None;
+        }
+        let taken = {
+            let mut retries = lock(&self.retries);
+            match retries.get(&click.value) {
+                // Sending it again sends it as the person who wrote it, so only they may.
+                Some(offer) if offer.user != user => {
+                    return Some("That was not your message to send again.".to_owned());
+                }
+                Some(offer) if offer.at.elapsed() >= RETRY_TTL => {
+                    retries.remove(&click.value);
+                    None
+                }
+                Some(_) => retries.remove(&click.value).map(|offer| offer.incoming),
+                None => None,
+            }
+        };
+        let Some(incoming) = taken else {
+            return Some(lapsed.to_owned());
+        };
+        let chat = Arc::clone(self);
+        tokio::spawn(async move { chat.message(incoming, Instant::now()).await });
+        Some("Sending that message again.".to_owned())
     }
 
     /// Someone picked the machine a thread should run on. The turn in flight is stopped rather
@@ -641,17 +729,29 @@ impl Chat {
             let pending = match seat.node.link.call(prompt).await {
                 Ok(pending) => pending,
                 Err(err) => {
-                    self.alert(conversation, &faults::unreachable(&seat.node.name, &err))
-                        .await;
+                    let refusal = Refusal::Failed(err);
+                    self.faulted(
+                        conversation,
+                        user,
+                        incoming,
+                        faults::unreachable(&seat.node.name, &refusal),
+                        faults::worth_retrying(&refusal),
+                    )
+                    .await;
                     return None;
                 }
             };
             let reply = match tokio::time::timeout(PROMPT_TIMEOUT, pending.reply).await {
                 Ok(reply) => reply,
                 Err(_) => {
-                    self.alert(
+                    // Silence is the one failure with nothing to read: it is always worth one
+                    // more try, which reseats the conversation on whatever is up now.
+                    self.faulted(
                         conversation,
-                        &faults::silent(&seat.node.name, PROMPT_TIMEOUT),
+                        user,
+                        incoming,
+                        faults::silent(&seat.node.name, PROMPT_TIMEOUT),
+                        true,
                     )
                     .await;
                     return None;
@@ -697,9 +797,13 @@ impl Chat {
                     return None;
                 }
                 Err(err) => {
-                    self.alert(
+                    let refusal = Refusal::Failed(err);
+                    self.faulted(
                         conversation,
-                        &faults::not_taken(&seat.node.name, &Refusal::Failed(err)),
+                        user,
+                        incoming,
+                        faults::not_taken(&seat.node.name, &refusal),
+                        faults::worth_retrying(&refusal),
                     )
                     .await;
                     return None;
@@ -779,8 +883,14 @@ impl Chat {
             Ok(session_id) => session_id,
             Err(refusal) => {
                 self.fleet.session_ended(&node.selector);
-                self.alert(conversation, &faults::no_session(&node.name, &refusal))
-                    .await;
+                self.faulted(
+                    conversation,
+                    user,
+                    incoming,
+                    faults::no_session(&node.name, &refusal),
+                    faults::worth_retrying(&refusal),
+                )
+                .await;
                 return None;
             }
         };
@@ -885,6 +995,7 @@ impl Chat {
         let mut stalled = false;
         // The first fault is the diagnosis; anything after it is fallout from the same cause.
         let mut failure: Option<rax::Error> = None;
+        let mut unattached: Vec<(String, String)> = Vec::new();
         let mut reply = Reply::new(
             self.slack.clone(),
             Target {
@@ -915,8 +1026,10 @@ impl Chat {
             };
             active = Instant::now();
             let written = reply.has_written();
-            if let Some(reported) = self.show(&mut reply, node, event, &turn).await {
-                failure.get_or_insert(reported);
+            match self.show(&mut reply, node, event, &turn).await {
+                Some(Aftermath::Failed(reported)) => drop(failure.get_or_insert(reported)),
+                Some(Aftermath::Unattached { name, reason }) => unattached.push((name, reason)),
+                None => {}
             }
             if !written && reply.has_written() {
                 first_output.get_or_insert_with(Instant::now);
@@ -941,17 +1054,35 @@ impl Chat {
                 "_*{}*_ went offline before finishing this answer.",
                 render::escape(&node.name)
             ))
-        } else if !reply.has_written() && failure.is_none() {
+        } else if !reply.has_written() && failure.is_none() && unattached.is_empty() {
             Some("done, with nothing to say.".to_owned())
         } else {
             None
         };
         reply.finish().await;
-        // A fault is the gateway's to explain, so it follows the answer as its own card rather
-        // than as a last italic line inside the agent's words.
-        if let Some(reported) = &failure {
-            self.alert(conversation, &faults::turn_failed(&node.name, reported))
+        // What went wrong is the gateway's to explain, so it follows the answer as its own card
+        // rather than as a last italic line inside the agent's words.
+        if !unattached.is_empty() {
+            self.alert(conversation, &faults::unattached(&node.name, &unattached))
                 .await;
+        }
+        if let Some(reported) = &failure {
+            match UserId::parse(&incoming.user) {
+                Ok(user) => {
+                    self.faulted(
+                        conversation,
+                        &user,
+                        incoming,
+                        faults::turn_failed(&node.name, reported),
+                        faults::worth_retrying_turn(reported),
+                    )
+                    .await;
+                }
+                Err(_) => {
+                    self.alert(conversation, &faults::turn_failed(&node.name, reported))
+                        .await;
+                }
+            }
         }
         if let Some(ending) = ending {
             self.notice(conversation, &ending).await;
@@ -959,15 +1090,16 @@ impl Chat {
         first_output
     }
 
-    /// Draws one event into the reply, and hands back the fault the turn reported, if it did:
-    /// that one is not the agent talking, so it is not written into what the agent said.
+    /// Draws one event into the reply, and hands back anything the gateway must say about the
+    /// turn once it ends: that is the gateway talking, not the agent, so it is never written
+    /// into what the agent said.
     async fn show(
         &self,
         reply: &mut Reply,
         node: &Node,
         event: Open<TurnEvent>,
         turn: &Turn,
-    ) -> Option<rax::Error> {
+    ) -> Option<Aftermath> {
         match event {
             Open::Known(TurnEvent::Message {
                 content: Open::Known(ContentBlock::Text { text }),
@@ -1021,7 +1153,7 @@ impl Chat {
             Open::Known(TurnEvent::SignInSettled { sign_in_settled }) => {
                 self.sign_ins.settle(&node.selector, sign_in_settled).await;
             }
-            Open::Known(TurnEvent::Error { error }) => return Some(error),
+            Open::Known(TurnEvent::Error { error }) => return Some(Aftermath::Failed(error)),
             Open::Known(TurnEvent::Attachment { attachment }) => {
                 let name = attachment
                     .filename
@@ -1029,9 +1161,7 @@ impl Chat {
                     .unwrap_or_else(|| "attachment".to_owned());
                 if let Err(reason) = self.attach(reply.target(), node, attachment).await {
                     tracing::warn!(node = %node.name, file = %name, %reason, "could not attach a file");
-                    reply
-                        .text(&format!("\n\n_Could not attach {name}: {reason}_\n\n"))
-                        .await;
+                    return Some(Aftermath::Unattached { name, reason });
                 }
             }
             Open::Known(TurnEvent::Complete { .. }) => {}
@@ -1168,6 +1298,22 @@ impl Chat {
         if let Err(err) = self.slack.add_reaction(channel, ts, name).await {
             tracing::warn!(error = %err, "could not react");
         }
+    }
+
+    /// Posts a fault's card, carrying the button to send the message again when trying again has
+    /// a real chance. A card with a button opens expanded, so the button is not hidden.
+    async fn faulted(
+        &self,
+        conversation: &Conversation,
+        user: &UserId,
+        incoming: &Incoming,
+        mut card: Alert,
+        retryable: bool,
+    ) {
+        if retryable {
+            card.actions = Some(faults::send_again(&self.offer_retry(user, incoming)));
+        }
+        self.alert(conversation, &card).await;
     }
 
     async fn alert(&self, conversation: &Conversation, alert: &Alert) {

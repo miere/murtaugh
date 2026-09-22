@@ -11,10 +11,14 @@ use std::time::Duration;
 use rax::error::ProviderFailure;
 use rax::{Error, ErrorKind};
 use rax_tokio::{CallError, SendError};
+use serde_json::{Value, json};
 
 use crate::alerts::{Alert, Level, clip};
 use crate::chat::span;
 use crate::render;
+
+/// The button that sends a failed message again; its value is the id of the message kept back.
+pub const SEND_AGAIN: &str = "message_send_again";
 
 /// Long enough to diagnose from, short enough that the reason and the next steps still fit the
 /// card's one section beside it.
@@ -42,11 +46,11 @@ impl From<CallError> for Refusal {
 }
 
 /// The message never got onto the machine.
-pub fn unreachable(node: &str, err: &CallError) -> Alert {
+pub fn unreachable(node: &str, refusal: &Refusal) -> Alert {
     card(
         format!("Could not reach {node}"),
         format!("This message never reached {node}."),
-        diagnose(err),
+        refused(refusal),
     )
 }
 
@@ -109,10 +113,93 @@ pub fn turn_failed(node: &str, error: &Error) -> Alert {
     )
 }
 
+/// Files the agent meant to send that never arrived. One card for the turn however many failed:
+/// a card each would bury the answer they belong to.
+pub fn unattached(node: &str, failures: &[(String, String)]) -> Alert {
+    let (title, subtitle) = match failures {
+        [(name, _)] => (
+            format!("{node} could not attach {name}"),
+            "The answer is above; the file is not.".to_owned(),
+        ),
+        _ => (
+            format!("{node} could not attach {} files", failures.len()),
+            "The answer is above; the files are not.".to_owned(),
+        ),
+    };
+    let detail = failures
+        .iter()
+        .map(|(name, reason)| format!("{name}: {reason}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    card(
+        title,
+        subtitle,
+        Told {
+            level: Level::Warn,
+            reason: "The gateway did not get the file's bytes from the machine.".to_owned(),
+            next_steps: Some("Ask the agent to send it again."),
+            detail: Some(detail),
+        },
+    )
+}
+
 /// The one-line diagnosis on its own, for a surface with no room for a card: a slash command is
 /// answered with a sentence, not a block.
 pub fn line(refusal: &Refusal) -> String {
     refused(refusal).reason
+}
+
+/// Whether sending the very same message again has a real chance, so the card is worth a button.
+///
+/// A provider failure is the only one that answers this outright, and its answer is taken. The
+/// rest turn on whether the obstacle was the message itself: a ceiling the same message hits
+/// again, or a credential nobody has signed in to yet, is not retried by pressing a button.
+pub fn worth_retrying(refusal: &Refusal) -> bool {
+    match refusal {
+        // Whatever the machine sent instead, sending the message again will not change it.
+        Refusal::Mismatched => false,
+        Refusal::Failed(err) => match err {
+            // The message never landed, or landed somewhere that has since forgotten it.
+            // Sending it again seats the conversation afresh, which is the whole cure.
+            CallError::LinkReset | CallError::Closed | CallError::Transfer(_) => true,
+            CallError::Unsendable(SendError::TooLarge { .. }) => false,
+            CallError::Unsendable(_) => true,
+            CallError::Fault(fault) => worth_retrying_turn(fault),
+        },
+    }
+}
+
+/// As [`worth_retrying`], for a fault the node reported itself rather than a call that failed.
+pub fn worth_retrying_turn(fault: &Error) -> bool {
+    match &fault.kind {
+        ErrorKind::Cancelled | ErrorKind::UnknownSession | ErrorKind::NotFound => true,
+        ErrorKind::Provider { provider } => provider.retryable,
+        // Each of these is the message's own doing, a standing refusal, or a state a button
+        // cannot move: the same message would fail the same way.
+        ErrorKind::ToolCeiling
+        | ErrorKind::Credential
+        | ErrorKind::Unsupported
+        | ErrorKind::SessionBusy
+        | ErrorKind::Forbidden
+        | ErrorKind::TooLarge
+        | ErrorKind::Rpc { .. }
+        | ErrorKind::Unknown => false,
+    }
+}
+
+/// The button itself. `id` is how the gateway finds the message it kept back.
+pub fn send_again(id: &str) -> Value {
+    json!({
+        "type": "actions",
+        "block_id": "murtaugh_fault_actions",
+        "elements": [{
+            "type": "button",
+            "action_id": SEND_AGAIN,
+            "value": id,
+            "style": "primary",
+            "text": {"type": "plain_text", "text": "Send Again"},
+        }],
+    })
 }
 
 /// What the gateway can say about a failure on its own, before the producer's words.
@@ -316,20 +403,26 @@ mod tests {
     #[test]
     fn a_card_never_shows_a_person_the_transport_crates_name() {
         let every = [
-            fault(ErrorKind::Unknown, "boom"),
-            CallError::LinkReset,
-            CallError::Closed,
-            CallError::Transfer("half a file".into()),
-            CallError::Unsendable(SendError::TooLarge { size: 99 }),
-            CallError::Unsendable(SendError::Closed),
+            Refusal::Failed(fault(ErrorKind::Unknown, "boom")),
+            Refusal::Failed(CallError::LinkReset),
+            Refusal::Failed(CallError::Closed),
+            Refusal::Failed(CallError::Transfer("half a file".into())),
+            Refusal::Failed(CallError::Unsendable(SendError::TooLarge { size: 99 })),
+            Refusal::Failed(CallError::Unsendable(SendError::Closed)),
+            Refusal::Mismatched,
         ];
-        for err in &every {
-            let alert = unreachable("laptop", err);
-            assert!(
-                !body(&alert).contains("rax"),
-                "{} leaked the wire's wording",
-                body(&alert)
-            );
+        for refusal in &every {
+            for alert in [
+                unreachable("laptop", refusal),
+                not_taken("laptop", refusal),
+                no_session("laptop", refusal),
+            ] {
+                assert!(
+                    !body(&alert).contains("rax"),
+                    "{} leaked the wire's wording",
+                    body(&alert)
+                );
+            }
         }
     }
 
@@ -384,6 +477,71 @@ mod tests {
         assert!(detail.contains("&lt;!channel&gt;"));
         assert!(detail.contains("&lt;@U0ALICE01&gt;"));
         assert!(detail.contains("&amp;"));
+    }
+
+    #[test]
+    fn only_a_failure_a_second_try_could_clear_is_worth_a_button() {
+        let worth = |kind| worth_retrying(&Refusal::Failed(fault(kind, "")));
+
+        // Nothing about the message caused these, so the same message may well land.
+        assert!(worth(ErrorKind::Cancelled));
+        assert!(worth(ErrorKind::UnknownSession));
+        assert!(worth_retrying(&Refusal::Failed(CallError::LinkReset)));
+        assert!(worth_retrying(&Refusal::Failed(CallError::Closed)));
+
+        // These would fail the same way, so a button would only lie about the odds.
+        assert!(!worth(ErrorKind::ToolCeiling));
+        assert!(!worth(ErrorKind::Credential));
+        assert!(!worth(ErrorKind::TooLarge));
+        assert!(!worth(ErrorKind::Forbidden));
+        assert!(!worth_retrying(&Refusal::Mismatched));
+        assert!(!worth_retrying(&Refusal::Failed(CallError::Unsendable(
+            SendError::TooLarge { size: 99 }
+        ))));
+    }
+
+    #[test]
+    fn a_provider_decides_its_own_retry_and_the_button_follows() {
+        let failing = |retryable| ProviderFailure {
+            kind: "overloaded_error".into(),
+            provider: None,
+            status_code: None,
+            message: None,
+            retryable,
+        };
+        let refusal = |retryable| {
+            Refusal::Failed(fault(
+                ErrorKind::Provider {
+                    provider: failing(retryable),
+                },
+                "",
+            ))
+        };
+        assert!(worth_retrying(&refusal(true)));
+        assert!(!worth_retrying(&refusal(false)));
+    }
+
+    #[test]
+    fn every_file_that_went_missing_is_named_on_one_card() {
+        let failures = [
+            (
+                "chart.png".to_owned(),
+                "3 bytes arrived, 9 were announced".to_owned(),
+            ),
+            ("notes.txt".to_owned(), "the transfer timed out".to_owned()),
+        ];
+
+        let one = unattached("laptop", &failures[..1]);
+        assert_eq!(one.title, "laptop could not attach chart.png");
+        assert!(one.subtitle.unwrap().contains("the file is not"));
+
+        let both = unattached("laptop", &failures);
+        assert_eq!(both.title, "laptop could not attach 2 files");
+        let detail = both.text.unwrap();
+        assert!(detail.contains("chart.png: 3 bytes arrived"));
+        assert!(detail.contains("notes.txt: the transfer timed out"));
+        // The answer the files belonged to already landed, so this is not an error.
+        assert_eq!(both.level, Some(Level::Warn));
     }
 
     #[test]

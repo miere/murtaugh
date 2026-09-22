@@ -245,6 +245,7 @@ impl Rig {
             answers: answers.clone(),
             cancels,
             sessions: Arc::new(Mutex::new(0u32)),
+            refused: Arc::new(Mutex::new(false)),
             name: name.to_owned(),
             initialized,
         };
@@ -304,6 +305,8 @@ struct Script {
     answers: tokio::sync::broadcast::Sender<DisplayAnswer>,
     cancels: tokio::sync::broadcast::Sender<SessionId>,
     sessions: Arc<Mutex<u32>>,
+    /// Set once a "refuse this once" prompt has been faulted, so the retry of it is taken.
+    refused: Arc<Mutex<bool>>,
     name: String,
     initialized: mpsc::Sender<()>,
 }
@@ -316,6 +319,7 @@ async fn answer(script: Script, id: RequestId, call: GatewayCall) {
         answers,
         cancels,
         sessions,
+        refused,
         name,
         initialized,
     } = script;
@@ -372,7 +376,17 @@ async fn answer(script: Script, id: RequestId, call: GatewayCall) {
                 text: text.clone(),
                 links,
             });
-            if text.contains("refuse this") {
+            // "refuse this" always faults; "refuse this once" faults the first time only, so a
+            // retry of it is taken and answered.
+            let refuse = if text.contains("refuse this once") {
+                let mut refused = refused.lock().await;
+                let first = !*refused;
+                *refused = true;
+                first
+            } else {
+                text.contains("refuse this")
+            };
+            if refuse {
                 let provider = rax::error::ProviderFailure {
                     kind: "overloaded_error".into(),
                     provider: Some("anthropic".into()),
@@ -1290,12 +1304,18 @@ async fn an_attachment_whose_bytes_do_not_match_is_reported_not_uploaded() {
 
     let thread = rig.sim.thread(GENERAL, &ts);
     assert!(thread.iter().all(|m| m.files.is_empty()), "{thread:?}");
-    assert!(
-        thread
-            .iter()
-            .any(|m| m.text.contains("Could not attach chart.png")),
-        "{thread:?}"
-    );
+    let card = thread
+        .iter()
+        .find(|m| m.text == "laptop could not attach chart.png")
+        .unwrap_or_else(|| panic!("no card for the file that never arrived: {thread:?}"));
+    assert!(card_says(card, "murtaugh_alert_card"));
+    assert!(card_says(card, "bytes arrived"));
+    // The answer is the agent's; what became of the file is the gateway's, and sits apart.
+    let answer = thread
+        .iter()
+        .find(|m| m.text.contains("pong to: attach and lie"))
+        .expect("the answer went missing");
+    assert!(!answer.text.contains("Could not attach"), "{answer:?}");
     assert!(
         rig.sim
             .calls()
@@ -1710,6 +1730,69 @@ async fn a_refused_message_gets_a_card_that_diagnoses_it_rather_than_dumping_it(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_send_again_button_belongs_to_its_sender_and_spends_itself() {
+    use murtaugh_gateway::faults::SEND_AGAIN;
+
+    let rig = rig().await;
+    rig.store.set_allowed(&user(BOB), true).await.unwrap();
+    let mut laptop = rig.node(ALICE, "laptop").await;
+    let ts = rig
+        .sim
+        .mention(ALICE, GENERAL, "refuse this once, no approval", None)
+        .await
+        .unwrap();
+    laptop.next_prompt().await;
+
+    let card = eventually("the refusal card", || {
+        rig.sim
+            .thread(GENERAL, &ts)
+            .into_iter()
+            .find(|m| m.text == "laptop could not take this message")
+    })
+    .await;
+    // The provider called its own failure retryable, so the card carries the button.
+    assert!(card_says(&card, SEND_AGAIN));
+    assert!(card_says(&card, "Send Again"));
+
+    // Bob may chat in here, and it is still not his message to send.
+    rig.sim
+        .click(BOB, GENERAL, &card.ts, SEND_AGAIN)
+        .await
+        .unwrap();
+    eventually("Bob being turned away", || {
+        rig.sim
+            .ephemerals()
+            .into_iter()
+            .find(|(_, who, text)| who == BOB && text.contains("not your message"))
+    })
+    .await;
+
+    // Alice's press sends the very same message again, and this time it is taken.
+    rig.sim
+        .click(ALICE, GENERAL, &card.ts, SEND_AGAIN)
+        .await
+        .unwrap();
+    let (_, sent) = within(laptop.next_prompt()).await;
+    assert!(sent.contains("refuse this once"), "{sent}");
+    wait_for_turn_end(&rig, GENERAL, &ts, "pong to: refuse this once").await;
+
+    // The offer is spent: one card sends one message however often it is pressed.
+    rig.sim
+        .click(ALICE, GENERAL, &card.ts, SEND_AGAIN)
+        .await
+        .unwrap();
+    eventually("the lapsed note", || {
+        rig.sim
+            .ephemerals()
+            .into_iter()
+            .find(|(_, who, text)| who == ALICE && text.contains("no longer on offer"))
+    })
+    .await;
+    assert_eq!(rig.sim.violations(), vec![]);
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_turn_that_fails_partway_keeps_its_answer_and_gets_a_card_of_its_own() {
     let rig = rig().await;
     let mut laptop = rig.node(ALICE, "laptop").await;
@@ -1729,6 +1812,8 @@ async fn a_turn_that_fails_partway_keeps_its_answer_and_gets_a_card_of_its_own()
     .await;
     assert!(card_says(&card, "every tool call"));
     assert!(card_says(&card, "40 tool calls used"));
+    // The same message would hit the same ceiling, so this card offers no button.
+    assert!(!card_says(&card, murtaugh_gateway::faults::SEND_AGAIN));
 
     let thread = rig.sim.thread(GENERAL, &ts);
     let answer = thread
