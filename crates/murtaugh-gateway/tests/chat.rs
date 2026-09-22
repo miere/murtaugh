@@ -713,7 +713,7 @@ async fn a_thread_whose_node_left_continues_elsewhere_after_a_notice_and_a_catch
         .await;
     let notice = replies
         .iter()
-        .position(|m| m.text.contains("went offline. Continuing on *desktop*"))
+        .position(|m| m.text.contains("went offline. Continuing on _*desktop*_"))
         .expect("no notice");
     let answer = replies
         .iter()
@@ -905,7 +905,7 @@ async fn a_thread_caught_up_after_a_gateway_restart_is_told_first() {
             {
                 let notice = replies
                     .iter()
-                    .position(|text| text.contains("Picking this conversation up on *laptop*"))
+                    .position(|text| text.contains("picking this conversation up on _*laptop*_"))
                     .expect("no notice before the catch-up");
                 let answer = replies
                     .iter()
@@ -962,7 +962,7 @@ async fn only_a_machine_that_is_not_the_admins_says_it_picked_a_thread_up() {
     assert!(
         !replies
             .iter()
-            .any(|m| m.text.contains("Picking this conversation up")),
+            .any(|m| m.text.contains("picking this conversation up")),
         "the admin's own machine announced itself: {replies:?}"
     );
 
@@ -982,9 +982,9 @@ async fn only_a_machine_that_is_not_the_admins_says_it_picked_a_thread_up() {
         })
         .await;
     assert!(
-        replies
-            .iter()
-            .any(|m| m.text.contains("Picking this conversation up on *laptop*")),
+        replies.iter().any(|m| m
+            .text
+            .contains("picking this conversation up on _*laptop*_")),
         "somebody else's machine said nothing: {replies:?}"
     );
     rig.shutdown.cancel();
@@ -1945,9 +1945,9 @@ async fn a_message_mid_turn_interrupts_it_and_the_waiting_ones_run_together() {
         .bot_replies(&ts, |r| r.iter().any(|m| m.text.contains("pong to:")))
         .await;
     assert!(
-        replies
-            .iter()
-            .any(|m| m.text.contains("_Interrupted by a newer message._")),
+        replies.iter().any(|m| m
+            .text
+            .contains("_*Notice*_: interrupted by a newer message.")),
         "{:?}",
         replies.iter().map(|m| &m.text).collect::<Vec<_>>()
     );
@@ -1975,7 +1975,9 @@ async fn stop_inside_a_thread_cancels_its_turn_and_nothing_else_runs() {
         .unwrap();
     assert_eq!(next_cancel(&mut laptop).await, "<cancelled>");
     let replies = rig
-        .bot_replies(&ts, |r| r.iter().any(|m| m.text.contains("_Stopped._")))
+        .bot_replies(&ts, |r| {
+            r.iter().any(|m| m.text.contains("_*Notice*_: stopped."))
+        })
         .await;
     assert!(!replies.iter().any(|m| m.text.contains("pong to:")));
     rig.sim
@@ -2036,7 +2038,9 @@ async fn a_mentioned_stop_cancels_the_turn_and_never_reaches_the_node() {
         .unwrap();
     assert_eq!(next_cancel(&mut laptop).await, "<cancelled>");
     let replies = rig
-        .bot_replies(&ts, |r| r.iter().any(|m| m.text.contains("_Stopped._")))
+        .bot_replies(&ts, |r| {
+            r.iter().any(|m| m.text.contains("_*Notice*_: stopped."))
+        })
         .await;
     assert!(!replies.iter().any(|m| m.text.contains("pong to:")));
     // The gateway answered it, so it is never sent on as the prompt that replaces the turn.
