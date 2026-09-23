@@ -165,7 +165,9 @@ fn serving<'a>(
     } else {
         access.fallback_owners(user)
     };
-    nodes
-        .values()
-        .filter(move |entry| entry.node.connected && owners.contains(&entry.node.owner))
+    nodes.values().filter(move |entry| {
+        entry.node.connected
+            && owners.contains(&entry.node.owner)
+            && access.is_enabled(&entry.node.selector)
+    })
 }

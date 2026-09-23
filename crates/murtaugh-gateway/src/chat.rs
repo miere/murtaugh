@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use murtaugh_slack::{
-    Block, Click, Event, FileRef, PostMessage, SlackClient, TaskStatus, Text, Upload,
+    Block, Click, Event, FileRef, HomeClick, PostMessage, SlackClient, TaskStatus, Text, Upload,
 };
 use murtaugh_store::{Conversation, Pin, Store, ToolMode, UserConfig, UserId};
 use rax::attachment::Attachment;
@@ -23,12 +23,13 @@ use time::OffsetDateTime;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::access::Access;
+use crate::access::{Access, Snapshot};
 use crate::alerts::{self, Alert, Level};
 use crate::approval::{self, Approvals};
 use crate::faults::{self, Refusal};
 use crate::files::Files;
 use crate::fleet::{Fleet, Node};
+use crate::home;
 use crate::hub::FleetChange;
 use crate::picker;
 use crate::prompts::{self, Asked, Prompts};
@@ -467,10 +468,44 @@ impl Chat {
         let Ok(viewer) = UserId::parse(viewer) else {
             return;
         };
-        let blocks = crate::home::view(&viewer, &self.access.snapshot(), &self.fleet.summaries());
+        let blocks = home::view(&viewer, &self.access.snapshot(), &self.fleet.summaries());
         if let Err(err) = self.slack.publish_home(viewer.as_str(), &blocks).await {
             tracing::warn!(error = %err, "could not publish the Home tab");
         }
+    }
+
+    /// Disables or re-enables a node's routing from its Home tab row. The click carries no
+    /// channel to answer an error into, so a denied or failed toggle is silent beyond the log —
+    /// the Home tab simply keeps showing the state the store already holds.
+    pub async fn on_home_click(self: Arc<Self>, click: HomeClick) {
+        if click.action_id != home::TOGGLE {
+            return;
+        }
+        let Some((selector, disabled)) = home::parse_toggle(&click.value) else {
+            return;
+        };
+        let Ok(user) = UserId::parse(&click.user) else {
+            return;
+        };
+        let snapshot = self.access.snapshot();
+        let allowed = snapshot.admin() == Some(&user) || snapshot.owner(&selector) == Some(&user);
+        if !allowed {
+            tracing::info!(%selector, user = %click.user, "denied a node toggle from someone who does not own it");
+            return;
+        }
+        if let Err(err) = self.store.set_node_disabled(&selector, disabled).await {
+            tracing::warn!(%selector, error = %err, "could not toggle a node's routing");
+            return;
+        }
+        match Snapshot::load(&*self.store).await {
+            Ok(fresh) => {
+                self.access.replace(fresh);
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "could not reload access after a node toggle");
+            }
+        }
+        self.show_home(&click.user).await;
     }
 
     pub async fn on_fleet(self: Arc<Self>, change: FleetChange) {
@@ -833,6 +868,7 @@ impl Chat {
         conversation: &Conversation,
         incoming: &Incoming,
     ) -> Option<Seat> {
+        let snapshot = self.access.snapshot();
         let pinned = match self.store.pin(conversation).await {
             Ok(pinned) => pinned,
             Err(err) => {
@@ -841,7 +877,13 @@ impl Chat {
             }
         };
         if let Some(pin) = &pinned {
-            if let Some(node) = self.fleet.get(&pin.node).filter(|node| node.connected) {
+            // A node disabled mid-conversation is treated exactly like one that went offline: the
+            // pin is dropped and the thread is picked up by whichever machine `assign` finds next.
+            let live = self
+                .fleet
+                .get(&pin.node)
+                .filter(|node| node.connected && snapshot.is_enabled(&node.selector));
+            if let Some(node) = live {
                 let moved = lock(&self.moved).remove(conversation);
                 let history = match moved {
                     true => self.history(conversation, &incoming.ts).await,
@@ -857,7 +899,6 @@ impl Chat {
             self.fleet.session_ended(&pin.node);
             lock(&self.orphaned).insert(conversation.clone());
         }
-        let snapshot = self.access.snapshot();
         let Some(node) = self.fleet.assign(user, &snapshot) else {
             let orphaned = lock(&self.orphaned).contains(conversation);
             self.alert(conversation, &no_machine(orphaned)).await;

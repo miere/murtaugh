@@ -156,6 +156,12 @@ pub enum SimError {
     UnknownMessage { channel: String, ts: String },
     #[error("no button with action_id {action_id} on {ts}")]
     UnknownAction { ts: String, action_id: String },
+    #[error("no Home tab overflow option {value:?} under action_id {action_id} for {user}")]
+    UnknownHomeAction {
+        user: String,
+        action_id: String,
+        value: String,
+    },
     #[error("no {method} call matched within {waited:?}; calls that did arrive: {arrived:#?}")]
     Timeout {
         method: String,
@@ -634,6 +640,34 @@ impl SlackSim {
         Ok(())
     }
 
+    /// Chooses an option from an overflow menu on the app's Home tab, delivering a `block_actions`
+    /// interactive envelope whose container is the view rather than a message — the Home tab has
+    /// no channel or ts for a click to reference.
+    pub async fn click_home(
+        &self,
+        user: &str,
+        action_id: &str,
+        value: &str,
+    ) -> Result<(), SimError> {
+        let envelope =
+            {
+                let mut st = self.inner.lock();
+                if !st.users.contains_key(user) {
+                    return Err(SimError::UnknownUser(user.to_owned()));
+                }
+                let blocks = st.homes.get(user).cloned().unwrap_or(Value::Array(vec![]));
+                let (block_id, option) = find_overflow_option(&blocks, action_id, value)
+                    .ok_or_else(|| SimError::UnknownHomeAction {
+                        user: user.to_owned(),
+                        action_id: action_id.to_owned(),
+                        value: value.to_owned(),
+                    })?;
+                render::home_block_actions(&mut st, user, action_id, &block_id, &option)
+            };
+        socket::deliver(&self.inner, envelope);
+        Ok(())
+    }
+
     pub async fn slash(
         &self,
         user: &str,
@@ -787,6 +821,30 @@ fn find_option(ephemeral: &SimEphemeral, action_id: &str, option: &str) -> Optio
             .and_then(Value::as_str)
             .map_or_else(|| format!("sim{i}"), str::to_owned);
         Some((block_id, chosen.clone()))
+    })
+}
+
+/// Home tab rows share one `action_id` across every node's overflow menu, so the match is on the
+/// option's value (which carries the selector) rather than on the block alone.
+fn find_overflow_option(blocks: &Value, action_id: &str, value: &str) -> Option<(String, Value)> {
+    let top = blocks.as_array()?;
+    top.iter().enumerate().find_map(|(i, block)| {
+        let accessory = block.get("accessory")?;
+        if accessory.get("type").and_then(Value::as_str) != Some("overflow")
+            || accessory.get("action_id").and_then(Value::as_str) != Some(action_id)
+        {
+            return None;
+        }
+        let option = accessory
+            .get("options")?
+            .as_array()?
+            .iter()
+            .find(|o| o.get("value").and_then(Value::as_str) == Some(value))?;
+        let block_id = block
+            .get("block_id")
+            .and_then(Value::as_str)
+            .map_or_else(|| format!("sim{i}"), str::to_owned);
+        Some((block_id, option.clone()))
     })
 }
 

@@ -74,6 +74,14 @@ impl Snapshot {
         self.tokens.get(selector).map(|record| &record.owner)
     }
 
+    /// Whether a node may be routed to. Unlike [`Self::is_live`] this has nothing to do with the
+    /// credential: a disabled node keeps its link and can be re-enabled without reconnecting.
+    pub fn is_enabled(&self, selector: &str) -> bool {
+        self.tokens
+            .get(selector)
+            .is_some_and(|record| record.disabled_at.is_none())
+    }
+
     pub fn node_name(&self, selector: &str) -> Option<&str> {
         self.tokens.get(selector).map(|record| record.name.as_str())
     }
@@ -266,6 +274,7 @@ mod tests {
                 name: "laptop".into(),
                 created_at: OffsetDateTime::UNIX_EPOCH,
                 revoked_at: None,
+                disabled_at: None,
             },
         );
         (snapshot, minted.token)

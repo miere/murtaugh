@@ -139,6 +139,9 @@ pub struct NodeToken {
     pub name: String,
     pub created_at: OffsetDateTime,
     pub revoked_at: Option<OffsetDateTime>,
+    /// Set and cleared by the node's owner (or the admin) from the Home tab; routing skips a
+    /// disabled node without touching its credential or its link.
+    pub disabled_at: Option<OffsetDateTime>,
 }
 
 /// A Slack thread; a top-level message is a thread of its own ts.

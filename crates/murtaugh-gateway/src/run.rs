@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use murtaugh_slack::{Click, SlackClient, SocketEvent, SocketMode, Tokens};
+use murtaugh_slack::{Click, HomeClick, SlackClient, SocketEvent, SocketMode, Tokens};
 use murtaugh_store::{Leader, Lease};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -229,6 +229,8 @@ async fn serve_as_leader(
                 Some(SocketEvent::Interactive(payload)) => {
                     if let Some(click) = Click::from_interactive(&payload) {
                         tokio::spawn(chat.clone().on_click(click));
+                    } else if let Some(click) = HomeClick::from_interactive(&payload) {
+                        tokio::spawn(chat.clone().on_home_click(click));
                     }
                 }
                 None => break (Led::SlackFailed("the Slack connection ended".into()), true),

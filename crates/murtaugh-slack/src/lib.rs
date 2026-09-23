@@ -10,7 +10,7 @@ mod web;
 
 pub use blocks::{Block, Button, ButtonStyle, Text, mrkdwn};
 pub use error::SlackError;
-pub use events::{Click, Event, EventEnvelope, FileRef, SocketEvent};
+pub use events::{Click, Event, EventEnvelope, FileRef, HomeClick, SocketEvent};
 pub use socket::SocketMode;
 pub use stream::{
     Chunk, PlanBlock, PlanTask, STREAM_FINALIZED, STREAMING_UNSUPPORTED, StartStream,

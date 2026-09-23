@@ -193,3 +193,35 @@ impl Click {
         })
     }
 }
+
+/// A button or menu chosen on the Home tab, taken from a `block_actions` payload whose container
+/// is a view rather than a message — the Home tab carries no channel, which is why `Click` (built
+/// for message-hosted interactions) cannot represent it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HomeClick {
+    pub user: String,
+    pub action_id: String,
+    /// A menu keeps its value under the option it chose rather than on the action.
+    pub value: String,
+}
+
+impl HomeClick {
+    /// `None` for anything but a button or menu on the Home tab.
+    pub fn from_interactive(payload: &Value) -> Option<HomeClick> {
+        if payload["type"].as_str() != Some("block_actions") {
+            return None;
+        }
+        if payload["container"]["type"].as_str() != Some("view") {
+            return None;
+        }
+        let action = payload["actions"].as_array()?.first()?;
+        let text = |value: &Value| value.as_str().map(str::to_owned);
+        Some(HomeClick {
+            user: text(&payload["user"]["id"])?,
+            action_id: text(&action["action_id"])?,
+            value: text(&action["value"])
+                .or_else(|| text(&action["selected_option"]["value"]))
+                .unwrap_or_default(),
+        })
+    }
+}
