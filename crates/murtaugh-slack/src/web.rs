@@ -269,6 +269,27 @@ impl SlackClient {
         }
     }
 
+    /// One message by its exact timestamp. `conversations.history` bounded to a single instant,
+    /// because `conversations.replies` widens a reply into its whole thread. `None` means the
+    /// channel is readable but holds nothing at that timestamp — a refusal is an error, not `None`.
+    pub async fn message_at(&self, channel: &str, ts: &str) -> Result<Option<Message>, SlackError> {
+        #[derive(Deserialize)]
+        struct Page {
+            messages: Vec<Message>,
+        }
+        let params = vec![
+            ("channel", channel.to_owned()),
+            ("latest", ts.to_owned()),
+            ("oldest", ts.to_owned()),
+            ("inclusive", "true".to_owned()),
+            ("limit", "1".to_owned()),
+        ];
+        let page: Page = self
+            .call("conversations.history", Token::Bot, Body::Form(params))
+            .await?;
+        Ok(page.messages.into_iter().find(|m| m.ts == ts))
+    }
+
     /// The whole thread, parent first; Slack repeats the parent on every page, so it is deduped.
     pub async fn replies(&self, channel: &str, ts: &str) -> Result<Vec<Message>, SlackError> {
         #[derive(Deserialize)]

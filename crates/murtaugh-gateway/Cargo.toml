@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 murtaugh-slack.workspace = true
+async-trait.workspace = true
 murtaugh-store.workspace = true
 rax.workspace = true
 rax-tokio.workspace = true

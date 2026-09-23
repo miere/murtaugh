@@ -49,6 +49,7 @@ async fn rig() -> Rig {
         access.clone(),
         fleet.clone(),
         murtaugh_gateway::files::Files::default(),
+        murtaugh_gateway::tools::Tools::default(),
         murtaugh_gateway::alerts::Credentials::default(),
         murtaugh_gateway::signin::SignIns::new(None, access.clone()),
         shutdown.clone(),
