@@ -24,6 +24,7 @@ pub mod signin;
 pub mod thread_commands;
 pub mod tls;
 pub mod token;
+pub mod tools;
 pub mod version;
 
 use std::sync::Arc;

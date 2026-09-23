@@ -19,6 +19,7 @@ use crate::alerts::{Credentials, Reporter};
 use crate::files::Files;
 use crate::fleet::{Fleet, Node};
 use crate::signin::{self, SignIns};
+use crate::tools::Tools;
 
 pub const REFRESH: Duration = Duration::from_secs(5);
 pub const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -30,13 +31,14 @@ pub enum FleetChange {
     Gone { selector: String },
 }
 
-pub fn capabilities() -> GatewayCapabilities {
+pub fn capabilities(tools: &Tools) -> GatewayCapabilities {
     GatewayCapabilities {
         question: true,
         plan: true,
         sign_in: true,
         resource_schemes: vec!["chat".into()],
         readable_schemes: vec![crate::files::SCHEME.into()],
+        tools: tools.catalogue(),
     }
 }
 
@@ -45,11 +47,14 @@ pub struct Hub {
     pub changes: mpsc::Receiver<FleetChange>,
 }
 
+/// Every collaborator a node's link is served with; bundling them would only move the list.
+#[allow(clippy::too_many_arguments)]
 pub async fn start(
     listen: SocketAddr,
     access: Access,
     fleet: Fleet,
     files: Files,
+    tools: Tools,
     credentials: Credentials,
     sign_ins: SignIns,
     shutdown: CancellationToken,
@@ -61,6 +66,7 @@ pub async fn start(
         access,
         fleet,
         files,
+        tools,
         credentials,
         sign_ins,
         changes,
@@ -107,6 +113,7 @@ struct Serving {
     access: Access,
     fleet: Fleet,
     files: Files,
+    tools: Tools,
     credentials: Credentials,
     sign_ins: SignIns,
     changes: mpsc::Sender<FleetChange>,
@@ -130,6 +137,7 @@ async fn serve(link: GatewayLink, mut events: LinkEvents, serving: Serving) {
         access,
         fleet,
         files,
+        tools,
         credentials,
         sign_ins,
         changes,
@@ -143,7 +151,7 @@ async fn serve(link: GatewayLink, mut events: LinkEvents, serving: Serving) {
         link.close().await;
         return;
     };
-    let capabilities = match initialize(&link).await {
+    let capabilities = match initialize(&link, &tools).await {
         Ok(capabilities) => capabilities,
         Err(reason) => {
             tracing::warn!(node = %name, %reason, "node did not initialize; closing its link");
@@ -182,6 +190,13 @@ async fn serve(link: GatewayLink, mut events: LinkEvents, serving: Serving) {
             } => {
                 let (files, link, selector) = (files.clone(), link.clone(), selector.clone());
                 tokio::spawn(async move { files.serve(&link, &selector, id, read).await });
+            }
+            LinkEvent::Request {
+                id,
+                call: NodeCall::CallTool(call),
+            } => {
+                let (tools, link, name) = (tools.clone(), link.clone(), name.clone());
+                tokio::spawn(async move { tools.serve(&link, &name, id, call).await });
             }
             LinkEvent::Request {
                 id,
@@ -249,10 +264,13 @@ async fn serve(link: GatewayLink, mut events: LinkEvents, serving: Serving) {
     }
 }
 
-async fn initialize(link: &GatewayLink) -> Result<rax::session::NodeCapabilities, String> {
+async fn initialize(
+    link: &GatewayLink,
+    tools: &Tools,
+) -> Result<rax::session::NodeCapabilities, String> {
     let offer = GatewayCall::Initialize(Initialize {
         protocol_version: PROTOCOL_VERSION,
-        capabilities: capabilities(),
+        capabilities: capabilities(tools),
     });
     let pending = link.call(offer).await.map_err(|err| err.to_string())?;
     let reply = tokio::time::timeout(INITIALIZE_TIMEOUT, pending.reply)
