@@ -32,6 +32,8 @@ pub struct Options {
     pub prompt_timeout: Duration,
     /// How long a turn may go without a word from the agent before it is stopped.
     pub turn_idle_timeout: Duration,
+    /// How long one tool call may hold a turn open before it is taken for wedged.
+    pub tool_ceiling: Duration,
 }
 
 impl Default for Options {
@@ -42,6 +44,7 @@ impl Default for Options {
             approval_timeout: approval::TIMEOUT,
             prompt_timeout: crate::prompts::TIMEOUT,
             turn_idle_timeout: chat::TURN_IDLE_TIMEOUT,
+            tool_ceiling: chat::TOOL_CEILING,
         }
     }
 }
@@ -130,6 +133,7 @@ pub async fn serve(
         prompt_timeout: options.prompt_timeout,
         sign_ins,
         turn_idle_timeout: options.turn_idle_timeout,
+        tool_ceiling: options.tool_ceiling,
     });
     tracing::info!(listen = %hub.server.local_addr(), team = %identity.team_id, %holder, "murtaugh gateway started; waiting to lead");
     let mut seen = Seen::default();

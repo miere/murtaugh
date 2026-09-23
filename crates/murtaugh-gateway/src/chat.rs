@@ -43,6 +43,10 @@ const FILE_SHARE: &str = "file_share";
 pub const THINKING: &str = "is thinking...";
 /// The Go gateway's `request_timeout`: silence, not length, is what stops a turn.
 pub const TURN_IDLE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// How long one tool call may hold a turn open while saying nothing. An in-flight tool keeps the
+/// idle clock from stopping the turn, so without a ceiling a wedged one — blocked on stdin, or on
+/// a person who walked away — would hold it for as long as the node stayed up.
+pub const TOOL_CEILING: Duration = Duration::from_secs(60 * 60);
 /// The chunks precede the `attachment` event on the link, so the bytes are normally there already.
 const ATTACHMENT_WAIT: Duration = Duration::from_secs(60);
 /// Slack clears the status once a chunk lands, so it is re-asserted until the turn ends.
@@ -76,6 +80,7 @@ pub struct Chat {
     moved: Mutex<HashSet<Conversation>>,
     turns: Mutex<HashMap<Conversation, Running>>,
     turn_idle_timeout: Duration,
+    tool_ceiling: Duration,
     /// Messages a retryable failure left on the table, by the id their card's button carries.
     retries: Mutex<HashMap<String, Offer>>,
 }
@@ -161,6 +166,7 @@ pub struct Parts {
     pub prompt_timeout: Duration,
     pub sign_ins: SignIns,
     pub turn_idle_timeout: Duration,
+    pub tool_ceiling: Duration,
 }
 
 impl Chat {
@@ -178,6 +184,7 @@ impl Chat {
             prompt_timeout,
             sign_ins,
             turn_idle_timeout,
+            tool_ceiling,
         } = parts;
         Arc::new(Self {
             slack,
@@ -197,6 +204,7 @@ impl Chat {
             moved: Mutex::new(HashSet::new()),
             turns: Mutex::new(HashMap::new()),
             turn_idle_timeout,
+            tool_ceiling,
             retries: Mutex::new(HashMap::new()),
         })
     }
@@ -993,6 +1001,7 @@ impl Chat {
         let turn = Turn::default();
         let mut active = Instant::now();
         let mut stalled = false;
+        let mut wedged = None;
         // The first fault is the diagnosis; anything after it is fallout from the same cause.
         let mut failure: Option<rax::Error> = None;
         let mut unattached: Vec<(String, String)> = Vec::new();
@@ -1017,8 +1026,22 @@ impl Chat {
                         active = Instant::now();
                         continue;
                     }
-                    stalled = true;
-                    break;
+                    // A tool that is still running is the turn's activity, even though it produces
+                    // no events of its own until it finishes.
+                    match turn.longest_tool() {
+                        Some((_, age)) if age < self.tool_ceiling => {
+                            active = Instant::now();
+                            continue;
+                        }
+                        Some((title, _)) => {
+                            wedged = Some(title);
+                            break;
+                        }
+                        None => {
+                            stalled = true;
+                            break;
+                        }
+                    }
                 }
             };
             let Some(event) = event else {
@@ -1046,6 +1069,13 @@ impl Chat {
             Some(format!(
                 "the agent went quiet for {}, so I stopped this turn.",
                 span(self.turn_idle_timeout)
+            ))
+        } else if let Some(title) = wedged {
+            cancel_turn(node.link.clone(), session_id.clone());
+            Some(format!(
+                "_*{}*_ ran for {} without finishing, so I stopped this turn.",
+                render::escape(&title),
+                span(self.tool_ceiling)
             ))
         } else if let Some(marker) = marker {
             Some(marker.to_owned())
@@ -1111,6 +1141,7 @@ impl Chat {
                     .clone()
                     .unwrap_or_else(|| tool_call.name.clone());
                 self.rule(reply.target(), node, tool_call, turn).await;
+                turn.tool(&id, Some(&title), TaskStatus::InProgress);
                 reply.task(&id, Some(&title), TaskStatus::InProgress).await;
             }
             Open::Known(TurnEvent::ToolCallUpdate { tool_call_update }) => {
@@ -1119,6 +1150,11 @@ impl Chat {
                     ToolCallStatus::Completed => TaskStatus::Complete,
                     ToolCallStatus::Failed | ToolCallStatus::Denied => TaskStatus::Error,
                 };
+                turn.tool(
+                    &tool_call_update.id.0,
+                    tool_call_update.title.as_deref(),
+                    status,
+                );
                 reply
                     .task(
                         &tool_call_update.id.0,
@@ -1422,11 +1458,18 @@ fn cancel_turn(link: GatewayLink, session_id: SessionId) {
 }
 
 /// One turn's cards: dismissed together when it ends, and while any waits on a person the
-/// turn is not idle.
+/// turn is not idle. It carries the tool calls in flight for the same reason: a tool that
+/// takes twenty minutes and says nothing in between is working, not silent.
 #[derive(Default)]
 struct Turn {
     token: CancellationToken,
     waiting: Arc<AtomicUsize>,
+    tools: Mutex<HashMap<String, InFlight>>,
+}
+
+struct InFlight {
+    started: Instant,
+    title: String,
 }
 
 struct Waiting(Arc<AtomicUsize>);
@@ -1445,6 +1488,38 @@ impl Turn {
 
     fn waiting(&self) -> bool {
         self.waiting.load(Ordering::SeqCst) > 0
+    }
+
+    /// Folds one sighting of a tool call into the in-flight set: a terminal status retires it,
+    /// anything else starts or keeps tracking it.
+    ///
+    /// The start is stamped once, on first sighting, so a call's age is measured from when it
+    /// began rather than from the last update that refined its title.
+    fn tool(&self, id: &str, title: Option<&str>, status: TaskStatus) {
+        let mut tools = lock(&self.tools);
+        match status {
+            TaskStatus::Complete | TaskStatus::Error => {
+                tools.remove(id);
+            }
+            TaskStatus::Pending | TaskStatus::InProgress => {
+                let call = tools.entry(id.to_owned()).or_insert_with(|| InFlight {
+                    started: Instant::now(),
+                    title: id.to_owned(),
+                });
+                if let Some(title) = title {
+                    call.title = title.to_owned();
+                }
+            }
+        }
+    }
+
+    /// The longest-running tool call in flight, with its age — the one piece of state the idle
+    /// arm needs to tell a working turn from a silent one, and from a wedged tool.
+    fn longest_tool(&self) -> Option<(String, Duration)> {
+        lock(&self.tools)
+            .values()
+            .max_by_key(|call| call.started.elapsed())
+            .map(|call| (call.title.clone(), call.started.elapsed()))
     }
 }
 

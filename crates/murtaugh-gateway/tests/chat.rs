@@ -123,6 +123,7 @@ async fn rig_with(approval_timeout: Duration) -> Rig {
 struct Tuning {
     approval_timeout: Duration,
     turn_idle_timeout: Duration,
+    tool_ceiling: Duration,
 }
 
 impl Default for Tuning {
@@ -130,6 +131,7 @@ impl Default for Tuning {
         Self {
             approval_timeout: murtaugh_gateway::approval::TIMEOUT,
             turn_idle_timeout: murtaugh_gateway::chat::TURN_IDLE_TIMEOUT,
+            tool_ceiling: murtaugh_gateway::chat::TOOL_CEILING,
         }
     }
 }
@@ -190,6 +192,7 @@ fn gateway_with(sim: &SlackSim, config: std::path::PathBuf, tuning: Tuning) -> C
         approval_timeout: tuning.approval_timeout,
         prompt_timeout: murtaugh_gateway::prompts::TIMEOUT,
         turn_idle_timeout: tuning.turn_idle_timeout,
+        tool_ceiling: tuning.tool_ceiling,
     };
     tokio::spawn({
         let shutdown = shutdown.clone();
@@ -416,7 +419,7 @@ async fn answer(script: Script, id: RequestId, call: GatewayCall) {
                 node.end(id).await.unwrap();
                 return;
             }
-            if text.contains("silent") || text.contains("slow") {
+            if text.contains("silent") || text.contains("slow") || text.contains("long tool") {
                 let mut cancelled = cancels.subscribe();
                 let session = prompt.session_id.clone();
                 if text.contains("slow") {
@@ -424,6 +427,21 @@ async fn answer(script: Script, id: RequestId, call: GatewayCall) {
                         content: ContentBlock::text("Working on it slowly…").into(),
                     };
                     node.event(id.clone(), started).await.unwrap();
+                }
+                if text.contains("long tool") {
+                    // A build that runs for minutes: announced once, then silent until it ends,
+                    // which for this node it never does.
+                    let running = ToolCall {
+                        id: ToolCallId("tc-long".into()),
+                        name: "Bash".into(),
+                        title: Some("gradle build".into()),
+                        kind: ToolKind::Execute,
+                        input: Some(serde_json::json!({"command": "./gradlew build"})),
+                        content: vec![],
+                    };
+                    node.event(id.clone(), Event::ToolCall { tool_call: running })
+                        .await
+                        .unwrap();
                 }
                 let waited = tokio::time::timeout(Duration::from_secs(20), async {
                     while let Ok(which) = cancelled.recv().await {
@@ -2297,6 +2315,62 @@ async fn a_turn_the_agent_goes_silent_on_is_stopped_after_the_idle_timeout() {
         .unwrap();
     assert_eq!(laptop.next_prompt().await.1, "hello again");
     let _ = next;
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tool_still_running_keeps_a_silent_turn_alive() {
+    let rig = rig_tuned(Tuning {
+        turn_idle_timeout: Duration::from_millis(300),
+        ..Tuning::default()
+    })
+    .await;
+    rig.store
+        .set_tool_mode(&user(ALICE), murtaugh_store::ToolMode::AlwaysAllowed)
+        .await
+        .unwrap();
+    let mut laptop = rig.node(ALICE, "laptop").await;
+    let ts = rig
+        .sim
+        .mention(ALICE, GENERAL, "run a long tool", None)
+        .await
+        .unwrap();
+    laptop.next_prompt().await;
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    assert!(
+        !rig.sim
+            .thread(GENERAL, &ts)
+            .iter()
+            .any(|m| m.text.contains("went quiet")),
+        "the turn was stopped while a tool ran"
+    );
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tool_that_never_finishes_is_stopped_at_its_ceiling() {
+    let rig = rig_tuned(Tuning {
+        turn_idle_timeout: Duration::from_millis(200),
+        tool_ceiling: Duration::from_millis(500),
+        ..Tuning::default()
+    })
+    .await;
+    rig.store
+        .set_tool_mode(&user(ALICE), murtaugh_store::ToolMode::AlwaysAllowed)
+        .await
+        .unwrap();
+    let mut laptop = rig.node(ALICE, "laptop").await;
+    let ts = rig
+        .sim
+        .mention(ALICE, GENERAL, "run a long tool", None)
+        .await
+        .unwrap();
+    laptop.next_prompt().await;
+    assert_eq!(next_cancel(&mut laptop).await, "<cancelled>");
+    rig.bot_replies(&ts, |r| {
+        r.iter().any(|m| m.text.contains("without finishing"))
+    })
+    .await;
     rig.shutdown.cancel();
 }
 
