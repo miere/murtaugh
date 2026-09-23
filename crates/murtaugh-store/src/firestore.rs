@@ -431,6 +431,7 @@ fn token_of(doc: &Doc) -> Result<NodeToken> {
         name: doc.string("name")?,
         created_at: doc.required_time("created_at")?,
         revoked_at: doc.time("revoked_at")?,
+        disabled_at: doc.time("disabled_at")?,
     })
 }
 
@@ -568,6 +569,9 @@ impl Store for FirestoreStore {
         if let Some(revoked_at) = token.revoked_at {
             fields["revoked_at"] = timestamp(revoked_at)?;
         }
+        if let Some(disabled_at) = token.disabled_at {
+            fields["disabled_at"] = timestamp(disabled_at)?;
+        }
         let mut write = self.update(&format!("node_tokens/{}", token.selector), fields);
         write["currentDocument"] = json!({"exists": false});
         self.commit(vec![write]).await.map(drop)
@@ -592,6 +596,19 @@ impl Store for FirestoreStore {
             Err(StoreError::Conflict(_)) => Ok(false),
             Err(err) => Err(err),
         }
+    }
+
+    async fn set_node_disabled(&self, selector: &str, disabled: bool) -> Result<()> {
+        let value = match disabled {
+            true => timestamp(OffsetDateTime::now_utc())?,
+            false => json!({"nullValue": null}),
+        };
+        let mut write = self.update(
+            &format!("node_tokens/{selector}"),
+            json!({"disabled_at": value}),
+        );
+        write["updateMask"] = json!({"fieldPaths": ["disabled_at"]});
+        self.commit(vec![write]).await.map(drop)
     }
 
     async fn pin(&self, conversation: &Conversation) -> Result<Option<Pin>> {

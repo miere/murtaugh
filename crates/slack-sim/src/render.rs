@@ -391,6 +391,52 @@ pub(crate) fn block_actions(
     }))
 }
 
+/// An overflow choice on the app's Home tab. Unlike [`block_actions`] the container is the view,
+/// not a message: the Home tab carries no channel or ts, which is what `HomeClick` (as opposed to
+/// `Click`) is built to read.
+pub(crate) fn home_block_actions(
+    state: &mut State,
+    user: &str,
+    action_id: &str,
+    block_id: &str,
+    option: &Value,
+) -> Value {
+    let envelope_id = state.uuid();
+    let trigger_id = format!("{}.{}.sim", state.next_seq(), now_secs());
+    let view_id = format!("V{}", state.next_seq());
+    let user_name = state
+        .users
+        .get(user)
+        .map(|u| u.name.clone())
+        .unwrap_or_default();
+    json!({
+        "envelope_id": envelope_id,
+        "payload": {
+            "type": "block_actions",
+            "user": {"id": user, "username": user_name, "name": user_name, "team_id": TEAM_ID},
+            "api_app_id": APP_ID,
+            "token": VERIFICATION_TOKEN,
+            "container": {"type": "view", "view_id": view_id},
+            "trigger_id": trigger_id,
+            "team": {"id": TEAM_ID, "domain": "slacksim"},
+            "enterprise": null,
+            "is_enterprise_install": false,
+            "view": {"id": view_id, "type": "home"},
+            "state": {"values": {}},
+            "response_url": format!("https://hooks.slack.com/actions/{}/{}/sim", TEAM_ID, now_secs()),
+            "actions": [{
+                "type": "overflow",
+                "action_id": action_id,
+                "block_id": block_id,
+                "selected_option": option,
+                "action_ts": format!("{}.000000", now_secs()),
+            }],
+        },
+        "type": "interactive",
+        "accepts_response_payload": false,
+    })
+}
+
 pub(crate) fn slash_command(
     state: &mut State,
     user: &str,

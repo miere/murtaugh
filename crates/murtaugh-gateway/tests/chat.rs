@@ -225,6 +225,7 @@ impl Rig {
                 name: name.into(),
                 created_at: OffsetDateTime::now_utc(),
                 revoked_at: None,
+                disabled_at: None,
             })
             .await
             .unwrap();
@@ -2072,6 +2073,7 @@ async fn the_home_tab_shows_the_version_and_the_viewers_nodes_or_all_for_the_adm
             name: "old-mac".into(),
             created_at: OffsetDateTime::now_utc(),
             revoked_at: None,
+            disabled_at: None,
         })
         .await
         .unwrap();
@@ -2100,6 +2102,93 @@ async fn the_home_tab_shows_the_version_and_the_viewers_nodes_or_all_for_the_adm
     let stranger = home_of(&rig, STRANGER).await;
     assert!(stranger.contains("don't have access"));
     assert!(!stranger.contains("laptop"));
+    assert_eq!(rig.sim.violations(), vec![]);
+    rig.shutdown.cancel();
+}
+
+async fn node_selector(rig: &Rig, owner: &str, name: &str) -> String {
+    rig.store
+        .node_tokens()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|token| token.owner == user(owner) && token.name == name)
+        .unwrap()
+        .selector
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_disabled_node_drops_its_thread_and_takes_it_back_once_re_enabled() {
+    let rig = rig().await;
+    let mut laptop = rig.node(ALICE, "laptop").await;
+    let selector = node_selector(&rig, ALICE, "laptop").await;
+
+    let ts = rig
+        .sim
+        .mention(ALICE, GENERAL, "first question", None)
+        .await
+        .unwrap();
+    laptop.next_prompt().await;
+    rig.bot_replies(&ts, |replies| {
+        replies
+            .iter()
+            .any(|m| m.text.contains("pong to: first question"))
+    })
+    .await;
+
+    let before = home_of(&rig, ALICE).await;
+    assert!(before.contains("\"Disable\""), "{before}");
+
+    rig.sim
+        .click_home(
+            ALICE,
+            murtaugh_gateway::home::TOGGLE,
+            &format!("{selector}:disable"),
+        )
+        .await
+        .unwrap();
+    let disabled = eventually("the disabled row", || {
+        let home = rig.sim.home(ALICE)?.to_string();
+        home.contains("Disabled").then_some(home)
+    })
+    .await;
+    assert!(disabled.contains("\"Enable\""), "{disabled}");
+
+    rig.sim
+        .mention(ALICE, GENERAL, "second question", Some(&ts))
+        .await
+        .unwrap();
+    rig.bot_replies(&ts, |replies| {
+        replies.iter().any(|m| m.text == "Machine offline")
+    })
+    .await;
+
+    rig.sim
+        .click_home(
+            ALICE,
+            murtaugh_gateway::home::TOGGLE,
+            &format!("{selector}:enable"),
+        )
+        .await
+        .unwrap();
+    eventually("the re-enabled row", || {
+        let home = rig.sim.home(ALICE)?.to_string();
+        (!home.contains("Disabled")).then_some(home)
+    })
+    .await;
+
+    rig.sim
+        .mention(ALICE, GENERAL, "third question", Some(&ts))
+        .await
+        .unwrap();
+    let (_, text) = laptop.next_prompt().await;
+    assert!(text.ends_with("third question"), "{text}");
+    rig.bot_replies(&ts, |replies| {
+        replies
+            .iter()
+            .any(|m| m.text.contains("pong to: third question"))
+    })
+    .await;
     assert_eq!(rig.sim.violations(), vec![]);
     rig.shutdown.cancel();
 }

@@ -104,6 +104,7 @@ pub async fn a_token_is_revoked_once(store: &dyn Store) {
         name: "laptop".into(),
         created_at: stamp(),
         revoked_at: None,
+        disabled_at: None,
     };
     store.add_node_token(&token).await.unwrap();
     assert_eq!(

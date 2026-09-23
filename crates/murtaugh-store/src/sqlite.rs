@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS node_tokens (
     owner TEXT NOT NULL,
     name TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    revoked_at TEXT
+    revoked_at TEXT,
+    disabled_at TEXT
 );
 CREATE TABLE IF NOT EXISTS pins (
     channel TEXT NOT NULL,
@@ -83,6 +84,7 @@ impl SqliteStore {
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.execute_batch(SCHEMA)?;
+        add_disabled_at_column(&connection)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
         })
@@ -118,6 +120,22 @@ impl SqliteStore {
         tokio::task::spawn_blocking(move || work(&mut guard(&connection)))
             .await
             .map_err(|err| StoreError::Task(err.to_string()))?
+    }
+}
+
+/// `node_tokens` predates the `disabled_at` column, and `CREATE TABLE IF NOT EXISTS` above never
+/// alters a table that already exists, so an existing database needs this one-off patch to grow
+/// the column. If a schema change ever needs more than this, it's time to give SQLite a real
+/// migration runner instead of patching `open` again.
+fn add_disabled_at_column(connection: &Connection) -> Result<()> {
+    match connection.execute("ALTER TABLE node_tokens ADD COLUMN disabled_at TEXT", []) {
+        Ok(_) => Ok(()),
+        Err(rusqlite::Error::SqliteFailure(_, Some(ref msg)))
+            if msg.contains("duplicate column") =>
+        {
+            Ok(())
+        }
+        Err(err) => Err(err.into()),
     }
 }
 
@@ -208,6 +226,10 @@ fn token_row(row: &Row<'_>) -> rusqlite::Result<NodeToken> {
         created_at: parse_stamp(&row.get::<_, String>(4)?)?,
         revoked_at: row
             .get::<_, Option<String>>(5)?
+            .map(|raw| parse_stamp(&raw))
+            .transpose()?,
+        disabled_at: row
+            .get::<_, Option<String>>(6)?
             .map(|raw| parse_stamp(&raw))
             .transpose()?,
     })
@@ -363,7 +385,7 @@ impl Store for SqliteStore {
     async fn node_tokens(&self) -> Result<Vec<NodeToken>> {
         self.run(|db| {
             let mut query = db.prepare(
-                "SELECT selector, secret_hash, owner, name, created_at, revoked_at
+                "SELECT selector, secret_hash, owner, name, created_at, revoked_at, disabled_at
                  FROM node_tokens ORDER BY created_at",
             )?;
             let tokens = query
@@ -378,17 +400,19 @@ impl Store for SqliteStore {
         let token = token.clone();
         let created = stamp(token.created_at)?;
         let revoked = token.revoked_at.map(stamp).transpose()?;
+        let disabled = token.disabled_at.map(stamp).transpose()?;
         self.run(move |db| {
             db.execute(
-                "INSERT INTO node_tokens (selector, secret_hash, owner, name, created_at, revoked_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO node_tokens (selector, secret_hash, owner, name, created_at, revoked_at, disabled_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     token.selector,
                     token.secret_hash,
                     token.owner.as_str(),
                     token.name,
                     created,
-                    revoked
+                    revoked,
+                    disabled
                 ],
             )?;
             Ok(())
@@ -404,6 +428,19 @@ impl Store for SqliteStore {
                 params![selector, at],
             )?;
             Ok(revoked > 0)
+        })
+        .await
+    }
+
+    async fn set_node_disabled(&self, selector: &str, disabled: bool) -> Result<()> {
+        let selector = selector.to_owned();
+        let at = disabled.then(|| stamp(now())).transpose()?;
+        self.run(move |db| {
+            db.execute(
+                "UPDATE node_tokens SET disabled_at = ?2 WHERE selector = ?1",
+                params![selector, at],
+            )?;
+            Ok(())
         })
         .await
     }

@@ -1,5 +1,6 @@
 //! The app's Home tab: this gateway's version, and the nodes the viewer runs, or every node for
-//! the admin, each with whether it is connected and how many conversations it is carrying.
+//! the admin, each with whether it is connected, how many conversations it is carrying, and an
+//! overflow menu to disable or re-enable its routing.
 
 use std::collections::HashMap;
 
@@ -13,6 +14,21 @@ use crate::version::VERSION;
 
 /// Home views hold at most 100 blocks; the header and footer take a few.
 const MAX_NODES: usize = 90;
+
+/// The overflow menu's action id on each node row.
+pub const TOGGLE: &str = "node_toggle";
+
+/// The selector and the disabled state to set, decoded from a `TOGGLE` option's value. A selector
+/// holds no colon (see `picker::chosen`), so splitting off the last one is unambiguous.
+pub fn parse_toggle(value: &str) -> Option<(String, bool)> {
+    let (selector, action) = value.rsplit_once(':')?;
+    let disabled = match action {
+        "disable" => true,
+        "enable" => false,
+        _ => return None,
+    };
+    Some((selector.to_owned(), disabled))
+}
 
 pub fn view(viewer: &UserId, snapshot: &Snapshot, attached: &[Summary]) -> Vec<Block> {
     let admin = snapshot.admin() == Some(viewer);
@@ -52,28 +68,50 @@ pub fn view(viewer: &UserId, snapshot: &Snapshot, attached: &[Summary]) -> Vec<B
     }
     let shown = nodes.len().min(MAX_NODES);
     for token in &nodes[..shown] {
-        let status = match attached.get(token.selector.as_str()) {
-            Some(summary) if summary.connected => format!(
-                ":large_green_circle: Connected · {} live {}",
-                summary.sessions,
-                if summary.sessions == 1 {
-                    "conversation"
-                } else {
-                    "conversations"
-                }
-            ),
-            Some(_) => ":large_yellow_circle: Reconnecting".to_owned(),
-            None => ":white_circle: Offline".to_owned(),
+        // Disabled overrides whatever the socket is doing: it is not taking new work either way,
+        // and that is the fact this row exists to report.
+        let status = if token.disabled_at.is_some() {
+            ":no_entry: Disabled — not routed any new work".to_owned()
+        } else {
+            match attached.get(token.selector.as_str()) {
+                Some(summary) if summary.connected => format!(
+                    ":large_green_circle: Connected · {} live {}",
+                    summary.sessions,
+                    if summary.sessions == 1 {
+                        "conversation"
+                    } else {
+                        "conversations"
+                    }
+                ),
+                Some(_) => ":large_yellow_circle: Reconnecting".to_owned(),
+                None => ":white_circle: Offline".to_owned(),
+            }
         };
         let owner = if admin {
             format!(" · <@{}>", token.owner)
         } else {
             String::new()
         };
-        blocks.push(Block::mrkdwn(format!(
-            "*{}*{owner}\n{status}",
-            render::escape(&token.name)
-        )));
+        let (toggle_label, toggle_action) = if token.disabled_at.is_some() {
+            ("Enable", "enable")
+        } else {
+            ("Disable", "disable")
+        };
+        blocks.push(Block::Raw(serde_json::json!({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": format!("*{}*{owner}\n{status}", render::escape(&token.name)),
+            },
+            "accessory": {
+                "type": "overflow",
+                "action_id": TOGGLE,
+                "options": [{
+                    "text": {"type": "plain_text", "text": toggle_label},
+                    "value": format!("{}:{toggle_action}", token.selector),
+                }],
+            },
+        })));
     }
     if nodes.len() > shown {
         blocks.push(Block::Context(vec![Text::Mrkdwn(format!(

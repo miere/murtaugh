@@ -84,6 +84,7 @@ impl Rig {
                 name: "laptop".into(),
                 created_at: OffsetDateTime::now_utc(),
                 revoked_at: None,
+                disabled_at: None,
             })
             .await
             .unwrap();

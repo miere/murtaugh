@@ -228,6 +228,7 @@ async fn mint(store: &dyn Store, args: MintArgs) -> Result<String, String> {
             name: name.clone(),
             created_at: OffsetDateTime::now_utc(),
             revoked_at: None,
+            disabled_at: None,
         })
         .await
         .map_err(|err| err.to_string())?;

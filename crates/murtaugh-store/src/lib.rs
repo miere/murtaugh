@@ -67,6 +67,9 @@ pub trait Store: Send + Sync + 'static {
     async fn add_node_token(&self, token: &NodeToken) -> Result<()>;
     /// Returns whether a live token was revoked.
     async fn revoke_node_token(&self, selector: &str) -> Result<bool>;
+    /// Reversible, unlike revoking: a disabled node keeps its credential and its link, it is just
+    /// left out of routing until this is called again with `false`.
+    async fn set_node_disabled(&self, selector: &str, disabled: bool) -> Result<()>;
 
     async fn pin(&self, conversation: &Conversation) -> Result<Option<Pin>>;
     async fn set_pin(&self, pin: &Pin) -> Result<()>;

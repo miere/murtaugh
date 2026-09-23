@@ -73,6 +73,7 @@ async fn riggs_answers_a_mention_through_the_gateway() {
             name: "riggs".into(),
             created_at: OffsetDateTime::now_utc(),
             revoked_at: None,
+            disabled_at: None,
         })
         .await
         .unwrap();
