@@ -17,9 +17,9 @@ expect_used = "deny"
 panic = "deny"
 
 [workspace.dependencies]
-rax = { git = "https://github.com/miere/rax-rs", rev = "db9df0f0f9794ff5cd019a3474db39222d8cb3e1" }
-rax-tokio = { git = "https://github.com/miere/rax-rs", rev = "db9df0f0f9794ff5cd019a3474db39222d8cb3e1" }
-rax-sim = { git = "https://github.com/miere/rax-rs", rev = "db9df0f0f9794ff5cd019a3474db39222d8cb3e1" }
+rax = { git = "https://github.com/miere/rax-rs", tag = "0.4.0" }
+rax-tokio = { git = "https://github.com/miere/rax-rs", tag = "0.4.0" }
+rax-sim = { git = "https://github.com/miere/rax-rs", tag = "0.4.0" }
 murtaugh-slack = { path = "crates/murtaugh-slack" }
 murtaugh-store = { path = "crates/murtaugh-store" }
 slack-sim = { path = "crates/slack-sim" }
