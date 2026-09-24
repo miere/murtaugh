@@ -12,6 +12,7 @@ use murtaugh_slack::{
 use murtaugh_store::{Conversation, Pin, Store, ToolMode, UserConfig, UserId};
 use rax::attachment::Attachment;
 use rax::content::ContentBlock;
+use rax::event::BackgroundEvent;
 use rax::id::SessionId;
 use rax::interaction::{DisplayAnswer, DisplayOutcome};
 use rax::session::{NewSession, Prompt, SessionRef};
@@ -20,6 +21,7 @@ use rax::{ErrorKind, Event as TurnEvent, GatewayCall, GatewayReply, Open};
 use rax_tokio::CallError;
 use rax_tokio::gateway::{GatewayLink, StreamEvents};
 use time::OffsetDateTime;
+use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -30,7 +32,7 @@ use crate::faults::{self, Refusal};
 use crate::files::Files;
 use crate::fleet::{Fleet, Node};
 use crate::home;
-use crate::hub::FleetChange;
+use crate::hub::{Background, FleetChange};
 use crate::picker;
 use crate::prompts::{self, Asked, Prompts};
 use crate::render;
@@ -54,6 +56,8 @@ const ATTACHMENT_WAIT: Duration = Duration::from_secs(60);
 pub const THINKING_REFRESH: Duration = Duration::from_secs(2);
 /// Long enough for a node to fetch the files a prompt links before accepting it.
 pub const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
+/// How often a background run that has finished checks whether the cards it raised are settled.
+const SETTLE_POLL: Duration = Duration::from_millis(500);
 /// How long a `Send Again` button stays live. Past this the conversation has almost certainly
 /// moved on, and replaying a message into it would be a surprise rather than a retry.
 const RETRY_TTL: Duration = Duration::from_secs(30 * 60);
@@ -84,7 +88,12 @@ pub struct Chat {
     tool_ceiling: Duration,
     /// Messages a retryable failure left on the table, by the id their card's button carries.
     retries: Mutex<HashMap<String, Offer>>,
+    /// The background run of each session that has one, by node and session: the one task that
+    /// draws them keeps a session's events in the order the node sent them.
+    backgrounds: Mutex<HashMap<(String, SessionId), BackgroundEvents>>,
 }
+
+type BackgroundEvents = mpsc::UnboundedSender<Open<BackgroundEvent>>;
 
 /// Something the gateway must say about a turn once the agent has finished saying its piece.
 enum Aftermath {
@@ -207,6 +216,7 @@ impl Chat {
             turn_idle_timeout,
             tool_ceiling,
             retries: Mutex::new(HashMap::new()),
+            backgrounds: Mutex::new(HashMap::new()),
         })
     }
 
@@ -517,6 +527,160 @@ impl Chat {
             Err(err) => {
                 tracing::warn!(node = %selector, error = %err, "could not drop the pins of a departed node");
             }
+        }
+    }
+
+    /// Hands an event to its session's background run, starting one if none is going.
+    pub fn on_background(self: &Arc<Self>, background: Background) {
+        let Background {
+            selector,
+            session_id,
+            event,
+        } = background;
+        let key = (selector, session_id);
+        let mut runs = lock(&self.backgrounds);
+        let event = match runs.get(&key) {
+            Some(run) => match run.send(event) {
+                Ok(()) => return,
+                Err(mpsc::error::SendError(event)) => event,
+            },
+            None => event,
+        };
+        let (run, events) = mpsc::unbounded_channel();
+        let _ = run.send(event);
+        runs.insert(key.clone(), run);
+        tokio::spawn(self.clone().background(key, events));
+    }
+
+    /// What a session does between turns: a background task finishing, the answer the agent
+    /// writes about it, a tool one of its sub-agents wants. Without this, all of it is lost and
+    /// the agent looks as if it never woke up.
+    async fn background(
+        self: Arc<Self>,
+        key: (String, SessionId),
+        mut events: mpsc::UnboundedReceiver<Open<BackgroundEvent>>,
+    ) {
+        let (selector, session_id) = &key;
+        loop {
+            match self.pinned(selector, session_id).await {
+                Some((pin, node)) => self.show_background(&pin, &node, &mut events).await,
+                None => {
+                    tracing::debug!(node = %selector, %session_id, "background event for a session no thread is pinned to");
+                    while events.try_recv().is_ok() {}
+                }
+            }
+            // Under the lock, so an event sent while this run was ending starts the next one here
+            // rather than landing in a channel nobody reads.
+            let mut runs = lock(&self.backgrounds);
+            if events.is_empty() {
+                runs.remove(&key);
+                return;
+            }
+        }
+    }
+
+    /// The pin of the thread a node's session answers in, and the node while it is attached.
+    async fn pinned(&self, selector: &str, session_id: &SessionId) -> Option<(Pin, Node)> {
+        let pins = match self.store.pins().await {
+            Ok(pins) => pins,
+            Err(err) => {
+                tracing::warn!(error = %err, "could not read the pins to place a background event");
+                return None;
+            }
+        };
+        let pin = pins
+            .into_iter()
+            .find(|pin| pin.node == selector && pin.session_id == session_id.0)?;
+        let node = self.fleet.get(selector)?;
+        Some((pin, node))
+    }
+
+    /// One stretch of background work, drawn as its own reply the way a turn is. It ends when the
+    /// agent completes and every card it raised is settled, or when it goes quiet; nothing is
+    /// cancelled then, because there is no turn to cancel.
+    async fn show_background(
+        &self,
+        pin: &Pin,
+        node: &Node,
+        events: &mut mpsc::UnboundedReceiver<Open<BackgroundEvent>>,
+    ) {
+        let conversation = &pin.conversation;
+        let recipient =
+            (!is_direct(&conversation.channel)).then(|| (self.team.clone(), pin.user.to_string()));
+        let thinking = Thinking::start(self.slack.clone(), conversation);
+        let turn = Turn::default();
+        let mut reply = Reply::new(
+            self.slack.clone(),
+            Target {
+                channel: conversation.channel.clone(),
+                thread_ts: conversation.thread_ts.clone(),
+                recipient,
+            },
+        );
+        let mut active = Instant::now();
+        let mut done = false;
+        let mut failure: Option<rax::Error> = None;
+        let mut unattached: Vec<(String, String)> = Vec::new();
+        loop {
+            // An approval ends as a deny once its run does, so a run the agent finished stays up
+            // until the cards its sub-agents raised are answered.
+            if done && !turn.waiting() {
+                break;
+            }
+            let due = reply.due();
+            let event = tokio::select! {
+                event = events.recv() => event,
+                () = sleep_until_due(due) => {
+                    reply.flush_due().await;
+                    continue;
+                }
+                () = tokio::time::sleep(SETTLE_POLL), if done => continue,
+                () = tokio::time::sleep_until(active + self.turn_idle_timeout) => {
+                    let working = turn.waiting()
+                        || turn
+                            .longest_tool()
+                            .is_some_and(|(_, age)| age < self.tool_ceiling);
+                    if working {
+                        active = Instant::now();
+                        continue;
+                    }
+                    break;
+                }
+            };
+            let Some(event) = event else {
+                break;
+            };
+            active = Instant::now();
+            let event = match event {
+                Open::Known(event) => event,
+                Open::Unknown { name, .. } => {
+                    tracing::debug!(%name, "background event of a kind this gateway does not know");
+                    continue;
+                }
+            };
+            done |= matches!(
+                event,
+                BackgroundEvent::Complete { .. } | BackgroundEvent::Error { .. }
+            );
+            match self
+                .show(&mut reply, node, Open::Known(as_turn(event)), &turn)
+                .await
+            {
+                Some(Aftermath::Failed(reported)) => drop(failure.get_or_insert(reported)),
+                Some(Aftermath::Unattached { name, reason }) => unattached.push((name, reason)),
+                None => {}
+            }
+        }
+        turn.token.cancel();
+        thinking.stop().await;
+        reply.finish().await;
+        if !unattached.is_empty() {
+            self.alert(conversation, &faults::unattached(&node.name, &unattached))
+                .await;
+        }
+        if let Some(reported) = &failure {
+            self.alert(conversation, &faults::turn_failed(&node.name, reported))
+                .await;
         }
     }
 
@@ -1414,6 +1578,28 @@ impl Chat {
             tracing::warn!(error = %err, "could not post in a thread");
         }
     }
+}
+
+/// A background event is drawn exactly as the same event in a turn would be.
+fn as_turn(event: BackgroundEvent) -> TurnEvent {
+    match event {
+        BackgroundEvent::Message { content } => TurnEvent::Message { content },
+        BackgroundEvent::Status { text } => TurnEvent::Status { text },
+        BackgroundEvent::Complete { stop_reason } => TurnEvent::Complete { stop_reason },
+        BackgroundEvent::Error { error } => TurnEvent::Error { error },
+        BackgroundEvent::ToolCall { tool_call } => TurnEvent::ToolCall { tool_call },
+        BackgroundEvent::ToolCallUpdate { tool_call_update } => {
+            TurnEvent::ToolCallUpdate { tool_call_update }
+        }
+        BackgroundEvent::PlanUpdate { entries } => TurnEvent::PlanUpdate { entries },
+        BackgroundEvent::Attachment { attachment } => TurnEvent::Attachment { attachment },
+    }
+}
+
+/// Slack's direct-message channels are the ones whose id starts with `D`, and a reply there
+/// names no recipient.
+fn is_direct(channel: &str) -> bool {
+    channel.starts_with('D')
 }
 
 /// Every gateway notice wears the same label, so one is told from an answer at a glance. The

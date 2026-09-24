@@ -238,6 +238,7 @@ async fn serve_as_leader(
             Some(change) = hub.changes.recv() => {
                 tokio::spawn(chat.clone().on_fleet(change));
             }
+            Some(background) = hub.backgrounds.recv() => chat.on_background(background),
             _ = renew.tick() => match leader.renew(&lease).await {
                 Ok(Some(next)) => {
                     lease = next;

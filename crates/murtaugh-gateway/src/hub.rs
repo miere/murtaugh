@@ -6,6 +6,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use murtaugh_store::Store;
+use rax::Open;
+use rax::event::BackgroundEvent;
+use rax::id::SessionId;
 use rax::session::{GatewayCapabilities, Initialize, PROTOCOL_VERSION};
 use rax::{GatewayCall, GatewayReply, NodeCall, NodeReply};
 use rax_tokio::gateway::{
@@ -31,6 +34,16 @@ pub enum FleetChange {
     Gone { selector: String },
 }
 
+/// Something a node's session did with no turn open, for the chat side to show in its thread:
+/// a background task finishing, the answer the agent wrote about it, or a tool one of its
+/// sub-agents wants to run.
+#[derive(Debug, Clone)]
+pub struct Background {
+    pub selector: String,
+    pub session_id: SessionId,
+    pub event: Open<BackgroundEvent>,
+}
+
 pub fn capabilities(tools: &Tools) -> GatewayCapabilities {
     GatewayCapabilities {
         question: true,
@@ -45,6 +58,7 @@ pub fn capabilities(tools: &Tools) -> GatewayCapabilities {
 pub struct Hub {
     pub server: GatewayServer,
     pub changes: mpsc::Receiver<FleetChange>,
+    pub backgrounds: mpsc::Receiver<Background>,
 }
 
 /// Every collaborator a node's link is served with; bundling them would only move the list.
@@ -62,6 +76,7 @@ pub async fn start(
     let (server, new_links) =
         GatewayServer::bind(listen, access.clone(), GatewayConfig::default()).await?;
     let (changes, receiver) = mpsc::channel(64);
+    let (backgrounds, background_receiver) = mpsc::channel(256);
     let serving = Serving {
         access,
         fleet,
@@ -70,11 +85,13 @@ pub async fn start(
         credentials,
         sign_ins,
         changes,
+        backgrounds,
     };
     tokio::spawn(accept(new_links, serving, shutdown));
     Ok(Hub {
         server,
         changes: receiver,
+        backgrounds: background_receiver,
     })
 }
 
@@ -117,6 +134,7 @@ struct Serving {
     credentials: Credentials,
     sign_ins: SignIns,
     changes: mpsc::Sender<FleetChange>,
+    backgrounds: mpsc::Sender<Background>,
 }
 
 async fn accept(mut new_links: NewLinks, serving: Serving, shutdown: CancellationToken) {
@@ -141,6 +159,7 @@ async fn serve(link: GatewayLink, mut events: LinkEvents, serving: Serving) {
         credentials,
         sign_ins,
         changes,
+        backgrounds,
     } = serving;
     let selector = link.identity().0.clone();
     let snapshot = access.snapshot();
@@ -240,8 +259,15 @@ async fn serve(link: GatewayLink, mut events: LinkEvents, serving: Serving) {
                     tracing::debug!(node = %name, error = %err, "could not answer a node call");
                 }
             }
-            LinkEvent::Background { session_id, .. } => {
-                tracing::debug!(node = %name, %session_id, "background event with no turn open");
+            LinkEvent::Background { session_id, event } => {
+                let background = Background {
+                    selector: selector.clone(),
+                    session_id,
+                    event,
+                };
+                if backgrounds.send(background).await.is_err() {
+                    tracing::debug!(node = %name, "no chat side to show a background event");
+                }
             }
             LinkEvent::Attachment { transfer_id, bytes } => {
                 files.arrived(&selector, transfer_id, Ok(bytes));

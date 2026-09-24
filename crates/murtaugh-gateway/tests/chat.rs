@@ -9,6 +9,7 @@ use murtaugh_gateway::run::{self, Options};
 use murtaugh_gateway::token;
 use murtaugh_store::{NodeToken, SqliteStore, Store, UserId};
 use rax::content::ContentBlock;
+use rax::event::BackgroundEvent;
 use rax::id::PromptId;
 use rax::id::{RequestId, SessionId, ToolCallId};
 use rax::interaction::{DisplayAnswer, PlanRequest, Question, QuestionOption, QuestionRequest};
@@ -2491,5 +2492,89 @@ async fn a_card_waiting_on_a_person_keeps_a_silent_turn_alive() {
         .await
         .unwrap();
     wait_for_turn_end(&rig, GENERAL, &ts, "[Chat {} None").await;
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_that_wakes_up_after_its_turn_answers_in_its_thread() {
+    let rig = rig().await;
+    let mut laptop = rig.node(ALICE, "laptop").await;
+
+    let ts = rig.sim.mention(ALICE, GENERAL, "ping", None).await.unwrap();
+    let (session, _) = laptop.next_prompt().await;
+    wait_for_turn_end(&rig, GENERAL, &ts, "says pong to: ping").await;
+    assert!(matches!(
+        within(laptop.seen.recv()).await.unwrap(),
+        Seen::Verdict { allowed: true }
+    ));
+
+    // A sub-agent the turn left running asks for a tool, then the task it ran finishes and the
+    // agent writes about it, all with no turn open.
+    let asked = ToolCall {
+        id: ToolCallId("tc-late".into()),
+        name: "Bash".into(),
+        title: Some("cargo test".into()),
+        kind: ToolKind::Execute,
+        input: Some(serde_json::json!({"command": "cargo test"})),
+        content: vec![],
+    };
+    laptop
+        .handle
+        .background(
+            session.clone(),
+            BackgroundEvent::ToolCall { tool_call: asked },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        within(laptop.seen.recv()).await.unwrap(),
+        Seen::Verdict { allowed: true }
+    ));
+    let woke = BackgroundEvent::Message {
+        content: ContentBlock::text("The background build finished green.").into(),
+    };
+    laptop
+        .handle
+        .background(session.clone(), woke)
+        .await
+        .unwrap();
+    laptop
+        .handle
+        .background(session, BackgroundEvent::Complete { stop_reason: None })
+        .await
+        .unwrap();
+
+    rig.bot_replies(&ts, |replies| {
+        replies.iter().any(|message| {
+            message
+                .text
+                .contains("The background build finished green.")
+        })
+    })
+    .await;
+    assert_eq!(rig.sim.violations(), vec![]);
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_background_event_for_a_session_no_thread_holds_is_dropped() {
+    let rig = rig().await;
+    let laptop = rig.node(ALICE, "laptop").await;
+
+    let stray = BackgroundEvent::Message {
+        content: ContentBlock::text("nobody asked").into(),
+    };
+    laptop
+        .handle
+        .background(SessionId("laptop-9".into()), stray)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !rig.sim
+            .messages(GENERAL)
+            .iter()
+            .any(|message| message.text.contains("nobody asked"))
+    );
     rig.shutdown.cancel();
 }
