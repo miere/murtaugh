@@ -35,6 +35,8 @@ fn task(id: &str, status: TaskStatus) -> PlanTask {
         task_id: id.into(),
         title: format!("Run {id}"),
         status,
+        icon: None,
+        details: None,
     }
 }
 

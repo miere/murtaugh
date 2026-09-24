@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use murtaugh_gateway::reply::{Reply, Target};
+use murtaugh_gateway::reply::{Reply, Target, TaskCard};
 use murtaugh_slack::{SlackClient, TaskStatus, Tokens};
 use slack_sim::{ALICE, BOT_USER_ID, GENERAL, SimMessage, SlackSim, TEAM_ID};
 
@@ -108,19 +108,60 @@ async fn a_stream_that_expired_while_idle_carries_on_in_a_new_message() {
     assert!(sim.violations().is_empty(), "{:?}", sim.violations());
 }
 
+fn card(title: &str) -> TaskCard<'_> {
+    TaskCard {
+        title: Some(title),
+        ..TaskCard::default()
+    }
+}
+
+#[tokio::test]
+async fn a_task_card_keeps_its_details_and_icon_through_later_updates() {
+    let (sim, mut reply, thread) = setup().await;
+    let first = TaskCard {
+        title: Some("List the files"),
+        details: Some("ls -la"),
+        icon: Some("code"),
+    };
+    reply.task("t1", first, TaskStatus::InProgress).await;
+    reply
+        .task("t1", TaskCard::default(), TaskStatus::Complete)
+        .await;
+    reply.finish().await;
+
+    let stream = answers(&sim, &thread)[0].stream.clone().unwrap();
+    let task = &stream.plan_blocks[0].tasks[0];
+    assert_eq!(
+        (
+            task.title.as_str(),
+            task.details.as_deref(),
+            task.icon.as_deref(),
+            task.status.as_str()
+        ),
+        ("List the files", Some("_ls -la_"), Some("code"), "complete")
+    );
+    assert!(sim.violations().is_empty(), "{:?}", sim.violations());
+}
+
 #[tokio::test]
 async fn a_tool_settles_on_its_own_beat_however_much_the_agent_says_after_it() {
     let (sim, mut reply, thread) = setup().await;
     reply
-        .task("t1", Some("Read a file"), TaskStatus::InProgress)
+        .task("t1", card("Read a file"), TaskStatus::InProgress)
         .await;
-    reply.task("t1", None, TaskStatus::InProgress).await;
-    reply.text("It says hello.").await;
-    reply.task("t1", None, TaskStatus::Complete).await;
     reply
-        .task("t2", Some("Run tests"), TaskStatus::InProgress)
+        .task("t1", TaskCard::default(), TaskStatus::InProgress)
         .await;
-    reply.task("t2", None, TaskStatus::Error).await;
+    reply.text("It says hello.").await;
+    reply
+        .task("t1", TaskCard::default(), TaskStatus::Complete)
+        .await;
+    reply
+        .task("t2", card("Run tests"), TaskStatus::InProgress)
+        .await;
+    reply
+        .task("t2", TaskCard::default(), TaskStatus::Error)
+        .await;
     reply.finish().await;
 
     let answers = answers(&sim, &thread);
@@ -165,7 +206,7 @@ async fn a_surface_that_cannot_stream_gets_ordinary_messages_instead() {
     sim.fail("chat.startStream", "channel_type_not_supported");
     reply.text("**Hello** from a canvas").await;
     reply
-        .task("t1", Some("ignored"), TaskStatus::InProgress)
+        .task("t1", card("ignored"), TaskStatus::InProgress)
         .await;
     reply.text(", still here.").await;
     reply.finish().await;

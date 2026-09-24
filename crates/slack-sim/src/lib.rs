@@ -133,6 +133,10 @@ pub struct SimTask {
     pub id: String,
     pub title: String,
     pub status: String,
+    /// The name of a task card's icon, if it has one.
+    pub icon: Option<String>,
+    /// A task card's details as plain text, with `_` around each italic run.
+    pub details: Option<String>,
 }
 
 /// A plan block sent as a `blocks` chunk. Slack rewrites one whose `block_id` the message already
