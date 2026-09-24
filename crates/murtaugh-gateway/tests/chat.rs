@@ -16,7 +16,7 @@ use rax::interaction::{DisplayAnswer, PlanRequest, Question, QuestionOption, Que
 use rax::resource::ReadResource;
 use rax::session::{Initialized, NodeCapabilities, PromptAccepted, SessionCreated, ToolGate};
 use rax::tool::{Decision, ToolCall, ToolKind};
-use rax::{Event, GatewayCall, GatewayReply, Open};
+use rax::{Event, GatewayCall, GatewayReply, NodeCall, NodeReply, Open};
 use rax_tokio::CallError;
 use rax_tokio::node::{NodeConfig, NodeEvent, NodeHandle, NodeLink, Resource};
 use slack_sim::{BOT_USER_ID, GENERAL, SimMessage, SlackSim, TEAM_ID};
@@ -64,6 +64,10 @@ enum Seen {
     Verdict {
         allowed: bool,
     },
+    /// A metadata key the gateway reported it ignored.
+    Ignored(String),
+    /// The gateway ended the link over this node's metadata.
+    Rejected(rax::Rejection),
 }
 
 struct FakeNode {
@@ -80,15 +84,35 @@ impl FakeNode {
 
     async fn next_prompt_with_links(&mut self) -> (SessionId, String, Vec<ContentBlock>) {
         loop {
-            match within(self.seen.recv()).await.unwrap() {
-                Seen::Prompt {
-                    session,
-                    text,
-                    links,
-                } => return (session, text, links),
-                Seen::Verdict { .. } => {}
+            if let Seen::Prompt {
+                session,
+                text,
+                links,
+            } = within(self.seen.recv()).await.unwrap()
+            {
+                return (session, text, links);
             }
         }
+    }
+
+    /// The next thing the gateway said about this node's metadata.
+    async fn next_notice(&mut self) -> Seen {
+        loop {
+            if let notice @ (Seen::Ignored(_) | Seen::Rejected(_)) =
+                within(self.seen.recv()).await.unwrap()
+            {
+                return notice;
+            }
+        }
+    }
+
+    async fn update_metadata(&self, metadata: serde_json::Value) -> Result<NodeReply, CallError> {
+        let metadata = serde_json::from_value(metadata).unwrap();
+        within(
+            self.handle
+                .call(NodeCall::UpdateMetadata(rax::UpdateMetadata { metadata })),
+        )
+        .await
     }
 
     async fn read(&self, uri: &str, max_bytes: Option<u64>) -> Result<Resource, CallError> {
@@ -217,6 +241,25 @@ impl Rig {
         name: &str,
         gateways: &[std::net::SocketAddr],
     ) -> FakeNode {
+        self.node_declaring(owner, name, gateways, rax::Metadata::new())
+            .await
+    }
+
+    /// A node whose owner lets in only `people`, beside themselves.
+    async fn node_allowing(&self, owner: &str, name: &str, people: &[&str]) -> FakeNode {
+        let access = serde_json::json!({"policy": "allow_list", "people": people});
+        let metadata = rax::Metadata::from([("murtaugh_access".to_owned(), access)]);
+        self.node_declaring(owner, name, &[self.listen], metadata)
+            .await
+    }
+
+    async fn node_declaring(
+        &self,
+        owner: &str,
+        name: &str,
+        gateways: &[std::net::SocketAddr],
+        metadata: rax::Metadata,
+    ) -> FakeNode {
         let minted = token::mint();
         self.store
             .add_node_token(&NodeToken {
@@ -253,6 +296,7 @@ impl Rig {
             refused: Arc::new(Mutex::new(false)),
             name: name.to_owned(),
             initialized,
+            metadata,
         };
         tokio::spawn(async move {
             while let Some(event) = events.recv().await {
@@ -267,6 +311,19 @@ impl Rig {
                     }
                     NodeEvent::Answer(answer) => {
                         let _ = script.answers.send(answer);
+                    }
+                    NodeEvent::Unhandled {
+                        body:
+                            rax::Unhandled {
+                                subject: rax::open::Subject::MetadataKey { key },
+                                ..
+                            },
+                        ..
+                    } => {
+                        let _ = script.seen.send(Seen::Ignored(key));
+                    }
+                    NodeEvent::Rejected(rejection) => {
+                        let _ = script.seen.send(Seen::Rejected(rejection));
                     }
                     _ => {}
                 }
@@ -314,6 +371,7 @@ struct Script {
     refused: Arc<Mutex<bool>>,
     name: String,
     initialized: mpsc::Sender<()>,
+    metadata: rax::Metadata,
 }
 
 async fn answer(script: Script, id: RequestId, call: GatewayCall) {
@@ -327,6 +385,7 @@ async fn answer(script: Script, id: RequestId, call: GatewayCall) {
         refused,
         name,
         initialized,
+        metadata,
     } = script;
     match call {
         GatewayCall::Initialize(_) => {
@@ -336,6 +395,7 @@ async fn answer(script: Script, id: RequestId, call: GatewayCall) {
                     tool_gate: ToolGate::EveryCall,
                     ..Default::default()
                 },
+                metadata,
             });
             node.reply(id, reply).await.unwrap();
             let _ = initialized.send(()).await;
@@ -2576,5 +2636,211 @@ async fn a_background_event_for_a_session_no_thread_holds_is_dropped() {
             .iter()
             .any(|message| message.text.contains("nobody asked"))
     );
+    rig.shutdown.cancel();
+}
+
+async fn zipped(rig: &Rig, ts: &str) {
+    eventually("the zipped mouth", || {
+        rig.sim
+            .reactions(GENERAL, ts)
+            .contains(&"zipper_mouth_face".to_owned())
+            .then_some(())
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_allow_list_lets_in_the_owner_and_the_listed_and_keeps_even_the_admin_out() {
+    let rig = rig().await;
+    rig.store.set_allowed(&user(BOB), true).await.unwrap();
+    let _desktop = rig.node(ADMIN, "desktop").await;
+    let mut laptop = rig.node_allowing(ALICE, "laptop", &[BOB]).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let ts = rig
+        .sim
+        .mention(ALICE, GENERAL, "first", None)
+        .await
+        .unwrap();
+    assert_eq!(laptop.next_prompt().await.1, "first");
+    rig.bot_replies(&ts, |replies| {
+        replies.iter().any(|m| m.text.contains("pong to: first"))
+    })
+    .await;
+    rig.sim
+        .mention(BOB, GENERAL, "from bob", Some(&ts))
+        .await
+        .unwrap();
+    assert_eq!(laptop.next_prompt().await.1, "from bob");
+    rig.bot_replies(&ts, |replies| {
+        replies.iter().any(|m| m.text.contains("pong to: from bob"))
+    })
+    .await;
+
+    let from_admin = rig
+        .sim
+        .mention(ADMIN, GENERAL, "from the admin", Some(&ts))
+        .await
+        .unwrap();
+    zipped(&rig, &from_admin).await;
+    rig.sim
+        .mention(ALICE, GENERAL, "second", Some(&ts))
+        .await
+        .unwrap();
+    assert_eq!(laptop.next_prompt().await.1, "second");
+    assert_eq!(rig.sim.violations(), vec![]);
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn someone_shut_out_of_a_thread_cannot_interrupt_its_turn() {
+    let rig = rig().await;
+    rig.store.set_allowed(&user(BOB), true).await.unwrap();
+    let mut laptop = rig.node_allowing(ALICE, "laptop", &[]).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let ts = rig.sim.mention(ALICE, GENERAL, "slow", None).await.unwrap();
+    laptop.next_prompt().await;
+    let from_bob = rig
+        .sim
+        .mention(BOB, GENERAL, "stop that", Some(&ts))
+        .await
+        .unwrap();
+    zipped(&rig, &from_bob).await;
+    let heard = tokio::time::timeout(Duration::from_secs(1), laptop.seen.recv()).await;
+    assert!(heard.is_err(), "the turn heard {heard:?}");
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_person_falls_back_only_onto_a_machine_that_lets_them_in() {
+    let rig = rig().await;
+    rig.store.set_allowed(&user(BOB), true).await.unwrap();
+    let _desktop = rig.node_allowing(ADMIN, "desktop", &[]).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let ts = rig
+        .sim
+        .mention(BOB, GENERAL, "anyone?", None)
+        .await
+        .unwrap();
+    zipped(&rig, &ts).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        rig.sim
+            .thread(GENERAL, &ts)
+            .iter()
+            .all(|m| m.user.as_deref() != Some(BOT_USER_ID))
+    );
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_someone_let_in_may_answer_the_nodes_question() {
+    let rig = rig().await;
+    rig.store.set_allowed(&user(BOB), true).await.unwrap();
+    let mut laptop = rig.node_allowing(ALICE, "laptop", &[]).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let ts = rig
+        .sim
+        .mention(ALICE, GENERAL, "ask me", None)
+        .await
+        .unwrap();
+    laptop.next_prompt().await;
+    let card = eventually("the question card", || prompt_card(&rig, &ts)).await;
+    rig.sim
+        .click(BOB, GENERAL, &card.ts, murtaugh_gateway::prompts::CHAT)
+        .await
+        .unwrap();
+    eventually("the note to bob", || {
+        rig.sim
+            .ephemerals()
+            .iter()
+            .any(|(_, who, text)| who == BOB && text == "You can't answer this one.")
+            .then_some(())
+    })
+    .await;
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_whose_access_is_malformed_is_told_why_and_let_go() {
+    let rig = rig().await;
+    let metadata = serde_json::from_value(serde_json::json!({
+        "murtaugh_access": "everyone",
+    }))
+    .unwrap();
+    let mut laptop = rig
+        .node_declaring(ALICE, "laptop", &[rig.listen], metadata)
+        .await;
+    let Seen::Rejected(rejection) = laptop.next_notice().await else {
+        panic!("expected a rejection")
+    };
+    assert_eq!(rejection.key.as_deref(), Some("murtaugh_access"));
+    assert!(
+        rejection.message.contains("must be a table"),
+        "{}",
+        rejection.message
+    );
+
+    let ts = rig.sim.mention(ALICE, GENERAL, "ping", None).await.unwrap();
+    rig.bot_replies(&ts, |replies| {
+        replies.iter().any(|m| m.text == "No machine available")
+    })
+    .await;
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_changes_who_it_lets_in_live_and_a_bad_change_ends_its_link() {
+    let rig = rig().await;
+    rig.store.set_allowed(&user(BOB), true).await.unwrap();
+    let mut laptop = rig.node(ALICE, "laptop").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let ts = rig
+        .sim
+        .mention(ALICE, GENERAL, "first", None)
+        .await
+        .unwrap();
+    laptop.next_prompt().await;
+    rig.bot_replies(&ts, |replies| {
+        replies.iter().any(|m| m.text.contains("pong to: first"))
+    })
+    .await;
+    rig.sim
+        .mention(BOB, GENERAL, "one", Some(&ts))
+        .await
+        .unwrap();
+    assert_eq!(laptop.next_prompt().await.1, "one");
+    rig.bot_replies(&ts, |replies| {
+        replies.iter().any(|m| m.text.contains("pong to: one"))
+    })
+    .await;
+
+    let narrowed = laptop
+        .update_metadata(serde_json::json!({
+            "murtaugh_access": {"policy": "allow_list", "people": []},
+            "murtaugh_colour": "teal",
+        }))
+        .await;
+    assert!(matches!(narrowed, Ok(NodeReply::UpdateMetadata)));
+    assert!(matches!(laptop.next_notice().await, Seen::Ignored(key) if key == "murtaugh_colour"));
+    let two = rig
+        .sim
+        .mention(BOB, GENERAL, "two", Some(&ts))
+        .await
+        .unwrap();
+    zipped(&rig, &two).await;
+
+    let broken = laptop
+        .update_metadata(serde_json::json!({"murtaugh_access": {"policy": "allow_list"}}))
+        .await;
+    assert!(matches!(
+        broken,
+        Err(CallError::Fault(fault)) if fault.kind == rax::ErrorKind::Rejected
+    ));
+    assert!(matches!(laptop.next_notice().await, Seen::Rejected(_)));
     rig.shutdown.cancel();
 }

@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use murtaugh_slack::{Block, Click, PostMessage, SlackClient, UpdateMessage};
+use murtaugh_store::UserId;
 use rax::id::PromptId;
 use rax::interaction::{
     DisplayAnswer, DisplayOutcome, PlanChoice, PlanRequest, Question, QuestionRequest,
@@ -16,6 +17,8 @@ use rax_tokio::gateway::GatewayLink;
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
+
+use crate::node_access::NodeAccess;
 
 /// The Go gateway's bound on one question; plans share it.
 pub const TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -68,6 +71,16 @@ enum Ended {
 struct Waiting {
     questions: Vec<Question>,
     decide: oneshot::Sender<Decided>,
+    /// An answer reaches the node as words, so only people its owner lets in may give one.
+    admits: Admits,
+}
+
+/// Who the asking node's owner lets in, as it stood when the card was posted: a turn already
+/// running finishes under the rules it started with.
+#[derive(Clone)]
+pub struct Admits {
+    pub owner: UserId,
+    pub access: NodeAccess,
 }
 
 /// Everything one card needs, owned so it can wait in its own task while the turn goes on.
@@ -80,6 +93,7 @@ pub struct Put {
     pub timeout: Duration,
     /// Cancelled when the turn ends, which dismisses a card nobody answered.
     pub turn: CancellationToken,
+    pub admits: Admits,
 }
 
 #[derive(Clone, Default)]
@@ -103,8 +117,14 @@ impl Prompts {
             Asked::Plan(_) => Vec::new(),
         };
         let (decide, decided) = oneshot::channel();
-        self.waiting()
-            .insert(id.clone(), Waiting { questions, decide });
+        self.waiting().insert(
+            id.clone(),
+            Waiting {
+                questions,
+                decide,
+                admits: put.admits.clone(),
+            },
+        );
         let pending = match &put.asked {
             Asked::Questions(request) => question_card(request, &id),
             Asked::Plan(request) => plan_card(request, &id),
@@ -175,7 +195,9 @@ impl Prompts {
         let Some(card) = waiting.get(&click.value) else {
             return Some("That's already been answered.".into());
         };
-        if !may_answer {
+        let admitted = UserId::parse(&click.user)
+            .is_ok_and(|user| card.admits.access.admits(&card.admits.owner, &user));
+        if !may_answer || !admitted {
             return Some("You can't answer this one.".into());
         }
         let decision = if click.action_id == SUBMIT {

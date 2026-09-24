@@ -182,6 +182,7 @@ pub fn worth_retrying_turn(fault: &Error) -> bool {
         | ErrorKind::SessionBusy
         | ErrorKind::Forbidden
         | ErrorKind::TooLarge
+        | ErrorKind::Rejected
         | ErrorKind::Rpc { .. }
         | ErrorKind::Unknown => false,
     }
@@ -328,6 +329,11 @@ fn reported(fault: &Error) -> Told {
             Level::Error,
             "This message is larger than the machine accepts.".to_owned(),
             Some(SHORTEN),
+        ),
+        ErrorKind::Rejected => (
+            Level::Error,
+            "The machine's settings were refused, so it has stopped.".to_owned(),
+            Some("Ask the machine's owner to fix its settings."),
         ),
         ErrorKind::Provider { provider } => return provider_failed(provider, detail),
         ErrorKind::Rpc { rpc } => (

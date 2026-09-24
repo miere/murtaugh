@@ -15,6 +15,7 @@ pub mod hub;
 pub mod launchd;
 pub mod logging;
 pub mod manifest;
+pub mod node_access;
 pub mod picker;
 pub mod prompts;
 pub mod render;

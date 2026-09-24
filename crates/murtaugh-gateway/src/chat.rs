@@ -392,6 +392,11 @@ impl Chat {
         let Some((conversation, selector)) = picker::chosen(&click.value) else {
             return Some("That menu is out of date. Ask me `/node` again.".to_owned());
         };
+        if self.shut_out_of(&conversation, &user).await {
+            return Some(
+                "This thread runs on a machine whose owner has not let you in.".to_owned(),
+            );
+        }
         if !self
             .fleet
             .choices(&user, &snapshot)
@@ -689,7 +694,16 @@ impl Chat {
             return;
         };
         let snapshot = self.access.snapshot();
-        if !snapshot.may_chat(&user) {
+        let conversation = Conversation {
+            channel: incoming.channel.clone(),
+            thread_ts: incoming
+                .thread_ts
+                .clone()
+                .unwrap_or_else(|| incoming.ts.clone()),
+        };
+        // Before commands too: `/stop` and `/node` steer the owner's machine as surely as a
+        // prompt does.
+        if !snapshot.may_chat(&user) || self.shut_out_of(&conversation, &user).await {
             self.react(&incoming.channel, &incoming.ts, UNAUTHORISED_REACTION)
                 .await;
             return;
@@ -700,13 +714,6 @@ impl Chat {
             self.command(command, &incoming).await;
             return;
         }
-        let conversation = Conversation {
-            channel: incoming.channel.clone(),
-            thread_ts: incoming
-                .thread_ts
-                .clone()
-                .unwrap_or_else(|| incoming.ts.clone()),
-        };
         let cancel = {
             let mut turns = lock(&self.turns);
             match turns.get_mut(&conversation) {
@@ -726,10 +733,10 @@ impl Chat {
             }
             return;
         }
-        let (mut user, mut incoming, mut received) = (user, incoming, received);
+        let (mut user, mut batch, mut received) = (user, vec![incoming], received);
         loop {
             let thinking = Thinking::start(self.slack.clone(), &conversation);
-            let timing = self.converse(&user, &conversation, &incoming).await;
+            let timing = self.converse(&user, &conversation, &batch).await;
             thinking.stop().await;
             if self.turn_timings
                 && let Some(timing) = timing
@@ -756,15 +763,50 @@ impl Chat {
                 }
                 queued
             };
-            let Some(next) = self.merge(queued) else {
+            // Kept apart until the turn's machine is known, because whose words may reach it
+            // depends on whose machine it is.
+            let mut queued = queued;
+            queued.sort_by(|a, b| a.ts.cmp(&b.ts));
+            let Some(last) = queued.last() else {
                 return;
             };
-            let Ok(next_user) = UserId::parse(&next.user) else {
+            let Ok(next_user) = UserId::parse(&last.user) else {
                 lock(&self.turns).remove(&conversation);
                 return;
             };
-            (user, incoming, received) = (next_user, next, Instant::now());
+            (user, batch, received) = (next_user, queued, Instant::now());
         }
+    }
+
+    /// Whether the machine this thread runs on belongs to an owner who has not let this person
+    /// in. Such a person cannot steer the thread either — interrupt, stop or move it — because
+    /// each would act on the owner's machine for them.
+    async fn shut_out_of(&self, conversation: &Conversation, user: &UserId) -> bool {
+        let pinned = match self.store.pin(conversation).await {
+            Ok(pinned) => pinned,
+            Err(err) => {
+                tracing::warn!(error = %err, "could not read a conversation's pin");
+                None
+            }
+        };
+        pinned
+            .and_then(|pin| self.fleet.get(&pin.node))
+            .is_some_and(|node| !node.admits(user))
+    }
+
+    /// What of these messages the node's owner lets reach it, as one prompt. The rest are marked
+    /// where they were written and never leave the gateway.
+    async fn admitted(&self, node: &Node, batch: &[Incoming]) -> Option<Incoming> {
+        let mut kept = Vec::with_capacity(batch.len());
+        for message in batch {
+            if UserId::parse(&message.user).is_ok_and(|speaker| node.admits(&speaker)) {
+                kept.push(message.clone());
+            } else {
+                self.react(&message.channel, &message.ts, UNAUTHORISED_REACTION)
+                    .await;
+            }
+        }
+        self.merge(kept)
     }
 
     /// Messages that arrived during a turn, as one: each on its own paragraph, named when more
@@ -879,7 +921,10 @@ impl Chat {
                 .next()
                 .is_some_and(|word| word.eq_ignore_ascii_case("stop"));
         let (user, channel) = (text("user_id"), text("channel_id"));
-        if !stop || !UserId::parse(&user).is_ok_and(|u| self.access.snapshot().may_chat(&u)) {
+        let Ok(user_id) = UserId::parse(&user) else {
+            return;
+        };
+        if !stop || !self.access.snapshot().may_chat(&user_id) {
             return;
         }
         let thread_ts = payload["thread_ts"].as_str().map(str::to_owned);
@@ -888,10 +933,16 @@ impl Chat {
                 "Slack does not run slash commands inside threads. Mention me with `{}` in the thread you want to stop.",
                 Command::Stop
             )),
-            Some(thread_ts) => self.stop(&Conversation {
-                channel: channel.clone(),
-                thread_ts: thread_ts.clone(),
-            }),
+            Some(thread_ts) => {
+                let conversation = Conversation {
+                    channel: channel.clone(),
+                    thread_ts: thread_ts.clone(),
+                };
+                if self.shut_out_of(&conversation, &user_id).await {
+                    return;
+                }
+                self.stop(&conversation)
+            }
         };
         let Some(note) = note else {
             return;
@@ -909,12 +960,14 @@ impl Chat {
         &self,
         user: &UserId,
         conversation: &Conversation,
-        incoming: &Incoming,
+        batch: &[Incoming],
     ) -> Option<TurnTiming> {
-        let text = self.strip_mention(&incoming.text);
         let mut retried = false;
         loop {
-            let seat = self.seat(user, conversation, incoming).await?;
+            let seat = self.seat(user, conversation, batch).await?;
+            let merged = self.admitted(&seat.node, batch).await?;
+            let incoming = &merged;
+            let text = self.strip_mention(&incoming.text);
             let mut words = String::new();
             if let Some(history) = &seat.history {
                 words.push_str(history);
@@ -1026,12 +1079,14 @@ impl Chat {
         self.fleet.session_ended(&node.selector);
     }
 
+    /// `batch` is sorted and never empty; its last message is the one that started the turn.
     async fn seat(
         &self,
         user: &UserId,
         conversation: &Conversation,
-        incoming: &Incoming,
+        batch: &[Incoming],
     ) -> Option<Seat> {
+        let incoming = batch.last()?;
         let snapshot = self.access.snapshot();
         let pinned = match self.store.pin(conversation).await {
             Ok(pinned) => pinned,
@@ -1050,7 +1105,7 @@ impl Chat {
             if let Some(node) = live {
                 let moved = lock(&self.moved).remove(conversation);
                 let history = match moved {
-                    true => self.history(conversation, &incoming.ts).await,
+                    true => self.history(conversation, &incoming.ts, &node).await,
                     false => None,
                 };
                 return Some(Seat {
@@ -1064,13 +1119,26 @@ impl Chat {
             lock(&self.orphaned).insert(conversation.clone());
         }
         let Some(node) = self.fleet.assign(user, &snapshot) else {
+            // Machines are up, but no owner lets these people in: that is a refusal, not an
+            // outage, and says so the way every refusal does.
+            if self.fleet.shuts_out(user, &snapshot) {
+                for message in batch {
+                    let shut_out = UserId::parse(&message.user)
+                        .is_ok_and(|speaker| self.fleet.shuts_out(&speaker, &snapshot));
+                    if shut_out {
+                        self.react(&message.channel, &message.ts, UNAUTHORISED_REACTION)
+                            .await;
+                    }
+                }
+                return None;
+            }
             let orphaned = lock(&self.orphaned).contains(conversation);
             self.alert(conversation, &no_machine(orphaned)).await;
             return None;
         };
         let orphaned = lock(&self.orphaned).remove(conversation);
         let history = if incoming.thread_ts.is_some() || orphaned {
-            self.history(conversation, &incoming.ts).await
+            self.history(conversation, &incoming.ts, &node).await
         } else {
             None
         };
@@ -1143,7 +1211,14 @@ impl Chat {
         }
     }
 
-    async fn history(&self, conversation: &Conversation, current: &str) -> Option<String> {
+    /// Leaves out what people the node's owner has not let in wrote, so catching a machine up
+    /// never hands it words that could not have reached it directly.
+    async fn history(
+        &self,
+        conversation: &Conversation,
+        current: &str,
+        node: &Node,
+    ) -> Option<String> {
         let messages = match self
             .slack
             .replies(&conversation.channel, &conversation.thread_ts)
@@ -1159,6 +1234,12 @@ impl Chat {
             .iter()
             .filter(|message| message.ts != current)
             .filter(|message| !message.text.trim().is_empty())
+            .filter(|message| match (&message.user, &message.bot_id) {
+                (Some(user), None) if *user != self.bot_user => {
+                    UserId::parse(user).is_ok_and(|speaker| node.admits(&speaker))
+                }
+                _ => true,
+            })
             .map(|message| {
                 let who = match (&message.user, &message.bot_id) {
                     (Some(user), _) if *user == self.bot_user => "you (the assistant)".to_owned(),
@@ -1471,6 +1552,10 @@ impl Chat {
             asked,
             timeout: self.prompt_timeout,
             turn: turn.token.clone(),
+            admits: prompts::Admits {
+                owner: node.owner.clone(),
+                access: node.access.clone(),
+            },
         };
         let prompts = self.prompts.clone();
         let waiting = turn.wait();
