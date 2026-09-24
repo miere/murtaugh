@@ -9,8 +9,9 @@ use murtaugh_store::Store;
 use rax::Open;
 use rax::event::BackgroundEvent;
 use rax::id::SessionId;
-use rax::session::{GatewayCapabilities, Initialize, PROTOCOL_VERSION};
-use rax::{GatewayCall, GatewayReply, NodeCall, NodeReply};
+use rax::open::{Subject, UnhandledReason};
+use rax::session::{GatewayCapabilities, Initialize, Initialized, PROTOCOL_VERSION};
+use rax::{ErrorKind, GatewayCall, GatewayReply, NodeCall, NodeReply, Unhandled};
 use rax_tokio::gateway::{
     GatewayConfig, GatewayLink, GatewayServer, LinkEvent, LinkEvents, NewLink, NewLinks,
 };
@@ -21,6 +22,7 @@ use crate::access::{Access, Snapshot};
 use crate::alerts::{Credentials, Reporter};
 use crate::files::Files;
 use crate::fleet::{Fleet, Node};
+use crate::node_access;
 use crate::signin::{self, SignIns};
 use crate::tools::Tools;
 
@@ -170,15 +172,27 @@ async fn serve(link: GatewayLink, mut events: LinkEvents, serving: Serving) {
         link.close().await;
         return;
     };
-    let capabilities = match initialize(&link, &tools).await {
-        Ok(capabilities) => capabilities,
+    let initialized = match initialize(&link, &tools).await {
+        Ok(initialized) => initialized,
         Err(reason) => {
             tracing::warn!(node = %name, %reason, "node did not initialize; closing its link");
             link.close().await;
             return;
         }
     };
-    tracing::info!(node = %name, %owner, tool_gate = ?capabilities.tool_gate, "node attached");
+    // Info, not an alert: only the node's owner can fix their configuration, and the node tells
+    // them why it stopped.
+    let read = match node_access::read(&initialized.metadata) {
+        Ok(read) => read,
+        Err(rejection) => {
+            tracing::info!(node = %name, %owner, reason = %rejection.message, "rejected the node's metadata; closing its link");
+            link.reject(rejection).await;
+            return;
+        }
+    };
+    report_ignored(&link, &name, &read.ignored).await;
+    let capabilities = initialized.capabilities;
+    tracing::info!(node = %name, %owner, tool_gate = ?capabilities.tool_gate, access = ?read.access, "node attached");
     let attachment = fleet.attach(Node {
         selector: selector.clone(),
         owner: owner.clone(),
@@ -186,6 +200,7 @@ async fn serve(link: GatewayLink, mut events: LinkEvents, serving: Serving) {
         link: link.clone(),
         capabilities,
         connected: true,
+        access: read.access,
     });
     let _ = changes
         .send(FleetChange::Attached {
@@ -259,6 +274,29 @@ async fn serve(link: GatewayLink, mut events: LinkEvents, serving: Serving) {
                     tracing::debug!(node = %name, error = %err, "could not answer a node call");
                 }
             }
+            LinkEvent::Request {
+                id,
+                call: NodeCall::UpdateMetadata(update),
+            } => match node_access::read(&update.metadata) {
+                Ok(read) => {
+                    report_ignored(&link, &name, &read.ignored).await;
+                    tracing::info!(node = %name, access = ?read.access, "node updated its metadata");
+                    fleet.set_access(&selector, attachment, read.access);
+                    if let Err(err) = link.reply(id, NodeReply::UpdateMetadata).await {
+                        tracing::debug!(node = %name, error = %err, "could not answer a node call");
+                    }
+                }
+                // The last good policy is not kept: a node whose owner meant something else must
+                // not go on serving under what they no longer want.
+                Err(rejection) => {
+                    tracing::info!(node = %name, %owner, reason = %rejection.message, "rejected the node's metadata; closing its link");
+                    let fault = rax::Error::new(ErrorKind::Rejected, rejection.message.clone());
+                    if let Err(err) = link.fault(id, fault).await {
+                        tracing::debug!(node = %name, error = %err, "could not answer a node call");
+                    }
+                    link.reject(rejection).await;
+                }
+            },
             LinkEvent::Background { session_id, event } => {
                 let background = Background {
                     selector: selector.clone(),
@@ -290,10 +328,22 @@ async fn serve(link: GatewayLink, mut events: LinkEvents, serving: Serving) {
     }
 }
 
-async fn initialize(
-    link: &GatewayLink,
-    tools: &Tools,
-) -> Result<rax::session::NodeCapabilities, String> {
+/// Tells the node, and so its owner, which keys this gateway did not read. Nobody on this side
+/// needs to hear about another gateway's settings.
+async fn report_ignored(link: &GatewayLink, name: &str, keys: &[String]) {
+    for key in keys {
+        let body = Unhandled {
+            subject: Subject::MetadataKey { key: key.clone() },
+            reason: UnhandledReason::UnsupportedType,
+            message: Some(format!("this gateway ignores `{key}`")),
+        };
+        if let Err(err) = link.unhandled(None, body).await {
+            tracing::debug!(node = %name, error = %err, "could not report an ignored metadata key");
+        }
+    }
+}
+
+async fn initialize(link: &GatewayLink, tools: &Tools) -> Result<Initialized, String> {
     let offer = GatewayCall::Initialize(Initialize {
         protocol_version: PROTOCOL_VERSION,
         capabilities: capabilities(tools),
@@ -307,7 +357,7 @@ async fn initialize(
         GatewayReply::Initialize(initialized)
             if initialized.protocol_version == PROTOCOL_VERSION =>
         {
-            Ok(initialized.capabilities)
+            Ok(initialized)
         }
         GatewayReply::Initialize(initialized) => Err(format!(
             "the node speaks RAX {}, this gateway speaks {PROTOCOL_VERSION}",

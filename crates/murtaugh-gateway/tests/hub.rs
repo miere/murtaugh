@@ -123,6 +123,7 @@ async fn answer_initialize(node: &NodeHandle, events: &mut NodeEvents) {
                         tool_gate: ToolGate::EveryCall,
                         ..Default::default()
                     },
+                    metadata: Default::default(),
                 });
                 node.reply(id, reply).await.unwrap();
                 return;

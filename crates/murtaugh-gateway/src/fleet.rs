@@ -9,6 +9,7 @@ use rax::session::NodeCapabilities;
 use rax_tokio::gateway::GatewayLink;
 
 use crate::access::Snapshot;
+use crate::node_access::NodeAccess;
 
 #[derive(Clone)]
 pub struct Node {
@@ -20,6 +21,14 @@ pub struct Node {
     /// False while the socket is down and RAX holds the link for a resume. Such a node takes no
     /// new work: a turn sent to it would wait for a socket that may never come back.
     pub connected: bool,
+    /// Who its owner lets in, as the node last declared it.
+    pub access: NodeAccess,
+}
+
+impl Node {
+    pub fn admits(&self, user: &UserId) -> bool {
+        self.access.admits(&self.owner, user)
+    }
 }
 
 struct Entry {
@@ -82,6 +91,16 @@ impl Fleet {
         }
     }
 
+    /// Only for the link it was declared on, so an update racing a reconnect cannot land on the
+    /// node's next link.
+    pub fn set_access(&self, selector: &str, attachment: u64, access: NodeAccess) {
+        if let Some(entry) = self.nodes().get_mut(selector)
+            && entry.attachment == attachment
+        {
+            entry.node.access = access;
+        }
+    }
+
     pub fn get(&self, selector: &str) -> Option<Node> {
         self.nodes().get(selector).map(|entry| entry.node.clone())
     }
@@ -119,6 +138,14 @@ impl Fleet {
         choices
     }
 
+    /// True when there are machines this person would be given but none of their owners lets
+    /// them in, which is a refusal rather than an outage.
+    pub fn shuts_out(&self, user: &UserId, access: &Snapshot) -> bool {
+        let nodes = self.nodes();
+        let mut offered = candidates(user, access, &nodes).peekable();
+        offered.peek().is_some() && !offered.any(|entry| entry.node.admits(user))
+    }
+
     pub fn session_ended(&self, selector: &str) {
         if let Some(entry) = self.nodes().get_mut(selector) {
             entry.sessions = entry.sessions.saturating_sub(1);
@@ -148,9 +175,19 @@ impl Fleet {
     }
 }
 
-/// Own nodes shadow the fallback entirely: somebody with a machine of their own never lands on
-/// another person's, so neither may the picker put them there.
+/// Of the machines that would take this person on, those whose owners let them in.
 fn serving<'a>(
+    user: &UserId,
+    access: &Snapshot,
+    nodes: &'a HashMap<String, Entry>,
+) -> impl Iterator<Item = &'a Entry> {
+    candidates(user, access, nodes).filter(|entry| entry.node.admits(user))
+}
+
+/// Whether or not their owners let this person in. Own nodes shadow the fallback entirely:
+/// somebody with a machine of their own never lands on another person's, so neither may the
+/// picker put them there.
+fn candidates<'a>(
     user: &UserId,
     access: &Snapshot,
     nodes: &'a HashMap<String, Entry>,

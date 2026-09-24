@@ -1553,8 +1553,8 @@ dependencies = [
 
 [[package]]
 name = "rax"
-version = "0.3.0"
-source = "git+https://github.com/miere/rax-rs?tag=0.3.0#c184d61a0bebe88d24a78e819f41c9abd3d4e077"
+version = "0.4.0"
+source = "git+https://github.com/miere/rax-rs?tag=0.4.0#a0fed55fb6401af0efdf3030cfb942c824127ced"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -1566,8 +1566,8 @@ dependencies = [
 
 [[package]]
 name = "rax-sim"
-version = "0.3.0"
-source = "git+https://github.com/miere/rax-rs?tag=0.3.0#c184d61a0bebe88d24a78e819f41c9abd3d4e077"
+version = "0.4.0"
+source = "git+https://github.com/miere/rax-rs?tag=0.4.0#a0fed55fb6401af0efdf3030cfb942c824127ced"
 dependencies = [
  "rax",
  "rax-tokio",
@@ -1581,8 +1581,8 @@ dependencies = [
 
 [[package]]
 name = "rax-tokio"
-version = "0.3.0"
-source = "git+https://github.com/miere/rax-rs?tag=0.3.0#c184d61a0bebe88d24a78e819f41c9abd3d4e077"
+version = "0.4.0"
+source = "git+https://github.com/miere/rax-rs?tag=0.4.0#a0fed55fb6401af0efdf3030cfb942c824127ced"
 dependencies = [
  "futures-util",
  "rand 0.10.2",
@@ -2112,7 +2112,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
