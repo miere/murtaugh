@@ -36,7 +36,7 @@ use crate::hub::{Background, FleetChange};
 use crate::picker;
 use crate::prompts::{self, Asked, Prompts};
 use crate::render;
-use crate::reply::{Reply, Target};
+use crate::reply::{Reply, Target, TaskCard};
 use crate::signin::{self, SignIns};
 use crate::thread_commands::{self, Command};
 
@@ -1426,9 +1426,15 @@ impl Chat {
                     .title
                     .clone()
                     .unwrap_or_else(|| tool_call.name.clone());
+                let (heading, details, icon) = task_card(&tool_call);
                 self.rule(reply.target(), node, tool_call, turn).await;
                 turn.tool(&id, Some(&title), TaskStatus::InProgress);
-                reply.task(&id, Some(&title), TaskStatus::InProgress).await;
+                let card = TaskCard {
+                    title: Some(&heading),
+                    details: details.as_deref(),
+                    icon,
+                };
+                reply.task(&id, card, TaskStatus::InProgress).await;
             }
             Open::Known(TurnEvent::ToolCallUpdate { tool_call_update }) => {
                 let status = match tool_call_update.status {
@@ -1441,13 +1447,16 @@ impl Chat {
                     tool_call_update.title.as_deref(),
                     status,
                 );
-                reply
-                    .task(
-                        &tool_call_update.id.0,
-                        tool_call_update.title.as_deref(),
-                        status,
-                    )
-                    .await;
+                // The agent's title for a call is its detail line; the card's own title stays.
+                let details = tool_call_update
+                    .title
+                    .as_deref()
+                    .map(|title| alerts::clip(title, TASK_DETAILS_CHARS));
+                let card = TaskCard {
+                    details: details.as_deref(),
+                    ..TaskCard::default()
+                };
+                reply.task(&tool_call_update.id.0, card, status).await;
             }
             Open::Known(TurnEvent::Question { question }) => {
                 self.put(reply.target(), node, Asked::Questions(question), turn);
@@ -1733,6 +1742,32 @@ fn talks_to_people(tool: &str) -> bool {
     TALKING_TOOLS.contains(&tool)
 }
 
+/// Tools that run a command line, drawn with Slack's `code` icon.
+const SHELL_TOOLS: [&str; 3] = ["terminal", "shell", "bash"];
+/// Enough of a command to recognise it; a whole heredoc would bury the list.
+const TASK_DETAILS_CHARS: usize = 300;
+
+/// A tool call's card as (title, details, icon): the agent's plain-English `description` as the
+/// title, or the tool's name when it gave none, and the agent's own title for the call — the
+/// command or path — underneath.
+fn task_card(tool_call: &ToolCall) -> (String, Option<String>, Option<&'static str>) {
+    let title = tool_call
+        .input
+        .as_ref()
+        .and_then(|input| input["description"].as_str())
+        .map(str::trim)
+        .filter(|description| !description.is_empty())
+        .map_or_else(|| tool_call.name.clone(), str::to_owned);
+    let details = tool_call
+        .title
+        .as_deref()
+        .map(|title| alerts::clip(title, TASK_DETAILS_CHARS));
+    let shell = SHELL_TOOLS
+        .iter()
+        .any(|tool| tool_call.name.eq_ignore_ascii_case(tool));
+    (title, details, shell.then_some("code"))
+}
+
 const INTERRUPTED: &str = "interrupted by a newer message.";
 const STOPPED: &str = "stopped.";
 
@@ -1904,5 +1939,58 @@ async fn sleep_until_due(due: Option<Instant>) {
     match due {
         Some(due) => tokio::time::sleep_until(due).await,
         None => std::future::pending().await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rax::id::ToolCallId;
+    use rax::tool::ToolKind;
+
+    use super::*;
+
+    fn call(name: &str, title: &str, input: serde_json::Value) -> ToolCall {
+        ToolCall {
+            id: ToolCallId("tc".into()),
+            name: name.into(),
+            title: Some(title.into()),
+            kind: ToolKind::Other,
+            input: Some(input),
+            content: vec![],
+        }
+    }
+
+    #[test]
+    fn a_task_card_is_titled_by_the_description_or_else_the_tool_name() {
+        let bash = call(
+            "Bash",
+            "ls -la",
+            serde_json::json!({"command": "ls -la", "description": " List the files "}),
+        );
+        assert_eq!(
+            task_card(&bash),
+            ("List the files".into(), Some("ls -la".into()), Some("code"))
+        );
+        let read = call(
+            "Read",
+            "/tmp/INDEX.md",
+            serde_json::json!({"file_path": "/tmp/INDEX.md", "description": "  "}),
+        );
+        assert_eq!(
+            task_card(&read),
+            ("Read".into(), Some("/tmp/INDEX.md".into()), None)
+        );
+        let shell = call("Shell", "x", serde_json::json!({}));
+        assert_eq!(task_card(&shell).2, Some("code"));
+    }
+
+    #[test]
+    fn a_long_command_is_clipped_in_the_details() {
+        let script = "x".repeat(TASK_DETAILS_CHARS * 2);
+        let details = task_card(&call("Bash", &script, serde_json::json!({}))).1;
+        assert_eq!(
+            details.map(|details| details.chars().count()),
+            Some(TASK_DETAILS_CHARS)
+        );
     }
 }

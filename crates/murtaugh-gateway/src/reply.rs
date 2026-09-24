@@ -8,8 +8,8 @@
 use std::time::Duration;
 
 use murtaugh_slack::{
-    Chunk, PlanTask, PostMessage, STREAM_FINALIZED, STREAMING_UNSUPPORTED, SlackClient, SlackError,
-    StartStream, TaskDisplayMode, TaskStatus, UpdateMessage,
+    Chunk, Icon, PlanTask, PostMessage, RichText, STREAM_FINALIZED, STREAMING_UNSUPPORTED,
+    SlackClient, SlackError, StartStream, TaskDisplayMode, TaskStatus, UpdateMessage,
 };
 use tokio::time::Instant;
 
@@ -26,6 +26,19 @@ const BEAT_TITLE: &str = "Task list";
 /// approval is; the message itself stays.
 const STREAM_EXPIRED: &str = "message_not_found";
 const TASK_TITLE: &str = "Tool call";
+
+fn given(text: Option<&str>) -> Option<&str> {
+    text.map(str::trim).filter(|text| !text.is_empty())
+}
+
+/// What a tool call's card shows. A field left `None` keeps what the card already has.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TaskCard<'a> {
+    pub title: Option<&'a str>,
+    /// Set in italics under the title.
+    pub details: Option<&'a str>,
+    pub icon: Option<&'a str>,
+}
 
 /// Where the reply goes and whom it answers. `recipient` is (team, user), left out in DMs.
 #[derive(Debug, Clone)]
@@ -292,7 +305,7 @@ impl Reply {
     }
 
     /// Settled states always go out; a running beat is redrawn at most once a `TASK_INTERVAL`.
-    pub async fn task(&mut self, id: &str, title: Option<&str>, status: TaskStatus) {
+    pub async fn task(&mut self, id: &str, card: TaskCard<'_>, status: TaskStatus) {
         if matches!(self.mode, Mode::Buffered { .. }) {
             return;
         }
@@ -318,7 +331,9 @@ impl Reply {
             }
         };
         let settled = matches!(status, TaskStatus::Complete | TaskStatus::Error);
-        let title = title.map(str::trim).filter(|title| !title.is_empty());
+        let title = given(card.title);
+        let details = given(card.details).map(RichText::italic);
+        let icon = given(card.icon).map(Icon::named);
         let Some(beat) = self.beats.get_mut(at) else {
             return;
         };
@@ -327,12 +342,20 @@ impl Reply {
                 if let Some(title) = title {
                     known.title = title.to_owned();
                 }
+                if details.is_some() {
+                    known.details = details;
+                }
+                if icon.is_some() {
+                    known.icon = icon;
+                }
                 known.status = status;
             }
             None => beat.tasks.push(PlanTask {
                 task_id: id.to_owned(),
                 title: title.unwrap_or(TASK_TITLE).to_owned(),
                 status,
+                icon,
+                details,
             }),
         }
         if !settled && beat.flushed.is_some_and(|at| at.elapsed() < TASK_INTERVAL) {

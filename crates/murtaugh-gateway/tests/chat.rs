@@ -540,7 +540,10 @@ async fn answer(script: Script, id: RequestId, call: GatewayCall) {
                 },
                 title: Some("ls".into()),
                 kind: ToolKind::Execute,
-                input: Some(serde_json::json!({"command": "git push origin main"})),
+                input: Some(serde_json::json!({
+                    "command": "git push origin main",
+                    "description": "List the files",
+                })),
                 content: vec![],
             };
             let mut ruled = verdicts.subscribe();
@@ -725,9 +728,15 @@ async fn a_mention_is_answered_in_its_thread_by_the_persons_own_node() {
     assert_eq!(stream.plan_blocks.len(), 1);
     let tasks = &stream.plan_blocks[0].tasks;
     assert_eq!(tasks.len(), 1);
+    // The agent's description titles the card; its own title for the call sits underneath.
     assert_eq!(
-        (tasks[0].title.as_str(), tasks[0].status.as_str()),
-        ("ls", "complete")
+        (
+            tasks[0].title.as_str(),
+            tasks[0].details.as_deref(),
+            tasks[0].icon.as_deref(),
+            tasks[0].status.as_str()
+        ),
+        ("List the files", Some("_ls_"), Some("code"), "complete")
     );
     assert!(matches!(
         within(laptop.seen.recv()).await.unwrap(),

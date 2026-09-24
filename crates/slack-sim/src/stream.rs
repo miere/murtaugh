@@ -66,6 +66,8 @@ fn chunk(item: &Value) -> Result<Chunk, ApiError> {
                 id: field(item, "id", "task_update")?.to_owned(),
                 title: field(item, "title", "task_update")?.to_owned(),
                 status: status.to_owned(),
+                icon: None,
+                details: None,
             }))
         }
         Some("blocks") => {
@@ -118,10 +120,62 @@ fn plan_block(item: &Value) -> Result<SimPlanBlock, ApiError> {
                     id: field(task, "task_id", "task")?.to_owned(),
                     title: field(task, "title", "task")?.to_owned(),
                     status: status.to_owned(),
+                    icon: task.get("icon").map(icon).transpose()?,
+                    details: task.get("details").map(details).transpose()?,
                 })
             })
             .collect::<Result<_, _>>()?,
     })
+}
+
+fn icon(item: &Value) -> Result<String, ApiError> {
+    if item.get("type").and_then(Value::as_str) != Some("icon") {
+        return Err(err(
+            "invalid_blocks",
+            "a task's `icon` must be of type icon",
+        ));
+    }
+    Ok(field(item, "name", "icon")?.to_owned())
+}
+
+/// A task's `rich_text` details, flattened to text with `_` around italic runs.
+fn details(item: &Value) -> Result<String, ApiError> {
+    if item.get("type").and_then(Value::as_str) != Some("rich_text") {
+        return Err(err(
+            "invalid_blocks",
+            "a task's `details` must be a rich_text block",
+        ));
+    }
+    let bad = || err("invalid_blocks", "malformed rich_text in a task's details");
+    let mut out = String::new();
+    for section in item
+        .get("elements")
+        .and_then(Value::as_array)
+        .ok_or_else(bad)?
+    {
+        if section.get("type").and_then(Value::as_str) != Some("rich_text_section") {
+            return Err(bad());
+        }
+        for element in section
+            .get("elements")
+            .and_then(Value::as_array)
+            .ok_or_else(bad)?
+        {
+            if element.get("type").and_then(Value::as_str) != Some("text") {
+                return Err(bad());
+            }
+            let text = element
+                .get("text")
+                .and_then(Value::as_str)
+                .ok_or_else(bad)?;
+            if element.pointer("/style/italic").and_then(Value::as_bool) == Some(true) {
+                out.push_str(&format!("_{text}_"));
+            } else {
+                out.push_str(text);
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn apply(text: &mut String, stream: &mut SimStream, chunks: Vec<Chunk>) -> Result<(), ApiError> {
