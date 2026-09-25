@@ -125,26 +125,40 @@ release exists; the repository is private, so set `GH_TOKEN` (for example
 
 ## Who may use it
 
-Everything below changes the store directly and reaches a running gateway within seconds.
+The gateway decides three things: who may use it (allowed users), who may connect nodes (node
+admins, who hold a grant), and which of their machines may connect (node tokens). Each rests on
+the one before it. Minting a token grants its owner, and granting someone allows them. Revoking a
+grant revokes every token that person holds, for good, and disallowing someone takes their grant
+too. Revoking one node leaves the grant alone, and revoking a grant leaves the person allowed.
+
+The admin does all of this from the app's Home tab. A node admin's Home tab shows their tool
+approval mode and their own nodes, which they can mint, disable and revoke. A new token goes to
+its owner by DM. Everyone else sees only the footer. The same changes work from the CLI, which
+writes to the store directly and reaches a running gateway within seconds:
 
 ```sh
 murtaugh-gateway admin set U0123ADMIN                 # the only onboarding step
-murtaugh-gateway grant approve U0456ALICE             # Alice may run her own nodes
 murtaugh-gateway node mint --owner U0456ALICE --name laptop --token-file alice-laptop.token
-murtaugh-gateway user allow U0789BOB                  # Bob may use the admin's nodes
-murtaugh-gateway grant revoke U0456ALICE              # her nodes are disconnected
+                                                      # also grants Alice, and allows her
+murtaugh-gateway grant approve U0456ALICE             # Alice may run nodes, and use the gateway
+murtaugh-gateway user allow U0789BOB                  # Bob may use the gateway
+murtaugh-gateway grant revoke U0456ALICE              # her tokens are revoked for good
 murtaugh-gateway node revoke <selector>               # one node is disconnected
 ```
 
-A grant is per person, and every node that person runs shares it. A node can dial as soon as
-its token is minted: the gateway checks the store for a token it has not seen yet. Hand node tokens over in
-person: the gateway never shows one twice. Someone with no node of their own and no
-pre-authorisation gets a 🤐 reaction and nothing else.
+A node can dial as soon as its token is minted: the gateway checks the store for a token it has
+not seen yet. The gateway never shows a token twice. Someone who isn't allowed gets a 🤐 reaction
+and nothing else. When the admin hands the gateway over, the old admin keeps their machines as a
+node admin.
 
-A conversation is a Slack thread. It goes to the person's own node with the fewest live
-sessions, or, if none of theirs is connected, to one of the admin's when they are pre-authorised.
-If that node goes away, the next message says so and continues on another node, catching it up
-from the thread.
+Which nodes an allowed person may use is up to each node's owner, through the `murtaugh_access`
+metadata their node sends: `{"policy": "always_allow"}` shares it with everyone allowed on the
+gateway, and `{"policy": "allow_list", "people": [...]}` with the people listed. A node that says
+nothing serves its owner alone.
+
+A conversation is a Slack thread. It goes to the person's own node with the fewest live sessions,
+or, if none of theirs is connected, to the least busy node whose owner lets them in. If that node
+goes away, the next message says so and continues on another node, catching it up from the thread.
 
 | Crate | What it is |
 |---|---|

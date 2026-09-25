@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use murtaugh_slack::{
     Block, Click, Event, FileRef, HomeClick, PostMessage, SlackClient, TaskStatus, Text, Upload,
+    ViewSubmission,
 };
 use murtaugh_store::{Conversation, Pin, Store, ToolMode, UserConfig, UserId};
 use rax::attachment::Attachment;
@@ -25,14 +26,14 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::access::{Access, Snapshot};
+use crate::access::Access;
 use crate::alerts::{self, Alert, Level};
 use crate::approval::{self, Approvals};
 use crate::faults::{self, Refusal};
 use crate::files::Files;
 use crate::fleet::{Fleet, Node};
-use crate::home;
 use crate::hub::{Background, FleetChange};
+use crate::panel::Panel;
 use crate::picker;
 use crate::prompts::{self, Asked, Prompts};
 use crate::render;
@@ -91,6 +92,7 @@ pub struct Chat {
     /// The background run of each session that has one, by node and session: the one task that
     /// draws them keeps a session's events in the order the node sent them.
     backgrounds: Mutex<HashMap<(String, SessionId), BackgroundEvents>>,
+    panel: Panel,
 }
 
 type BackgroundEvents = mpsc::UnboundedSender<Open<BackgroundEvent>>;
@@ -196,7 +198,15 @@ impl Chat {
             turn_idle_timeout,
             tool_ceiling,
         } = parts;
+        let panel = Panel {
+            slack: slack.clone(),
+            store: store.clone(),
+            access: access.clone(),
+            fleet: fleet.clone(),
+            bot_user: bot_user.clone(),
+        };
         Arc::new(Self {
+            panel,
             slack,
             bot_user,
             store,
@@ -480,47 +490,17 @@ impl Chat {
     }
 
     async fn show_home(&self, viewer: &str) {
-        let Ok(viewer) = UserId::parse(viewer) else {
-            return;
-        };
-        let blocks = home::view(&viewer, &self.access.snapshot(), &self.fleet.summaries());
-        if let Err(err) = self.slack.publish_home(viewer.as_str(), &blocks).await {
-            tracing::warn!(error = %err, "could not publish the Home tab");
+        if let Ok(viewer) = UserId::parse(viewer) {
+            self.panel.show(&viewer).await;
         }
     }
 
-    /// Disables or re-enables a node's routing from its Home tab row. The click carries no
-    /// channel to answer an error into, so a denied or failed toggle is silent beyond the log —
-    /// the Home tab simply keeps showing the state the store already holds.
     pub async fn on_home_click(self: Arc<Self>, click: HomeClick) {
-        if click.action_id != home::TOGGLE {
-            return;
-        }
-        let Some((selector, disabled)) = home::parse_toggle(&click.value) else {
-            return;
-        };
-        let Ok(user) = UserId::parse(&click.user) else {
-            return;
-        };
-        let snapshot = self.access.snapshot();
-        let allowed = snapshot.admin() == Some(&user) || snapshot.owner(&selector) == Some(&user);
-        if !allowed {
-            tracing::info!(%selector, user = %click.user, "denied a node toggle from someone who does not own it");
-            return;
-        }
-        if let Err(err) = self.store.set_node_disabled(&selector, disabled).await {
-            tracing::warn!(%selector, error = %err, "could not toggle a node's routing");
-            return;
-        }
-        match Snapshot::load(&*self.store).await {
-            Ok(fresh) => {
-                self.access.replace(fresh);
-            }
-            Err(err) => {
-                tracing::warn!(error = %err, "could not reload access after a node toggle");
-            }
-        }
-        self.show_home(&click.user).await;
+        self.panel.click(click).await;
+    }
+
+    pub async fn on_view_submission(self: Arc<Self>, submission: ViewSubmission) {
+        self.panel.submit(submission).await;
     }
 
     pub async fn on_fleet(self: Arc<Self>, change: FleetChange) {

@@ -391,24 +391,34 @@ pub(crate) fn block_actions(
     }))
 }
 
-/// An overflow choice on the app's Home tab. Unlike [`block_actions`] the container is the view,
-/// not a message: the Home tab carries no channel or ts, which is what `HomeClick` (as opposed to
-/// `Click`) is built to read.
+/// A choice on the app's Home tab: an overflow option, a button, a select or a user picker.
+/// Unlike [`block_actions`] the container is the view, not a message: the Home tab carries no
+/// channel or ts, which is what `HomeClick` (as opposed to `Click`) is built to read. `chosen` is
+/// what the element type adds to the action, such as `selected_option` or `selected_users`.
 pub(crate) fn home_block_actions(
     state: &mut State,
     user: &str,
-    action_id: &str,
+    element: &Value,
     block_id: &str,
-    option: &Value,
+    chosen: Value,
 ) -> Value {
     let envelope_id = state.uuid();
     let trigger_id = format!("{}.{}.sim", state.next_seq(), now_secs());
+    state.triggers.insert(trigger_id.clone(), user.to_owned());
     let view_id = format!("V{}", state.next_seq());
     let user_name = state
         .users
         .get(user)
         .map(|u| u.name.clone())
         .unwrap_or_default();
+    let mut action = Map::new();
+    action.insert("type".into(), element["type"].clone());
+    action.insert("action_id".into(), element["action_id"].clone());
+    action.insert("block_id".into(), json!(block_id));
+    if let Value::Object(chosen) = chosen {
+        action.extend(chosen);
+    }
+    action.insert("action_ts".into(), json!(format!("{}.000000", now_secs())));
     json!({
         "envelope_id": envelope_id,
         "payload": {
@@ -424,16 +434,39 @@ pub(crate) fn home_block_actions(
             "view": {"id": view_id, "type": "home"},
             "state": {"values": {}},
             "response_url": format!("https://hooks.slack.com/actions/{}/{}/sim", TEAM_ID, now_secs()),
-            "actions": [{
-                "type": "overflow",
-                "action_id": action_id,
-                "block_id": block_id,
-                "selected_option": option,
-                "action_ts": format!("{}.000000", now_secs()),
-            }],
+            "actions": [Value::Object(action)],
         },
         "type": "interactive",
         "accepts_response_payload": false,
+    })
+}
+
+/// A modal submitted: the view as it was opened, with the inputs' `state.values` filled in.
+pub(crate) fn view_submission(state: &mut State, user: &str, view: &Value, values: Value) -> Value {
+    let envelope_id = state.uuid();
+    let user_name = state
+        .users
+        .get(user)
+        .map(|u| u.name.clone())
+        .unwrap_or_default();
+    let mut view = view.clone();
+    view["state"] = json!({"values": values});
+    json!({
+        "envelope_id": envelope_id,
+        "payload": {
+            "type": "view_submission",
+            "user": {"id": user, "username": user_name, "name": user_name, "team_id": TEAM_ID},
+            "api_app_id": APP_ID,
+            "token": VERIFICATION_TOKEN,
+            "trigger_id": format!("{}.{}.sim", state.next_seq(), now_secs()),
+            "team": {"id": TEAM_ID, "domain": "slacksim"},
+            "enterprise": null,
+            "is_enterprise_install": false,
+            "view": view,
+            "response_urls": [],
+        },
+        "type": "interactive",
+        "accepts_response_payload": true,
     })
 }
 

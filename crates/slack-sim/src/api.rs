@@ -19,6 +19,7 @@ const METHODS: &[&str] = &[
     "chat.update",
     "chat.postEphemeral",
     "views.publish",
+    "views.open",
     "chat.startStream",
     "chat.appendStream",
     "chat.stopStream",
@@ -35,6 +36,7 @@ const JSON_METHODS: &[&str] = &[
     "chat.update",
     "chat.postEphemeral",
     "views.publish",
+    "views.open",
     "reactions.add",
 ];
 const MAX_TEXT: usize = 40_000;
@@ -263,6 +265,7 @@ fn dispatch(
         "assistant.threads.setStatus" => crate::stream::set_status(st, params),
         "chat.postEphemeral" => post_ephemeral(st, params),
         "views.publish" => publish_view(st, params),
+        "views.open" => open_view(st, params),
         "reactions.add" => add_reaction(st, params),
         "conversations.replies" => replies(st, params),
         "files.getUploadURLExternal" => crate::upload::reserve(st, params),
@@ -418,6 +421,73 @@ fn publish_view(st: &mut State, params: &Map<String, Value>) -> Result<Value, Ap
     blocks::validate(&parsed).map_err(|e| err(e.code, e.detail))?;
     st.homes.insert(user.clone(), Value::Array(parsed.clone()));
     Ok(json!({"view": {"id": format!("V{}", st.next_seq()), "type": "home", "blocks": parsed}}))
+}
+
+/// A modal answers a click: the `trigger_id` says whose, and is spent once used.
+fn open_view(st: &mut State, params: &Map<String, Value>) -> Result<Value, ApiError> {
+    let trigger = arg(params, "trigger_id")?
+        .ok_or_else(|| err("invalid_arguments", "`trigger_id` is required"))?;
+    let user = st
+        .triggers
+        .remove(&trigger)
+        .ok_or_else(|| err("invalid_trigger_id", "no click gave this `trigger_id`"))?;
+    let view = params
+        .get("view")
+        .and_then(Value::as_object)
+        .ok_or_else(|| err("invalid_arguments", "`view` must be an object"))?;
+    if view.get("type").and_then(Value::as_str) != Some("modal") {
+        return Err(err(
+            "invalid_arguments",
+            "an opened view must be of type `modal`",
+        ));
+    }
+    for key in ["title", "submit", "close"] {
+        let Some(text) = view.get(key) else {
+            if key == "title" {
+                return Err(err("invalid_arguments", "a modal needs a `title`"));
+            }
+            continue;
+        };
+        let fits = text.get("type").and_then(Value::as_str) == Some("plain_text")
+            && text
+                .get("text")
+                .and_then(Value::as_str)
+                .is_some_and(|t| !t.is_empty() && t.chars().count() <= 24);
+        if !fits {
+            return Err(err(
+                "invalid_arguments",
+                format!("`{key}` must be plain_text of at most 24 characters"),
+            ));
+        }
+    }
+    if view
+        .get("private_metadata")
+        .and_then(Value::as_str)
+        .is_some_and(|m| m.len() > 3000)
+    {
+        return Err(err(
+            "invalid_arguments",
+            "`private_metadata` holds at most 3000 characters",
+        ));
+    }
+    let raw = view.get("blocks").cloned().unwrap_or(Value::Array(vec![]));
+    let parsed = blocks::parse(&raw).map_err(|e| err(e.code, e.detail))?;
+    let has_input = parsed
+        .iter()
+        .any(|block| block.get("type").and_then(Value::as_str) == Some("input"));
+    if has_input && view.get("submit").is_none() {
+        return Err(err(
+            "invalid_arguments",
+            "a modal with inputs needs a `submit`",
+        ));
+    }
+    blocks::validate(&parsed).map_err(|e| err(e.code, e.detail))?;
+    let mut opened = view.clone();
+    opened.insert("blocks".into(), Value::Array(parsed));
+    let id = format!("V{}", st.next_seq());
+    opened.insert("id".into(), json!(id));
+    st.modals.insert(user, Value::Object(opened.clone()));
+    Ok(json!({"view": opened}))
 }
 
 fn update_message(st: &mut State, params: &Map<String, Value>) -> Result<Value, ApiError> {

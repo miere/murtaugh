@@ -253,6 +253,15 @@ impl SlackClient {
             .map(drop)
     }
 
+    /// Opens a modal in answer to the click that gave `trigger_id`, which lapses in seconds.
+    /// `view` is the whole modal: its type, title, blocks, callback id and so on.
+    pub async fn open_view(&self, trigger_id: &str, view: &Value) -> Result<(), SlackError> {
+        let body = json!({"trigger_id": trigger_id, "view": view});
+        self.call::<Value>("views.open", Token::Bot, Body::Json(body))
+            .await
+            .map(drop)
+    }
+
     pub async fn add_reaction(
         &self,
         channel: &str,

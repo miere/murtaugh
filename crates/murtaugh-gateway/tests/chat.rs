@@ -245,6 +245,14 @@ impl Rig {
             .await
     }
 
+    /// A node whose owner lets in everyone allowed on the gateway.
+    async fn node_sharing(&self, owner: &str, name: &str) -> FakeNode {
+        let access = serde_json::json!({"policy": "always_allow"});
+        let metadata = rax::Metadata::from([("murtaugh_access".to_owned(), access)]);
+        self.node_declaring(owner, name, &[self.listen], metadata)
+            .await
+    }
+
     /// A node whose owner lets in only `people`, beside themselves.
     async fn node_allowing(&self, owner: &str, name: &str, people: &[&str]) -> FakeNode {
         let access = serde_json::json!({"policy": "allow_list", "people": people});
@@ -775,7 +783,7 @@ async fn a_stranger_gets_a_zipped_mouth_and_nothing_else() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_pre_authorised_person_uses_the_admins_node_and_hears_when_none_is_up() {
+async fn an_allowed_person_uses_a_shared_node_and_hears_when_none_is_up() {
     let rig = rig().await;
     rig.store.set_allowed(&user(BOB), true).await.unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -790,7 +798,7 @@ async fn a_pre_authorised_person_uses_the_admins_node_and_hears_when_none_is_up(
     })
     .await;
 
-    let mut desktop = rig.node(ADMIN, "desktop").await;
+    let mut desktop = rig.node_sharing(ALICE, "desktop").await;
     let ts = rig.sim.mention(BOB, GENERAL, "now?", None).await.unwrap();
     assert_eq!(desktop.next_prompt().await.1, "now?");
     rig.bot_replies(&ts, |replies| {
@@ -799,6 +807,21 @@ async fn a_pre_authorised_person_uses_the_admins_node_and_hears_when_none_is_up(
             .any(|m| m.text.contains("**desktop** says pong"))
     })
     .await;
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_that_says_nothing_serves_its_owner_alone_even_the_admins() {
+    let rig = rig().await;
+    rig.store.set_allowed(&user(BOB), true).await.unwrap();
+    let mut desktop = rig.node(ADMIN, "desktop").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let ts = rig.sim.mention(BOB, GENERAL, "may I?", None).await.unwrap();
+    zipped(&rig, &ts).await;
+
+    rig.sim.mention(ADMIN, GENERAL, "mine", None).await.unwrap();
+    assert_eq!(desktop.next_prompt().await.1, "mine");
     rig.shutdown.cancel();
 }
 
@@ -2075,7 +2098,7 @@ async fn a_sign_in_is_worked_through_by_the_owner_alone_in_their_dm() {
 async fn a_sign_in_raised_in_a_turn_tells_the_thread_and_goes_to_the_owner() {
     let rig = rig().await;
     rig.store.set_allowed(&user(BOB), true).await.unwrap();
-    let mut desktop = rig.node(ADMIN, "desktop").await;
+    let mut desktop = rig.node_sharing(ADMIN, "desktop").await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     let ts = rig
         .sim
@@ -2154,8 +2177,16 @@ async fn the_home_tab_shows_the_version_and_the_viewers_nodes_or_all_for_the_adm
         alice.contains(murtaugh_gateway::version::VERSION),
         "{alice}"
     );
-    assert!(alice.contains("Your nodes"));
+    assert!(alice.contains("Configuration Panel") && alice.contains("Tool Approval"));
+    assert!(
+        !alice.contains("Admin User") && !alice.contains("Allowed Users"),
+        "{alice}"
+    );
     assert!(alice.contains("*laptop*") && alice.contains("Connected · 0 live conversations"));
+    assert!(
+        alice.contains("only <@U0ALICE01>"),
+        "a silent node should serve its owner alone: {alice}"
+    );
     assert!(alice.contains("*old-mac*") && alice.contains("Offline"));
     assert!(
         !alice.contains("desktop"),
@@ -2163,16 +2194,319 @@ async fn the_home_tab_shows_the_version_and_the_viewers_nodes_or_all_for_the_adm
     );
 
     let admin = home_of(&rig, ADMIN).await;
-    assert!(admin.contains("All nodes"));
+    for part in [
+        "Admin User",
+        "Node Admin Users",
+        "Allowed Users",
+        "New node",
+    ] {
+        assert!(admin.contains(part), "{part} is missing: {admin}");
+    }
     assert!(
         admin.contains("*desktop*") && admin.contains("*laptop* · <@U0ALICE01>"),
         "{admin}"
     );
 
-    let stranger = home_of(&rig, STRANGER).await;
-    assert!(stranger.contains("don't have access"));
-    assert!(!stranger.contains("laptop"));
+    rig.store.set_allowed(&user(BOB), true).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    for person in [BOB, STRANGER] {
+        let home: serde_json::Value = serde_json::from_str(&home_of(&rig, person).await).unwrap();
+        let blocks = home.as_array().unwrap();
+        assert_eq!(
+            blocks.len(),
+            1,
+            "{person} sees more than the footer: {home}"
+        );
+        assert!(blocks[0].to_string().contains("Powered by Murtaugh"));
+    }
+    for home in [&alice, &admin] {
+        let blocks: serde_json::Value = serde_json::from_str(home).unwrap();
+        let kinds: Vec<&str> = blocks
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|block| block["type"].as_str().unwrap())
+            .collect();
+        assert!(
+            !kinds.windows(2).any(|pair| pair == ["divider", "divider"]),
+            "two dividers in a row: {kinds:?}"
+        );
+    }
     assert_eq!(rig.sim.violations(), vec![]);
+    rig.shutdown.cancel();
+}
+
+async fn granted(rig: &Rig, person: &str) -> bool {
+    rig.store
+        .grants()
+        .await
+        .unwrap()
+        .iter()
+        .any(|grant| grant.user == user(person))
+}
+
+async fn allowed(rig: &Rig, person: &str) -> bool {
+    rig.store.user(&user(person)).await.unwrap().allowed
+}
+
+async fn live_tokens(rig: &Rig, owner: &str) -> Vec<String> {
+    rig.store
+        .node_tokens()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|token| token.owner == user(owner) && token.revoked_at.is_none())
+        .map(|token| token.name)
+        .collect()
+}
+
+/// Waits for a store condition that a Home tab change settles in the background.
+async fn settled(what: &str, mut check: impl AsyncFnMut() -> bool) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while !check().await {
+        if tokio::time::Instant::now() > deadline {
+            panic!("timed out waiting for {what}");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_admin_grants_and_revokes_node_admins_and_allowed_users_from_the_home_tab() {
+    let rig = rig().await;
+    let _laptop = rig.node(ALICE, "laptop").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    home_of(&rig, ADMIN).await;
+
+    rig.sim
+        .pick_home_users(
+            ADMIN,
+            murtaugh_gateway::home::NODE_ADMINS_SET,
+            &[ALICE, BOB],
+        )
+        .await
+        .unwrap();
+    settled("Bob's grant", async || granted(&rig, BOB).await).await;
+    assert!(allowed(&rig, BOB).await, "a grant did not allow Bob");
+    let bob = eventually("Bob's panel", || {
+        let home = rig.sim.home(BOB)?.to_string();
+        home.contains("Configuration Panel").then_some(home)
+    })
+    .await;
+    assert!(!bob.contains("Node Admin Users"), "{bob}");
+
+    home_of(&rig, ADMIN).await;
+    rig.sim
+        .pick_home_users(ADMIN, murtaugh_gateway::home::NODE_ADMINS_SET, &[BOB])
+        .await
+        .unwrap();
+    settled("Alice's grant revoked", async || {
+        !granted(&rig, ALICE).await
+    })
+    .await;
+    assert!(
+        live_tokens(&rig, ALICE).await.is_empty(),
+        "Alice kept a token"
+    );
+    assert!(
+        allowed(&rig, ALICE).await,
+        "revoking a grant disallowed Alice"
+    );
+
+    home_of(&rig, ADMIN).await;
+    rig.sim
+        .pick_home_users(
+            ADMIN,
+            murtaugh_gateway::home::ALLOWED_USERS_SET,
+            &[ALICE, STRANGER],
+        )
+        .await
+        .unwrap();
+    settled("Bob disallowed", async || !allowed(&rig, BOB).await).await;
+    assert!(!granted(&rig, BOB).await, "Bob kept his grant");
+    assert!(allowed(&rig, STRANGER).await);
+    assert_eq!(rig.sim.violations(), vec![]);
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_admin_sets_their_tool_mode_from_the_home_tab() {
+    let rig = rig().await;
+    home_of(&rig, ALICE).await;
+    rig.sim
+        .click_home(ALICE, murtaugh_gateway::home::TOOL_MODE, "denied")
+        .await
+        .unwrap();
+    settled("Alice's tool mode", async || {
+        rig.store.user(&user(ALICE)).await.unwrap().tool_mode == murtaugh_store::ToolMode::Denied
+    })
+    .await;
+    let home = eventually("the new mode shown", || {
+        let home = rig.sim.home(ALICE)?;
+        let select = &home[2]["accessory"];
+        (select["initial_option"]["value"] == "denied").then_some(())
+    });
+    home.await;
+    rig.shutdown.cancel();
+}
+
+/// The token file the bot last DMed `person`, and the note above it.
+async fn dmed_token(rig: &Rig, person: &str) -> (String, String) {
+    eventually("a DMed token", || {
+        let channel = rig.sim.im_channel(person)?;
+        let messages = rig.sim.messages(&channel);
+        let file = messages
+            .iter()
+            .rev()
+            .find_map(|m| m.files.first().cloned())?;
+        let note = messages
+            .iter()
+            .rev()
+            .find(|m| m.text.contains("authorised to connect a node"))?
+            .text
+            .clone();
+        let token = String::from_utf8(rig.sim.file(&file)?.bytes).ok()?;
+        Some((note, token))
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_admin_mints_their_own_node_and_gets_the_token_by_dm() {
+    let rig = rig().await;
+    home_of(&rig, ALICE).await;
+    rig.sim
+        .click_home(ALICE, murtaugh_gateway::home::NODE_NEW, "new")
+        .await
+        .unwrap();
+    let modal = eventually("the new node modal", || rig.sim.modal(ALICE)).await;
+    assert!(
+        !modal.to_string().contains("node_owner"),
+        "only the admin picks an owner: {modal}"
+    );
+    rig.sim
+        .submit_modal(
+            ALICE,
+            serde_json::json!({"node_name": {"name": {"type": "plain_text_input", "value": " desktop "}}}),
+        )
+        .await
+        .unwrap();
+    let (note, token) = dmed_token(&rig, ALICE).await;
+    assert!(token.starts_with("mrtg_node_"), "{token}");
+    assert!(note.contains(&format!("<@{BOT_USER_ID}>")), "{note}");
+    assert!(
+        note.contains("https://github.com/miere/riggs#running-riggs"),
+        "{note}"
+    );
+    assert_eq!(live_tokens(&rig, ALICE).await, ["desktop"]);
+    eventually("the new node listed", || {
+        rig.sim
+            .home(ALICE)?
+            .to_string()
+            .contains("*desktop*")
+            .then_some(())
+    })
+    .await;
+    assert_eq!(rig.sim.violations(), vec![]);
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_admin_mints_a_node_for_someone_which_grants_them() {
+    let rig = rig().await;
+    home_of(&rig, ADMIN).await;
+    rig.sim
+        .click_home(ADMIN, murtaugh_gateway::home::NODE_NEW, "new")
+        .await
+        .unwrap();
+    eventually("the new node modal", || rig.sim.modal(ADMIN)).await;
+    rig.sim
+        .submit_modal(
+            ADMIN,
+            serde_json::json!({
+                "node_name": {"name": {"type": "plain_text_input", "value": "laptop"}},
+                "node_owner": {"owner": {"type": "users_select", "selected_user": BOB}},
+            }),
+        )
+        .await
+        .unwrap();
+    let (_, token) = dmed_token(&rig, BOB).await;
+    assert!(token.starts_with("mrtg_node_"));
+    assert!(granted(&rig, BOB).await && allowed(&rig, BOB).await);
+    assert_eq!(live_tokens(&rig, BOB).await, ["laptop"]);
+    assert!(
+        rig.sim.im_channel(ADMIN).is_none(),
+        "the admin was sent the token"
+    );
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn revoking_a_node_asks_first_then_cuts_it_off_for_good() {
+    let rig = rig().await;
+    let _laptop = rig.node(ALICE, "laptop").await;
+    let selector = node_selector(&rig, ALICE, "laptop").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    home_of(&rig, ALICE).await;
+
+    rig.sim
+        .click_home(
+            ALICE,
+            murtaugh_gateway::home::NODE_MENU,
+            &format!("{selector}:revoke"),
+        )
+        .await
+        .unwrap();
+    let modal = eventually("the revoke modal", || rig.sim.modal(ALICE)).await;
+    assert!(modal.to_string().contains("*laptop*"), "{modal}");
+    assert_eq!(
+        live_tokens(&rig, ALICE).await,
+        ["laptop"],
+        "revoked before confirming"
+    );
+
+    rig.sim
+        .submit_modal(ALICE, serde_json::json!({}))
+        .await
+        .unwrap();
+    settled("the laptop revoked", async || {
+        live_tokens(&rig, ALICE).await.is_empty()
+    })
+    .await;
+    eventually("the laptop gone from the Home tab", || {
+        (!rig.sim.home(ALICE)?.to_string().contains("*laptop*")).then_some(())
+    })
+    .await;
+    assert!(granted(&rig, ALICE).await, "revoking a node took the grant");
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn handing_the_gateway_over_keeps_the_old_admins_nodes() {
+    let rig = rig().await;
+    home_of(&rig, ADMIN).await;
+    rig.sim
+        .click_home(ADMIN, murtaugh_gateway::home::ADMIN_SET, ALICE)
+        .await
+        .unwrap();
+    settled("Alice as admin", async || {
+        rig.store.admin().await.unwrap() == Some(user(ALICE))
+    })
+    .await;
+    assert!(granted(&rig, ADMIN).await && allowed(&rig, ADMIN).await);
+    eventually("the old admin's panel shrinks", || {
+        let home = rig.sim.home(ADMIN)?.to_string();
+        (!home.contains("Admin User") && home.contains("Configuration Panel")).then_some(())
+    })
+    .await;
+    eventually("the new admin's panel grows", || {
+        rig.sim
+            .home(ALICE)?
+            .to_string()
+            .contains("Admin User")
+            .then_some(())
+    })
+    .await;
     rig.shutdown.cancel();
 }
 
@@ -2212,7 +2546,7 @@ async fn a_disabled_node_drops_its_thread_and_takes_it_back_once_re_enabled() {
     rig.sim
         .click_home(
             ALICE,
-            murtaugh_gateway::home::TOGGLE,
+            murtaugh_gateway::home::NODE_MENU,
             &format!("{selector}:disable"),
         )
         .await
@@ -2236,7 +2570,7 @@ async fn a_disabled_node_drops_its_thread_and_takes_it_back_once_re_enabled() {
     rig.sim
         .click_home(
             ALICE,
-            murtaugh_gateway::home::TOGGLE,
+            murtaugh_gateway::home::NODE_MENU,
             &format!("{selector}:enable"),
         )
         .await
@@ -2276,7 +2610,7 @@ async fn next_cancel(node: &mut FakeNode) -> String {
 async fn a_message_mid_turn_interrupts_it_and_the_waiting_ones_run_together() {
     let rig = rig().await;
     rig.store.set_allowed(&user(BOB), true).await.unwrap();
-    let mut laptop = rig.node(ALICE, "laptop").await;
+    let mut laptop = rig.node_sharing(ALICE, "laptop").await;
     let ts = rig
         .sim
         .mention(ALICE, GENERAL, "slow job", None)
@@ -2805,7 +3139,7 @@ async fn a_node_whose_access_is_malformed_is_told_why_and_let_go() {
 async fn a_node_changes_who_it_lets_in_live_and_a_bad_change_ends_its_link() {
     let rig = rig().await;
     rig.store.set_allowed(&user(BOB), true).await.unwrap();
-    let mut laptop = rig.node(ALICE, "laptop").await;
+    let mut laptop = rig.node_sharing(ALICE, "laptop").await;
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     let ts = rig

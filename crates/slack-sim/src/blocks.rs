@@ -35,6 +35,7 @@ const ELEMENT_TYPES: &[&str] = &[
     "multi_conversations_select",
     "multi_channels_select",
     "overflow",
+    "plain_text_input",
     "radio_buttons",
     "static_select",
     "external_select",
@@ -124,6 +125,7 @@ fn validate_block(block: &Value, at: &str) -> Result<(), Invalid> {
         "context" => context(obj, at),
         "actions" => actions(obj, at),
         "container" => container(obj, at),
+        "input" => input(obj, at),
         "header" => {
             only_keys(obj, &["type", "block_id", "text", "level"], at)?;
             let text = obj.get("text").ok_or_else(|| {
@@ -317,6 +319,33 @@ fn actions(obj: &Map<String, Value>, at: &str) -> Result<(), Invalid> {
         }
     }
     Ok(())
+}
+
+fn input(obj: &Map<String, Value>, at: &str) -> Result<(), Invalid> {
+    only_keys(
+        obj,
+        &[
+            "type",
+            "block_id",
+            "label",
+            "element",
+            "hint",
+            "optional",
+            "dispatch_action",
+        ],
+        at,
+    )?;
+    let label = obj
+        .get("label")
+        .ok_or_else(|| invalid(format!("missing required field: label [json-pointer:{at}]")))?;
+    text_object(label, &["plain_text"], 2000, &format!("{at}/label"))?;
+    let element_at = format!("{at}/element");
+    let element_value = obj.get("element").ok_or_else(|| {
+        invalid(format!(
+            "missing required field: element [json-pointer:{at}]"
+        ))
+    })?;
+    element(element_value, &element_at)
 }
 
 fn element(value: &Value, at: &str) -> Result<(), Invalid> {

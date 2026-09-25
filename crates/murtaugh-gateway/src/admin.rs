@@ -5,11 +5,10 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
-use murtaugh_store::{NodeToken, Store, ToolMode, ToolModeError, UserId};
-use time::OffsetDateTime;
+use murtaugh_store::{Store, ToolMode, ToolModeError, UserId};
 
 use crate::cli::{AdminCommand, GrantCommand, MintArgs, NodeCommand, ToolsCommand, UserCommand};
-use crate::token;
+use crate::roles;
 
 fn user(raw: &str) -> Result<UserId, String> {
     UserId::parse(raw).map_err(|err| err.to_string())
@@ -30,11 +29,16 @@ pub async fn admin(store: &dyn Store, command: AdminCommand) -> Result<String, S
     match command {
         AdminCommand::Set { user: raw } => {
             let admin = user(&raw)?;
-            store
-                .set_admin(&admin)
+            let previous = store.admin().await.map_err(|err| err.to_string())?;
+            roles::set_admin(store, &admin)
                 .await
                 .map_err(|err| err.to_string())?;
-            Ok(format!("{admin} is the admin."))
+            Ok(match previous.filter(|previous| previous != &admin) {
+                Some(previous) => {
+                    format!("{admin} is the admin; {previous} keeps their nodes as a node admin.")
+                }
+                None => format!("{admin} is the admin."),
+            })
         }
         AdminCommand::Show => Ok(match store.admin().await.map_err(|err| err.to_string())? {
             Some(admin) => admin.to_string(),
@@ -48,24 +52,27 @@ pub async fn grant(store: &dyn Store, command: GrantCommand) -> Result<String, S
         GrantCommand::Approve { user: raw } => {
             let person = user(&raw)?;
             let admin = admin_of(store).await?;
-            let grant = store
-                .approve(&person, &admin)
+            let grant = roles::grant(store, &person, &admin)
                 .await
                 .map_err(|err| err.to_string())?;
             Ok(format!(
-                "{} may run nodes (approved by {} at {}).",
+                "{} may run nodes and use the gateway (approved by {} at {}).",
                 grant.user, grant.approved_by, grant.approved_at
             ))
         }
         GrantCommand::Revoke { user: raw } => {
             let person = user(&raw)?;
-            Ok(
-                if store.revoke(&person).await.map_err(|err| err.to_string())? {
-                    format!("{person} may no longer run nodes; theirs will be disconnected.")
-                } else {
-                    format!("{person} had no grant.")
-                },
-            )
+            let (had, revoked) = roles::revoke_grant(store, &person)
+                .await
+                .map_err(|err| err.to_string())?;
+            Ok(if had {
+                format!(
+                    "{person} may no longer run nodes; {} revoked, and their nodes will be disconnected. They may still use the gateway.",
+                    tokens(revoked.len())
+                )
+            } else {
+                format!("{person} had no grant.")
+            })
         }
         GrantCommand::List => {
             let grants = store.grants().await.map_err(|err| err.to_string())?;
@@ -88,19 +95,26 @@ pub async fn user_settings(store: &dyn Store, command: UserCommand) -> Result<St
         UserCommand::Allow { user: raw } => {
             let person = user(&raw)?;
             admin_of(store).await?;
-            store
-                .set_allowed(&person, true)
+            roles::allow(store, &person)
                 .await
                 .map_err(|err| err.to_string())?;
-            Ok(format!("{person} may use the admin's nodes."))
+            Ok(format!(
+                "{person} may use the gateway, on any node whose owner lets them in."
+            ))
         }
         UserCommand::Disallow { user: raw } => {
             let person = user(&raw)?;
-            store
-                .set_allowed(&person, false)
+            let revoked = roles::disallow(store, &person)
                 .await
                 .map_err(|err| err.to_string())?;
-            Ok(format!("{person} may no longer use the admin's nodes."))
+            Ok(if revoked.is_empty() {
+                format!("{person} may no longer use the gateway.")
+            } else {
+                format!(
+                    "{person} may no longer use the gateway or run nodes; {} revoked.",
+                    tokens(revoked.len())
+                )
+            })
         }
         UserCommand::List => {
             let users = store.users().await.map_err(|err| err.to_string())?;
@@ -204,32 +218,11 @@ pub async fn node(store: &dyn Store, command: NodeCommand) -> Result<String, Str
 async fn mint(store: &dyn Store, args: MintArgs) -> Result<String, String> {
     let owner = user(&args.owner)?;
     let admin = admin_of(store).await?;
-    let granted = store
-        .grants()
-        .await
-        .map_err(|err| err.to_string())?
-        .iter()
-        .any(|grant| grant.user == owner);
-    if owner != admin && !granted {
-        return Err(format!(
-            "{owner} has no grant; run `murtaugh-gateway grant approve {owner}` first"
-        ));
-    }
     let name = args.name.trim().to_owned();
     if name.is_empty() {
         return Err("--name must not be empty".to_owned());
     }
-    let minted = token::mint();
-    store
-        .add_node_token(&NodeToken {
-            selector: minted.selector.clone(),
-            secret_hash: minted.secret_hash,
-            owner: owner.clone(),
-            name: name.clone(),
-            created_at: OffsetDateTime::now_utc(),
-            revoked_at: None,
-            disabled_at: None,
-        })
+    let minted = roles::mint(store, &owner, &name, &admin)
         .await
         .map_err(|err| err.to_string())?;
     match args.token_file {
@@ -245,6 +238,13 @@ async fn mint(store: &dyn Store, args: MintArgs) -> Result<String, String> {
             "Minted {} for {owner}'s node {name:?}. Hand this token over in person; it is not shown again:\n{}",
             minted.selector, minted.token
         )),
+    }
+}
+
+fn tokens(count: usize) -> String {
+    match count {
+        1 => "1 token".to_owned(),
+        count => format!("{count} tokens"),
     }
 }
 

@@ -61,7 +61,7 @@ fn credentials_come_from_a_dotenv_beside_the_config() {
 }
 
 #[test]
-fn the_admin_approves_a_person_mints_their_node_and_revokes_it() {
+fn minting_a_persons_node_grants_and_allows_them_and_revoking_the_grant_takes_the_tokens() {
     let (dir, config) = setup();
     let stderr = failed(gateway(&config, &["grant", "approve", "U0PERSON1"]));
     assert!(stderr.contains("admin set"), "{stderr}");
@@ -69,13 +69,6 @@ fn the_admin_approves_a_person_mints_their_node_and_revokes_it() {
     ok(gateway(&config, &["admin", "set", "U0ADMIN01"]));
     assert_eq!(ok(gateway(&config, &["admin", "show"])).trim(), "U0ADMIN01");
 
-    let stderr = failed(gateway(
-        &config,
-        &["node", "mint", "--owner", "U0PERSON1", "--name", "laptop"],
-    ));
-    assert!(stderr.contains("grant approve U0PERSON1"), "{stderr}");
-
-    ok(gateway(&config, &["grant", "approve", "U0PERSON1"]));
     let token_file = dir.path().join("node-token");
     let minted = ok(gateway(
         &config,
@@ -95,13 +88,24 @@ fn the_admin_approves_a_person_mints_their_node_and_revokes_it() {
     assert!(!minted.contains(token.trim()), "the token was printed too");
     let mode = std::fs::metadata(&token_file).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o600);
+    assert!(ok(gateway(&config, &["grant", "list"])).contains("U0PERSON1"));
+    assert!(ok(gateway(&config, &["user", "list"])).contains("U0PERSON1\tallowed"));
 
     let listed = ok(gateway(&config, &["node", "list"]));
     let selector = listed.split('\t').next().unwrap().to_owned();
     assert!(listed.contains("U0PERSON1\tlaptop\tlive"), "{listed}");
     assert!(ok(gateway(&config, &["node", "revoke", &selector])).contains("Revoked"));
     assert!(ok(gateway(&config, &["node", "list"])).contains("revoked"));
-    assert!(ok(gateway(&config, &["grant", "revoke", "U0PERSON1"])).contains("no longer"));
+    assert!(ok(gateway(&config, &["grant", "list"])).contains("U0PERSON1"));
+
+    ok(gateway(
+        &config,
+        &["node", "mint", "--owner", "U0PERSON1", "--name", "desktop"],
+    ));
+    let revoked = ok(gateway(&config, &["grant", "revoke", "U0PERSON1"]));
+    assert!(revoked.contains("1 token revoked"), "{revoked}");
+    assert!(!ok(gateway(&config, &["node", "list"])).contains("live"));
+    assert!(ok(gateway(&config, &["user", "list"])).contains("U0PERSON1\tallowed"));
 }
 
 #[test]

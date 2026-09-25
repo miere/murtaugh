@@ -14,12 +14,18 @@ use crate::tools::NAMESPACE;
 /// The name under this gateway's prefix, so the key a node writes is `murtaugh_access`.
 pub const ACCESS: &str = "access";
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NodeAccess {
-    /// What a node that says nothing gets, so a node from before this key keeps working as it did.
-    #[default]
     AlwaysAllow,
     AllowList(HashSet<UserId>),
+}
+
+/// A node that says nothing serves its owner alone. Anyone allowed on the gateway may be routed to
+/// any node that lets them in, so sharing a machine has to be something its owner said.
+impl Default for NodeAccess {
+    fn default() -> Self {
+        Self::AllowList(HashSet::new())
+    }
 }
 
 impl NodeAccess {
@@ -112,9 +118,11 @@ mod tests {
     }
 
     #[test]
-    fn a_node_that_says_nothing_lets_everyone_in() {
+    fn a_node_that_says_nothing_serves_only_its_owner() {
         let read = read(&Metadata::new()).unwrap();
-        assert_eq!(read.access, NodeAccess::AlwaysAllow);
+        let owner = user("U0ALICE01");
+        assert!(read.access.admits(&owner, &owner));
+        assert!(!read.access.admits(&owner, &user("U0ADMIN01")));
         assert!(read.ignored.is_empty());
     }
 

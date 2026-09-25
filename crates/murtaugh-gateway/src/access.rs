@@ -86,23 +86,20 @@ impl Snapshot {
         self.tokens.get(selector).map(|record| record.name.as_str())
     }
 
-    fn owns_a_node(&self, user: &UserId) -> bool {
-        self.tokens
-            .values()
-            .any(|record| &record.owner == user && record.revoked_at.is_none())
-    }
-
-    /// People with nodes of their own, or pre-authorised on the admin's. Everyone else is ignored.
+    /// Everyone allowed on the gateway, node admins included: granting someone allows them too.
+    /// Which nodes they may use is up to each node's owner, not the gateway.
     pub fn may_chat(&self, user: &UserId) -> bool {
-        self.allowed.contains(user) || (self.may_run_nodes(user) && self.owns_a_node(user))
+        self.allowed.contains(user) || self.may_run_nodes(user)
     }
 
-    /// Whose nodes a person may fall back to when none of their own is online.
-    pub fn fallback_owners(&self, user: &UserId) -> Vec<UserId> {
-        match &self.admin {
-            Some(admin) if admin != user && self.allowed.contains(user) => vec![admin.clone()],
-            _ => Vec::new(),
-        }
+    /// People granted the right to connect nodes, the admin aside, who needs no grant.
+    pub fn node_admins(&self) -> impl Iterator<Item = &UserId> {
+        self.grants.iter()
+    }
+
+    /// People allowed to talk to the gateway, as the store lists them.
+    pub fn allowed_users(&self) -> impl Iterator<Item = &UserId> {
+        self.allowed.iter()
     }
 }
 
@@ -305,13 +302,15 @@ mod tests {
     }
 
     #[test]
-    fn people_without_nodes_chat_only_when_pre_authorised_and_fall_back_to_the_admin() {
+    fn the_allowed_node_admins_and_the_admin_may_chat_and_nobody_else() {
         let (mut snapshot, _) = with_token("U0ADMIN01");
         let guest = user("U0GUEST01");
         assert!(!snapshot.may_chat(&guest));
-        assert!(snapshot.fallback_owners(&guest).is_empty());
         snapshot.allowed.insert(guest.clone());
         assert!(snapshot.may_chat(&guest));
-        assert_eq!(snapshot.fallback_owners(&guest), [user("U0ADMIN01")]);
+        let node_admin = user("U0PERSON1");
+        snapshot.grants.insert(node_admin.clone());
+        assert!(snapshot.may_chat(&node_admin));
+        assert!(snapshot.may_chat(&user("U0ADMIN01")));
     }
 }
