@@ -2031,12 +2031,15 @@ async fn a_sign_in_is_worked_through_by_the_owner_alone_in_their_dm() {
         .unwrap();
     let approved = within(answers.recv()).await.unwrap();
     assert_eq!(approved.outcome, rax::interaction::DisplayOutcome::Approved);
-    assert!(
+    // The two clicks are handled at once, so Bob's refusal may land after Alice's approval.
+    eventually("Bob told the card is not his", || {
         rig.sim
             .ephemerals()
             .iter()
             .any(|(_, who, text)| who == BOB && text.contains("Only <@U0ALICE01>"))
-    );
+            .then_some(())
+    })
+    .await;
 
     let settle = |state: SignInState, url: Option<&str>| {
         rax::NodeCall::SignInSettled(SignInSettled {
