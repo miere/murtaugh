@@ -115,6 +115,10 @@ pub(crate) struct State {
     pub reserved: HashMap<String, crate::upload::Reserved>,
     pub ephemerals: Vec<SimEphemeral>,
     pub homes: HashMap<String, Value>,
+    /// Whose click each `trigger_id` came from, so `views.open` knows whom a modal is for.
+    pub triggers: HashMap<String, String>,
+    /// The modal each person has open, as `views.open` was given it.
+    pub modals: HashMap<String, Value>,
     clock: u64,
     seq: u64,
 }
@@ -140,6 +144,8 @@ impl State {
             reserved: HashMap::new(),
             ephemerals: Vec::new(),
             homes: HashMap::new(),
+            triggers: HashMap::new(),
+            modals: HashMap::new(),
             clock: 0,
             seq: 0,
         };

@@ -50,6 +50,8 @@ pub struct Summary {
     pub name: String,
     pub sessions: usize,
     pub connected: bool,
+    /// Who its owner lets in, as the node last declared it.
+    pub access: NodeAccess,
 }
 
 impl Fleet {
@@ -105,8 +107,8 @@ impl Fleet {
         self.nodes().get(selector).map(|entry| entry.node.clone())
     }
 
-    /// A person's own nodes when any is attached, otherwise the nodes of whoever lets them fall
-    /// back; never a mix. Least live sessions wins, and the choice counts as a session at once.
+    /// A person's own nodes when any is attached, otherwise anyone's that lets them in; never a
+    /// mix. Least live sessions wins, and the choice counts as a session at once.
     pub fn assign(&self, user: &UserId, access: &Snapshot) -> Option<Node> {
         let mut nodes = self.nodes();
         let selector = serving(user, access, &nodes)
@@ -132,6 +134,7 @@ impl Fleet {
                 name: entry.node.name.clone(),
                 sessions: entry.sessions,
                 connected: entry.node.connected,
+                access: entry.node.access.clone(),
             })
             .collect();
         choices.sort_by(|a, b| a.name.cmp(&b.name));
@@ -168,6 +171,7 @@ impl Fleet {
                 name: entry.node.name.clone(),
                 sessions: entry.sessions,
                 connected: entry.node.connected,
+                access: entry.node.access.clone(),
             })
             .collect();
         summaries.sort_by(|a, b| a.name.cmp(&b.name));
@@ -184,7 +188,7 @@ fn serving<'a>(
     candidates(user, access, nodes).filter(|entry| entry.node.admits(user))
 }
 
-/// Whether or not their owners let this person in. Own nodes shadow the fallback entirely:
+/// Whether or not their owners let this person in. Own nodes shadow everyone else's entirely:
 /// somebody with a machine of their own never lands on another person's, so neither may the
 /// picker put them there.
 fn candidates<'a>(
@@ -192,19 +196,12 @@ fn candidates<'a>(
     access: &Snapshot,
     nodes: &'a HashMap<String, Entry>,
 ) -> impl Iterator<Item = &'a Entry> {
-    let live = |owner: &UserId| {
-        nodes
-            .values()
-            .any(|entry| entry.node.connected && &entry.node.owner == owner)
-    };
-    let owners = if live(user) {
-        vec![user.clone()]
-    } else {
-        access.fallback_owners(user)
-    };
+    let own_live = nodes
+        .values()
+        .any(|entry| entry.node.connected && &entry.node.owner == user);
     nodes.values().filter(move |entry| {
         entry.node.connected
-            && owners.contains(&entry.node.owner)
+            && (!own_live || &entry.node.owner == user)
             && access.is_enabled(&entry.node.selector)
     })
 }

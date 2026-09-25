@@ -5,7 +5,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use murtaugh_slack::{Click, HomeClick, SlackClient, SocketEvent, SocketMode, Tokens};
+use murtaugh_slack::{
+    Click, HomeClick, SlackClient, SocketEvent, SocketMode, Tokens, ViewSubmission,
+};
 use murtaugh_store::{Leader, Lease};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -88,6 +90,16 @@ pub async fn serve(
         .auth_test()
         .await
         .map_err(|err| format!("Slack refused the bot token: {err}"))?;
+    let reconciled = crate::roles::reconcile(&*store)
+        .await
+        .map_err(|err| err.to_string())?;
+    if !reconciled.allowed.is_empty() || !reconciled.revoked.is_empty() {
+        tracing::info!(
+            allowed = ?reconciled.allowed,
+            revoked = ?reconciled.revoked,
+            "brought access into line: node admins are allowed, and tokens without a grant are revoked"
+        );
+    }
     let snapshot = Snapshot::load(&*store)
         .await
         .map_err(|err| err.to_string())?;
@@ -231,6 +243,8 @@ async fn serve_as_leader(
                         tokio::spawn(chat.clone().on_click(click));
                     } else if let Some(click) = HomeClick::from_interactive(&payload) {
                         tokio::spawn(chat.clone().on_home_click(click));
+                    } else if let Some(submission) = ViewSubmission::from_interactive(&payload) {
+                        tokio::spawn(chat.clone().on_view_submission(submission));
                     }
                 }
                 None => break (Led::SlackFailed("the Slack connection ended".into()), true),

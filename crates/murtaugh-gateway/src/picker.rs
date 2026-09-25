@@ -84,6 +84,7 @@ mod tests {
             name: name.into(),
             sessions: 0,
             connected: true,
+            access: Default::default(),
         }
     }
 

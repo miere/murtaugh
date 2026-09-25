@@ -110,11 +110,13 @@ pub enum AdminCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum GrantCommand {
-    /// Let a person run their own nodes; approve only someone you have spoken to
+    /// Let a person run their own nodes, and use the gateway; approve only someone you have
+    /// spoken to
     Approve {
         user: String,
     },
-    /// Take it back; their nodes are disconnected within seconds
+    /// Take it back; every token they hold is revoked for good, and their nodes are disconnected
+    /// within seconds. They may still use the gateway
     Revoke {
         user: String,
     },
@@ -123,10 +125,11 @@ pub enum GrantCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum UserCommand {
-    /// Pre-authorise a person on the admin's nodes
+    /// Let a person use the gateway, on any node whose owner lets them in
     Allow {
         user: String,
     },
+    /// Take it back, with their grant and every token they hold
     Disallow {
         user: String,
     },
@@ -148,7 +151,7 @@ pub enum ToolsCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum NodeCommand {
-    /// Mint a credential for one of a person's nodes
+    /// Mint a credential for one of a person's nodes, granting them first if need be
     Mint(MintArgs),
     /// Revoke a credential; its node is disconnected within seconds
     Revoke { selector: String },

@@ -160,12 +160,14 @@ pub enum SimError {
     UnknownMessage { channel: String, ts: String },
     #[error("no button with action_id {action_id} on {ts}")]
     UnknownAction { ts: String, action_id: String },
-    #[error("no Home tab overflow option {value:?} under action_id {action_id} for {user}")]
+    #[error("no Home tab element under action_id {action_id} takes {value:?} for {user}")]
     UnknownHomeAction {
         user: String,
         action_id: String,
         value: String,
     },
+    #[error("{0} has no modal open")]
+    NoModal(String),
     #[error("no {method} call matched within {waited:?}; calls that did arrive: {arrived:#?}")]
     Timeout {
         method: String,
@@ -653,21 +655,83 @@ impl SlackSim {
         action_id: &str,
         value: &str,
     ) -> Result<(), SimError> {
-        let envelope =
-            {
-                let mut st = self.inner.lock();
-                if !st.users.contains_key(user) {
-                    return Err(SimError::UnknownUser(user.to_owned()));
+        let unknown = || SimError::UnknownHomeAction {
+            user: user.to_owned(),
+            action_id: action_id.to_owned(),
+            value: value.to_owned(),
+        };
+        let envelope = {
+            let mut st = self.inner.lock();
+            if !st.users.contains_key(user) {
+                return Err(SimError::UnknownUser(user.to_owned()));
+            }
+            let (block_id, element) =
+                find_home_element(&st, user, action_id).ok_or_else(unknown)?;
+            let chosen = match element["type"].as_str() {
+                Some("overflow" | "static_select") => {
+                    let option = element["options"]
+                        .as_array()
+                        .and_then(|options| options.iter().find(|o| o["value"] == value))
+                        .cloned()
+                        .ok_or_else(unknown)?;
+                    serde_json::json!({"selected_option": option})
                 }
-                let blocks = st.homes.get(user).cloned().unwrap_or(Value::Array(vec![]));
-                let (block_id, option) = find_overflow_option(&blocks, action_id, value)
-                    .ok_or_else(|| SimError::UnknownHomeAction {
-                        user: user.to_owned(),
-                        action_id: action_id.to_owned(),
-                        value: value.to_owned(),
-                    })?;
-                render::home_block_actions(&mut st, user, action_id, &block_id, &option)
+                Some("button") => serde_json::json!({
+                    "text": element["text"],
+                    "value": element.get("value").cloned().unwrap_or_default(),
+                }),
+                Some("users_select") => serde_json::json!({"selected_user": value}),
+                _ => return Err(unknown()),
             };
+            render::home_block_actions(&mut st, user, &element, &block_id, chosen)
+        };
+        socket::deliver(&self.inner, envelope);
+        Ok(())
+    }
+
+    /// Sets a multi-user picker on the Home tab to exactly `users`, as Slack reports it: the whole
+    /// selection, not the change.
+    pub async fn pick_home_users(
+        &self,
+        user: &str,
+        action_id: &str,
+        users: &[&str],
+    ) -> Result<(), SimError> {
+        let envelope = {
+            let mut st = self.inner.lock();
+            if !st.users.contains_key(user) {
+                return Err(SimError::UnknownUser(user.to_owned()));
+            }
+            let (block_id, element) = find_home_element(&st, user, action_id)
+                .filter(|(_, element)| element["type"] == "multi_users_select")
+                .ok_or_else(|| SimError::UnknownHomeAction {
+                    user: user.to_owned(),
+                    action_id: action_id.to_owned(),
+                    value: users.join(","),
+                })?;
+            let chosen = serde_json::json!({"selected_users": users});
+            render::home_block_actions(&mut st, user, &element, &block_id, chosen)
+        };
+        socket::deliver(&self.inner, envelope);
+        Ok(())
+    }
+
+    /// The modal `user` has open, as the bot opened it.
+    pub fn modal(&self, user: &str) -> Option<Value> {
+        self.inner.lock().modals.get(user).cloned()
+    }
+
+    /// Submits the modal `user` has open, closing it. `values` is the view's `state.values`,
+    /// keyed by block id, then action id.
+    pub async fn submit_modal(&self, user: &str, values: Value) -> Result<(), SimError> {
+        let envelope = {
+            let mut st = self.inner.lock();
+            let view = st
+                .modals
+                .remove(user)
+                .ok_or_else(|| SimError::NoModal(user.to_owned()))?;
+            render::view_submission(&mut st, user, &view, values)
+        };
         socket::deliver(&self.inner, envelope);
         Ok(())
     }
@@ -830,25 +894,19 @@ fn find_option(ephemeral: &SimEphemeral, action_id: &str, option: &str) -> Optio
 
 /// Home tab rows share one `action_id` across every node's overflow menu, so the match is on the
 /// option's value (which carries the selector) rather than on the block alone.
-fn find_overflow_option(blocks: &Value, action_id: &str, value: &str) -> Option<(String, Value)> {
-    let top = blocks.as_array()?;
-    top.iter().enumerate().find_map(|(i, block)| {
+/// The element `user`'s Home tab carries under `action_id`, with its block's id.
+fn find_home_element(st: &State, user: &str, action_id: &str) -> Option<(String, Value)> {
+    let blocks = st.homes.get(user)?.as_array()?;
+    blocks.iter().enumerate().find_map(|(i, block)| {
         let accessory = block.get("accessory")?;
-        if accessory.get("type").and_then(Value::as_str) != Some("overflow")
-            || accessory.get("action_id").and_then(Value::as_str) != Some(action_id)
-        {
+        if accessory.get("action_id").and_then(Value::as_str) != Some(action_id) {
             return None;
         }
-        let option = accessory
-            .get("options")?
-            .as_array()?
-            .iter()
-            .find(|o| o.get("value").and_then(Value::as_str) == Some(value))?;
         let block_id = block
             .get("block_id")
             .and_then(Value::as_str)
             .map_or_else(|| format!("sim{i}"), str::to_owned);
-        Some((block_id, option.clone()))
+        Some((block_id, accessory.clone()))
     })
 }
 

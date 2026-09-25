@@ -201,8 +201,13 @@ impl Click {
 pub struct HomeClick {
     pub user: String,
     pub action_id: String,
-    /// A menu keeps its value under the option it chose rather than on the action.
+    /// A menu keeps its value under the option it chose rather than on the action, and a user
+    /// picker under the person it chose.
     pub value: String,
+    /// Everyone a multi-user picker holds now, not just the change.
+    pub users: Vec<String>,
+    /// What `views.open` needs to answer this click with a modal, good for a few seconds.
+    pub trigger_id: String,
 }
 
 impl HomeClick {
@@ -221,7 +226,48 @@ impl HomeClick {
             action_id: text(&action["action_id"])?,
             value: text(&action["value"])
                 .or_else(|| text(&action["selected_option"]["value"]))
+                .or_else(|| text(&action["selected_user"]))
                 .unwrap_or_default(),
+            users: action["selected_users"]
+                .as_array()
+                .map(|users| users.iter().filter_map(text).collect())
+                .unwrap_or_default(),
+            trigger_id: text(&payload["trigger_id"]).unwrap_or_default(),
         })
+    }
+}
+
+/// A modal the bot opened, submitted: a `view_submission` payload.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ViewSubmission {
+    pub user: String,
+    pub callback_id: String,
+    /// Whatever the bot put in the view when opening it; modals carry their context here.
+    pub private_metadata: String,
+    /// `view.state.values`, keyed by block id, then action id.
+    pub values: Value,
+}
+
+impl ViewSubmission {
+    pub fn from_interactive(payload: &Value) -> Option<ViewSubmission> {
+        if payload["type"].as_str() != Some("view_submission") {
+            return None;
+        }
+        let text = |value: &Value| value.as_str().map(str::to_owned);
+        let view = &payload["view"];
+        Some(ViewSubmission {
+            user: text(&payload["user"]["id"])?,
+            callback_id: text(&view["callback_id"])?,
+            private_metadata: text(&view["private_metadata"]).unwrap_or_default(),
+            values: view["state"]["values"].clone(),
+        })
+    }
+
+    /// What one input held: a text input's value, or the person a user picker chose.
+    pub fn value(&self, block_id: &str, action_id: &str) -> Option<&str> {
+        let input = &self.values[block_id][action_id];
+        input["value"]
+            .as_str()
+            .or_else(|| input["selected_user"].as_str())
     }
 }
