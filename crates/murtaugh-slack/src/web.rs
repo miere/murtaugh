@@ -101,10 +101,56 @@ pub struct Message {
 pub struct FileInfo {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub title: String,
     pub mimetype: String,
     pub size: u64,
     #[serde(default)]
     pub url_private_download: String,
+}
+
+/// The mimetype `files.info` gives a canvas.
+pub const CANVAS_MIMETYPE: &str = "application/vnd.slack-docs";
+/// Every canvas's HTML is wrapped in this, and nothing else Slack serves is.
+const CANVAS_ROOT: &str = "<div class=\"quip-canvas-content\">";
+
+impl FileInfo {
+    pub fn is_canvas(&self) -> bool {
+        self.mimetype == CANVAS_MIMETYPE
+    }
+}
+
+/// One `canvases.edit` change. `section_id` is a block's id from the canvas's HTML; `markdown` is
+/// what to insert or replace with, and is left out of a delete.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanvasChange {
+    pub operation: CanvasOperation,
+    pub section_id: Option<String>,
+    pub markdown: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CanvasOperation {
+    InsertAtStart,
+    InsertAtEnd,
+    InsertBefore,
+    InsertAfter,
+    /// Without a section, replaces the whole canvas.
+    Replace,
+    Delete,
+}
+
+impl CanvasOperation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CanvasOperation::InsertAtStart => "insert_at_start",
+            CanvasOperation::InsertAtEnd => "insert_at_end",
+            CanvasOperation::InsertBefore => "insert_before",
+            CanvasOperation::InsertAfter => "insert_after",
+            CanvasOperation::Replace => "replace",
+            CanvasOperation::Delete => "delete",
+        }
+    }
 }
 
 /// A file to share; with a `thread_ts` it lands in that thread, `initial_comment` above it.
@@ -417,12 +463,49 @@ impl SlackClient {
     }
 
     pub async fn download(&self, file: &FileInfo) -> Result<Vec<u8>, SlackError> {
-        let failed = |reason: String| SlackError::Download {
+        let (content_type, bytes) = self.fetch(file).await?;
+        if content_type.starts_with("text/html") && !file.mimetype.starts_with("text/html") {
+            return Err(refused_download(file));
+        }
+        Ok(bytes)
+    }
+
+    /// A canvas's content, as the HTML Slack serves for it. A canvas is HTML whatever its
+    /// mimetype says, so a refusal is told apart by the wrapper every canvas has and the sign-in
+    /// page does not.
+    pub async fn canvas_html(&self, file: &FileInfo) -> Result<String, SlackError> {
+        let (_, bytes) = self.fetch(file).await?;
+        let html = String::from_utf8_lossy(&bytes).into_owned();
+        if !html.trim_start().starts_with(CANVAS_ROOT) {
+            return Err(refused_download(file));
+        }
+        Ok(html)
+    }
+
+    /// Applies one change to a canvas: Slack takes no more than one per call.
+    pub async fn edit_canvas(
+        &self,
+        canvas_id: &str,
+        change: &CanvasChange,
+    ) -> Result<(), SlackError> {
+        let mut edit = json!({"operation": change.operation.as_str()});
+        if let Some(section) = &change.section_id {
+            edit["section_id"] = json!(section);
+        }
+        if let Some(markdown) = &change.markdown {
+            edit["document_content"] = json!({"type": "markdown", "markdown": markdown});
+        }
+        let body = json!({"canvas_id": canvas_id, "changes": [edit]});
+        self.call::<Value>("canvases.edit", Token::Bot, Body::Json(body))
+            .await
+            .map(drop)
+    }
+
+    async fn fetch(&self, file: &FileInfo) -> Result<(String, Vec<u8>), SlackError> {
+        let url = Url::parse(&file.url_private_download).map_err(|e| SlackError::Download {
             url: file.url_private_download.clone(),
-            reason,
-        };
-        let url = Url::parse(&file.url_private_download)
-            .map_err(|e| failed(format!("not a URL: {e}")))?;
+            reason: format!("not a URL: {e}"),
+        })?;
         let http = |source| SlackError::Http {
             method: "files.download".into(),
             source,
@@ -437,13 +520,8 @@ impl SlackClient {
             .map_err(http)?
             .error_for_status()
             .map_err(http)?;
-        let is_html = content_type(res.headers()).starts_with("text/html");
-        if is_html && !file.mimetype.starts_with("text/html") {
-            return Err(failed(
-                "Slack answered with an HTML page, which means the token was refused".into(),
-            ));
-        }
-        Ok(res.bytes().await.map_err(http)?.to_vec())
+        let content_type = content_type(res.headers());
+        Ok((content_type, res.bytes().await.map_err(http)?.to_vec()))
     }
 
     /// Slack's external upload: reserve an id, send the bytes to the URL it gives, then share.
@@ -587,12 +665,26 @@ impl SlackClient {
                     .and_then(Value::as_str)
                     .unwrap_or("unknown_error")
                     .to_owned();
-                if let Some(messages) = value.pointer("/response_metadata/messages") {
+                let messages = value.pointer("/response_metadata/messages");
+                if let Some(messages) = messages {
                     tracing::warn!(method, %error, %messages, "Slack rejected the call");
                 }
+                let detail = value
+                    .get("detail")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .or_else(|| {
+                        let lines: Vec<&str> = messages?
+                            .as_array()?
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .collect();
+                        (!lines.is_empty()).then(|| lines.join("; "))
+                    });
                 return Err(SlackError::Api {
                     method: method.into(),
                     error,
+                    detail,
                 });
             }
             return serde_json::from_value(value).map_err(|source| SlackError::Decode {
@@ -600,6 +692,13 @@ impl SlackClient {
                 source,
             });
         }
+    }
+}
+
+fn refused_download(file: &FileInfo) -> SlackError {
+    SlackError::Download {
+        url: file.url_private_download.clone(),
+        reason: "Slack answered with an HTML page, which means the token was refused".into(),
     }
 }
 

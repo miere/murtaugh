@@ -268,7 +268,7 @@ async fn slack_errors_are_surfaced_verbatim() {
     let codes: Vec<(String, String)> = [injected, hidden, long, missing]
         .into_iter()
         .map(|e| match e {
-            SlackError::Api { method, error } => (method, error),
+            SlackError::Api { method, error, .. } => (method, error),
             other => panic!("expected an API error, got {other:?}"),
         })
         .collect();

@@ -60,6 +60,10 @@ mod tests {
             "groups:history",
             "im:history",
             "mpim:history",
+            // read_canvas and edit_canvas; reading also downloads, which is files:read.
+            "canvases:read",
+            "canvases:write",
+            "files:read",
         ] {
             assert!(scopes.contains(&scope), "missing {scope}");
         }

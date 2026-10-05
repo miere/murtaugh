@@ -29,8 +29,10 @@ const METHODS: &[&str] = &[
     "files.info",
     "files.getUploadURLExternal",
     "files.completeUploadExternal",
+    "canvases.edit",
 ];
 const JSON_METHODS: &[&str] = &[
+    "canvases.edit",
     "auth.test",
     "chat.postMessage",
     "chat.update",
@@ -52,6 +54,15 @@ pub(crate) fn err(code: &str, detail: impl Into<String>) -> ApiError {
         code: code.to_owned(),
         detail: detail.into(),
         violation: true,
+    }
+}
+
+/// A refusal Slack explains, which a correct client can still meet: not a violation.
+pub(crate) fn refusal(code: &str, detail: impl Into<String>) -> ApiError {
+    ApiError {
+        code: code.to_owned(),
+        detail: detail.into(),
+        violation: false,
     }
 }
 
@@ -160,7 +171,7 @@ pub(crate) async fn handle(
         let outcome = match fault {
             Some(Fault::RateLimit(secs)) => Err(Some(secs)),
             Some(Fault::Fail(code)) => Ok(Err(benign(&code))),
-            None => Ok(dispatch(
+            Some(Fault::Pass) | None => Ok(dispatch(
                 &mut st,
                 &method,
                 req.token.as_deref(),
@@ -197,8 +208,12 @@ pub(crate) async fn handle(
         }
         Ok(Err(e)) => {
             let mut body = json!({"ok": false, "error": e.code});
-            if e.code.starts_with("invalid_blocks") && !e.detail.is_empty() {
+            let explained = e.code.starts_with("invalid_blocks") || e.code == "invalid_arguments";
+            if explained && !e.detail.is_empty() {
                 body["response_metadata"] = json!({"messages": [format!("[ERROR] {}", e.detail)]});
+            }
+            if e.code == "canvas_editing_failed" {
+                body["detail"] = json!(e.detail);
             }
             json_body(body).into_response()
         }
@@ -270,6 +285,7 @@ fn dispatch(
         "conversations.replies" => replies(st, params),
         "files.getUploadURLExternal" => crate::upload::reserve(st, params),
         "files.completeUploadExternal" => crate::upload::complete(st, params),
+        "canvases.edit" => crate::canvas::edit(st, params),
         _ => file_info(st, params),
     }
 }
@@ -616,6 +632,16 @@ fn replies(st: &mut State, params: &Map<String, Value>) -> Result<Value, ApiErro
 
 fn file_info(st: &mut State, params: &Map<String, Value>) -> Result<Value, ApiError> {
     let id = arg(params, "file")?.unwrap_or_default();
+    if let Some(canvas) = st.canvases.get(&id) {
+        if !crate::canvas::visible(st, &id) {
+            return Err(benign("file_not_found"));
+        }
+        return Ok(json!({
+            "file": crate::canvas::file_json(st, canvas),
+            "comments": [],
+            "response_metadata": {"next_cursor": ""},
+        }));
+    }
     let file = st
         .files
         .get(&id)
@@ -655,6 +681,15 @@ pub(crate) async fn download(
             .into_response();
     }
     let file_id = team_file.rsplit('-').next().unwrap_or_default();
+    if name == "canvas"
+        && let Some(canvas) = st.canvases.get(file_id)
+    {
+        return (
+            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            canvas.html(),
+        )
+            .into_response();
+    }
     match st.files.get(file_id).filter(|f| f.name == name) {
         Some(file) => (
             [(header::CONTENT_TYPE, file.mimetype.clone())],
