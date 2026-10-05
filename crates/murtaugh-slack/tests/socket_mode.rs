@@ -348,7 +348,7 @@ async fn a_bad_app_token_fails_at_connect() {
         sim.api_base(),
     );
     match SocketMode::connect(client).await {
-        Err(SlackError::Api { method, error }) => {
+        Err(SlackError::Api { method, error, .. }) => {
             assert_eq!(method, "apps.connections.open");
             assert_eq!(error, "invalid_auth");
         }

@@ -276,6 +276,7 @@ mod tests {
                 &SlackError::Api {
                     method: "conversations.history".into(),
                     error: code.into(),
+                    detail: None,
                 },
                 "C1",
             );
@@ -292,6 +293,7 @@ mod tests {
             &SlackError::Api {
                 method: "conversations.history".into(),
                 error: "ratelimited_forever".into(),
+                detail: None,
             },
             "C1",
         );

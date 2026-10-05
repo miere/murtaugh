@@ -11,6 +11,7 @@ use rax::{Error, ErrorKind, NodeReply};
 use rax_tokio::gateway::GatewayLink;
 use serde_json::Value;
 
+pub mod canvas;
 pub mod slack_message;
 
 /// Qualifies every tool name on the node, so the agent sees `mcp__murtaugh__…` — the same names

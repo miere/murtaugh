@@ -3,6 +3,7 @@
 
 mod api;
 mod blocks;
+mod canvas;
 mod render;
 mod socket;
 mod state;
@@ -441,6 +442,12 @@ impl SlackSim {
         self.push_fault(method, Fault::Fail(error.to_owned()));
     }
 
+    /// Lets the next call to `method` through, so a fault queued after this one lands on the call
+    /// after it.
+    pub fn pass(&self, method: &str) {
+        self.push_fault(method, Fault::Pass);
+    }
+
     fn push_fault(&self, method: &str, fault: Fault) {
         self.inner
             .lock()
@@ -476,6 +483,37 @@ impl SlackSim {
             bytes: file.bytes.clone(),
             user: file.user.clone(),
         })
+    }
+
+    /// A canvas in `channel`, written as Markdown; returns its file id. The bot sees it only if it
+    /// is a member of `channel`.
+    pub fn add_canvas(
+        &self,
+        channel: &str,
+        title: &str,
+        markdown: &str,
+    ) -> Result<String, SimError> {
+        let mut st = self.inner.lock();
+        if !st.channels.contains_key(channel) {
+            return Err(SimError::UnknownChannel(channel.to_owned()));
+        }
+        let id = format!("F0CANVAS{:06}", st.next_seq());
+        let blocks = canvas::parse_markdown(&mut st, markdown);
+        st.canvases.insert(
+            id.clone(),
+            canvas::Canvas {
+                id: id.clone(),
+                title: title.to_owned(),
+                channel: channel.to_owned(),
+                blocks,
+            },
+        );
+        Ok(id)
+    }
+
+    /// A canvas's content as its download serves it.
+    pub fn canvas_html(&self, id: &str) -> Option<String> {
+        self.inner.lock().canvases.get(id).map(canvas::Canvas::html)
     }
 
     pub fn thread_status(&self, channel: &str, thread_ts: &str) -> Option<String> {

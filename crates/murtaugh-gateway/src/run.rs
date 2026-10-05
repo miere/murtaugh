@@ -111,9 +111,17 @@ pub async fn serve(
     let access = Access::reloading(snapshot, store.clone());
     let fleet = Fleet::default();
     let files = Files::new(slack.clone());
-    let tools = crate::tools::Tools::new(vec![Box::new(
-        crate::tools::slack_message::SlackReadMessage::new(Some(slack.clone())),
-    )]);
+    let tools = crate::tools::Tools::new(vec![
+        Box::new(crate::tools::slack_message::SlackReadMessage::new(Some(
+            slack.clone(),
+        ))),
+        Box::new(crate::tools::canvas::read::ReadCanvas::new(Some(
+            slack.clone(),
+        ))),
+        Box::new(crate::tools::canvas::edit::EditCanvas::new(Some(
+            slack.clone(),
+        ))),
+    ]);
     let credentials = crate::alerts::Credentials::new(slack.clone());
     let sign_ins = crate::signin::SignIns::new(Some(slack.clone()), access.clone());
     let mut hub = hub::start(

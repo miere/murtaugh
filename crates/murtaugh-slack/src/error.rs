@@ -2,9 +2,14 @@ use std::time::Duration;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SlackError {
-    /// Slack answered `ok: false`; `error` is Slack's code, verbatim.
+    /// Slack answered `ok: false`; `error` is Slack's code, verbatim. `detail` is the sentence some
+    /// methods add beside it — `canvases.edit` names the section id it could not find there.
     #[error("{method} failed: {error}")]
-    Api { method: String, error: String },
+    Api {
+        method: String,
+        error: String,
+        detail: Option<String>,
+    },
     /// Still rate limited after the client honoured `Retry-After` on every allowed retry.
     #[error("{method} is rate limited; retry after {retry_after:?}")]
     RateLimited {

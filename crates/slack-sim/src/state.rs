@@ -77,6 +77,8 @@ pub(crate) struct File {
 pub(crate) enum Fault {
     RateLimit(u64),
     Fail(String),
+    /// Lets one call through untouched, so a fault queued behind it lands on a later call.
+    Pass,
 }
 
 pub(crate) enum Out {
@@ -101,6 +103,7 @@ pub(crate) struct State {
     pub users: BTreeMap<String, User>,
     pub channels: BTreeMap<String, Channel>,
     pub files: BTreeMap<String, File>,
+    pub canvases: BTreeMap<String, crate::canvas::Canvas>,
     pub calls: Vec<Call>,
     pub violations: Vec<Violation>,
     pub faults: HashMap<String, VecDeque<Fault>>,
@@ -130,6 +133,7 @@ impl State {
             users: BTreeMap::new(),
             channels: BTreeMap::new(),
             files: BTreeMap::new(),
+            canvases: BTreeMap::new(),
             calls: Vec::new(),
             violations: Vec::new(),
             faults: HashMap::new(),
