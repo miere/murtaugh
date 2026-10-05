@@ -27,6 +27,10 @@ from an earlier install would make `tar` and `install` pick the wrong one.
 `~/.local/bin` is on the PATH of the LaunchAgent that `murtaugh-gateway launchd` writes. To build
 from source instead: `cargo install --locked --git ssh://git@github.com/miere/murtaugh murtaugh-gateway`.
 
+The macOS release binaries are signed with a self-signed certificate, so the folder and
+Accessibility approvals macOS asks for survive upgrades. A source build is ad-hoc signed, and
+macOS treats every one as a new program that has to be approved again.
+
 ## Creating the Slack app
 
 ```sh
