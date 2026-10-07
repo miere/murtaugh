@@ -24,7 +24,7 @@ use crate::files::Files;
 use crate::fleet::{Fleet, Node};
 use crate::node_access;
 use crate::signin::{self, SignIns};
-use crate::tools::Tools;
+use crate::tools::{Lent, Tools};
 
 pub const REFRESH: Duration = Duration::from_secs(5);
 pub const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -71,6 +71,7 @@ pub async fn start(
     fleet: Fleet,
     files: Files,
     tools: Tools,
+    lent: Lent,
     credentials: Credentials,
     sign_ins: SignIns,
     shutdown: CancellationToken,
@@ -84,6 +85,7 @@ pub async fn start(
         fleet,
         files,
         tools,
+        lent,
         credentials,
         sign_ins,
         changes,
@@ -139,6 +141,7 @@ struct Serving {
     fleet: Fleet,
     files: Files,
     tools: Tools,
+    lent: Lent,
     credentials: Credentials,
     sign_ins: SignIns,
     changes: mpsc::Sender<FleetChange>,
@@ -164,6 +167,7 @@ async fn serve(link: GatewayLink, mut events: LinkEvents, serving: Serving) {
         fleet,
         files,
         tools,
+        lent,
         credentials,
         sign_ins,
         changes,
@@ -235,8 +239,9 @@ async fn serve(link: GatewayLink, mut events: LinkEvents, serving: Serving) {
                 id,
                 call: NodeCall::CallTool(call),
             } => {
-                let (tools, link, name) = (tools.clone(), link.clone(), name.clone());
-                tokio::spawn(async move { tools.serve(&link, &name, id, call).await });
+                let (tools, lent, link, name) =
+                    (tools.clone(), lent.clone(), link.clone(), name.clone());
+                tokio::spawn(async move { tools.serve(&link, &lent, &name, id, call).await });
             }
             LinkEvent::Request {
                 id,
@@ -329,6 +334,7 @@ async fn serve(link: GatewayLink, mut events: LinkEvents, serving: Serving) {
         }
     }
     if fleet.detach(&selector, attachment) {
+        lent.detached(&selector);
         tracing::info!(node = %name, "node detached");
         let _ = changes.send(FleetChange::Gone { selector }).await;
     }

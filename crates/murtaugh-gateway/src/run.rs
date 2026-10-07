@@ -122,6 +122,7 @@ pub async fn serve(
             slack.clone(),
         ))),
     ]);
+    let lent = crate::tools::Lent::new(store.clone());
     let credentials = crate::alerts::Credentials::new(slack.clone());
     let sign_ins = crate::signin::SignIns::new(Some(slack.clone()), access.clone());
     let mut hub = hub::start(
@@ -129,7 +130,8 @@ pub async fn serve(
         access.clone(),
         fleet.clone(),
         files.clone(),
-        tools,
+        tools.clone(),
+        lent.clone(),
         credentials,
         sign_ins.clone(),
         shutdown.clone(),
@@ -158,6 +160,8 @@ pub async fn serve(
         sign_ins,
         turn_idle_timeout: options.turn_idle_timeout,
         tool_ceiling: options.tool_ceiling,
+        tools,
+        lent,
     });
     tracing::info!(listen = %hub.server.local_addr(), team = %identity.team_id, %holder, "murtaugh gateway started; waiting to lead");
     let mut seen = Seen::default();

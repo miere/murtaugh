@@ -15,7 +15,7 @@ use rax::id::{RequestId, SessionId, ToolCallId};
 use rax::interaction::{DisplayAnswer, PlanRequest, Question, QuestionOption, QuestionRequest};
 use rax::resource::ReadResource;
 use rax::session::{Initialized, NodeCapabilities, PromptAccepted, SessionCreated, ToolGate};
-use rax::tool::{Decision, ToolCall, ToolKind};
+use rax::tool::{CallTool, Decision, ToolCall, ToolKind, ToolOutcome};
 use rax::{Event, GatewayCall, GatewayReply, NodeCall, NodeReply, Open};
 use rax_tokio::CallError;
 use rax_tokio::node::{NodeConfig, NodeEvent, NodeHandle, NodeLink, Resource};
@@ -68,6 +68,21 @@ enum Seen {
     Ignored(String),
     /// The gateway ended the link over this node's metadata.
     Rejected(rax::Rejection),
+    /// A session opened, with the namespaces of the tool groups it was lent.
+    Opened {
+        session: SessionId,
+        groups: Vec<String>,
+    },
+}
+
+/// What a scripted node does with the tool groups a session is lent.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Groups {
+    /// An older node: it never declares `tool_groups`.
+    Ignores,
+    Takes,
+    /// Declares the capability, then reports every group it is lent as unpublished.
+    Refuses,
 }
 
 struct FakeNode {
@@ -93,6 +108,30 @@ impl FakeNode {
                 return (session, text, links);
             }
         }
+    }
+
+    async fn next_opened(&mut self) -> (SessionId, Vec<String>) {
+        loop {
+            if let Seen::Opened { session, groups } = within(self.seen.recv()).await.unwrap() {
+                return (session, groups);
+            }
+        }
+    }
+
+    async fn call_tool(
+        &self,
+        session: &SessionId,
+        namespace: Option<&str>,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<NodeReply, CallError> {
+        let call = NodeCall::CallTool(CallTool {
+            session_id: session.clone(),
+            namespace: namespace.map(str::to_owned),
+            name: name.to_owned(),
+            arguments: Some(arguments),
+        });
+        within(self.handle.call(call)).await
     }
 
     /// The next thing the gateway said about this node's metadata.
@@ -245,6 +284,12 @@ impl Rig {
             .await
     }
 
+    /// A node that takes its gateway tools per session, or declares it does and refuses them.
+    async fn node_lent(&self, owner: &str, name: &str, groups: Groups) -> FakeNode {
+        self.node_built(owner, name, &[self.listen], rax::Metadata::new(), groups)
+            .await
+    }
+
     /// A node whose owner lets in everyone allowed on the gateway.
     async fn node_sharing(&self, owner: &str, name: &str) -> FakeNode {
         let access = serde_json::json!({"policy": "always_allow"});
@@ -267,6 +312,18 @@ impl Rig {
         name: &str,
         gateways: &[std::net::SocketAddr],
         metadata: rax::Metadata,
+    ) -> FakeNode {
+        self.node_built(owner, name, gateways, metadata, Groups::Ignores)
+            .await
+    }
+
+    async fn node_built(
+        &self,
+        owner: &str,
+        name: &str,
+        gateways: &[std::net::SocketAddr],
+        metadata: rax::Metadata,
+        groups: Groups,
     ) -> FakeNode {
         let minted = token::mint();
         self.store
@@ -305,6 +362,7 @@ impl Rig {
             name: name.to_owned(),
             initialized,
             metadata,
+            groups,
         };
         tokio::spawn(async move {
             while let Some(event) = events.recv().await {
@@ -380,6 +438,7 @@ struct Script {
     name: String,
     initialized: mpsc::Sender<()>,
     metadata: rax::Metadata,
+    groups: Groups,
 }
 
 async fn answer(script: Script, id: RequestId, call: GatewayCall) {
@@ -394,6 +453,7 @@ async fn answer(script: Script, id: RequestId, call: GatewayCall) {
         name,
         initialized,
         metadata,
+        groups,
     } = script;
     match call {
         GatewayCall::Initialize(_) => {
@@ -401,6 +461,7 @@ async fn answer(script: Script, id: RequestId, call: GatewayCall) {
                 protocol_version: rax::PROTOCOL_VERSION,
                 capabilities: NodeCapabilities {
                     tool_gate: ToolGate::EveryCall,
+                    tool_groups: groups != Groups::Ignores,
                     ..Default::default()
                 },
                 metadata,
@@ -416,13 +477,35 @@ async fn answer(script: Script, id: RequestId, call: GatewayCall) {
             let reply = GatewayReply::RenewCredential(rax::credential::CredentialRenewal::Started);
             node.reply(id, reply).await.unwrap();
         }
-        GatewayCall::NewSession(_) => {
+        GatewayCall::NewSession(request) => {
             let mut count = sessions.lock().await;
             *count += 1;
             let session_id = SessionId(format!("{name}-{count}"));
+            let lent: Vec<String> = request
+                .tool_groups
+                .iter()
+                .map(|group| group.namespace.clone())
+                .collect();
+            let unhandled = match groups {
+                Groups::Refuses => lent
+                    .iter()
+                    .map(|namespace| rax::Unhandled {
+                        subject: rax::open::Subject::ToolGroup {
+                            namespace: namespace.clone(),
+                        },
+                        reason: rax::open::UnhandledReason::Other,
+                        message: Some(format!("this machine already has a {namespace} server")),
+                    })
+                    .collect(),
+                _ => vec![],
+            };
+            let _ = seen.send(Seen::Opened {
+                session: session_id.clone(),
+                groups: lent,
+            });
             let reply = GatewayReply::NewSession(SessionCreated {
                 session_id,
-                unhandled: vec![],
+                unhandled,
             });
             node.reply(id, reply).await.unwrap();
         }
@@ -3188,5 +3271,130 @@ async fn a_node_changes_who_it_lets_in_live_and_a_bad_change_ends_its_link() {
         Err(CallError::Fault(fault)) if fault.kind == rax::ErrorKind::Rejected
     ));
     assert!(matches!(laptop.next_notice().await, Seen::Rejected(_)));
+    rig.shutdown.cancel();
+}
+
+/// A node that takes tools per session is lent the `slack` group when the thread's session opens,
+/// and the gateway serves a call only for the group that session was lent.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_is_lent_the_slack_tools_and_nothing_else() {
+    let rig = rig().await;
+    let mut laptop = rig.node_lent(ALICE, "laptop", Groups::Takes).await;
+
+    rig.sim.mention(ALICE, GENERAL, "ping", None).await.unwrap();
+    let (session, groups) = laptop.next_opened().await;
+    assert_eq!(groups, ["slack"]);
+    laptop.next_prompt().await;
+
+    // The tool runs: a link it cannot parse is the tool's own answer, not a refusal of the call.
+    let ran = laptop
+        .call_tool(
+            &session,
+            Some("slack"),
+            "read_message",
+            serde_json::json!({"link": "nope"}),
+        )
+        .await
+        .unwrap();
+    let NodeReply::CallTool(ToolOutcome { content, is_error }) = ran else {
+        panic!("expected a tool outcome, got {ran:?}")
+    };
+    assert!(is_error);
+    assert!(content.contains("is not a URL"), "{content}");
+
+    for (namespace, name) in [
+        (Some("openknowledge_x7k2"), "read"),
+        (Some("murtaugh"), "slack_read_message"),
+        (Some("slack"), "invented"),
+    ] {
+        let refused = laptop
+            .call_tool(&session, namespace, name, serde_json::json!({}))
+            .await;
+        let Err(CallError::Fault(fault)) = refused else {
+            panic!("{namespace:?}.{name} should be refused, got {refused:?}")
+        };
+        assert_eq!(fault.kind, rax::ErrorKind::Forbidden);
+    }
+    // A session this gateway never opened was lent nothing, whatever the node claims.
+    let unopened = laptop
+        .call_tool(
+            &SessionId("laptop-99".into()),
+            Some("slack"),
+            "read_message",
+            serde_json::json!({"link": "nope"}),
+        )
+        .await;
+    assert!(
+        matches!(&unopened, Err(CallError::Fault(fault)) if fault.kind == rax::ErrorKind::Forbidden),
+        "{unopened:?}"
+    );
+    rig.shutdown.cancel();
+}
+
+/// An older node is lent no groups, and keeps calling the `initialize` catalogue by the names it
+/// always published.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_older_node_keeps_the_catalogue_it_was_given_at_initialize() {
+    let rig = rig().await;
+    let mut laptop = rig.node(ALICE, "laptop").await;
+
+    rig.sim.mention(ALICE, GENERAL, "ping", None).await.unwrap();
+    let (session, groups) = laptop.next_opened().await;
+    assert!(groups.is_empty());
+
+    let ran = laptop
+        .call_tool(
+            &session,
+            None,
+            "slack_read_message",
+            serde_json::json!({"link": "nope"}),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        ran,
+        NodeReply::CallTool(ToolOutcome { is_error: true, .. })
+    ));
+    let renamed = laptop
+        .call_tool(&session, None, "read_message", serde_json::json!({}))
+        .await;
+    assert!(
+        matches!(&renamed, Err(CallError::Fault(fault)) if fault.kind == rax::ErrorKind::Forbidden),
+        "{renamed:?}"
+    );
+    rig.shutdown.cancel();
+}
+
+/// A group the node could not publish is said in the thread, and the conversation carries on.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_group_the_node_could_not_publish_is_said_in_the_thread() {
+    let rig = rig().await;
+    let mut laptop = rig.node_lent(ALICE, "laptop", Groups::Refuses).await;
+
+    let ts = rig.sim.mention(ALICE, GENERAL, "ping", None).await.unwrap();
+    laptop.next_prompt().await;
+    let replies = rig
+        .bot_replies(&ts, |replies| {
+            replies
+                .iter()
+                .any(|message| message.text.contains("could not take this conversation"))
+        })
+        .await;
+    let notice = replies
+        .iter()
+        .find(|message| message.text.contains("could not take"))
+        .unwrap();
+    assert!(notice.text.contains("`slack` tools"), "{}", notice.text);
+    assert!(
+        notice.text.contains("already has a slack server"),
+        "{}",
+        notice.text
+    );
+    rig.bot_replies(&ts, |replies| {
+        replies
+            .iter()
+            .any(|message| message.text.contains("says pong to: ping"))
+    })
+    .await;
     rig.shutdown.cancel();
 }

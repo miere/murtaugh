@@ -9,8 +9,8 @@ use murtaugh_store::UserId;
 use rax::{Metadata, Rejection};
 use serde_json::Value;
 
-use crate::tools::NAMESPACE;
-
+/// This gateway's prefix for the metadata keys it owns. It names the gateway, not a tool group.
+pub const GATEWAY: &str = "murtaugh";
 /// The name under this gateway's prefix, so the key a node writes is `murtaugh_access`.
 pub const ACCESS: &str = "access";
 
@@ -51,7 +51,7 @@ pub fn read(metadata: &Metadata) -> Result<Read, Rejection> {
     let mut read = Read::default();
     for (key, value) in metadata {
         match rax::metadata::owner(key) {
-            Some((NAMESPACE, ACCESS)) => {
+            Some((GATEWAY, ACCESS)) => {
                 read.access = access(value).map_err(|problem| Rejection {
                     key: Some(key.clone()),
                     message: format!("`{key}` {problem}"),
