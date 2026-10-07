@@ -52,6 +52,7 @@ async fn rig() -> Rig {
         murtaugh_gateway::tools::Lent::new(store.clone()),
         murtaugh_gateway::files::Files::default(),
         murtaugh_gateway::signin::SignIns::new(None, access.clone()),
+        None,
     );
     let hub = hub::start(
         "127.0.0.1:0".parse().unwrap(),

@@ -34,6 +34,7 @@ use tokio_util::sync::CancellationToken;
 
 const OWNER: &str = "U0PERSON1";
 const ADMIN: &str = "U0ADMIN01";
+const GUEST: &str = "U0GUEST01";
 
 fn user(raw: &str) -> UserId {
     UserId::parse(raw).unwrap()
@@ -74,6 +75,7 @@ async fn rig(retain_for: Duration) -> Rig {
         lent.clone(),
         files.clone(),
         sign_ins.clone(),
+        None,
     );
     let shutdown = CancellationToken::new();
     let hub = hub::start(
@@ -656,4 +658,82 @@ async fn a_client_that_stays_away_takes_its_sessions_with_it() {
     })
     .await;
     rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_the_nodes_owner_approves_a_call_from_someone_elses_client() {
+    let mut rig = rig(hub::RETAIN_FOR).await;
+    let mut node = rig.machine("laptop", true).await;
+    rig.store
+        .set_tool_mode(&user(OWNER), ToolMode::AllowedWhitelist)
+        .await
+        .unwrap();
+    // A guest with no machine of their own lands on the owner's, which lets everyone in.
+    let client = rig.client(GUEST).await;
+    let opening = tokio::spawn({
+        let client = client.clone();
+        async move { client.new_session(vec![]).await }
+    });
+    node.opens().await;
+    let session = within(opening).await.unwrap().unwrap().session_id;
+    let prompting = tokio::spawn({
+        let client = client.clone();
+        async move {
+            client
+                .prompt(session, vec![ContentBlock::text("go").into()])
+                .await
+        }
+    });
+    let (stream, _) = node.prompted().await;
+    let mut turn = within(prompting).await.unwrap().unwrap();
+    node.handle
+        .event(
+            stream.clone(),
+            Event::ToolCall {
+                tool_call: bash("tc1"),
+            },
+        )
+        .await
+        .unwrap();
+
+    // The guest hears what it waits on but is never asked, and with no Slack to reach the owner
+    // in, nobody approves it.
+    let Decision::Deny { by, .. } = verdict(&mut node).await else {
+        panic!("a call only the owner may approve was allowed")
+    };
+    assert_eq!(by, DeniedBy::Unavailable);
+    turn.verdict("tc1", Decision::Allow).await.unwrap();
+    node.finish(&stream).await;
+    turn.expect(Match::complete(StopReason::EndTurn))
+        .await
+        .unwrap();
+    assert!(
+        !turn
+            .seen()
+            .iter()
+            .any(|event| matches!(event, Open::Known(Event::ToolCall { .. }))),
+        "someone else's client was asked to approve a call on the owner's machine"
+    );
+    assert!(turn.seen().iter().any(|event| matches!(
+        event,
+        Open::Known(Event::Status { text }) if text.contains("owner of laptop")
+    )));
+    assert!(
+        quiet_verdicts(&mut node).await,
+        "the guest's verdict reached the node"
+    );
+    rig.shutdown.cancel();
+}
+
+/// No further verdict arrives on the node within a moment.
+async fn quiet_verdicts(node: &mut Machine) -> bool {
+    tokio::time::timeout(Duration::from_millis(300), async {
+        loop {
+            if let NodeEvent::Verdict(_) = node.next().await {
+                return;
+            }
+        }
+    })
+    .await
+    .is_err()
 }
