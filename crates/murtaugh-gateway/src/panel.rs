@@ -14,6 +14,7 @@ use crate::access::{Access, Snapshot};
 use crate::fleet::Fleet;
 use crate::home::{self, MenuAction};
 use crate::hub;
+use crate::relay::Relay;
 use crate::render;
 use crate::roles::{self, Minted};
 
@@ -22,6 +23,7 @@ pub struct Panel {
     pub store: Arc<dyn Store>,
     pub access: Access,
     pub fleet: Fleet,
+    pub relay: Relay,
     pub bot_user: String,
 }
 
@@ -39,6 +41,7 @@ impl Panel {
             tool_mode,
             &self.access.snapshot(),
             &self.fleet.summaries(),
+            &self.relay.summaries(),
         );
         if let Err(err) = self.slack.publish_home(viewer.as_str(), &blocks).await {
             tracing::warn!(error = %err, "could not publish the Home tab");
@@ -49,7 +52,7 @@ impl Panel {
     /// shows each touched person their Home tab as it now stands.
     async fn settle(&self, touched: impl IntoIterator<Item = UserId>) {
         match Snapshot::load(&*self.store).await {
-            Ok(fresh) => hub::apply(&self.access, &self.fleet, fresh).await,
+            Ok(fresh) => hub::apply(&self.access, &self.fleet, &self.relay, fresh).await,
             Err(err) => {
                 tracing::warn!(error = %err, "could not reload access after a Home tab change")
             }

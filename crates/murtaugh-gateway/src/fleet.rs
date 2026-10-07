@@ -123,6 +123,28 @@ impl Fleet {
         Some(entry.node.clone())
     }
 
+    /// [`Self::assign`], among the nodes that also pass `fits`, such as those that take tool
+    /// groups.
+    pub fn assign_where(
+        &self,
+        user: &UserId,
+        access: &Snapshot,
+        fits: impl Fn(&Node) -> bool,
+    ) -> Option<Node> {
+        let mut nodes = self.nodes();
+        let selector = serving(user, access, &nodes)
+            .filter(|entry| fits(&entry.node))
+            .min_by(|a, b| {
+                a.sessions
+                    .cmp(&b.sessions)
+                    .then_with(|| a.node.selector.cmp(&b.node.selector))
+            })
+            .map(|entry| entry.node.selector.clone())?;
+        let entry = nodes.get_mut(&selector)?;
+        entry.sessions += 1;
+        Some(entry.node.clone())
+    }
+
     /// The nodes a person may move a thread onto, by name. Drawn from the same set `assign` picks
     /// from, so a picker cannot offer a machine that assignment would refuse.
     pub fn choices(&self, user: &UserId, access: &Snapshot) -> Vec<Summary> {

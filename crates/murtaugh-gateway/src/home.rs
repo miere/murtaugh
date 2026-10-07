@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use crate::access::Snapshot;
 use crate::fleet::Summary;
 use crate::node_access::NodeAccess;
+use crate::relay;
 use crate::render;
 use crate::version::VERSION;
 
@@ -74,6 +75,7 @@ pub fn view(
     tool_mode: ToolMode,
     snapshot: &Snapshot,
     attached: &[Summary],
+    bridged: &[relay::Summary],
 ) -> Vec<Block> {
     let admin = snapshot.admin() == Some(viewer);
     let mut blocks = Vec::new();
@@ -93,7 +95,7 @@ pub fn view(
     }
     if snapshot.may_chat(viewer) {
         blocks.push(Block::Divider);
-        blocks.extend(client_blocks(viewer, admin, snapshot));
+        blocks.extend(client_blocks(viewer, admin, snapshot, bridged));
     }
     blocks.push(Block::Divider);
     blocks.push(Block::Context(vec![Text::Mrkdwn(format!(
@@ -343,7 +345,12 @@ fn node_blocks(
 }
 
 /// A person's own client tokens, or everyone's for the admin, each with a button to revoke it.
-fn client_blocks(viewer: &UserId, admin: bool, snapshot: &Snapshot) -> Vec<Block> {
+fn client_blocks(
+    viewer: &UserId,
+    admin: bool,
+    snapshot: &Snapshot,
+    bridged: &[relay::Summary],
+) -> Vec<Block> {
     let mut blocks = vec![Block::Raw(json!({
         "type": "section",
         "block_id": "home_clients",
@@ -363,6 +370,29 @@ fn client_blocks(viewer: &UserId, admin: bool, snapshot: &Snapshot) -> Vec<Block
         .filter(|token| admin || &token.owner == viewer)
         .collect();
     clients.sort_by(|a, b| (&a.owner, &a.name).cmp(&(&b.owner, &b.name)));
+    // Slack stays the place you see everything, a client's sessions included.
+    let sessions: Vec<String> = bridged
+        .iter()
+        .filter(|session| admin || &session.owner == viewer)
+        .map(|session| {
+            let owner = if admin {
+                format!(" · <@{}>", session.owner)
+            } else {
+                String::new()
+            };
+            format!(
+                "• *{}* on *{}*{owner}",
+                render::escape(&session.client),
+                render::escape(&session.node)
+            )
+        })
+        .collect();
+    if !sessions.is_empty() {
+        blocks.push(Block::Context(vec![Text::Mrkdwn(format!(
+            "Live client sessions:\n{}",
+            sessions.join("\n")
+        ))]));
+    }
     if clients.is_empty() {
         blocks.push(Block::Context(vec![Text::Mrkdwn(
             "No client tokens yet. Press *New client token* to mint one.".into(),
@@ -552,6 +582,36 @@ mod tests {
         );
         assert_eq!(parse_menu("abc123:explode"), None);
         assert_eq!(parse_menu("abc123"), None);
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_person_sees_their_live_client_sessions_and_the_admin_sees_everyones() {
+        let bob = UserId::parse("U0BOB0001").unwrap();
+        let alice = UserId::parse("U0ALICE01").unwrap();
+        let snapshot = Snapshot::default();
+        let bridged = vec![
+            relay::Summary {
+                owner: bob.clone(),
+                client: "editor".into(),
+                node: "laptop".into(),
+            },
+            relay::Summary {
+                owner: alice.clone(),
+                client: "zed".into(),
+                node: "desktop".into(),
+            },
+        ];
+        let blocks = client_blocks(&bob, false, &snapshot, &bridged);
+        let shown = serde_json::to_string(&blocks).unwrap();
+        assert!(shown.contains("*editor* on *laptop*"), "{shown}");
+        assert!(!shown.contains("zed"), "{shown}");
+        let blocks = client_blocks(&alice, true, &snapshot, &bridged);
+        let shown = serde_json::to_string(&blocks).unwrap();
+        assert!(
+            shown.contains("*editor* on *laptop* · <@U0BOB0001>"),
+            "{shown}"
+        );
     }
 
     #[test]

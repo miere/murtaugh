@@ -1,5 +1,6 @@
-//! The RAX side: accepts nodes, introduces itself, keeps the fleet current and closes the links of
-//! nodes whose token or owner loses access.
+//! The RAX side: one listener for nodes and for clients, told apart by the role they dial as. It
+//! introduces itself to nodes, keeps the fleet current, hands clients to the relay and closes the
+//! links of nodes and clients whose token or owner loses access.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -12,9 +13,9 @@ use rax::id::SessionId;
 use rax::open::{Subject, UnhandledReason};
 use rax::session::{GatewayCapabilities, Initialize, Initialized, PROTOCOL_VERSION};
 use rax::{ErrorKind, GatewayCall, GatewayReply, NodeCall, NodeReply, Unhandled};
-use rax_tokio::gateway::{
-    GatewayConfig, GatewayLink, GatewayServer, LinkEvent, LinkEvents, NewLink, NewLinks,
-};
+use rax_tokio::Role;
+use rax_tokio::accept::{AcceptConfig, Accepted, AcceptedLinks, Acceptor};
+use rax_tokio::gateway::{GatewayLink, LinkEvent, LinkEvents, NewLink};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -22,11 +23,15 @@ use crate::access::{Access, Snapshot};
 use crate::files::Files;
 use crate::fleet::{Fleet, Node};
 use crate::node_access;
+use crate::relay::{self, Relay};
 use crate::signin::{self, SignIns};
 use crate::tools::{Lent, Tools};
 
 pub const REFRESH: Duration = Duration::from_secs(5);
 pub const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a link that dropped is held for its node or client to resume. A client's sessions
+/// are closed on their nodes once it lapses.
+pub const RETAIN_FOR: Duration = Duration::from_secs(300);
 
 /// What the chat side must hear about: a node that left takes its conversations' pins with it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,13 +56,14 @@ pub fn capabilities(tools: &Tools) -> GatewayCapabilities {
         plan: true,
         sign_in: true,
         resource_schemes: vec!["chat".into()],
-        readable_schemes: vec![crate::files::SCHEME.into()],
+        readable_schemes: vec![crate::files::SCHEME.into(), relay::SCHEME.into()],
         tools: tools.catalogue(),
     }
 }
 
 pub struct Hub {
-    pub server: GatewayServer,
+    /// Serves nodes, which dial as `rax.v1.node`, and clients, which dial as `rax.v1.gateway`.
+    pub server: Acceptor,
     pub changes: mpsc::Receiver<FleetChange>,
     pub backgrounds: mpsc::Receiver<Background>,
 }
@@ -66,16 +72,22 @@ pub struct Hub {
 #[allow(clippy::too_many_arguments)]
 pub async fn start(
     listen: SocketAddr,
+    retain_for: Duration,
     access: Access,
     fleet: Fleet,
     files: Files,
     tools: Tools,
     lent: Lent,
     sign_ins: SignIns,
+    relay: Relay,
     shutdown: CancellationToken,
 ) -> std::io::Result<Hub> {
-    let (server, new_links) =
-        GatewayServer::bind(listen, access.clone(), GatewayConfig::default()).await?;
+    let config = AcceptConfig {
+        roles: vec![Role::Node, Role::Gateway],
+        retain_for,
+        ..AcceptConfig::default()
+    };
+    let (server, new_links) = Acceptor::bind(listen, access.clone(), config).await?;
     let (changes, receiver) = mpsc::channel(64);
     let (backgrounds, background_receiver) = mpsc::channel(256);
     let serving = Serving {
@@ -85,6 +97,7 @@ pub async fn start(
         tools,
         lent,
         sign_ins,
+        relay,
         changes,
         backgrounds,
     };
@@ -96,11 +109,12 @@ pub async fn start(
     })
 }
 
-/// Reloads access every `every` and closes any node that lost it.
+/// Reloads access every `every` and closes any node or client that lost it.
 pub async fn refresh(
     store: Arc<dyn Store>,
     access: Access,
     fleet: Fleet,
+    relay: Relay,
     every: Duration,
     shutdown: CancellationToken,
 ) {
@@ -116,19 +130,21 @@ pub async fn refresh(
                 continue;
             }
         };
-        apply(&access, &fleet, snapshot).await;
+        apply(&access, &fleet, &relay, snapshot).await;
     }
 }
 
-/// Puts `snapshot` in place and closes the link of every node it no longer admits. Whoever
-/// replaces the snapshot must close these links: the next refresh finds nothing lost.
-pub async fn apply(access: &Access, fleet: &Fleet, snapshot: Snapshot) {
-    for selector in access.replace(snapshot).nodes {
+/// Puts `snapshot` in place and closes the link of every node and client it no longer admits.
+/// Whoever replaces the snapshot must close these links: the next refresh finds nothing lost.
+pub async fn apply(access: &Access, fleet: &Fleet, relay: &Relay, snapshot: Snapshot) {
+    let lost = access.replace(snapshot);
+    for selector in lost.nodes {
         if let Some(node) = fleet.get(&selector) {
             tracing::info!(node = %node.name, owner = %node.owner, "access revoked; closing the node's link");
             node.link.close().await;
         }
     }
+    relay.close_clients(&lost.clients).await;
 }
 
 /// What every node's link is served with.
@@ -140,20 +156,27 @@ struct Serving {
     tools: Tools,
     lent: Lent,
     sign_ins: SignIns,
+    relay: Relay,
     changes: mpsc::Sender<FleetChange>,
     backgrounds: mpsc::Sender<Background>,
 }
 
-async fn accept(mut new_links: NewLinks, serving: Serving, shutdown: CancellationToken) {
+async fn accept(mut new_links: AcceptedLinks, serving: Serving, shutdown: CancellationToken) {
     loop {
         let new_link = tokio::select! {
             new_link = new_links.recv() => new_link,
             () = shutdown.cancelled() => return,
         };
-        let Some(NewLink { link, events }) = new_link else {
-            return;
-        };
-        tokio::spawn(serve(link, events, serving.clone()));
+        match new_link {
+            Some(Accepted::Node(NewLink { link, events })) => {
+                tokio::spawn(serve(link, events, serving.clone()));
+            }
+            Some(Accepted::Gateway(client)) => {
+                let relay = serving.relay.clone();
+                tokio::spawn(async move { relay.serve(client).await });
+            }
+            None => return,
+        }
     }
 }
 
@@ -165,6 +188,7 @@ async fn serve(link: GatewayLink, mut events: LinkEvents, serving: Serving) {
         tools,
         lent,
         sign_ins,
+        relay,
         changes,
         backgrounds,
     } = serving;
@@ -226,9 +250,25 @@ async fn serve(link: GatewayLink, mut events: LinkEvents, serving: Serving) {
             LinkEvent::Request {
                 id,
                 call: NodeCall::ReadResource(read),
+            } if read.uri.starts_with(&format!("{}://", relay::SCHEME)) => {
+                let (relay, link, name) = (relay.clone(), link.clone(), name.clone());
+                tokio::spawn(async move { relay.read(&link, &name, id, read).await });
+            }
+            LinkEvent::Request {
+                id,
+                call: NodeCall::ReadResource(read),
             } => {
                 let (files, link, selector) = (files.clone(), link.clone(), selector.clone());
                 tokio::spawn(async move { files.serve(&link, &selector, id, read).await });
+            }
+            // A client's session is lent the client's groups, never `slack`; a Slack thread's is
+            // lent `slack` alone.
+            LinkEvent::Request {
+                id,
+                call: NodeCall::CallTool(call),
+            } if relay.owns(&selector, &call.session_id) => {
+                let (relay, link, name) = (relay.clone(), link.clone(), name.clone());
+                tokio::spawn(async move { relay.call_tool(&link, &name, id, call).await });
             }
             LinkEvent::Request {
                 id,
@@ -303,6 +343,11 @@ async fn serve(link: GatewayLink, mut events: LinkEvents, serving: Serving) {
                     link.reject(rejection).await;
                 }
             },
+            LinkEvent::Background { session_id, event } if relay.owns(&selector, &session_id) => {
+                if let Some(node) = fleet.get(&selector) {
+                    relay.background(&node, &session_id, event).await;
+                }
+            }
             LinkEvent::Background { session_id, event } => {
                 let background = Background {
                     selector: selector.clone(),

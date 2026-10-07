@@ -48,7 +48,8 @@ token) and create the app-level token (**Basic Information → App-Level Tokens*
 The gateway reads one small TOML file per alias, by default
 `~/.config/murtaugh/default/murtaugh.toml` (`--config PATH` points elsewhere). Relative paths in it
 are resolved against its folder, so each alias keeps its own database, `.env` and logs apart. It
-holds only the Slack credentials, where the configuration store lives, and where nodes dial:
+holds only the Slack credentials, where the configuration store lives, and where nodes and clients
+dial:
 
 ```toml
 [slack]
@@ -65,8 +66,8 @@ backend = "sqlite"                 # or "firestore"
 # collection = "murtaugh"
 # credentials_file = "~/sa.json"
 
-[nodes]
-listen = "127.0.0.1:7443"          # put a TLS terminator in front; nodes dial wss://…/rax/v1/link
+[rax]                              # formerly [nodes], which still works
+listen = "127.0.0.1:7443"          # put a TLS terminator in front; nodes and clients dial wss://…/rax/v1/link
 
 [log]
 level = "info"                     # trace, debug, info, warn or error
@@ -172,6 +173,21 @@ nothing serves its owner alone.
 A conversation is a Slack thread. It goes to the person's own node with the fewest live sessions,
 or, if none of theirs is connected, to the least busy node whose owner lets them in. If that node
 goes away, the next message says so and continues on another node, catching it up from the thread.
+
+### The RAX API
+
+A client token also opens the RAX API, on the same listener as nodes: the client dials as a
+gateway (`rax.v1.gateway`) and Murtaugh plays the node toward it, relaying each session to a node of
+the fleet. That is how `murtaugh-client acp` puts an editor's agent sessions on your machines.
+
+- A session goes to the same node a Slack thread would, among those that take tool groups.
+- The tools a client lends a session reach the node suffixed with the client's link id, such as
+  `openknowledge_x7k2`, and only that session may call them. Files the client links reach the node
+  as `bridge://<link id>/<uri>`, and only a node holding one of the client's sessions may read them.
+- Tool calls are ruled by the node owner's tool mode and whitelist first. The client is asked only
+  when those leave a call to a person. Sign-ins still go to the node's owner in Slack.
+- Client sessions live in memory and are never pinned. A client that stays away past the link's
+  retention takes its sessions with it, and each person's Home tab lists their live ones.
 
 | Crate | What it is |
 |---|---|

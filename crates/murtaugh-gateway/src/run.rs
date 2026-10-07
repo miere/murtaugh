@@ -124,23 +124,34 @@ pub async fn serve(
     ]);
     let lent = crate::tools::Lent::new(store.clone());
     let sign_ins = crate::signin::SignIns::new(Some(slack.clone()), access.clone());
+    let relay = crate::relay::Relay::new(
+        access.clone(),
+        fleet.clone(),
+        store.clone(),
+        lent.clone(),
+        files.clone(),
+        sign_ins.clone(),
+    );
     let mut hub = hub::start(
         config.listen,
+        hub::RETAIN_FOR,
         access.clone(),
         fleet.clone(),
         files.clone(),
         tools.clone(),
         lent.clone(),
         sign_ins.clone(),
+        relay.clone(),
         shutdown.clone(),
     )
     .await
-    .map_err(|err| format!("cannot listen for nodes on {}: {err}", config.listen))?;
+    .map_err(|err| format!("cannot listen for RAX on {}: {err}", config.listen))?;
     hub.server.stop_serving();
     tokio::spawn(hub::refresh(
         store.clone(),
         access.clone(),
         fleet.clone(),
+        relay.clone(),
         options.refresh,
         shutdown.clone(),
     ));
@@ -160,6 +171,7 @@ pub async fn serve(
         tool_ceiling: options.tool_ceiling,
         tools,
         lent,
+        relay,
     });
     tracing::info!(listen = %hub.server.local_addr(), team = %identity.team_id, %holder, "murtaugh gateway started; waiting to lead");
     let mut seen = Seen::default();
@@ -296,7 +308,7 @@ pub fn banner(config: &config::Config) -> String {
         ),
     };
     format!(
-        "murtaugh-gateway {}\nconfig: {}\nstore: {database}\nnodes: ws://{}/rax/v1/link",
+        "murtaugh-gateway {}\nconfig: {}\nstore: {database}\nnodes and clients: ws://{}/rax/v1/link",
         crate::version::VERSION,
         config.path.display(),
         config.listen

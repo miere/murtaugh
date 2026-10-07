@@ -186,6 +186,7 @@ pub struct Parts {
     pub tool_ceiling: Duration,
     pub tools: Tools,
     pub lent: Lent,
+    pub relay: crate::relay::Relay,
 }
 
 impl Chat {
@@ -206,12 +207,14 @@ impl Chat {
             tool_ceiling,
             tools,
             lent,
+            relay,
         } = parts;
         let panel = Panel {
             slack: slack.clone(),
             store: store.clone(),
             access: access.clone(),
             fleet: fleet.clone(),
+            relay,
             bot_user: bot_user.clone(),
         };
         Arc::new(Self {
