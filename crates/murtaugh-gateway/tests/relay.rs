@@ -88,6 +88,7 @@ async fn rig(retain_for: Duration) -> Rig {
         lent,
         sign_ins,
         relay.clone(),
+        axum::Router::new(),
         shutdown.clone(),
     )
     .await
