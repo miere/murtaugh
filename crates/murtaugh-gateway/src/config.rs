@@ -123,8 +123,10 @@ struct File {
     slack: SlackFile,
     #[serde(default)]
     database: DatabaseFile,
-    #[serde(default)]
-    nodes: NodesFile,
+    /// Where nodes and clients dial in over RAX.
+    rax: Option<NodesFile>,
+    /// The old name of `[rax]`, from when only nodes dialled in.
+    nodes: Option<NodesFile>,
     #[serde(default)]
     log: LogFile,
 }
@@ -259,15 +261,21 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
         ),
     };
     let database = database_of(&dir, file.database, &mut problems);
-    let listen_raw = file
-        .nodes
-        .listen
-        .unwrap_or_else(|| DEFAULT_LISTEN.to_owned());
+    let (section, rax) = match (file.rax, file.nodes) {
+        (Some(_), Some(_)) => {
+            problems.add("nodes", "is the old name of [rax]; keep only [rax]");
+            ("rax", NodesFile::default())
+        }
+        (Some(rax), None) => ("rax", rax),
+        (None, Some(nodes)) => ("nodes", nodes),
+        (None, None) => ("rax", NodesFile::default()),
+    };
+    let listen_raw = rax.listen.unwrap_or_else(|| DEFAULT_LISTEN.to_owned());
     let listen = match listen_raw.trim().parse::<SocketAddr>() {
         Ok(listen) => Some(listen),
         Err(err) => {
             problems.add(
-                "nodes.listen",
+                &format!("{section}.listen"),
                 format!("{listen_raw:?} is not an address like {DEFAULT_LISTEN}: {err}"),
             );
             None
@@ -541,6 +549,20 @@ level = "loud"
                 "nodes.listen",
                 "log.level"
             ]
+        );
+    }
+
+    #[test]
+    fn rax_is_where_the_listener_lives_and_nodes_is_its_old_name() {
+        let (_dir, path) = write(&format!("{GOOD}\n[rax]\nlisten = \"127.0.0.1:9100\"\n"));
+        assert_eq!(load(&path).unwrap().listen.to_string(), "127.0.0.1:9100");
+        let (_dir, path) = write(&format!("{GOOD}\n[nodes]\nlisten = \"127.0.0.1:9101\"\n"));
+        assert_eq!(load(&path).unwrap().listen.to_string(), "127.0.0.1:9101");
+        assert_eq!(
+            fields(&format!(
+                "{GOOD}\n[rax]\nlisten = \"127.0.0.1:1\"\n[nodes]\nlisten = \"127.0.0.1:2\"\n"
+            )),
+            ["nodes"]
         );
     }
 

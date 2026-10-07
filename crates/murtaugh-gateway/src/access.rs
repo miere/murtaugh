@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use murtaugh_store::{NodeToken, Store, StoreError, UserId, UserToken};
+use rax_tokio::accept::GatewayIdentity;
 use rax_tokio::gateway::{Authenticator, NodeIdentity};
 use tokio::runtime::{Handle, RuntimeFlavor};
 
@@ -340,6 +341,11 @@ impl Authenticator for Access {
             .authenticate(token)
             .or_else(|| self.admit_new(token, Kind::Node))
             .map(NodeIdentity)
+    }
+
+    /// A client dials as a gateway, and only a client token opens that role.
+    fn authenticate_gateway(&self, token: &str) -> Option<GatewayIdentity> {
+        self.authenticate_client(token).map(GatewayIdentity)
     }
 }
 

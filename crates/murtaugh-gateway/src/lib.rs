@@ -20,6 +20,7 @@ pub mod panel;
 pub mod picker;
 pub mod policy;
 pub mod prompts;
+pub mod relay;
 pub mod render;
 pub mod reply;
 pub mod roles;

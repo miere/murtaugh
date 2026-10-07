@@ -29,6 +29,7 @@ struct Rig {
     store: Arc<dyn Store>,
     access: Access,
     fleet: Fleet,
+    relay: murtaugh_gateway::relay::Relay,
     hub: hub::Hub,
     shutdown: CancellationToken,
 }
@@ -44,14 +45,24 @@ async fn rig() -> Rig {
     let access = Access::reloading(Snapshot::load(&*store).await.unwrap(), store.clone());
     let fleet = Fleet::default();
     let shutdown = CancellationToken::new();
+    let relay = murtaugh_gateway::relay::Relay::new(
+        access.clone(),
+        fleet.clone(),
+        store.clone(),
+        murtaugh_gateway::tools::Lent::new(store.clone()),
+        murtaugh_gateway::files::Files::default(),
+        murtaugh_gateway::signin::SignIns::new(None, access.clone()),
+    );
     let hub = hub::start(
         "127.0.0.1:0".parse().unwrap(),
+        hub::RETAIN_FOR,
         access.clone(),
         fleet.clone(),
         murtaugh_gateway::files::Files::default(),
         murtaugh_gateway::tools::Tools::default(),
         murtaugh_gateway::tools::Lent::new(store.clone()),
         murtaugh_gateway::signin::SignIns::new(None, access.clone()),
+        relay.clone(),
         shutdown.clone(),
     )
     .await
@@ -61,6 +72,7 @@ async fn rig() -> Rig {
         store,
         access,
         fleet,
+        relay,
         hub,
         shutdown,
     }
@@ -167,6 +179,7 @@ async fn a_revoked_grant_disconnects_the_node_and_its_redial_is_refused() {
         rig.store.clone(),
         rig.access.clone(),
         rig.fleet.clone(),
+        rig.relay.clone(),
         Duration::from_millis(50),
         rig.shutdown.clone(),
     ));
