@@ -16,7 +16,9 @@ pub enum SlackError {
         method: String,
         retry_after: Duration,
     },
-    #[error("{method}: HTTP failure: {source}")]
+    /// The message carries every cause reqwest wraps — "error sending request" alone does not say
+    /// whether it was a timeout, a reset or TLS — and no URL, since an upload URL is a credential.
+    #[error("{method}: HTTP failure: {}", causes(source))]
     Http {
         method: String,
         #[source]
@@ -35,4 +37,24 @@ pub enum SlackError {
     Download { url: String, reason: String },
     #[error("upload of {filename} failed: {reason}")]
     Upload { filename: String, reason: String },
+}
+
+impl SlackError {
+    pub(crate) fn http(method: impl Into<String>, source: reqwest::Error) -> Self {
+        Self::Http {
+            method: method.into(),
+            source: source.without_url(),
+        }
+    }
+}
+
+fn causes(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut text = error.to_string();
+    let mut cause = error.source();
+    while let Some(next) = cause {
+        text.push_str(": ");
+        text.push_str(&next.to_string());
+        cause = next.source();
+    }
+    text
 }
