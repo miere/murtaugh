@@ -506,10 +506,7 @@ impl SlackClient {
             url: file.url_private_download.clone(),
             reason: format!("not a URL: {e}"),
         })?;
-        let http = |source| SlackError::Http {
-            method: "files.download".into(),
-            source,
-        };
+        let http = |source| SlackError::http("files.download", source);
         let res = self
             .inner
             .http
@@ -549,10 +546,7 @@ impl SlackClient {
                 Body::Form(reserve),
             )
             .await?;
-        let http = |source| SlackError::Http {
-            method: "files.upload".into(),
-            source,
-        };
+        let http = |source| SlackError::http("files.upload", source);
         let part = reqwest::multipart::Part::bytes(upload.bytes.clone())
             .file_name(upload.filename.clone());
         self.inner
@@ -619,10 +613,7 @@ impl SlackClient {
                     .finish(),
             ),
         };
-        let http = |source| SlackError::Http {
-            method: method.into(),
-            source,
-        };
+        let http = |source| SlackError::http(method, source);
         let mut attempt = 0;
         loop {
             let res = self

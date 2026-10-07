@@ -408,3 +408,26 @@ async fn an_ephemeral_message_reaches_one_person_only() {
     assert!(sim.messages(GENERAL).is_empty());
     assert!(sim.violations().is_empty(), "{:?}", sim.violations());
 }
+
+#[tokio::test]
+async fn an_http_failure_names_its_cause_and_not_the_url() {
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = closed.local_addr().unwrap().port();
+    drop(closed);
+    let api_base = format!("http://127.0.0.1:{port}/upload/v1/secret-token/")
+        .parse()
+        .unwrap();
+    let client = SlackClient::with_max_retries(
+        Tokens {
+            app: "xapp-test".into(),
+            bot: "xoxb-test".into(),
+        },
+        api_base,
+        0,
+    );
+    let err = client.auth_test().await.unwrap_err();
+    assert!(matches!(err, SlackError::Http { .. }), "{err:?}");
+    let message = err.to_string();
+    assert!(message.contains("Connection refused"), "{message}");
+    assert!(!message.contains("secret-token"), "{message}");
+}
