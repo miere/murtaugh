@@ -17,6 +17,6 @@ pub use stream::{
     StartStream, TaskDisplayMode, TaskStatus,
 };
 pub use web::{
-    CANVAS_MIMETYPE, CanvasChange, CanvasOperation, DEFAULT_API_BASE, FileInfo, Identity, Message,
-    PostMessage, Posted, SlackClient, Tokens, UpdateMessage, Upload,
+    CANVAS_MIMETYPE, CanvasChange, CanvasOperation, ConversationInfo, DEFAULT_API_BASE, FileInfo,
+    Identity, Message, PostMessage, Posted, SlackClient, Tokens, UpdateMessage, Upload,
 };

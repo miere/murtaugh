@@ -1761,6 +1761,7 @@ dependencies = [
  "rax",
  "rax-sim",
  "rax-tokio",
+ "reqwest",
  "rustls",
  "semver",
  "serde",

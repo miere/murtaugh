@@ -28,6 +28,7 @@ pub mod run;
 pub mod signin;
 pub mod thread_commands;
 pub mod tools;
+pub mod workloads;
 
 pub use murtaugh_common::{launchd, tls, token, version};
 

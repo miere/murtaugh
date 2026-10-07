@@ -202,6 +202,30 @@ the fleet. That is how `murtaugh-client acp` puts an editor's agent sessions on 
 | `murtaugh-slack` | A Slack client: Socket Mode and the Web API methods the gateway calls. |
 | `slack-sim` | A fake Slack that validates and records every call, for testing without a workspace. |
 
+### The workloads API
+
+`POST /api/v1/workloads`, on the same port as RAX, runs a prompt on one of the caller's nodes and
+answers in Slack. It needs a client token with the `workloads` scope, and returns `202 Accepted` as
+soon as the run starts; it never waits for the answer.
+
+```sh
+curl -X POST https://murtaugh.example.com/api/v1/workloads \
+  -H "Authorization: Bearer $(cat ci.token)" \
+  -H "Idempotency-Key: nightly-2026-10-07" \
+  -d '{"prompt": "Summarise the deploys from yesterday", "target": {"channel": "C0123ABCD"}}'
+# 202 {"workload": "…", "channel": "C0123ABCD", "thread_ts": "1791…"}
+```
+
+- `target` is `{"channel": …}` for a new thread, `{"channel": …, "thread_ts": …}` to continue one
+  (as if its owner had written there), or `{"dm": …}`, which may only name the token's owner.
+- It fails closed, with `{"error": …, "message": …}`: `401` for no live token, `403
+  insufficient_scope`, `400`/`413` for a bad body or a prompt over 32 KiB, `403 bot_cannot_post`
+  when the bot is not in the channel, `404 thread_not_found`, `409 busy` when the thread has a turn
+  running, and `503 no_node` (with `Retry-After`) when none of the caller's machines is connected.
+- The run is the token owner's: their nodes, and tool approvals for the node's owner alone, as a
+  card in the node owner's DM, never in the target channel.
+- A repeated `Idempotency-Key` within 24 hours answers with the run it already started.
+
 ## murtaugh-client
 
 `murtaugh-client acp` lets an editor that speaks [ACP](https://agentclientprotocol.com) run its

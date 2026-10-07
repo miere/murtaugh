@@ -3593,3 +3593,256 @@ async fn send_message_posts_into_the_sessions_own_thread() {
     assert_eq!(rig.sim.violations(), vec![]);
     rig.shutdown.cancel();
 }
+
+/// A client token for `owner` opening `scopes`.
+async fn client_token(rig: &Rig, owner: &str, scopes: &[murtaugh_store::Scope]) -> String {
+    rig.store.set_allowed(&user(owner), true).await.unwrap();
+    murtaugh_gateway::roles::mint_client(
+        &*rig.store,
+        &user(owner),
+        "ci",
+        scopes.iter().copied().collect(),
+    )
+    .await
+    .unwrap()
+    .token
+}
+
+/// Posts a workload and returns its status and JSON body.
+async fn workload(
+    rig: &Rig,
+    token: Option<&str>,
+    body: serde_json::Value,
+    key: Option<&str>,
+) -> (u16, serde_json::Value, reqwest::header::HeaderMap) {
+    // The gateway opens its port, and starts serving on it, a moment after the rig returns.
+    let response = eventually_async("the workloads endpoint", async || {
+        let mut request = reqwest::Client::new()
+            .post(format!("http://{}/api/v1/workloads", rig.listen))
+            .json(&body);
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+        if let Some(key) = key {
+            request = request.header("idempotency-key", key);
+        }
+        let response = request.send().await.ok()?;
+        // Only a member standing by answers with this short a Retry-After.
+        let standing_by = response
+            .headers()
+            .get("retry-after")
+            .is_some_and(|after| after == "5");
+        (!standing_by).then_some(response)
+    })
+    .await;
+    let status = response.status().as_u16();
+    let headers = response.headers().clone();
+    let body = response.json().await.unwrap_or(serde_json::Value::Null);
+    (status, body, headers)
+}
+
+const WORKLOADS: &[murtaugh_store::Scope] = &[murtaugh_store::Scope::Workloads];
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_workload_is_refused_closed_with_a_clear_reason() {
+    let rig = rig().await;
+    let ask = serde_json::json!({"prompt": "ping", "target": {"channel": GENERAL}});
+
+    let (status, body, headers) = workload(&rig, None, ask.clone(), None).await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (401, Some("unauthorized"))
+    );
+    assert_eq!(headers["www-authenticate"], "Bearer");
+    let (status, ..) = workload(
+        &rig,
+        Some("mrtg_user_0123456789abcdef_nope"),
+        ask.clone(),
+        None,
+    )
+    .await;
+    assert_eq!(status, 401);
+
+    let rax_only = client_token(&rig, ALICE, &[murtaugh_store::Scope::Rax]).await;
+    let (status, body, headers) = workload(&rig, Some(&rax_only), ask.clone(), None).await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (403, Some("insufficient_scope"))
+    );
+    assert!(
+        headers["www-authenticate"]
+            .to_str()
+            .unwrap()
+            .contains("insufficient_scope")
+    );
+
+    let token = client_token(&rig, ALICE, WORKLOADS).await;
+    for (bad, code, status) in [
+        (serde_json::json!({"prompt": "x"}), "invalid_request", 400),
+        (
+            serde_json::json!({"prompt": " ", "target": {"channel": GENERAL}}),
+            "invalid_request",
+            400,
+        ),
+        (
+            serde_json::json!({"prompt": "x".repeat(40 * 1024), "target": {"channel": GENERAL}}),
+            "prompt_too_large",
+            413,
+        ),
+        (
+            serde_json::json!({"prompt": "x", "target": {"channel": slack_sim::RANDOM}}),
+            "bot_cannot_post",
+            403,
+        ),
+        (
+            serde_json::json!({"prompt": "x", "target": {"channel": slack_sim::SECRET}}),
+            "bot_cannot_post",
+            403,
+        ),
+        (
+            serde_json::json!({"prompt": "x", "target": {"channel": GENERAL, "thread_ts": "1.000001"}}),
+            "thread_not_found",
+            404,
+        ),
+        (
+            serde_json::json!({"prompt": "x", "target": {"dm": BOB}}),
+            "dm_not_owner",
+            403,
+        ),
+    ] {
+        let (got, body, _) = workload(&rig, Some(&token), bad.clone(), None).await;
+        assert_eq!((got, body["error"].as_str()), (status, Some(code)), "{bad}");
+        assert!(body["message"].as_str().is_some_and(|m| !m.is_empty()));
+    }
+
+    // No machine Alice may use is connected yet.
+    let (status, body, headers) = workload(&rig, Some(&token), ask.clone(), None).await;
+    assert_eq!((status, body["error"].as_str()), (503, Some("no_node")));
+    assert!(headers.contains_key("retry-after"));
+
+    // A thread with a turn running is busy.
+    let _laptop = rig.node(ALICE, "laptop").await;
+    let ts = rig
+        .sim
+        .mention(ALICE, GENERAL, "silent", None)
+        .await
+        .unwrap();
+    eventually("the turn to start", || rig.sim.thread_status(GENERAL, &ts)).await;
+    let busy = serde_json::json!({"prompt": "x", "target": {"channel": GENERAL, "thread_ts": ts}});
+    let (status, body, _) = workload(&rig, Some(&token), busy, None).await;
+    assert_eq!((status, body["error"].as_str()), (409, Some("busy")));
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_workload_starts_a_thread_on_the_owners_node_and_answers_there() {
+    let rig = rig().await;
+    let mut laptop = rig.node(ALICE, "laptop").await;
+    let token = client_token(&rig, ALICE, WORKLOADS).await;
+    let ask =
+        serde_json::json!({"prompt": "summarise the deploys", "target": {"channel": GENERAL}});
+    let (status, accepted, _) = workload(&rig, Some(&token), ask.clone(), Some("deploys-1")).await;
+    assert_eq!(status, 202, "{accepted}");
+    assert_eq!(accepted["channel"], GENERAL);
+    let thread = accepted["thread_ts"].as_str().unwrap().to_owned();
+    let (session, text) = laptop.next_prompt().await;
+    assert!(text.contains("summarise the deploys"), "{text}");
+    wait_for_turn_end(&rig, GENERAL, &thread, "pong to: summarise the deploys").await;
+    let opening = &rig.sim.thread(GENERAL, &thread)[0];
+    assert!(
+        opening.text.contains("<@U0ALICE01> sent a workload"),
+        "{}",
+        opening.text
+    );
+
+    // The same key names the same run, and starts nothing new.
+    let (status, again, _) = workload(&rig, Some(&token), ask, Some("deploys-1")).await;
+    assert_eq!((status, &again), (202, &accepted));
+    let openings = rig
+        .sim
+        .messages(GENERAL)
+        .iter()
+        .filter(|m| m.text.contains("sent a workload"))
+        .count();
+    assert_eq!(openings, 1);
+
+    // A workload into that thread continues its session.
+    let more = serde_json::json!({"prompt": "and yesterday", "target": {"channel": GENERAL, "thread_ts": thread}});
+    let (status, body, _) = workload(&rig, Some(&token), more, None).await;
+    assert_eq!(status, 202, "{body}");
+    assert_eq!(body["thread_ts"].as_str(), Some(thread.as_str()));
+    let (again, text) = laptop.next_prompt().await;
+    assert_eq!(again, session);
+    assert!(text.contains("and yesterday"));
+    assert_eq!(rig.sim.violations(), vec![]);
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_workload_can_answer_in_its_owners_dm() {
+    let rig = rig().await;
+    let mut laptop = rig.node(ALICE, "laptop").await;
+    let token = client_token(&rig, ALICE, WORKLOADS).await;
+    let ask = serde_json::json!({"prompt": "nightly report", "target": {"dm": ALICE}});
+    let (status, accepted, _) = workload(&rig, Some(&token), ask, None).await;
+    assert_eq!(status, 202, "{accepted}");
+    let dm = rig.sim.im_channel(ALICE).unwrap();
+    assert_eq!(accepted["channel"].as_str(), Some(dm.as_str()));
+    laptop.next_prompt().await;
+    let thread = accepted["thread_ts"].as_str().unwrap();
+    wait_for_turn_end(&rig, &dm, thread, "pong to: nightly report").await;
+    rig.shutdown.cancel();
+}
+
+/// Bob's workload runs on Alice's machine, which lets everyone in; only Alice approves its tools,
+/// in her DM, never in the channel.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_workloads_approval_goes_to_the_node_owner_alone() {
+    let rig = rig().await;
+    rig.store
+        .set_tool_mode(&user(ALICE), murtaugh_store::ToolMode::AllowedWhitelist)
+        .await
+        .unwrap();
+    let mut laptop = rig.node_sharing(ALICE, "laptop").await;
+    let token = client_token(&rig, BOB, WORKLOADS).await;
+    let ask = serde_json::json!({"prompt": "push it", "target": {"channel": GENERAL}});
+    let (status, accepted, _) = workload(&rig, Some(&token), ask, None).await;
+    assert_eq!(status, 202, "{accepted}");
+    laptop.next_prompt().await;
+    let thread = accepted["thread_ts"].as_str().unwrap().to_owned();
+
+    let card = eventually("the card in Alice's DM", || {
+        let dm = rig.sim.im_channel(ALICE)?;
+        rig.sim
+            .messages(&dm)
+            .into_iter()
+            .find(|m| card_says(m, "murtaugh_approval_card"))
+    })
+    .await;
+    assert!(card_says(&card, "working for <@U0BOB0001>'s workload"));
+    assert!(
+        approval_card(&rig, &thread).is_none(),
+        "the card was posted in the channel"
+    );
+    let dm = rig.sim.im_channel(ALICE).unwrap();
+    rig.sim
+        .click(ALICE, &dm, &card.ts, murtaugh_gateway::approval::ALLOW_ONCE)
+        .await
+        .unwrap();
+    wait_for_turn_end(&rig, GENERAL, &thread, "pong to: push it (tool ran)").await;
+    rig.shutdown.cancel();
+}
+
+async fn eventually_async<T>(what: &str, mut check: impl AsyncFnMut() -> Option<T>) -> T {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Some(found) = check().await {
+            return found;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}

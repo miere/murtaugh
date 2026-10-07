@@ -65,12 +65,19 @@ impl Snapshot {
     /// A client's selector if its token is live, opens `scope`, and its owner may still use the
     /// gateway. A client runs nothing, so being allowed is enough; no grant is needed.
     pub fn authenticate_client(&self, presented: &str, scope: Scope) -> Option<String> {
+        self.verify_client(presented)
+            .filter(|record| record.allows(scope))
+            .map(|record| record.selector.clone())
+    }
+
+    /// The client token presented, if it is live and its owner may still use the gateway,
+    /// whatever its scopes: for an entry point that answers a missing scope apart from a bad token.
+    pub fn verify_client(&self, presented: &str) -> Option<&UserToken> {
         let credential = token::parse(token::USER_PREFIX, presented)?;
         let record = self.clients.get(&credential.selector)?;
         (self.is_live_client(&credential.selector)
-            && record.allows(scope)
             && token::matches(&credential.secret, &record.secret_hash))
-        .then_some(credential.selector)
+        .then_some(record)
     }
 
     pub fn is_live_client(&self, selector: &str) -> bool {
@@ -276,7 +283,16 @@ impl Access {
     pub fn authenticate_client(&self, presented: &str, scope: Scope) -> Option<String> {
         self.snapshot()
             .authenticate_client(presented, scope)
-            .or_else(|| self.admit_new(presented, Kind::Client(scope)))
+            .or_else(|| self.admit_new(presented, Kind::Client(Some(scope))))
+    }
+
+    /// [`Snapshot::verify_client`], letting in a token minted since the last refresh.
+    pub fn verify_client(&self, presented: &str) -> Option<UserToken> {
+        if let Some(record) = self.snapshot().verify_client(presented) {
+            return Some(record.clone());
+        }
+        self.admit_new(presented, Kind::Client(None))?;
+        self.snapshot().verify_client(presented).cloned()
     }
 
     pub fn snapshot(&self) -> Arc<Snapshot> {
@@ -317,8 +333,8 @@ impl Access {
 #[derive(Clone, Copy)]
 enum Kind {
     Node,
-    /// A client token, presented at the entry point that needs this scope.
-    Client(Scope),
+    /// A client token, presented at the entry point that needs this scope, if one does.
+    Client(Option<Scope>),
 }
 
 impl Kind {
@@ -332,7 +348,10 @@ impl Kind {
     fn authenticate(self, snapshot: &Snapshot, presented: &str) -> Option<String> {
         match self {
             Self::Node => snapshot.authenticate(presented),
-            Self::Client(scope) => snapshot.authenticate_client(presented, scope),
+            Self::Client(Some(scope)) => snapshot.authenticate_client(presented, scope),
+            Self::Client(None) => snapshot
+                .verify_client(presented)
+                .map(|record| record.selector.clone()),
         }
     }
 }

@@ -26,6 +26,8 @@ const METHODS: &[&str] = &[
     "assistant.threads.setStatus",
     "reactions.add",
     "conversations.replies",
+    "conversations.info",
+    "conversations.open",
     "files.info",
     "files.getUploadURLExternal",
     "files.completeUploadExternal",
@@ -283,6 +285,8 @@ fn dispatch(
         "views.open" => open_view(st, params),
         "reactions.add" => add_reaction(st, params),
         "conversations.replies" => replies(st, params),
+        "conversations.info" => conversation_info(st, params),
+        "conversations.open" => open_conversation(st, params),
         "files.getUploadURLExternal" => crate::upload::reserve(st, params),
         "files.completeUploadExternal" => crate::upload::complete(st, params),
         "canvases.edit" => crate::canvas::edit(st, params),
@@ -582,6 +586,33 @@ fn add_reaction(st: &mut State, params: &Map<String, Value>) -> Result<Value, Ap
             Ok(json!({}))
         }
     }
+}
+
+fn conversation_info(st: &mut State, params: &Map<String, Value>) -> Result<Value, ApiError> {
+    let id = channel(st, arg(params, "channel")?, false)?;
+    let chan = st
+        .channels
+        .get(&id)
+        .ok_or_else(|| err("channel_not_found", id.clone()))?;
+    let mut info = json!({
+        "id": id,
+        "name": chan.name,
+        "is_im": chan.kind == ChannelKind::Im,
+        "is_private": chan.kind == ChannelKind::Private,
+        "is_archived": false,
+    });
+    if chan.kind != ChannelKind::Im {
+        info["is_member"] = json!(chan.bot_member);
+    }
+    Ok(json!({"channel": info}))
+}
+
+fn open_conversation(st: &mut State, params: &Map<String, Value>) -> Result<Value, ApiError> {
+    let user = arg(params, "users")?
+        .filter(|user| st.users.contains_key(user))
+        .ok_or_else(|| err("user_not_found", "`users` names nobody in the workspace"))?;
+    let id = st.im_for(&user);
+    Ok(json!({"channel": {"id": id}}))
 }
 
 fn replies(st: &mut State, params: &Map<String, Value>) -> Result<Value, ApiError> {
