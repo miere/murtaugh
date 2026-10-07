@@ -18,6 +18,7 @@ pub mod manifest;
 pub mod node_access;
 pub mod panel;
 pub mod picker;
+pub mod policy;
 pub mod prompts;
 pub mod render;
 pub mod reply;
