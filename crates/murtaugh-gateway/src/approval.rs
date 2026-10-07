@@ -61,7 +61,10 @@ pub struct Ask {
     pub node_name: String,
     pub owner: UserId,
     pub channel: String,
-    pub thread_ts: String,
+    /// `None` posts the card on its own, such as in the owner's DM.
+    pub thread_ts: Option<String>,
+    /// Who the agent is working for, when that is not plain from where the card is posted.
+    pub requester: Option<String>,
     pub tool: ToolCall,
     pub timeout: Duration,
     /// Cancelled when the turn ends, which dismisses a card nobody answered.
@@ -92,7 +95,7 @@ impl Approvals {
             .slack
             .post_message(&murtaugh_slack::PostMessage {
                 channel: ask.channel.clone(),
-                thread_ts: Some(ask.thread_ts.clone()),
+                thread_ts: ask.thread_ts.clone(),
                 text: card.fallback(),
                 blocks: vec![card.pending(&id, &ask.owner, ask.timeout)],
             })
@@ -184,6 +187,7 @@ fn denied(by: DeniedBy, reason: &str) -> Decision {
 struct Card {
     tool: String,
     node: String,
+    requester: Option<String>,
     detail: Option<String>,
     language: Option<&'static str>,
 }
@@ -211,6 +215,7 @@ impl Card {
         Card {
             tool: ask.tool.name.clone(),
             node: ask.node_name.clone(),
+            requester: ask.requester.clone(),
             detail,
             language: execute.then_some("bash"),
         }
@@ -237,10 +242,16 @@ impl Card {
         );
         self.container(
             "Approval Needed",
-            &format!(
-                "The agent on {} wants to use the '{}' tool",
-                self.node, self.tool
-            ),
+            &match &self.requester {
+                Some(requester) => format!(
+                    "The agent on {}, working for {requester}, wants to use the '{}' tool",
+                    self.node, self.tool
+                ),
+                None => format!(
+                    "The agent on {} wants to use the '{}' tool",
+                    self.node, self.tool
+                ),
+            },
             ICON_PENDING,
             false,
             [context(&footer), buttons],

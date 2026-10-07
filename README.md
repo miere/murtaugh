@@ -186,8 +186,10 @@ the fleet. That is how `murtaugh-client acp` puts an editor's agent sessions on 
 - The tools a client lends a session reach the node suffixed with the client's link id, such as
   `openknowledge_x7k2`, and only that session may call them. Files the client links reach the node
   as `bridge://<link id>/<uri>`, and only a node holding one of the client's sessions may read them.
-- Tool calls are ruled by the node owner's tool mode and whitelist first. The client is asked only
-  when those leave a call to a person. Sign-ins still go to the node's owner in Slack.
+- Tool calls are ruled by the node owner's tool mode and whitelist first. When those leave a call
+  to a person, that person is the node's owner, since the tool runs on their machine: a client of
+  their own asks them in the editor, and anyone else's client waits while the owner gets an
+  approval card in their Slack DM. Sign-ins still go to the node's owner in Slack.
 - Client sessions live in memory and are never pinned. A client that stays away past the link's
   retention takes its sessions with it, and each person's Home tab lists their live ones.
 

@@ -124,6 +124,7 @@ pub async fn serve(
     ]);
     let lent = crate::tools::Lent::new(store.clone());
     let sign_ins = crate::signin::SignIns::new(Some(slack.clone()), access.clone());
+    let approvals = crate::approval::Approvals::default();
     let relay = crate::relay::Relay::new(
         access.clone(),
         fleet.clone(),
@@ -131,6 +132,11 @@ pub async fn serve(
         lent.clone(),
         files.clone(),
         sign_ins.clone(),
+        Some(crate::relay::OwnerApproval {
+            slack: slack.clone(),
+            approvals: approvals.clone(),
+            timeout: options.approval_timeout,
+        }),
     );
     let mut hub = hub::start(
         config.listen,
@@ -172,6 +178,7 @@ pub async fn serve(
         tools,
         lent,
         relay,
+        approvals,
     });
     tracing::info!(listen = %hub.server.local_addr(), team = %identity.team_id, %holder, "murtaugh gateway started; waiting to lead");
     let mut seen = Seen::default();

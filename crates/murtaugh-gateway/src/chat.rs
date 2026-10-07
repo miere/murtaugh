@@ -187,6 +187,8 @@ pub struct Parts {
     pub tools: Tools,
     pub lent: Lent,
     pub relay: crate::relay::Relay,
+    /// Shared with the relay, so a card it raised is answered by the same click handler.
+    pub approvals: Approvals,
 }
 
 impl Chat {
@@ -208,6 +210,7 @@ impl Chat {
             tools,
             lent,
             relay,
+            approvals,
         } = parts;
         let panel = Panel {
             slack: slack.clone(),
@@ -227,7 +230,7 @@ impl Chat {
             files,
             team,
             turn_timings,
-            approvals: Approvals::default(),
+            approvals,
             approval_timeout,
             prompts: Prompts::default(),
             prompt_timeout,
@@ -1523,7 +1526,8 @@ impl Chat {
                     node_name: node.name.clone(),
                     owner: node.owner.clone(),
                     channel: target.channel.clone(),
-                    thread_ts: target.thread_ts.clone(),
+                    thread_ts: Some(target.thread_ts.clone()),
+                    requester: None,
                     tool,
                     timeout: self.approval_timeout,
                     turn: turn.token.clone(),

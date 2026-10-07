@@ -3446,3 +3446,96 @@ async fn a_group_the_node_could_not_publish_is_said_in_the_thread() {
     .await;
     rig.shutdown.cancel();
 }
+
+/// A client's session on someone else's machine: the machine's owner approves, in their DM, and
+/// the client's own person cannot.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_from_someone_elses_client_is_approved_by_the_node_owner_in_their_dm() {
+    let rig = rig().await;
+    rig.store
+        .set_tool_mode(&user(ALICE), murtaugh_store::ToolMode::AllowedWhitelist)
+        .await
+        .unwrap();
+    let access = serde_json::json!({"policy": "always_allow"});
+    let metadata = rax::Metadata::from([("murtaugh_access".to_owned(), access)]);
+    let _laptop = rig
+        .node_built(ALICE, "laptop", &[rig.listen], metadata, Groups::Takes)
+        .await;
+    let minted = murtaugh_gateway::roles::mint_client(
+        &*rig.store,
+        &user(BOB),
+        "editor",
+        murtaugh_store::Scope::legacy(),
+    )
+    .await
+    .unwrap();
+    let client = rax_sim::SimNode::dial(
+        rax_tokio::dial::DialConfig {
+            endpoints: vec![format!("ws://{}", rig.listen)],
+            token: minted.token,
+            backoff_min: Duration::from_millis(10),
+            backoff_max: Duration::from_millis(50),
+            ..Default::default()
+        },
+        rax_sim::NodeOptions::default(),
+        Duration::from_secs(20),
+    )
+    .unwrap();
+    assert!(matches!(
+        client.next_link_change().await.unwrap(),
+        rax_sim::LinkChange::Fresh
+    ));
+    client
+        .initialize(rax::session::GatewayCapabilities::default())
+        .await
+        .unwrap();
+    let session = client.new_session(vec![]).await.unwrap().session_id;
+    let mut turn = client
+        .prompt(session, vec![ContentBlock::text("push it").into()])
+        .await
+        .unwrap();
+
+    let card = eventually("the card in Alice's DM", || {
+        let dm = rig.sim.im_channel(ALICE)?;
+        rig.sim.messages(&dm).into_iter().rev().find(|m| {
+            m.blocks
+                .as_ref()
+                .is_some_and(|b| b.to_string().contains("murtaugh_approval_card"))
+        })
+    })
+    .await;
+    assert!(
+        card_says(&card, "working for <@U0BOB0001>'s client *editor*"),
+        "{:?}",
+        card.blocks
+    );
+    let dm = rig.sim.im_channel(ALICE).unwrap();
+    rig.sim
+        .click(BOB, &dm, &card.ts, murtaugh_gateway::approval::ALLOW_ONCE)
+        .await
+        .unwrap();
+    eventually("the note to Bob", || {
+        rig.sim
+            .ephemerals()
+            .iter()
+            .any(|(_, who, text)| who == BOB && text.contains("Only <@U0ALICE01> can decide"))
+            .then_some(())
+    })
+    .await;
+    rig.sim
+        .click(ALICE, &dm, &card.ts, murtaugh_gateway::approval::ALLOW_ONCE)
+        .await
+        .unwrap();
+    turn.expect(rax_sim::Match::message_contains("(tool ran)"))
+        .await
+        .unwrap();
+    assert!(
+        !turn
+            .seen()
+            .iter()
+            .any(|event| matches!(event, Open::Known(Event::ToolCall { .. }))),
+        "Bob's client was asked to approve a call on Alice's machine"
+    );
+    assert_eq!(rig.sim.violations(), vec![]);
+    rig.shutdown.cancel();
+}

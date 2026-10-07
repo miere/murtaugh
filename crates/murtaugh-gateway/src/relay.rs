@@ -33,7 +33,10 @@ use rax_tokio::accept::GatewayIdentity;
 use rax_tokio::gateway::{GatewayLink, StreamEvents};
 use rax_tokio::node::{NewNodeLink, NodeEvent, NodeEvents, NodeHandle};
 
+use tokio_util::sync::CancellationToken;
+
 use crate::access::Access;
+use crate::approval::{self, Approvals};
 use crate::files::Files;
 use crate::fleet::{Fleet, Node};
 use crate::policy::{self, Ruling};
@@ -50,6 +53,15 @@ const ATTACHMENT_WAIT: Duration = Duration::from_secs(60);
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// How the node's owner is asked about a client's call when the client is not theirs: a card in
+/// their Slack DM, answered through the same handler as a thread's cards.
+#[derive(Clone)]
+pub struct OwnerApproval {
+    pub slack: murtaugh_slack::SlackClient,
+    pub approvals: Approvals,
+    pub timeout: Duration,
 }
 
 /// What one bridge session is, as the Home tab shows it.
@@ -72,6 +84,8 @@ struct Inner {
     lent: Lent,
     files: Files,
     sign_ins: SignIns,
+    /// `None` where there is no Slack to ask in: a call only the owner may approve is denied.
+    owner_approval: Option<OwnerApproval>,
     bridges: Mutex<HashMap<String, Arc<Bridge>>>,
     /// Which bridge session each node session belongs to, by node selector and node session id.
     routes: Mutex<HashMap<(String, SessionId), Route>>,
@@ -152,6 +166,7 @@ impl Relay {
         lent: Lent,
         files: Files,
         sign_ins: SignIns,
+        owner_approval: Option<OwnerApproval>,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -161,6 +176,7 @@ impl Relay {
                 lent,
                 files,
                 sign_ins,
+                owner_approval,
                 bridges: Mutex::default(),
                 routes: Mutex::default(),
             }),
@@ -534,8 +550,11 @@ impl Relay {
         stream: &RequestId,
         mut events: StreamEvents,
     ) {
+        // Dismisses any card still waiting on the owner once the turn is over.
+        let turn = CancellationToken::new();
+        let _ended = turn.clone().drop_guard();
         while let Some(event) = events.recv().await {
-            let Some(event) = self.relayed(bridge, node, event).await else {
+            let Some(event) = self.relayed(bridge, node, &turn, event).await else {
                 continue;
             };
             if let Err(err) = bridge.handle.event(stream.clone(), event).await {
@@ -550,6 +569,7 @@ impl Relay {
         &self,
         bridge: &Arc<Bridge>,
         node: &Node,
+        turn: &CancellationToken,
         event: Open<Event>,
     ) -> Option<Open<Event>> {
         let Open::Known(event) = event else {
@@ -557,7 +577,10 @@ impl Relay {
         };
         let event = match event {
             Event::ToolCall { tool_call } => {
-                return self.rule(bridge, node, tool_call).await.map(Open::Known);
+                return self
+                    .rule(bridge, node, turn, tool_call)
+                    .await
+                    .map(Open::Known);
             }
             Event::Question { question } => {
                 if !lock(&bridge.caps).question {
@@ -622,15 +645,31 @@ impl Relay {
         Some(Open::Known(event))
     }
 
-    /// Rules on a call with the node owner's tool rules, and puts it to the client only when a
-    /// person must decide. A call ruled here still shows, as an update the client draws but is
+    /// Rules on a call with the node owner's tool rules. When a person must decide, that person
+    /// is the node's owner, because the tool runs on their machine: the client is asked only when
+    /// it is the owner's own, and otherwise the owner gets a card in Slack while the client hears
+    /// what it is waiting for. A call ruled here still shows, as an update the client draws but is
     /// not asked about.
-    async fn rule(&self, bridge: &Arc<Bridge>, node: &Node, tool_call: ToolCall) -> Option<Event> {
+    async fn rule(
+        &self,
+        bridge: &Arc<Bridge>,
+        node: &Node,
+        turn: &CancellationToken,
+        tool_call: ToolCall,
+    ) -> Option<Event> {
         let rules = policy::rules(&*self.inner.store, &node.owner).await;
         match policy::rule(&rules, &tool_call.name) {
-            Ruling::Ask => {
+            Ruling::Ask if bridge.owner == node.owner => {
                 lock(&bridge.verdicts).insert(tool_call.id.clone(), node.link.clone());
                 Some(Event::ToolCall { tool_call })
+            }
+            Ruling::Ask => {
+                let waiting = format!(
+                    "Waiting for the owner of {} to approve the '{}' tool.",
+                    node.name, tool_call.name
+                );
+                self.ask_owner(bridge, node, turn, tool_call).await;
+                Some(Event::Status { text: waiting })
             }
             Ruling::Decided(decision) => {
                 let status = match decision {
@@ -657,6 +696,47 @@ impl Relay {
         }
     }
 
+    /// Puts a client's call to the node's owner in their Slack DM, or denies it when there is no
+    /// Slack to ask in. The verdict reaches the node from the card, never from the client.
+    async fn ask_owner(
+        &self,
+        bridge: &Bridge,
+        node: &Node,
+        turn: &CancellationToken,
+        tool_call: ToolCall,
+    ) {
+        let Some(asking) = self.inner.owner_approval.clone() else {
+            let verdict = ToolVerdict {
+                id: tool_call.id,
+                decision: Decision::Deny {
+                    by: rax::tool::DeniedBy::Unavailable,
+                    reason: Some(
+                        "Only the node's owner can approve this, and they could not be asked."
+                            .into(),
+                    ),
+                },
+            };
+            if let Err(err) = node.link.verdict(verdict).await {
+                tracing::warn!(node = %node.name, error = %err, "could not rule on a client's tool call");
+            }
+            return;
+        };
+        let ask = approval::Ask {
+            slack: asking.slack,
+            store: self.inner.store.clone(),
+            link: node.link.clone(),
+            node_name: node.name.clone(),
+            owner: node.owner.clone(),
+            channel: node.owner.to_string(),
+            thread_ts: None,
+            requester: Some(format!("<@{}>'s client *{}*", bridge.owner, bridge.name)),
+            tool: tool_call,
+            timeout: asking.timeout,
+            turn: turn.clone(),
+        };
+        tokio::spawn(async move { asking.approvals.ask(ask).await });
+    }
+
     fn route(&self, selector: &str, session: &SessionId) -> Option<(Arc<Bridge>, SessionId)> {
         let route = lock(&self.inner.routes)
             .get(&(selector.to_owned(), session.clone()))
@@ -677,13 +757,16 @@ impl Relay {
         };
         let event = match event {
             Open::Known(BackgroundEvent::ToolCall { tool_call }) => {
-                match self.rule(&bridge, node, tool_call).await {
+                // No turn ends a background call's card; the approval timeout does.
+                let unbounded = CancellationToken::new();
+                match self.rule(&bridge, node, &unbounded, tool_call).await {
                     Some(Event::ToolCall { tool_call }) => {
                         Open::Known(BackgroundEvent::ToolCall { tool_call })
                     }
                     Some(Event::ToolCallUpdate { tool_call_update }) => {
                         Open::Known(BackgroundEvent::ToolCallUpdate { tool_call_update })
                     }
+                    Some(Event::Status { text }) => Open::Known(BackgroundEvent::Status { text }),
                     _ => return,
                 }
             }
