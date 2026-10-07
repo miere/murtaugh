@@ -15,6 +15,8 @@ use rax::session::{GatewayCapabilities, Initialize, Initialized, PROTOCOL_VERSIO
 use rax::{ErrorKind, GatewayCall, GatewayReply, NodeCall, NodeReply, Unhandled};
 use rax_tokio::Role;
 use rax_tokio::accept::{AcceptConfig, Accepted, AcceptedLinks, Acceptor};
+
+use crate::port::Port;
 use rax_tokio::gateway::{GatewayLink, LinkEvent, LinkEvents, NewLink};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -62,8 +64,9 @@ pub fn capabilities(tools: &Tools) -> GatewayCapabilities {
 }
 
 pub struct Hub {
-    /// Serves nodes, which dial as `rax.v1.node`, and clients, which dial as `rax.v1.gateway`.
-    pub server: Acceptor,
+    /// Serves nodes, which dial as `rax.v1.node`, clients, which dial as `rax.v1.gateway`, and the
+    /// HTTP API, all on one port.
+    pub server: Port,
     pub changes: mpsc::Receiver<FleetChange>,
     pub backgrounds: mpsc::Receiver<Background>,
 }
@@ -80,6 +83,7 @@ pub async fn start(
     lent: Lent,
     sign_ins: SignIns,
     relay: Relay,
+    http: axum::Router,
     shutdown: CancellationToken,
 ) -> std::io::Result<Hub> {
     let config = AcceptConfig {
@@ -87,7 +91,8 @@ pub async fn start(
         retain_for,
         ..AcceptConfig::default()
     };
-    let (server, new_links) = Acceptor::bind(listen, access.clone(), config).await?;
+    let (acceptor, new_links) = Acceptor::unbound(access.clone(), config);
+    let server = Port::bind(listen, acceptor, http).await?;
     let (changes, receiver) = mpsc::channel(64);
     let (backgrounds, background_receiver) = mpsc::channel(256);
     let serving = Serving {

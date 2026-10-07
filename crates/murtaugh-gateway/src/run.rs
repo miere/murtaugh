@@ -151,10 +151,11 @@ pub async fn serve(
         lent.clone(),
         sign_ins.clone(),
         relay.clone(),
+        axum::Router::new(),
         shutdown.clone(),
     )
     .await
-    .map_err(|err| format!("cannot listen for RAX on {}: {err}", config.listen))?;
+    .map_err(|err| format!("cannot listen on {}: {err}", config.listen))?;
     hub.server.stop_serving();
     tokio::spawn(hub::refresh(
         store.clone(),

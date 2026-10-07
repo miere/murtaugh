@@ -11,6 +11,7 @@ name = "murtaugh-gateway"
 path = "src/main.rs"
 
 [dependencies]
+axum.workspace = true
 murtaugh-common.workspace = true
 murtaugh-slack.workspace = true
 async-trait.workspace = true

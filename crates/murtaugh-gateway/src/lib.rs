@@ -18,6 +18,7 @@ pub mod node_access;
 pub mod panel;
 pub mod picker;
 pub mod policy;
+pub mod port;
 pub mod prompts;
 pub mod relay;
 pub mod render;

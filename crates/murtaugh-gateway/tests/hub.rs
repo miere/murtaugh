@@ -64,6 +64,7 @@ async fn rig() -> Rig {
         murtaugh_gateway::tools::Lent::new(store.clone()),
         murtaugh_gateway::signin::SignIns::new(None, access.clone()),
         relay.clone(),
+        axum::Router::new(),
         shutdown.clone(),
     )
     .await
@@ -260,4 +261,52 @@ async fn a_token_revoked_before_it_first_dials_is_still_refused() {
         Some(NodeEvent::CredentialRejected)
     ));
     rig.shutdown.cancel();
+}
+
+async fn http_get(addr: std::net::SocketAddr, path: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let request = format!("GET {path} HTTP/1.1\r\nhost: murtaugh\r\nconnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut response = String::new();
+    within(stream.read_to_string(&mut response)).await.unwrap();
+    response
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rax_links_and_http_share_one_port() {
+    let (acceptor, mut links) = rax_tokio::accept::Acceptor::unbound(
+        |_: &str| Some(rax_tokio::gateway::NodeIdentity("node-1".into())),
+        rax_tokio::accept::AcceptConfig::default(),
+    );
+    let http = axum::Router::new().route("/ping", axum::routing::get(|| async { "pong" }));
+    let port = murtaugh_gateway::port::Port::bind("127.0.0.1:0".parse().unwrap(), acceptor, http)
+        .await
+        .unwrap();
+
+    let (node, mut events) = NodeLink::start(NodeConfig {
+        endpoints: vec![format!("ws://{}", port.local_addr())],
+        token: "anything".into(),
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(matches!(
+        within(events.recv()).await,
+        Some(NodeEvent::Fresh)
+    ));
+    assert!(within(links.recv()).await.is_some());
+    let answered = http_get(port.local_addr(), "/ping").await;
+    assert!(answered.starts_with("HTTP/1.1 200"), "{answered}");
+    assert!(answered.ends_with("pong"), "{answered}");
+
+    port.stop_serving();
+    let refused = http_get(port.local_addr(), "/ping").await;
+    assert!(refused.starts_with("HTTP/1.1 503"), "{refused}");
+    port.start_serving();
+    assert!(
+        http_get(port.local_addr(), "/ping")
+            .await
+            .starts_with("HTTP/1.1 200")
+    );
+    node.close().await;
 }
