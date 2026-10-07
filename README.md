@@ -224,6 +224,9 @@ curl -X POST https://murtaugh.example.com/api/v1/workloads \
   running, and `503 no_node` (with `Retry-After`) when none of the caller's machines is connected.
 - The run is the token owner's: their nodes, and tool approvals for the node's owner alone, as a
   card in the node owner's DM, never in the target channel.
+- `"output": "quiet"` posts nothing of the turn itself: no thinking line, no streamed words, no tool
+  cards. The thread gets what the agent posts with the `slack` group's `send_message` tool, the
+  files it attaches, and any failure notice. The default, `"stream"`, is the usual thread.
 - A repeated `Idempotency-Key` within 24 hours answers with the run it already started.
 
 ## murtaugh-client

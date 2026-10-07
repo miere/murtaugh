@@ -134,6 +134,8 @@ struct Incoming {
 #[derive(Debug, Clone)]
 pub struct WorkloadRun {
     pub caller: UserId,
+    /// Posts nothing of the turn itself: only what the agent sends, files, cards and failures.
+    pub quiet: bool,
 }
 
 /// A workload ready to run: checked, with its thread resolved.
@@ -145,6 +147,7 @@ pub struct Workload {
     pub thread_ts: Option<String>,
     pub prompt: String,
     pub direct: bool,
+    pub quiet: bool,
 }
 
 struct Seat {
@@ -752,6 +755,7 @@ impl Chat {
             direct: workload.direct,
             workload: Some(WorkloadRun {
                 caller: workload.owner,
+                quiet: workload.quiet,
             }),
         };
         let chat = self.clone();
@@ -805,9 +809,15 @@ impl Chat {
         }
         let (mut user, mut batch, mut received) = (user, vec![incoming], received);
         loop {
-            let thinking = Thinking::start(self.slack.clone(), &conversation);
+            let quiet = batch
+                .last()
+                .and_then(|incoming| incoming.workload.as_ref())
+                .is_some_and(|run| run.quiet);
+            let thinking = (!quiet).then(|| Thinking::start(self.slack.clone(), &conversation));
             let timing = self.converse(&user, &conversation, &batch).await;
-            thinking.stop().await;
+            if let Some(thinking) = thinking {
+                thinking.stop().await;
+            }
             if self.turn_timings
                 && let Some(timing) = timing
             {
@@ -1379,14 +1389,16 @@ impl Chat {
         // The first fault is the diagnosis; anything after it is fallout from the same cause.
         let mut failure: Option<rax::Error> = None;
         let mut unattached: Vec<(String, String)> = Vec::new();
-        let mut reply = Reply::new(
-            self.slack.clone(),
-            Target {
-                channel: conversation.channel.clone(),
-                thread_ts: conversation.thread_ts.clone(),
-                recipient,
-            },
-        );
+        let target = Target {
+            channel: conversation.channel.clone(),
+            thread_ts: conversation.thread_ts.clone(),
+            recipient,
+        };
+        let quiet = incoming.workload.as_ref().is_some_and(|run| run.quiet);
+        let mut reply = match quiet {
+            true => Reply::quiet(self.slack.clone(), target),
+            false => Reply::new(self.slack.clone(), target),
+        };
         loop {
             let due = reply.due();
             let event = tokio::select! {
@@ -1458,7 +1470,7 @@ impl Chat {
                 "_*{}*_ went offline before finishing this answer.",
                 render::escape(&node.name)
             ))
-        } else if !reply.has_written() && failure.is_none() && unattached.is_empty() {
+        } else if !quiet && !reply.has_written() && failure.is_none() && unattached.is_empty() {
             Some("done, with nothing to say.".to_owned())
         } else {
             None
