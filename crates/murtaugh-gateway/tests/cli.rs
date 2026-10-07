@@ -153,6 +153,23 @@ fn a_client_token_allows_its_owner_without_a_grant_and_is_revoked_on_its_own() {
         ],
     ));
     assert!(refused.contains("not a token scope"), "{refused}");
+    ok(gateway(
+        &config,
+        &[
+            "user",
+            "token",
+            "mint",
+            "--owner",
+            "U0GUEST01",
+            "--name",
+            "ci",
+            "--scope",
+            "rax",
+            "--scope",
+            "workloads",
+        ],
+    ));
+    assert!(ok(gateway(&config, &["user", "token", "list"])).contains("ci\tlive\trax,workloads"));
     let selector = listed.split('\t').next().unwrap().to_owned();
     assert!(ok(gateway(&config, &["user", "token", "revoke", &selector])).contains("Revoked"));
     assert!(ok(gateway(&config, &["user", "token", "list"])).contains("revoked"));
