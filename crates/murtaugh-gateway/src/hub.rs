@@ -60,6 +60,7 @@ pub fn capabilities(tools: &Tools) -> GatewayCapabilities {
         resource_schemes: vec!["chat".into()],
         readable_schemes: vec![crate::files::SCHEME.into(), relay::SCHEME.into()],
         tools: tools.catalogue(),
+        attachment_receipts: true,
     }
 }
 

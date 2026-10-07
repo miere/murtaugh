@@ -11,7 +11,7 @@ use murtaugh_slack::{
     ViewSubmission,
 };
 use murtaugh_store::{Conversation, Pin, Store, UserId};
-use rax::attachment::Attachment;
+use rax::attachment::{Attachment, ReceiptOutcome};
 use rax::content::ContentBlock;
 use rax::event::BackgroundEvent;
 use rax::id::SessionId;
@@ -592,7 +592,22 @@ impl Chat {
                 Some((pin, node)) => self.show_background(&pin, &node, &mut events).await,
                 None => {
                     tracing::debug!(node = %selector, %session_id, "background event for a session no thread is pinned to");
-                    while events.try_recv().is_ok() {}
+                    let node = self.fleet.get(selector);
+                    while let Ok(event) = events.try_recv() {
+                        if let (
+                            Some(node),
+                            Open::Known(BackgroundEvent::Attachment { attachment }),
+                        ) = (&node, event)
+                        {
+                            let reason = "there is no conversation to show it in".to_owned();
+                            node.acknowledge(
+                                attachment.transfer_id,
+                                ReceiptOutcome::Failed,
+                                Some(reason),
+                            )
+                            .await;
+                        }
+                    }
                 }
             }
             // Under the lock, so an event sent while this run was ending starts the next one here
@@ -1590,10 +1605,16 @@ impl Chat {
                     .filename
                     .clone()
                     .unwrap_or_else(|| "attachment".to_owned());
+                let transfer_id = attachment.transfer_id.clone();
                 if let Err(reason) = self.attach(reply.target(), node, attachment).await {
                     tracing::warn!(node = %node.name, file = %name, %reason, "could not attach a file");
+                    let told = format!("Slack did not take it: {reason}");
+                    node.acknowledge(transfer_id, ReceiptOutcome::Failed, Some(told))
+                        .await;
                     return Some(Aftermath::Unattached { name, reason });
                 }
+                node.acknowledge(transfer_id, ReceiptOutcome::Delivered, None)
+                    .await;
             }
             Open::Known(TurnEvent::Complete { .. }) => {}
             other => tracing::debug!(event = ?other, "turn event not shown yet"),

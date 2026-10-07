@@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use murtaugh_store::UserId;
+use rax::attachment::{AttachmentReceipt, ReceiptOutcome};
+use rax::id::TransferId;
 use rax::session::NodeCapabilities;
 use rax_tokio::gateway::GatewayLink;
 
@@ -28,6 +30,27 @@ pub struct Node {
 impl Node {
     pub fn admits(&self, user: &UserId) -> bool {
         self.access.admits(&self.owner, user)
+    }
+
+    /// Tells the node what became of an attachment, if it asked to know. `Unknown` is for a file
+    /// passed on somewhere that does not say whether anyone saw it.
+    pub async fn acknowledge(
+        &self,
+        transfer_id: TransferId,
+        outcome: ReceiptOutcome,
+        reason: Option<String>,
+    ) {
+        if !self.capabilities.attachment_receipts {
+            return;
+        }
+        let receipt = AttachmentReceipt {
+            transfer_id,
+            outcome,
+            reason,
+        };
+        if let Err(err) = self.link.receipt(receipt).await {
+            tracing::debug!(node = %self.name, error = %err, "could not send an attachment receipt");
+        }
     }
 }
 

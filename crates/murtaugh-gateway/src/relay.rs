@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use murtaugh_store::{Store, UserId};
+use rax::attachment::{Attachment, ReceiptOutcome};
 use rax::content::ContentBlock;
 use rax::credential::CredentialRenewal;
 use rax::event::BackgroundEvent;
@@ -258,6 +259,9 @@ impl Relay {
                         }
                     }
                 }
+                NodeEvent::Receipt(receipt) => {
+                    tracing::debug!(client = %bridge.name, transfer_id = %receipt.transfer_id, "a receipt from a client this relay did not ask for");
+                }
                 NodeEvent::Disconnected { reason } => {
                     tracing::info!(client = %bridge.name, %reason, "client disconnected; holding its link for a resume");
                 }
@@ -355,6 +359,7 @@ impl Relay {
                 tool_gate: ToolGate::EveryCall,
                 sessions: SessionDurability::Ephemeral,
                 tool_groups: true,
+                attachment_receipts: false,
             },
             metadata: Default::default(),
         }
@@ -618,31 +623,52 @@ impl Relay {
                     .await;
                 return None;
             }
-            Event::Attachment { mut attachment } => {
-                let bytes = self
-                    .inner
-                    .files
-                    .claim(&node.selector, &attachment.transfer_id, ATTACHMENT_WAIT)
-                    .await;
-                let bytes = match bytes {
-                    Ok(bytes) => bytes,
-                    Err(reason) => {
-                        tracing::warn!(node = %node.name, %reason, "an attachment for a client never arrived");
-                        return None;
-                    }
-                };
-                match bridge.handle.send_attachment(&bytes).await {
-                    Ok(transfer_id) => attachment.transfer_id = transfer_id,
-                    Err(err) => {
-                        tracing::warn!(client = %bridge.name, error = %err, "could not pass an attachment on");
-                        return None;
-                    }
-                }
-                Event::Attachment { attachment }
-            }
+            Event::Attachment { attachment } => Event::Attachment {
+                attachment: self.pass_on(bridge, node, attachment).await?,
+            },
             other => other,
         };
         Some(Open::Known(event))
+    }
+
+    /// Sends an attachment's bytes on to the client under a transfer of its own, and tells the node
+    /// how far it got.
+    async fn pass_on(
+        &self,
+        bridge: &Bridge,
+        node: &Node,
+        mut attachment: Attachment,
+    ) -> Option<Attachment> {
+        let from_node = attachment.transfer_id.clone();
+        let bytes = self
+            .inner
+            .files
+            .claim(&node.selector, &from_node, ATTACHMENT_WAIT)
+            .await;
+        let bytes = match bytes {
+            Ok(bytes) => bytes,
+            Err(reason) => {
+                tracing::warn!(node = %node.name, %reason, "an attachment for a client never arrived");
+                let reason = format!("its bytes never reached the gateway: {reason}");
+                node.acknowledge(from_node, ReceiptOutcome::Failed, Some(reason))
+                    .await;
+                return None;
+            }
+        };
+        match bridge.handle.send_attachment(&bytes).await {
+            Ok(transfer_id) => attachment.transfer_id = transfer_id,
+            Err(err) => {
+                tracing::warn!(client = %bridge.name, error = %err, "could not pass an attachment on");
+                let reason = format!("it could not be passed on to the editor: {err}");
+                node.acknowledge(from_node, ReceiptOutcome::Failed, Some(reason))
+                    .await;
+                return None;
+            }
+        }
+        // The client does not say whether anyone saw it.
+        node.acknowledge(from_node, ReceiptOutcome::Unknown, None)
+            .await;
+        Some(attachment)
     }
 
     /// Rules on a call with the node owner's tool rules. When a person must decide, that person
@@ -769,6 +795,13 @@ impl Relay {
                     Some(Event::Status { text }) => Open::Known(BackgroundEvent::Status { text }),
                     _ => return,
                 }
+            }
+            // Its bytes arrived here under the node's transfer, which the client never saw.
+            Open::Known(BackgroundEvent::Attachment { attachment }) => {
+                let Some(attachment) = self.pass_on(&bridge, node, attachment).await else {
+                    return;
+                };
+                Open::Known(BackgroundEvent::Attachment { attachment })
             }
             other => other,
         };
