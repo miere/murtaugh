@@ -10,7 +10,8 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-  BINARY: murtaugh-gateway
+  # Every binary ships on every target, each in its own tarball.
+  BINARIES: murtaugh-gateway murtaugh-client
 
 jobs:
   build:
@@ -40,25 +41,37 @@ jobs:
       - name: Build
         run: |
           export MURTAUGH_VERSION="${GITHUB_REF_NAME#v}"
-          cargo build --release --locked --target ${{ matrix.target }} -p "$BINARY"
-      - name: Sign the macOS binary
+          for binary in $BINARIES; do
+            cargo build --release --locked --target ${{ matrix.target }} -p "$binary"
+          done
+      - name: Sign the macOS binaries
         if: endsWith(matrix.target, 'apple-darwin')
         env:
           P12_B64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
           P12_PW: ${{ secrets.MACOS_CERT_PASSWORD }}
-          # Both end up inside every user's stored TCC grant. Changing either
-          # one invalidates every existing grant at once, so treat them as
-          # permanent.
-          SIGN_IDENTIFIER: dev.murtaugh.gateway
+          # The identifier and the leaf both end up inside every user's stored
+          # TCC grant. Changing either one invalidates every existing grant at
+          # once, so treat them as permanent. Each binary has its own
+          # identifier under the same certificate.
           SIGN_LEAF_SHA1: 08e8006e09132416a8fa6f105c0a2a9d4785283c
-        run: scripts/sign-macos.sh "target/${{ matrix.target }}/release/$BINARY"
+        run: |
+          for binary in $BINARIES; do
+            case "$binary" in
+              murtaugh-gateway) identifier=dev.murtaugh.gateway ;;
+              murtaugh-client) identifier=dev.murtaugh.client ;;
+              *) echo "::error::No signing identifier for $binary"; exit 1 ;;
+            esac
+            SIGN_IDENTIFIER="$identifier" scripts/sign-macos.sh "target/${{ matrix.target }}/release/$binary"
+          done
       - name: Package
         run: |
-          name="$BINARY-$GITHUB_REF_NAME-${{ matrix.target }}"
-          mkdir -p "dist/$name"
-          cp "target/${{ matrix.target }}/release/$BINARY" README.md "dist/$name/"
-          tar -C dist -czf "dist/$name.tar.gz" "$name"
-          (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
+          for binary in $BINARIES; do
+            name="$binary-$GITHUB_REF_NAME-${{ matrix.target }}"
+            mkdir -p "dist/$name"
+            cp "target/${{ matrix.target }}/release/$binary" README.md "dist/$name/"
+            tar -C dist -czf "dist/$name.tar.gz" "$name"
+            (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
