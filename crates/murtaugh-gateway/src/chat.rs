@@ -10,7 +10,7 @@ use murtaugh_slack::{
     Block, Click, Event, FileRef, HomeClick, PostMessage, SlackClient, TaskStatus, Text, Upload,
     ViewSubmission,
 };
-use murtaugh_store::{Conversation, Pin, Store, ToolMode, UserConfig, UserId};
+use murtaugh_store::{Conversation, Pin, Store, UserId};
 use rax::attachment::Attachment;
 use rax::content::ContentBlock;
 use rax::event::BackgroundEvent;
@@ -18,7 +18,7 @@ use rax::id::SessionId;
 use rax::interaction::{DisplayAnswer, DisplayOutcome};
 use rax::open::Subject;
 use rax::session::{NewSession, Prompt, SessionRef};
-use rax::tool::{Decision, DeniedBy, ToolCall, ToolCallStatus, ToolGroup, ToolVerdict};
+use rax::tool::{ToolCall, ToolCallStatus, ToolGroup, ToolVerdict};
 use rax::{ErrorKind, Event as TurnEvent, GatewayCall, GatewayReply, Open, Unhandled};
 use rax_tokio::CallError;
 use rax_tokio::gateway::{GatewayLink, StreamEvents};
@@ -36,6 +36,7 @@ use crate::fleet::{Fleet, Node};
 use crate::hub::{Background, FleetChange};
 use crate::panel::Panel;
 use crate::picker;
+use crate::policy::{self, Ruling};
 use crate::prompts::{self, Asked, Prompts};
 use crate::render;
 use crate::reply::{Reply, Target, TaskCard};
@@ -1508,25 +1509,10 @@ impl Chat {
 
     /// Allows, denies, or puts the call to the node's owner, as their tool mode says.
     async fn rule(&self, target: &Target, node: &Node, tool: ToolCall, turn: &Turn) {
-        let config = match self.store.user(&node.owner).await {
-            Ok(config) => config,
-            Err(err) => {
-                tracing::warn!(error = %err, "could not read the owner's tool rules; asking them");
-                UserConfig {
-                    tool_mode: ToolMode::AllowedWhitelist,
-                    ..UserConfig::new(node.owner.clone())
-                }
-            }
-        };
-        let decision = match config.tool_mode {
-            _ if talks_to_people(&tool.name) => Decision::Allow,
-            ToolMode::AlwaysAllowed => Decision::Allow,
-            ToolMode::AllowedWhitelist if config.whitelist.contains(&tool.name) => Decision::Allow,
-            ToolMode::Denied => Decision::Deny {
-                by: DeniedBy::Policy,
-                reason: Some("The node's owner does not allow tools.".into()),
-            },
-            ToolMode::AllowedWhitelist => {
+        let config = policy::rules(&*self.store, &node.owner).await;
+        let decision = match policy::rule(&config, &tool.name) {
+            Ruling::Decided(decision) => decision,
+            Ruling::Ask => {
                 let ask = approval::Ask {
                     slack: self.slack.clone(),
                     store: self.store.clone(),
@@ -1754,19 +1740,6 @@ fn no_machine(orphaned: bool) -> Alert {
             ..Alert::default()
         }
     }
-}
-
-/// The node's own tools for reaching the people in the conversation. They do nothing to the
-/// owner's machine, so asking the owner's permission to ask them a question helps nobody.
-const TALKING_TOOLS: [&str; 4] = [
-    "mcp__riggs__ask",
-    "mcp__riggs__present_plan",
-    "mcp__riggs__attach",
-    "mcp__riggs__auth",
-];
-
-fn talks_to_people(tool: &str) -> bool {
-    TALKING_TOOLS.contains(&tool)
 }
 
 /// Tools that run a command line, drawn with Slack's `code` icon.
