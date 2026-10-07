@@ -14,7 +14,9 @@ use url::Url;
 
 use super::Tool;
 
-pub const NAME: &str = "slack_read_message";
+pub const NAME: &str = "read_message";
+/// What older nodes still publish it as, under the deprecated `murtaugh` catalogue.
+pub const LEGACY_NAME: &str = "slack_read_message";
 
 pub struct SlackReadMessage {
     slack: Option<SlackClient>,
@@ -28,6 +30,10 @@ impl SlackReadMessage {
 
 #[async_trait]
 impl Tool for SlackReadMessage {
+    fn legacy_name(&self) -> String {
+        LEGACY_NAME.to_owned()
+    }
+
     fn def(&self) -> ToolDef {
         ToolDef {
             name: NAME.to_owned(),

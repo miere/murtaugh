@@ -16,9 +16,10 @@ use rax::content::ContentBlock;
 use rax::event::BackgroundEvent;
 use rax::id::SessionId;
 use rax::interaction::{DisplayAnswer, DisplayOutcome};
+use rax::open::Subject;
 use rax::session::{NewSession, Prompt, SessionRef};
-use rax::tool::{Decision, DeniedBy, ToolCall, ToolCallStatus, ToolVerdict};
-use rax::{ErrorKind, Event as TurnEvent, GatewayCall, GatewayReply, Open};
+use rax::tool::{Decision, DeniedBy, ToolCall, ToolCallStatus, ToolGroup, ToolVerdict};
+use rax::{ErrorKind, Event as TurnEvent, GatewayCall, GatewayReply, Open, Unhandled};
 use rax_tokio::CallError;
 use rax_tokio::gateway::{GatewayLink, StreamEvents};
 use time::OffsetDateTime;
@@ -40,6 +41,7 @@ use crate::render;
 use crate::reply::{Reply, Target, TaskCard};
 use crate::signin::{self, SignIns};
 use crate::thread_commands::{self, Command};
+use crate::tools::{Lent, Tools};
 
 pub const UNAUTHORISED_REACTION: &str = "zipper_mouth_face";
 /// The subtype Slack gives a DM that carries files; it is still the person talking.
@@ -87,6 +89,8 @@ pub struct Chat {
     turns: Mutex<HashMap<Conversation, Running>>,
     turn_idle_timeout: Duration,
     tool_ceiling: Duration,
+    tools: Tools,
+    lent: Lent,
     /// Messages a retryable failure left on the table, by the id their card's button carries.
     retries: Mutex<HashMap<String, Offer>>,
     /// The background run of each session that has one, by node and session: the one task that
@@ -179,6 +183,8 @@ pub struct Parts {
     pub sign_ins: SignIns,
     pub turn_idle_timeout: Duration,
     pub tool_ceiling: Duration,
+    pub tools: Tools,
+    pub lent: Lent,
 }
 
 impl Chat {
@@ -197,6 +203,8 @@ impl Chat {
             sign_ins,
             turn_idle_timeout,
             tool_ceiling,
+            tools,
+            lent,
         } = parts;
         let panel = Panel {
             slack: slack.clone(),
@@ -225,6 +233,8 @@ impl Chat {
             turns: Mutex::new(HashMap::new()),
             turn_idle_timeout,
             tool_ceiling,
+            tools,
+            lent,
             retries: Mutex::new(HashMap::new()),
             backgrounds: Mutex::new(HashMap::new()),
         })
@@ -1172,17 +1182,32 @@ impl Chat {
         })
     }
 
+    /// Every path that seats a conversation opens its session here — a new thread, a node that
+    /// went away, `/node` and an `unknown_session` retry — so this is the one place its tools are
+    /// chosen. A node that does not declare `tool_groups` is lent none, and keeps the catalogue it
+    /// was sent at `initialize`.
     async fn open_session(
         &self,
         node: &Node,
         conversation: &Conversation,
     ) -> Result<SessionId, Refusal> {
+        let tool_groups: Vec<ToolGroup> = match node.capabilities.tool_groups {
+            true => self.tools.group().into_iter().collect(),
+            false => Vec::new(),
+        };
         let call = GatewayCall::NewSession(NewSession {
             context: vec![Open::Known(thread_link(conversation))],
+            tool_groups: tool_groups.clone(),
         });
         let pending = node.link.call(call).await?;
         match pending.reply.await {
-            Ok(GatewayReply::NewSession(created)) => Ok(created.session_id),
+            Ok(GatewayReply::NewSession(created)) => {
+                self.lent
+                    .opened(&node.selector, &created.session_id, &tool_groups);
+                self.unpublished(conversation, node, &created.unhandled)
+                    .await;
+                Ok(created.session_id)
+            }
             Ok(other) => {
                 tracing::warn!(reply = ?other, "a new session was answered with the wrong reply");
                 Err(Refusal::Mismatched)
@@ -1635,6 +1660,28 @@ impl Chat {
         let message = alert.message(&conversation.channel, Some(&conversation.thread_ts));
         if let Err(err) = self.slack.post_message(&message).await {
             tracing::warn!(error = %err, "could not post an alert in a thread");
+        }
+    }
+
+    /// A group the node could not publish leaves the agent without those tools for the whole
+    /// session, which the people in the thread should hear rather than discover.
+    async fn unpublished(&self, conversation: &Conversation, node: &Node, unhandled: &[Unhandled]) {
+        for refused in unhandled {
+            let Subject::ToolGroup { namespace } = &refused.subject else {
+                continue;
+            };
+            tracing::info!(node = %node.name, %namespace, reason = ?refused.message, "node did not publish a tool group");
+            let why = refused
+                .message
+                .as_deref()
+                .map(|message| format!(": {}", render::escape(message)))
+                .unwrap_or_default();
+            let body = format!(
+                "_*{}*_ could not take this conversation's `{}` tools{why}. The agent will work without them.",
+                render::escape(&node.name),
+                render::escape(namespace),
+            );
+            self.notice(conversation, &body).await;
         }
     }
 
