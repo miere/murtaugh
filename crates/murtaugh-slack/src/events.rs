@@ -270,4 +270,17 @@ impl ViewSubmission {
             .as_str()
             .or_else(|| input["selected_user"].as_str())
     }
+
+    /// The values of a checkbox group or multi-select, in the order Slack sent them.
+    pub fn selected(&self, block_id: &str, action_id: &str) -> Vec<&str> {
+        self.values[block_id][action_id]["selected_options"]
+            .as_array()
+            .map(|options| {
+                options
+                    .iter()
+                    .filter_map(|option| option["value"].as_str())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }

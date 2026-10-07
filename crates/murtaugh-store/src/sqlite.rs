@@ -9,8 +9,8 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::{
-    Conversation, Grant, NodeToken, Pin, Result, Store, StoreError, ToolMode, UserConfig, UserId,
-    UserToken,
+    Conversation, Grant, NodeToken, Pin, Result, Scope, Store, StoreError, ToolMode, UserConfig,
+    UserId, UserToken,
 };
 
 const SCHEMA: &str = "
@@ -51,7 +51,8 @@ CREATE TABLE IF NOT EXISTS user_tokens (
     owner TEXT NOT NULL,
     name TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    revoked_at TEXT
+    revoked_at TEXT,
+    scopes TEXT NOT NULL DEFAULT 'rax'
 );
 CREATE TABLE IF NOT EXISTS pins (
     channel TEXT NOT NULL,
@@ -255,6 +256,10 @@ fn user_token_row(row: &Row<'_>) -> rusqlite::Result<UserToken> {
             .get::<_, Option<String>>(5)?
             .map(|raw| parse_stamp(&raw))
             .transpose()?,
+        scopes: {
+            let raw = row.get::<_, String>(6)?;
+            Scope::split(&raw).map_err(|err| invalid(&raw, err))?
+        },
     })
 }
 
@@ -471,7 +476,7 @@ impl Store for SqliteStore {
     async fn user_tokens(&self) -> Result<Vec<UserToken>> {
         self.run(|db| {
             let mut query = db.prepare(
-                "SELECT selector, secret_hash, owner, name, created_at, revoked_at
+                "SELECT selector, secret_hash, owner, name, created_at, revoked_at, scopes
                  FROM user_tokens ORDER BY created_at",
             )?;
             let tokens = query
@@ -486,17 +491,19 @@ impl Store for SqliteStore {
         let token = token.clone();
         let created = stamp(token.created_at)?;
         let revoked = token.revoked_at.map(stamp).transpose()?;
+        let scopes = Scope::join(&token.scopes);
         self.run(move |db| {
             db.execute(
-                "INSERT INTO user_tokens (selector, secret_hash, owner, name, created_at, revoked_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO user_tokens (selector, secret_hash, owner, name, created_at, revoked_at, scopes)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     token.selector,
                     token.secret_hash,
                     token.owner.as_str(),
                     token.name,
                     created,
-                    revoked
+                    revoked,
+                    scopes
                 ],
             )?;
             Ok(())

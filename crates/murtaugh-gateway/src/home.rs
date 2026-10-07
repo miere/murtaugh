@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use murtaugh_slack::{Block, Text};
-use murtaugh_store::{ToolMode, UserId};
+use murtaugh_store::{Scope, ToolMode, UserId};
 use serde_json::{Value, json};
 
 use crate::access::Snapshot;
@@ -45,6 +45,7 @@ const MAX_CLIENTS: usize = 20;
 /// Where the new client token modal keeps its inputs, as block id and action id.
 pub const CLIENT_NAME: (&str, &str) = ("client_name", "name");
 pub const CLIENT_OWNER: (&str, &str) = ("client_owner", "owner");
+pub const CLIENT_SCOPES: (&str, &str) = ("client_scopes", "scopes");
 
 const CLIENT_SETUP: &str = "https://github.com/miere/murtaugh-rs#murtaugh-client";
 
@@ -411,7 +412,16 @@ fn client_blocks(
             "block_id": format!("home_client:{}", token.selector),
             "text": {
                 "type": "mrkdwn",
-                "text": format!("*{}*{owner}", render::escape(&token.name)),
+                "text": format!(
+                    "*{}*{owner}\nOpens: {}",
+                    render::escape(&token.name),
+                    token
+                        .scopes
+                        .iter()
+                        .map(|scope| scope.describe())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
             },
             "accessory": {
                 "type": "button",
@@ -527,6 +537,22 @@ pub fn new_client_modal(viewer: &UserId, admin: bool) -> Value {
             "placeholder": plain("editor"),
         },
     })];
+    let scopes: Vec<Value> = Scope::ALL
+        .iter()
+        .map(|scope| option(scope.describe(), scope.as_str()))
+        .collect();
+    blocks.push(json!({
+        "type": "input",
+        "block_id": CLIENT_SCOPES.0,
+        "label": plain("Opens"),
+        "hint": plain("What the token may be used for. Pick one or more."),
+        "element": {
+            "type": "checkboxes",
+            "action_id": CLIENT_SCOPES.1,
+            "options": scopes,
+            "initial_options": [option(Scope::Rax.describe(), Scope::Rax.as_str())],
+        },
+    }));
     if admin {
         blocks.push(json!({
             "type": "input",

@@ -5,7 +5,7 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
-use murtaugh_store::{Store, ToolMode, ToolModeError, UserId};
+use murtaugh_store::{Scope, Store, ToolMode, ToolModeError, UserId};
 
 use crate::cli::{
     AdminCommand, GrantCommand, MintArgs, NodeCommand, ToolsCommand, UserCommand, UserTokenCommand,
@@ -157,8 +157,11 @@ async fn user_token(store: &dyn Store, command: UserTokenCommand) -> Result<Stri
                         "live"
                     };
                     format!(
-                        "{}\t{}\t{}\t{state}",
-                        token.selector, token.owner, token.name
+                        "{}\t{}\t{}\t{state}\t{}",
+                        token.selector,
+                        token.owner,
+                        token.name,
+                        Scope::join(&token.scopes)
                     )
                 })
                 .collect::<Vec<_>>()
@@ -174,7 +177,8 @@ async fn mint_client(store: &dyn Store, args: UserTokenMintArgs) -> Result<Strin
     if name.is_empty() {
         return Err("--name must not be empty".to_owned());
     }
-    let minted = roles::mint_client(store, &owner, &name)
+    let scopes = Scope::split(&args.scopes.join(",")).map_err(|err| err.to_string())?;
+    let minted = roles::mint_client(store, &owner, &name, scopes)
         .await
         .map_err(|err| err.to_string())?;
     match args.out {

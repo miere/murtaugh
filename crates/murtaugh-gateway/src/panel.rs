@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use murtaugh_slack::{HomeClick, PostMessage, SlackClient, Upload, ViewSubmission};
-use murtaugh_store::{Store, ToolMode, UserId};
+use murtaugh_store::{Scope, Store, ToolMode, UserId};
 
 use crate::access::{Access, Snapshot};
 use crate::fleet::Fleet;
@@ -290,7 +290,17 @@ impl Panel {
             },
             _ => user.clone(),
         };
-        let minted = match roles::mint_client(&*self.store, &owner, name).await {
+        let picked = submission
+            .selected(home::CLIENT_SCOPES.0, home::CLIENT_SCOPES.1)
+            .join(",");
+        let scopes = match Scope::split(&picked) {
+            Ok(scopes) => scopes,
+            Err(err) => {
+                tracing::info!(%user, error = %err, "refused a client token with no valid scope");
+                return;
+            }
+        };
+        let minted = match roles::mint_client(&*self.store, &owner, name, scopes).await {
             Ok(minted) => minted,
             Err(err) => {
                 tracing::warn!(%owner, error = %err, "could not mint a client token from the Home tab");

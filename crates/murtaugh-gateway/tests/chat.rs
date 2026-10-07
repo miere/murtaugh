@@ -2504,7 +2504,12 @@ async fn an_allowed_person_mints_a_client_token_by_dm_and_revokes_it() {
     rig.sim
         .submit_modal(
             BOB,
-            serde_json::json!({"client_name": {"name": {"type": "plain_text_input", "value": "editor"}}}),
+            serde_json::json!({
+                "client_name": {"name": {"type": "plain_text_input", "value": "editor"}},
+                "client_scopes": {"scopes": {"type": "checkboxes", "selected_options": [
+                    {"text": {"type": "plain_text", "text": "RAX API"}, "value": "rax"},
+                ]}},
+            }),
         )
         .await
         .unwrap();
@@ -2512,6 +2517,8 @@ async fn an_allowed_person_mints_a_client_token_by_dm_and_revokes_it() {
     assert!(token.starts_with("mrtg_user_"), "{token}");
     assert!(note.contains("murtaugh-client login"), "{note}");
     assert!(!granted(&rig, BOB).await, "a client token granted nodes");
+    let stored = rig.store.user_tokens().await.unwrap();
+    assert_eq!(stored[0].scopes, murtaugh_store::Scope::legacy());
     let selector = eventually("the client token listed", || {
         let home = rig.sim.home(BOB)?;
         home.as_array()?.iter().find_map(|block| {

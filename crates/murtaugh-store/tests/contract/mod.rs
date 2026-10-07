@@ -1,7 +1,7 @@
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use murtaugh_store::{
-    Conversation, NodeToken, Pin, Store, ToolMode, UserConfig, UserId, UserToken,
+    Conversation, NodeToken, Pin, Scope, Store, ToolMode, UserConfig, UserId, UserToken,
 };
 use time::OffsetDateTime;
 
@@ -131,6 +131,7 @@ pub async fn a_user_token_is_kept_apart_from_node_tokens_and_revoked_once(store:
         name: "editor".into(),
         created_at: stamp(),
         revoked_at: None,
+        scopes: [Scope::Rax].into(),
     };
     store.add_user_token(&token).await.unwrap();
     assert_eq!(

@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use murtaugh_store::{NodeToken, Store, StoreError, UserId, UserToken};
+use murtaugh_store::{NodeToken, Scope, Store, StoreError, UserId, UserToken};
 use rax_tokio::accept::GatewayIdentity;
 use rax_tokio::gateway::{Authenticator, NodeIdentity};
 use tokio::runtime::{Handle, RuntimeFlavor};
@@ -62,12 +62,13 @@ impl Snapshot {
             .filter(|token| token.revoked_at.is_none())
     }
 
-    /// A client's selector if its token is live and its owner may still use the gateway. A client
-    /// runs nothing, so being allowed is enough; no grant is needed.
-    pub fn authenticate_client(&self, presented: &str) -> Option<String> {
+    /// A client's selector if its token is live, opens `scope`, and its owner may still use the
+    /// gateway. A client runs nothing, so being allowed is enough; no grant is needed.
+    pub fn authenticate_client(&self, presented: &str, scope: Scope) -> Option<String> {
         let credential = token::parse(token::USER_PREFIX, presented)?;
         let record = self.clients.get(&credential.selector)?;
         (self.is_live_client(&credential.selector)
+            && record.allows(scope)
             && token::matches(&credential.secret, &record.secret_hash))
         .then_some(credential.selector)
     }
@@ -195,7 +196,7 @@ impl Access {
         let snapshot = self.snapshot();
         let known = match kind {
             Kind::Node => snapshot.tokens.contains_key(&selector),
-            Kind::Client => snapshot.clients.contains_key(&selector),
+            Kind::Client(_) => snapshot.clients.contains_key(&selector),
         };
         if known {
             return None;
@@ -259,7 +260,7 @@ impl Access {
                 }
                 next.tokens.insert(admitted.clone(), record);
             }
-            Kind::Client => {
+            Kind::Client(_) => {
                 let record = fresh.clients.get(&admitted)?.clone();
                 if fresh.allowed.contains(&record.owner) {
                     next.allowed.insert(record.owner.clone());
@@ -272,10 +273,10 @@ impl Access {
     }
 
     /// A client's selector, read as a node's is: a token minted since the last refresh is let in.
-    pub fn authenticate_client(&self, presented: &str) -> Option<String> {
+    pub fn authenticate_client(&self, presented: &str, scope: Scope) -> Option<String> {
         self.snapshot()
-            .authenticate_client(presented)
-            .or_else(|| self.admit_new(presented, Kind::Client))
+            .authenticate_client(presented, scope)
+            .or_else(|| self.admit_new(presented, Kind::Client(scope)))
     }
 
     pub fn snapshot(&self) -> Arc<Snapshot> {
@@ -316,21 +317,22 @@ impl Access {
 #[derive(Clone, Copy)]
 enum Kind {
     Node,
-    Client,
+    /// A client token, presented at the entry point that needs this scope.
+    Client(Scope),
 }
 
 impl Kind {
     fn prefix(self) -> &'static str {
         match self {
             Self::Node => token::NODE_PREFIX,
-            Self::Client => token::USER_PREFIX,
+            Self::Client(_) => token::USER_PREFIX,
         }
     }
 
     fn authenticate(self, snapshot: &Snapshot, presented: &str) -> Option<String> {
         match self {
             Self::Node => snapshot.authenticate(presented),
-            Self::Client => snapshot.authenticate_client(presented),
+            Self::Client(scope) => snapshot.authenticate_client(presented, scope),
         }
     }
 }
@@ -343,9 +345,10 @@ impl Authenticator for Access {
             .map(NodeIdentity)
     }
 
-    /// A client dials as a gateway, and only a client token opens that role.
+    /// A client dials as a gateway, and only a client token with the RAX scope opens that role.
     fn authenticate_gateway(&self, token: &str) -> Option<GatewayIdentity> {
-        self.authenticate_client(token).map(GatewayIdentity)
+        self.authenticate_client(token, Scope::Rax)
+            .map(GatewayIdentity)
     }
 }
 
@@ -418,16 +421,32 @@ mod tests {
                 name: "editor".into(),
                 created_at: OffsetDateTime::UNIX_EPOCH,
                 revoked_at: None,
+                scopes: Scope::legacy(),
             },
         );
-        assert_eq!(snapshot.authenticate_client(&minted.token), None);
+        assert_eq!(
+            snapshot.authenticate_client(&minted.token, Scope::Rax),
+            None
+        );
         snapshot.allowed.insert(user("U0GUEST01"));
         assert_eq!(
-            snapshot.authenticate_client(&minted.token),
+            snapshot.authenticate_client(&minted.token, Scope::Rax),
             Some(minted.selector.clone())
         );
         assert_eq!(snapshot.authenticate(&minted.token), None);
-        assert_eq!(snapshot.authenticate_client(&node_token), None);
+        assert_eq!(snapshot.authenticate_client(&node_token, Scope::Rax), None);
+
+        // A token opens only the entry points its scopes name.
+        if let Some(record) = snapshot.clients.get_mut(&minted.selector) {
+            record.scopes.clear();
+        }
+        assert_eq!(
+            snapshot.authenticate_client(&minted.token, Scope::Rax),
+            None
+        );
+        if let Some(record) = snapshot.clients.get_mut(&minted.selector) {
+            record.scopes = Scope::legacy();
+        }
 
         let access = Access::new(snapshot);
         let lost = access.replace(Snapshot {
