@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use murtaugh_store::{NodeToken, Store, StoreError, UserId};
+use murtaugh_store::{NodeToken, Store, StoreError, UserId, UserToken};
 use rax_tokio::gateway::{Authenticator, NodeIdentity};
 use tokio::runtime::{Handle, RuntimeFlavor};
 
@@ -17,6 +17,14 @@ pub struct Snapshot {
     grants: HashSet<UserId>,
     allowed: HashSet<UserId>,
     tokens: HashMap<String, NodeToken>,
+    clients: HashMap<String, UserToken>,
+}
+
+/// What a new snapshot no longer admits, so the links it opened can be closed.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Lost {
+    pub nodes: Vec<String>,
+    pub clients: Vec<String>,
 }
 
 impl Snapshot {
@@ -37,7 +45,40 @@ impl Snapshot {
                 .into_iter()
                 .map(|token| (token.selector.clone(), token))
                 .collect(),
+            clients: store
+                .user_tokens()
+                .await?
+                .into_iter()
+                .map(|token| (token.selector.clone(), token))
+                .collect(),
         })
+    }
+
+    /// Every client credential not revoked, whether or not its client is connected.
+    pub fn live_clients(&self) -> impl Iterator<Item = &UserToken> {
+        self.clients
+            .values()
+            .filter(|token| token.revoked_at.is_none())
+    }
+
+    /// A client's selector if its token is live and its owner may still use the gateway. A client
+    /// runs nothing, so being allowed is enough; no grant is needed.
+    pub fn authenticate_client(&self, presented: &str) -> Option<String> {
+        let credential = token::parse(token::USER_PREFIX, presented)?;
+        let record = self.clients.get(&credential.selector)?;
+        (self.is_live_client(&credential.selector)
+            && token::matches(&credential.secret, &record.secret_hash))
+        .then_some(credential.selector)
+    }
+
+    pub fn is_live_client(&self, selector: &str) -> bool {
+        self.clients
+            .get(selector)
+            .is_some_and(|record| record.revoked_at.is_none() && self.may_chat(&record.owner))
+    }
+
+    pub fn client(&self, selector: &str) -> Option<&UserToken> {
+        self.clients.get(selector)
     }
 
     /// Every credential not revoked, whether or not its node is attached.
@@ -57,7 +98,7 @@ impl Snapshot {
 
     /// A node's selector if its token is live and its owner may still run nodes.
     pub fn authenticate(&self, presented: &str) -> Option<String> {
-        let credential = token::parse(presented)?;
+        let credential = token::parse(token::NODE_PREFIX, presented)?;
         let record = self.tokens.get(&credential.selector)?;
         let live = record.revoked_at.is_none() && self.may_run_nodes(&record.owner);
         (live && token::matches(&credential.secret, &record.secret_hash))
@@ -147,10 +188,15 @@ impl Access {
         }
     }
 
-    fn admit_new(&self, presented: &str) -> Option<String> {
+    fn admit_new(&self, presented: &str, kind: Kind) -> Option<String> {
         let reload = self.reload.as_ref()?;
-        let selector = token::parse(presented)?.selector;
-        if self.snapshot().tokens.contains_key(&selector) {
+        let selector = token::parse(kind.prefix(), presented)?.selector;
+        let snapshot = self.snapshot();
+        let known = match kind {
+            Kind::Node => snapshot.tokens.contains_key(&selector),
+            Kind::Client => snapshot.clients.contains_key(&selector),
+        };
+        if known {
             return None;
         }
         if reload.handle.runtime_flavor() != RuntimeFlavor::MultiThread {
@@ -180,7 +226,7 @@ impl Access {
         let wait = match plan {
             Plan::Recheck(wait) => {
                 tokio::task::block_in_place(|| reload.handle.block_on(tokio::time::sleep(wait)));
-                return self.snapshot().authenticate(presented);
+                return kind.authenticate(&self.snapshot(), presented);
             }
             Plan::Read(wait) => wait,
         };
@@ -190,10 +236,9 @@ impl Access {
                 Snapshot::load(&*reload.store).await
             })
         })
-        .map_err(|err| tracing::warn!(error = %err, "could not read the store to admit a new node"))
+        .map_err(|err| tracing::warn!(error = %err, "could not read the store to admit a new credential"))
         .ok()?;
-        let admitted = fresh.authenticate(presented)?;
-        let record = fresh.tokens.get(&admitted)?.clone();
+        let admitted = kind.authenticate(&fresh, presented)?;
         let mut current = self
             .current
             .write()
@@ -203,13 +248,33 @@ impl Access {
             grants: current.grants.clone(),
             allowed: current.allowed.clone(),
             tokens: current.tokens.clone(),
+            clients: current.clients.clone(),
         };
-        if fresh.grants.contains(&record.owner) {
-            next.grants.insert(record.owner.clone());
+        match kind {
+            Kind::Node => {
+                let record = fresh.tokens.get(&admitted)?.clone();
+                if fresh.grants.contains(&record.owner) {
+                    next.grants.insert(record.owner.clone());
+                }
+                next.tokens.insert(admitted.clone(), record);
+            }
+            Kind::Client => {
+                let record = fresh.clients.get(&admitted)?.clone();
+                if fresh.allowed.contains(&record.owner) {
+                    next.allowed.insert(record.owner.clone());
+                }
+                next.clients.insert(admitted.clone(), record);
+            }
         }
-        next.tokens.insert(admitted.clone(), record);
         *current = Arc::new(next);
         Some(admitted)
+    }
+
+    /// A client's selector, read as a node's is: a token minted since the last refresh is let in.
+    pub fn authenticate_client(&self, presented: &str) -> Option<String> {
+        self.snapshot()
+            .authenticate_client(presented)
+            .or_else(|| self.admit_new(presented, Kind::Client))
     }
 
     pub fn snapshot(&self) -> Arc<Snapshot> {
@@ -219,20 +284,53 @@ impl Access {
             .clone()
     }
 
-    /// Returns the selectors that were live before and are not now, so their links can be closed.
-    pub fn replace(&self, next: Snapshot) -> Vec<String> {
+    /// Returns the nodes and clients that were live before and are not now, so their links can be
+    /// closed.
+    pub fn replace(&self, next: Snapshot) -> Lost {
         let mut current = self
             .current
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let lost = current
-            .tokens
-            .keys()
-            .filter(|selector| current.is_live(selector) && !next.is_live(selector))
-            .cloned()
-            .collect();
+        let lost = Lost {
+            nodes: current
+                .tokens
+                .keys()
+                .filter(|selector| current.is_live(selector) && !next.is_live(selector))
+                .cloned()
+                .collect(),
+            clients: current
+                .clients
+                .keys()
+                .filter(|selector| {
+                    current.is_live_client(selector) && !next.is_live_client(selector)
+                })
+                .cloned()
+                .collect(),
+        };
         *current = Arc::new(next);
         lost
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Kind {
+    Node,
+    Client,
+}
+
+impl Kind {
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::Node => token::NODE_PREFIX,
+            Self::Client => token::USER_PREFIX,
+        }
+    }
+
+    fn authenticate(self, snapshot: &Snapshot, presented: &str) -> Option<String> {
+        match self {
+            Self::Node => snapshot.authenticate(presented),
+            Self::Client => snapshot.authenticate_client(presented),
+        }
     }
 }
 
@@ -240,7 +338,7 @@ impl Authenticator for Access {
     fn authenticate(&self, token: &str) -> Option<NodeIdentity> {
         self.snapshot()
             .authenticate(token)
-            .or_else(|| self.admit_new(token))
+            .or_else(|| self.admit_new(token, Kind::Node))
             .map(NodeIdentity)
     }
 }
@@ -257,7 +355,7 @@ mod tests {
     }
 
     fn with_token(owner: &str) -> (Snapshot, String) {
-        let minted = token::mint();
+        let minted = token::mint(token::NODE_PREFIX);
         let mut snapshot = Snapshot {
             admin: Some(user("U0ADMIN01")),
             ..Default::default()
@@ -289,7 +387,7 @@ mod tests {
             tokens: access.snapshot().tokens.clone(),
             ..Default::default()
         });
-        assert_eq!(lost.len(), 1);
+        assert_eq!(lost.nodes.len(), 1);
         assert_eq!(access.authenticate(&presented), None);
     }
 
@@ -299,6 +397,38 @@ mod tests {
         assert!(snapshot.authenticate(&presented).is_some());
         let forged = format!("{}x", presented);
         assert_eq!(snapshot.authenticate(&forged), None);
+    }
+
+    #[test]
+    fn a_client_token_needs_its_owner_allowed_and_opens_nothing_a_node_token_does() {
+        let (mut snapshot, node_token) = with_token("U0ADMIN01");
+        let minted = token::mint(token::USER_PREFIX);
+        snapshot.clients.insert(
+            minted.selector.clone(),
+            UserToken {
+                selector: minted.selector.clone(),
+                secret_hash: minted.secret_hash,
+                owner: user("U0GUEST01"),
+                name: "editor".into(),
+                created_at: OffsetDateTime::UNIX_EPOCH,
+                revoked_at: None,
+            },
+        );
+        assert_eq!(snapshot.authenticate_client(&minted.token), None);
+        snapshot.allowed.insert(user("U0GUEST01"));
+        assert_eq!(
+            snapshot.authenticate_client(&minted.token),
+            Some(minted.selector.clone())
+        );
+        assert_eq!(snapshot.authenticate(&minted.token), None);
+        assert_eq!(snapshot.authenticate_client(&node_token), None);
+
+        let access = Access::new(snapshot);
+        let lost = access.replace(Snapshot {
+            clients: access.snapshot().clients.clone(),
+            ..Default::default()
+        });
+        assert_eq!(lost.clients, [minted.selector]);
     }
 
     #[test]

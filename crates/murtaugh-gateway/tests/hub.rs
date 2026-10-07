@@ -76,7 +76,7 @@ impl Rig {
 
     /// Only the store hears about it, as when the CLI mints while the gateway runs.
     async fn mint_quietly(&self, owner: &str) -> (String, String) {
-        let minted = token::mint();
+        let minted = token::mint(token::NODE_PREFIX);
         self.store
             .add_node_token(&NodeToken {
                 selector: minted.selector.clone(),

@@ -9,6 +9,7 @@ use time::format_description::well_known::Rfc3339;
 use crate::leader::{Leader, Lease};
 use crate::{
     Conversation, Grant, NodeToken, Pin, Result, Store, StoreError, ToolMode, UserConfig, UserId,
+    UserToken,
 };
 
 const SCOPE: &str = "https://www.googleapis.com/auth/datastore";
@@ -435,6 +436,17 @@ fn token_of(doc: &Doc) -> Result<NodeToken> {
     })
 }
 
+fn user_token_of(doc: &Doc) -> Result<UserToken> {
+    Ok(UserToken {
+        selector: doc.string("selector")?,
+        secret_hash: doc.string("secret_hash")?,
+        owner: doc.user("owner")?,
+        name: doc.string("name")?,
+        created_at: doc.required_time("created_at")?,
+        revoked_at: doc.time("revoked_at")?,
+    })
+}
+
 fn grant_of(doc: &Doc) -> Result<Grant> {
     Ok(Grant {
         user: doc.user("user_id")?,
@@ -609,6 +621,54 @@ impl Store for FirestoreStore {
         );
         write["updateMask"] = json!({"fieldPaths": ["disabled_at"]});
         self.commit(vec![write]).await.map(drop)
+    }
+
+    async fn user_tokens(&self) -> Result<Vec<UserToken>> {
+        let mut tokens = self
+            .list("user_tokens")
+            .await?
+            .iter()
+            .map(|(_, doc)| user_token_of(doc))
+            .collect::<Result<Vec<_>>>()?;
+        tokens.sort_by_key(|token| token.created_at);
+        Ok(tokens)
+    }
+
+    async fn add_user_token(&self, token: &UserToken) -> Result<()> {
+        let mut fields = json!({
+            "selector": string(&token.selector),
+            "secret_hash": string(&token.secret_hash),
+            "owner": string(token.owner.as_str()),
+            "name": string(&token.name),
+            "created_at": timestamp(token.created_at)?,
+        });
+        if let Some(revoked_at) = token.revoked_at {
+            fields["revoked_at"] = timestamp(revoked_at)?;
+        }
+        let mut write = self.update(&format!("user_tokens/{}", token.selector), fields);
+        write["currentDocument"] = json!({"exists": false});
+        self.commit(vec![write]).await.map(drop)
+    }
+
+    async fn revoke_user_token(&self, selector: &str) -> Result<bool> {
+        let relative = format!("user_tokens/{selector}");
+        let Some(doc) = self.get(&relative).await? else {
+            return Ok(false);
+        };
+        if doc.fields.contains_key("revoked_at") {
+            return Ok(false);
+        }
+        let mut write = self.update(
+            &relative,
+            json!({"revoked_at": timestamp(OffsetDateTime::now_utc())?}),
+        );
+        write["updateMask"] = json!({"fieldPaths": ["revoked_at"]});
+        write["currentDocument"] = json!({"updateTime": doc.update_time});
+        match self.commit(vec![write]).await {
+            Ok(_) => Ok(true),
+            Err(StoreError::Conflict(_)) => Ok(false),
+            Err(err) => Err(err),
+        }
     }
 
     async fn pin(&self, conversation: &Conversation) -> Result<Option<Pin>> {

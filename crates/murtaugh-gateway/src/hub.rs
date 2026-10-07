@@ -123,7 +123,7 @@ pub async fn refresh(
 /// Puts `snapshot` in place and closes the link of every node it no longer admits. Whoever
 /// replaces the snapshot must close these links: the next refresh finds nothing lost.
 pub async fn apply(access: &Access, fleet: &Fleet, snapshot: Snapshot) {
-    for selector in access.replace(snapshot) {
+    for selector in access.replace(snapshot).nodes {
         if let Some(node) = fleet.get(&selector) {
             tracing::info!(node = %node.name, owner = %node.owner, "access revoked; closing the node's link");
             node.link.close().await;

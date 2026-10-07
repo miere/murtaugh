@@ -141,6 +141,31 @@ impl Panel {
                     tracing::warn!(error = %err, "could not open the new node modal");
                 }
             }
+            home::CLIENT_NEW if snapshot.may_chat(&user) => {
+                let modal = home::new_client_modal(&user, admin);
+                if let Err(err) = self.slack.open_view(&click.trigger_id, &modal).await {
+                    tracing::warn!(error = %err, "could not open the new client token modal");
+                }
+            }
+            home::CLIENT_REVOKE => {
+                let selector = click.value.as_str();
+                let Some(owner) = snapshot.client(selector).map(|token| token.owner.clone()) else {
+                    return;
+                };
+                if !admin && owner != user {
+                    denied(home::CLIENT_REVOKE);
+                    return;
+                }
+                match self.store.revoke_user_token(selector).await {
+                    Ok(_) => {
+                        tracing::info!(%selector, by = %user, "revoked a client token from the Home tab")
+                    }
+                    Err(err) => {
+                        tracing::warn!(%selector, error = %err, "could not revoke a client token")
+                    }
+                }
+                self.settle([user, owner]).await;
+            }
             home::NODE_MENU => {
                 let Some((selector, action)) = home::parse_menu(&click.value) else {
                     return;
@@ -188,6 +213,7 @@ impl Panel {
         match submission.callback_id.as_str() {
             home::NODE_NEW_SUBMIT => self.mint(&user, &submission).await,
             home::NODE_REVOKE_SUBMIT => self.revoke(&user, &submission.private_metadata).await,
+            home::CLIENT_NEW_SUBMIT => self.mint_client(&user, &submission).await,
             _ => {}
         }
     }
@@ -222,7 +248,8 @@ impl Panel {
             }
         };
         tracing::info!(%owner, by = %user, selector = %minted.selector, "minted a node from the Home tab");
-        if let Err(reason) = self.deliver(&minted).await {
+        let note = home::token_message(&self.bot_user, &minted.name);
+        if let Err(reason) = self.deliver(&minted, note, "Node token").await {
             tracing::warn!(%owner, selector = %minted.selector, %reason, "could not DM a new token; revoking it");
             if let Err(err) = self.store.revoke_node_token(&minted.selector).await {
                 tracing::warn!(selector = %minted.selector, error = %err, "could not revoke an undelivered token");
@@ -238,9 +265,55 @@ impl Panel {
         self.settle([user.clone(), owner]).await;
     }
 
+    /// Anyone allowed mints for themselves, and the admin for anyone, who is then allowed too.
+    async fn mint_client(&self, user: &UserId, submission: &ViewSubmission) {
+        let snapshot = self.access.snapshot();
+        let admin = snapshot.admin() == Some(user);
+        if !snapshot.may_chat(user) {
+            tracing::info!(%user, "denied minting a client token to someone who may not use the gateway");
+            return;
+        }
+        let name = submission
+            .value(home::CLIENT_NAME.0, home::CLIENT_NAME.1)
+            .map(str::trim)
+            .unwrap_or_default();
+        if name.is_empty() {
+            return;
+        }
+        let owner = match submission.value(home::CLIENT_OWNER.0, home::CLIENT_OWNER.1) {
+            Some(picked) if admin => match self.people(&[picked.to_owned()]).pop_first() {
+                Some(owner) => owner,
+                None => return,
+            },
+            _ => user.clone(),
+        };
+        let minted = match roles::mint_client(&*self.store, &owner, name).await {
+            Ok(minted) => minted,
+            Err(err) => {
+                tracing::warn!(%owner, error = %err, "could not mint a client token from the Home tab");
+                return;
+            }
+        };
+        tracing::info!(%owner, by = %user, selector = %minted.selector, "minted a client token from the Home tab");
+        let note = home::client_token_message(&self.bot_user, &minted.name);
+        if let Err(reason) = self.deliver(&minted, note, "Client token").await {
+            tracing::warn!(%owner, selector = %minted.selector, %reason, "could not DM a new client token; revoking it");
+            if let Err(err) = self.store.revoke_user_token(&minted.selector).await {
+                tracing::warn!(selector = %minted.selector, error = %err, "could not revoke an undelivered client token");
+            }
+            let note = format!(
+                "I couldn't send <@{owner}> the client token *{}*, so I revoked it. Try again from the Home tab.",
+                render::escape(name)
+            );
+            if let Err(err) = self.slack.post_message(&dm(user, note)).await {
+                tracing::warn!(error = %err, "could not say a client token went undelivered");
+            }
+        }
+        self.settle([user.clone(), owner]).await;
+    }
+
     /// Sends the token to its owner alone, as a file under a note on what it is for.
-    async fn deliver(&self, minted: &Minted) -> Result<(), String> {
-        let note = home::token_message(&self.bot_user, &minted.name);
+    async fn deliver(&self, minted: &Minted, note: String, kind: &str) -> Result<(), String> {
         let posted = self
             .slack
             .post_message(&dm(&minted.owner, note))
@@ -251,7 +324,7 @@ impl Panel {
                 channel: posted.channel,
                 thread_ts: None,
                 filename: format!("{}.token", file_stem(&minted.name)),
-                title: Some(format!("Node token for {}", minted.name)),
+                title: Some(format!("{kind} for {}", minted.name)),
                 initial_comment: None,
                 bytes: format!("{}\n", minted.token).into_bytes(),
             })

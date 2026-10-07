@@ -81,7 +81,7 @@ async fn stack(riggs: &str, fake_claude: &str, script: &str, tool_mode: Option<T
     if let Some(mode) = tool_mode {
         store.set_tool_mode(&user(ALICE), mode).await.unwrap();
     }
-    let minted = token::mint();
+    let minted = token::mint(token::NODE_PREFIX);
     store
         .add_node_token(&NodeToken {
             selector: minted.selector,

@@ -1,7 +1,8 @@
 //! The app's Home tab, a configuration panel sized to the viewer. The admin sees all of it: their
-//! tool approval mode, who administers the gateway, who may connect nodes, who may use it, and
-//! every node. A node admin sees their tool approval mode and their own nodes. Anyone else sees the
-//! footer alone. Also the two modals the panel opens: minting a node and revoking one.
+//! tool approval mode, who administers the gateway, who may connect nodes, who may use it, every
+//! node and every client token. A node admin sees their tool approval mode, their own nodes and
+//! their own client tokens. Anyone else allowed sees their client tokens, and the rest the footer
+//! alone. Also the modals the panel opens: minting a node or a client token, and revoking a node.
 
 use std::collections::HashMap;
 
@@ -25,15 +26,26 @@ pub const ALLOWED_USERS_SET: &str = "allowed_users_set";
 pub const NODE_NEW: &str = "node_new";
 /// The overflow menu's action id on each node row.
 pub const NODE_MENU: &str = "node_menu";
+pub const CLIENT_NEW: &str = "client_new";
+/// The revoke button on each client token row; its value is the selector.
+pub const CLIENT_REVOKE: &str = "client_revoke";
 
 /// The modals' callback ids.
 pub const NODE_NEW_SUBMIT: &str = "node_new_submit";
 pub const NODE_REVOKE_SUBMIT: &str = "node_revoke_submit";
+pub const CLIENT_NEW_SUBMIT: &str = "client_new_submit";
 
 /// Where the new node modal keeps its inputs, as block id and action id.
 pub const NODE_NAME: (&str, &str) = ("node_name", "name");
 pub const NODE_OWNER: (&str, &str) = ("node_owner", "owner");
 const NODE_NAME_MAX: usize = 64;
+/// Home views hold at most 100 blocks, which the nodes above mostly take.
+const MAX_CLIENTS: usize = 20;
+/// Where the new client token modal keeps its inputs, as block id and action id.
+pub const CLIENT_NAME: (&str, &str) = ("client_name", "name");
+pub const CLIENT_OWNER: (&str, &str) = ("client_owner", "owner");
+
+const CLIENT_SETUP: &str = "https://github.com/miere/murtaugh-rs#murtaugh-client";
 
 const RIGGS_SETUP: &str = "https://github.com/miere/riggs#running-riggs";
 
@@ -78,6 +90,10 @@ pub fn view(
         }
         blocks.push(Block::Divider);
         blocks.extend(node_blocks(viewer, admin, snapshot, attached));
+    }
+    if snapshot.may_chat(viewer) {
+        blocks.push(Block::Divider);
+        blocks.extend(client_blocks(viewer, admin, snapshot));
     }
     blocks.push(Block::Divider);
     blocks.push(Block::Context(vec![Text::Mrkdwn(format!(
@@ -326,6 +342,71 @@ fn node_blocks(
     blocks
 }
 
+/// A person's own client tokens, or everyone's for the admin, each with a button to revoke it.
+fn client_blocks(viewer: &UserId, admin: bool, snapshot: &Snapshot) -> Vec<Block> {
+    let mut blocks = vec![Block::Raw(json!({
+        "type": "section",
+        "block_id": "home_clients",
+        "text": {
+            "type": "mrkdwn",
+            "text": "*Client Tokens*\n_Credentials for your own clients, such as an editor, to use the gateway's nodes._",
+        },
+        "accessory": {
+            "type": "button",
+            "action_id": CLIENT_NEW,
+            "text": plain("New client token"),
+            "value": "new",
+        },
+    }))];
+    let mut clients: Vec<_> = snapshot
+        .live_clients()
+        .filter(|token| admin || &token.owner == viewer)
+        .collect();
+    clients.sort_by(|a, b| (&a.owner, &a.name).cmp(&(&b.owner, &b.name)));
+    if clients.is_empty() {
+        blocks.push(Block::Context(vec![Text::Mrkdwn(
+            "No client tokens yet. Press *New client token* to mint one.".into(),
+        )]));
+        return blocks;
+    }
+    let shown = clients.len().min(MAX_CLIENTS);
+    for token in &clients[..shown] {
+        let owner = if admin {
+            format!(" · <@{}>", token.owner)
+        } else {
+            String::new()
+        };
+        blocks.push(Block::Raw(json!({
+            "type": "section",
+            "block_id": format!("home_client:{}", token.selector),
+            "text": {
+                "type": "mrkdwn",
+                "text": format!("*{}*{owner}", render::escape(&token.name)),
+            },
+            "accessory": {
+                "type": "button",
+                "action_id": CLIENT_REVOKE,
+                "text": plain("Revoke"),
+                "style": "danger",
+                "value": token.selector,
+                "confirm": confirm(
+                    "Revoke this client token?",
+                    "Its client is disconnected within seconds, and the token stops working for good.",
+                    "Revoke",
+                    "Keep it",
+                ),
+            },
+        })));
+    }
+    if clients.len() > shown {
+        blocks.push(Block::Context(vec![Text::Mrkdwn(format!(
+            "…and {} more.",
+            clients.len() - shown
+        ))]));
+    }
+    blocks
+}
+
 fn audience(owner: &UserId, access: &NodeAccess) -> String {
     match access {
         NodeAccess::AlwaysAllow => "all gateway users".to_owned(),
@@ -399,6 +480,52 @@ pub fn revoke_modal(selector: &str, name: &str) -> Value {
             },
         }],
     })
+}
+
+/// The modal behind *New client token*. The admin also picks whose token it is; anyone else mints
+/// for themselves.
+pub fn new_client_modal(viewer: &UserId, admin: bool) -> Value {
+    let mut blocks = vec![json!({
+        "type": "input",
+        "block_id": CLIENT_NAME.0,
+        "label": plain("Name"),
+        "hint": plain("What the client is, such as editor."),
+        "element": {
+            "type": "plain_text_input",
+            "action_id": CLIENT_NAME.1,
+            "max_length": NODE_NAME_MAX,
+            "placeholder": plain("editor"),
+        },
+    })];
+    if admin {
+        blocks.push(json!({
+            "type": "input",
+            "block_id": CLIENT_OWNER.0,
+            "label": plain("Owner"),
+            "hint": plain("They're allowed on the gateway, if they aren't yet."),
+            "element": {
+                "type": "users_select",
+                "action_id": CLIENT_OWNER.1,
+                "initial_user": viewer.as_str(),
+            },
+        }));
+    }
+    json!({
+        "type": "modal",
+        "callback_id": CLIENT_NEW_SUBMIT,
+        "title": plain("New client token"),
+        "submit": plain("Mint"),
+        "close": plain("Cancel"),
+        "blocks": blocks,
+    })
+}
+
+/// The DM that goes with a newly minted client token, which is attached beneath it.
+pub fn client_token_message(bot_user: &str, name: &str) -> String {
+    format!(
+        "Here's a client token for *{}*, to use <@{bot_user}>'s nodes from your own tools. It's attached. Keep it somewhere safe, because it won't be shown again. Save it with `murtaugh-client login`; the setup instructions are at <{CLIENT_SETUP}|github.com/miere/murtaugh-rs#murtaugh-client>.",
+        render::escape(name)
+    )
 }
 
 /// The DM that goes with a newly minted token, which is attached beneath it.

@@ -1,6 +1,8 @@
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use murtaugh_store::{Conversation, NodeToken, Pin, Store, ToolMode, UserConfig, UserId};
+use murtaugh_store::{
+    Conversation, NodeToken, Pin, Store, ToolMode, UserConfig, UserId, UserToken,
+};
 use time::OffsetDateTime;
 
 pub fn user(raw: &str) -> UserId {
@@ -119,6 +121,31 @@ pub async fn a_token_is_revoked_once(store: &dyn Store) {
     assert!(!store.revoke_node_token(&token.selector).await.unwrap());
     assert!(!store.revoke_node_token("ffffffffffffffff").await.unwrap());
     assert!(store.node_tokens().await.unwrap()[0].revoked_at.is_some());
+}
+
+pub async fn a_user_token_is_kept_apart_from_node_tokens_and_revoked_once(store: &dyn Store) {
+    let token = UserToken {
+        selector: "0123456789abcdef".into(),
+        secret_hash: "hash".into(),
+        owner: user("U0PERSON1"),
+        name: "editor".into(),
+        created_at: stamp(),
+        revoked_at: None,
+    };
+    store.add_user_token(&token).await.unwrap();
+    assert_eq!(
+        store.user_tokens().await.unwrap(),
+        std::slice::from_ref(&token)
+    );
+    assert!(store.node_tokens().await.unwrap().is_empty());
+    assert!(
+        store.add_user_token(&token).await.is_err(),
+        "a selector was reused"
+    );
+    assert!(!store.revoke_node_token(&token.selector).await.unwrap());
+    assert!(store.revoke_user_token(&token.selector).await.unwrap());
+    assert!(!store.revoke_user_token(&token.selector).await.unwrap());
+    assert!(store.user_tokens().await.unwrap()[0].revoked_at.is_some());
 }
 
 pub async fn pins_are_dropped_with_their_node(store: &dyn Store) {

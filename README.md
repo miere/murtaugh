@@ -137,8 +137,9 @@ too. Revoking one node leaves the grant alone, and revoking a grant leaves the p
 
 The admin does all of this from the app's Home tab. A node admin's Home tab shows their tool
 approval mode and their own nodes, which they can mint, disable and revoke. A new token goes to
-its owner by DM. Everyone else sees only the footer. The same changes work from the CLI, which
-writes to the store directly and reaches a running gateway within seconds:
+its owner by DM. Anyone allowed also sees their client tokens (see below). Everyone else sees only
+the footer. The same changes work from the CLI, which writes to the store directly and reaches a
+running gateway within seconds:
 
 ```sh
 murtaugh-gateway admin set U0123ADMIN                 # the only onboarding step
@@ -148,7 +149,15 @@ murtaugh-gateway grant approve U0456ALICE             # Alice may run nodes, and
 murtaugh-gateway user allow U0789BOB                  # Bob may use the gateway
 murtaugh-gateway grant revoke U0456ALICE              # her tokens are revoked for good
 murtaugh-gateway node revoke <selector>               # one node is disconnected
+murtaugh-gateway user token mint --owner U0789BOB --name editor --out bob-editor.token
+                                                      # a client token; also allows Bob
+murtaugh-gateway user token revoke <selector>         # one client is disconnected
 ```
+
+A client token, `mrtg_user_…`, lets a person's own client use the gateway's nodes without running
+one, such as an editor bridged by `murtaugh-client`. Anyone allowed may mint one for themselves
+from the Home tab, and the admin may mint one for anyone. It needs no grant, and it stops working
+as soon as its owner is no longer allowed.
 
 A node can dial as soon as its token is minted: the gateway checks the store for a token it has
 not seen yet. The gateway never shows a token twice. Someone who isn't allowed gets a 🤐 reaction
