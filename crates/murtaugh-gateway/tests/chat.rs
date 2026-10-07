@@ -8,6 +8,7 @@ use std::time::Duration;
 use murtaugh_gateway::run::{self, Options};
 use murtaugh_gateway::token;
 use murtaugh_store::{NodeToken, SqliteStore, Store, UserId};
+use rax::attachment::ReceiptOutcome;
 use rax::content::ContentBlock;
 use rax::event::BackgroundEvent;
 use rax::id::PromptId;
@@ -73,6 +74,8 @@ enum Seen {
         session: SessionId,
         groups: Vec<String>,
     },
+    /// What the gateway said became of an attachment.
+    Receipt(rax::attachment::AttachmentReceipt),
 }
 
 /// What a scripted node does with the tool groups a session is lent.
@@ -106,6 +109,14 @@ impl FakeNode {
             } = within(self.seen.recv()).await.unwrap()
             {
                 return (session, text, links);
+            }
+        }
+    }
+
+    async fn next_receipt(&mut self) -> rax::attachment::AttachmentReceipt {
+        loop {
+            if let Seen::Receipt(receipt) = within(self.seen.recv()).await.unwrap() {
+                return receipt;
             }
         }
     }
@@ -378,6 +389,9 @@ impl Rig {
                     NodeEvent::Answer(answer) => {
                         let _ = script.answers.send(answer);
                     }
+                    NodeEvent::Receipt(receipt) => {
+                        let _ = script.seen.send(Seen::Receipt(receipt));
+                    }
                     NodeEvent::Unhandled {
                         body:
                             rax::Unhandled {
@@ -462,6 +476,7 @@ async fn answer(script: Script, id: RequestId, call: GatewayCall) {
                 capabilities: NodeCapabilities {
                     tool_gate: ToolGate::EveryCall,
                     tool_groups: groups != Groups::Ignores,
+                    attachment_receipts: true,
                     ..Default::default()
                 },
                 metadata,
@@ -1464,6 +1479,8 @@ async fn an_attachment_from_the_agent_is_uploaded_into_the_thread() {
         .unwrap();
     laptop.next_prompt().await;
     wait_for_turn_end(&rig, GENERAL, &ts, "pong to: attach a chart").await;
+    let receipt = laptop.next_receipt().await;
+    assert_eq!(receipt.outcome, ReceiptOutcome::Delivered, "{receipt:?}");
 
     let shared = rig
         .sim
@@ -1496,6 +1513,10 @@ async fn an_attachment_whose_bytes_do_not_match_is_reported_not_uploaded() {
         .unwrap();
     laptop.next_prompt().await;
     wait_for_turn_end(&rig, GENERAL, &ts, "pong to: attach and lie").await;
+    let receipt = laptop.next_receipt().await;
+    assert_eq!(receipt.outcome, ReceiptOutcome::Failed, "{receipt:?}");
+    let reason = receipt.reason.unwrap_or_default();
+    assert!(reason.contains("bytes arrived"), "{reason}");
 
     let thread = rig.sim.thread(GENERAL, &ts);
     assert!(thread.iter().all(|m| m.files.is_empty()), "{thread:?}");
