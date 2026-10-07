@@ -109,6 +109,41 @@ fn minting_a_persons_node_grants_and_allows_them_and_revoking_the_grant_takes_th
 }
 
 #[test]
+fn a_client_token_allows_its_owner_without_a_grant_and_is_revoked_on_its_own() {
+    let (dir, config) = setup();
+    ok(gateway(&config, &["admin", "set", "U0ADMIN01"]));
+    let out = dir.path().join("editor.token");
+    let minted = ok(gateway(
+        &config,
+        &[
+            "user",
+            "token",
+            "mint",
+            "--owner",
+            "U0GUEST01",
+            "--name",
+            "editor",
+            "--out",
+            out.to_str().unwrap(),
+        ],
+    ));
+    let token = std::fs::read_to_string(&out).unwrap();
+    assert!(token.starts_with("mrtg_user_"));
+    assert!(!minted.contains(token.trim()), "the token was printed too");
+    let mode = std::fs::metadata(&out).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+    assert!(ok(gateway(&config, &["user", "list"])).contains("U0GUEST01\tallowed"));
+    assert!(!ok(gateway(&config, &["grant", "list"])).contains("U0GUEST01"));
+    assert!(ok(gateway(&config, &["node", "list"])).trim().is_empty());
+
+    let listed = ok(gateway(&config, &["user", "token", "list"]));
+    assert!(listed.contains("U0GUEST01\teditor\tlive"), "{listed}");
+    let selector = listed.split('\t').next().unwrap().to_owned();
+    assert!(ok(gateway(&config, &["user", "token", "revoke", &selector])).contains("Revoked"));
+    assert!(ok(gateway(&config, &["user", "token", "list"])).contains("revoked"));
+}
+
+#[test]
 fn a_channel_id_is_never_accepted_as_a_person() {
     let (_dir, config) = setup();
     let stderr = failed(gateway(&config, &["admin", "set", "C0123ABCD"]));

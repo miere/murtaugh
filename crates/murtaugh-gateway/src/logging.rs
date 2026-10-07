@@ -5,7 +5,7 @@ use tracing_subscriber::fmt::MakeWriter;
 use crate::config::{LogConfig, LogFormat};
 
 const REDACTED: &str = "[redacted]";
-const SECRET_PREFIXES: [&str; 4] = ["mrtg_node_", "xoxb-", "xapp-", "xoxp-"];
+const SECRET_PREFIXES: [&str; 5] = ["mrtg_node_", "mrtg_user_", "xoxb-", "xapp-", "xoxp-"];
 
 pub fn init(config: &LogConfig) {
     let builder = tracing_subscriber::fmt()
@@ -79,6 +79,10 @@ mod tests {
         assert_eq!(
             redact("node mrtg_node_0123456789abcdef_se-cret, bot xoxb-1-2-abc and xapp-9"),
             "node mrtg_node_[redacted], bot xoxb-[redacted] and xapp-[redacted]"
+        );
+        assert_eq!(
+            redact("client mrtg_user_0123456789abcdef_se-cret"),
+            "client mrtg_user_[redacted]"
         );
         assert_eq!(redact("nothing secret"), "nothing secret");
     }

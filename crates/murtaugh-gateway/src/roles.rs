@@ -3,7 +3,7 @@
 //! takes every token resting on it. Allowing and disallowing people, granting, minting and
 //! revoking all go through here, from the CLI and the Home tab alike, so the two cannot drift.
 
-use murtaugh_store::{Grant, NodeToken, Result, Store, UserId};
+use murtaugh_store::{Grant, NodeToken, Result, Store, UserId, UserToken};
 use time::OffsetDateTime;
 
 use crate::token;
@@ -65,7 +65,7 @@ pub async fn mint(store: &dyn Store, owner: &UserId, name: &str, by: &UserId) ->
     if store.admin().await?.as_ref() != Some(owner) {
         grant(store, owner, by).await?;
     }
-    let minted = token::mint();
+    let minted = token::mint(token::NODE_PREFIX);
     store
         .add_node_token(&NodeToken {
             selector: minted.selector.clone(),
@@ -75,6 +75,30 @@ pub async fn mint(store: &dyn Store, owner: &UserId, name: &str, by: &UserId) ->
             created_at: OffsetDateTime::now_utc(),
             revoked_at: None,
             disabled_at: None,
+        })
+        .await?;
+    Ok(Minted {
+        selector: minted.selector,
+        token: minted.token,
+        owner: owner.clone(),
+        name: name.to_owned(),
+    })
+}
+
+/// Mints a token for one of `owner`'s own clients, such as an editor bridge, allowing them first:
+/// a client runs nothing, so being allowed is all it rests on. Who may mint for whom is the
+/// caller's to check.
+pub async fn mint_client(store: &dyn Store, owner: &UserId, name: &str) -> Result<Minted> {
+    allow(store, owner).await?;
+    let minted = token::mint(token::USER_PREFIX);
+    store
+        .add_user_token(&UserToken {
+            selector: minted.selector.clone(),
+            secret_hash: minted.secret_hash,
+            owner: owner.clone(),
+            name: name.to_owned(),
+            created_at: OffsetDateTime::now_utc(),
+            revoked_at: None,
         })
         .await?;
     Ok(Minted {

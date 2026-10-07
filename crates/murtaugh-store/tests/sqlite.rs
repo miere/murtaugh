@@ -27,6 +27,7 @@ contract!(
     a_person_is_not_pre_authorised_until_the_admin_says_so,
     a_node_owners_tool_rules_are_kept_apart_from_the_rest_of_their_settings,
     a_token_is_revoked_once,
+    a_user_token_is_kept_apart_from_node_tokens_and_revoked_once,
     pins_are_dropped_with_their_node,
 );
 

@@ -12,6 +12,7 @@ pub use firestore::{FirestoreLeader, FirestoreOptions, FirestoreStore};
 pub use leader::{Leader, Lease, SqliteLeader};
 pub use model::{
     Conversation, Grant, NodeToken, Pin, ToolMode, ToolModeError, UserConfig, UserId, UserIdError,
+    UserToken,
 };
 pub use sqlite::{LeaderLock, SqliteStore};
 
@@ -70,6 +71,11 @@ pub trait Store: Send + Sync + 'static {
     /// Reversible, unlike revoking: a disabled node keeps its credential and its link, it is just
     /// left out of routing until this is called again with `false`.
     async fn set_node_disabled(&self, selector: &str, disabled: bool) -> Result<()>;
+
+    async fn user_tokens(&self) -> Result<Vec<UserToken>>;
+    async fn add_user_token(&self, token: &UserToken) -> Result<()>;
+    /// Returns whether a live token was revoked.
+    async fn revoke_user_token(&self, selector: &str) -> Result<bool>;
 
     async fn pin(&self, conversation: &Conversation) -> Result<Option<Pin>>;
     async fn set_pin(&self, pin: &Pin) -> Result<()>;

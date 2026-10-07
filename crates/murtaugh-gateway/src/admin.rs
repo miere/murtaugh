@@ -7,7 +7,10 @@ use std::path::Path;
 
 use murtaugh_store::{Store, ToolMode, ToolModeError, UserId};
 
-use crate::cli::{AdminCommand, GrantCommand, MintArgs, NodeCommand, ToolsCommand, UserCommand};
+use crate::cli::{
+    AdminCommand, GrantCommand, MintArgs, NodeCommand, ToolsCommand, UserCommand, UserTokenCommand,
+    UserTokenMintArgs,
+};
 use crate::roles;
 
 fn user(raw: &str) -> Result<UserId, String> {
@@ -125,6 +128,68 @@ pub async fn user_settings(store: &dyn Store, command: UserCommand) -> Result<St
                 .collect::<Vec<_>>()
                 .join("\n"))
         }
+        UserCommand::Token(command) => user_token(store, command).await,
+    }
+}
+
+async fn user_token(store: &dyn Store, command: UserTokenCommand) -> Result<String, String> {
+    match command {
+        UserTokenCommand::Mint(args) => mint_client(store, args).await,
+        UserTokenCommand::Revoke { selector } => Ok(
+            if store
+                .revoke_user_token(&selector)
+                .await
+                .map_err(|err| err.to_string())?
+            {
+                format!("Revoked {selector}; its client will be disconnected.")
+            } else {
+                format!("No live client credential {selector}.")
+            },
+        ),
+        UserTokenCommand::List => {
+            let tokens = store.user_tokens().await.map_err(|err| err.to_string())?;
+            Ok(tokens
+                .iter()
+                .map(|token| {
+                    let state = if token.revoked_at.is_some() {
+                        "revoked"
+                    } else {
+                        "live"
+                    };
+                    format!(
+                        "{}\t{}\t{}\t{state}",
+                        token.selector, token.owner, token.name
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n"))
+        }
+    }
+}
+
+async fn mint_client(store: &dyn Store, args: UserTokenMintArgs) -> Result<String, String> {
+    let owner = user(&args.owner)?;
+    admin_of(store).await?;
+    let name = args.name.trim().to_owned();
+    if name.is_empty() {
+        return Err("--name must not be empty".to_owned());
+    }
+    let minted = roles::mint_client(store, &owner, &name)
+        .await
+        .map_err(|err| err.to_string())?;
+    match args.out {
+        Some(path) => {
+            write_secret(&path, &minted.token)?;
+            Ok(format!(
+                "Minted {} for {owner}'s client {name:?}; the token is in {}.",
+                minted.selector,
+                path.display()
+            ))
+        }
+        None => Ok(format!(
+            "Minted {} for {owner}'s client {name:?}. Hand this token over in person; it is not shown again:\n{}",
+            minted.selector, minted.token
+        )),
     }
 }
 

@@ -134,6 +134,32 @@ pub enum UserCommand {
         user: String,
     },
     List,
+    /// Credentials for a person's own clients, such as `murtaugh-client acp`
+    #[command(subcommand)]
+    Token(UserTokenCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum UserTokenCommand {
+    /// Mint a client credential for a person, allowing them on the gateway if need be
+    Mint(UserTokenMintArgs),
+    /// Revoke a client credential; its client is disconnected within seconds
+    Revoke { selector: String },
+    /// Every client credential and whether it is revoked
+    List,
+}
+
+#[derive(Debug, Args)]
+pub struct UserTokenMintArgs {
+    /// The person the client belongs to
+    #[arg(long)]
+    pub owner: String,
+    /// A name for the client, such as "editor"
+    #[arg(long)]
+    pub name: String,
+    /// Write the token to this file (mode 0600) instead of printing it
+    #[arg(long, value_name = "PATH")]
+    pub out: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]

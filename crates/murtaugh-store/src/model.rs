@@ -144,6 +144,19 @@ pub struct NodeToken {
     pub disabled_at: Option<OffsetDateTime>,
 }
 
+/// A credential a person's own client presents to use the gateway's nodes over the RAX API, such as
+/// an editor bridge. Unlike a node token it runs nothing: anyone allowed on the gateway may hold
+/// one, and it stops working when they stop being allowed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserToken {
+    pub selector: String,
+    pub secret_hash: String,
+    pub owner: UserId,
+    pub name: String,
+    pub created_at: OffsetDateTime,
+    pub revoked_at: Option<OffsetDateTime>,
+}
+
 /// A Slack thread; a top-level message is a thread of its own ts.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Conversation {

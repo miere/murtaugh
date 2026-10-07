@@ -325,7 +325,7 @@ impl Rig {
         metadata: rax::Metadata,
         groups: Groups,
     ) -> FakeNode {
-        let minted = token::mint();
+        let minted = token::mint(token::NODE_PREFIX);
         self.store
             .add_node_token(&NodeToken {
                 selector: minted.selector,
@@ -2277,16 +2277,21 @@ async fn the_home_tab_shows_the_version_and_the_viewers_nodes_or_all_for_the_adm
 
     rig.store.set_allowed(&user(BOB), true).await.unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
-    for person in [BOB, STRANGER] {
-        let home: serde_json::Value = serde_json::from_str(&home_of(&rig, person).await).unwrap();
-        let blocks = home.as_array().unwrap();
-        assert_eq!(
-            blocks.len(),
-            1,
-            "{person} sees more than the footer: {home}"
-        );
-        assert!(blocks[0].to_string().contains("Powered by Murtaugh"));
-    }
+    let home: serde_json::Value = serde_json::from_str(&home_of(&rig, STRANGER).await).unwrap();
+    let blocks = home.as_array().unwrap();
+    assert_eq!(
+        blocks.len(),
+        1,
+        "a stranger sees more than the footer: {home}"
+    );
+    assert!(blocks[0].to_string().contains("Powered by Murtaugh"));
+    // Someone allowed runs no nodes, but may hold client tokens.
+    let bob = home_of(&rig, BOB).await;
+    assert!(bob.contains("New client token"), "{bob}");
+    assert!(
+        !bob.contains("Configuration Panel") && !bob.contains("New node"),
+        "{bob}"
+    );
     for home in [&alice, &admin] {
         let blocks: serde_json::Value = serde_json::from_str(home).unwrap();
         let kinds: Vec<&str> = blocks
@@ -2430,7 +2435,9 @@ async fn dmed_token(rig: &Rig, person: &str) -> (String, String) {
         let note = messages
             .iter()
             .rev()
-            .find(|m| m.text.contains("authorised to connect a node"))?
+            .find(|m| {
+                m.text.contains("authorised to connect a node") || m.text.contains("client token")
+            })?
             .text
             .clone();
         let token = String::from_utf8(rig.sim.file(&file)?.bytes).ok()?;
@@ -2473,6 +2480,58 @@ async fn a_node_admin_mints_their_own_node_and_gets_the_token_by_dm() {
             .to_string()
             .contains("*desktop*")
             .then_some(())
+    })
+    .await;
+    assert_eq!(rig.sim.violations(), vec![]);
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_allowed_person_mints_a_client_token_by_dm_and_revokes_it() {
+    let rig = rig().await;
+    rig.store.set_allowed(&user(BOB), true).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    home_of(&rig, BOB).await;
+    rig.sim
+        .click_home(BOB, murtaugh_gateway::home::CLIENT_NEW, "new")
+        .await
+        .unwrap();
+    let modal = eventually("the new client token modal", || rig.sim.modal(BOB)).await;
+    assert!(
+        !modal.to_string().contains("client_owner"),
+        "only the admin picks an owner: {modal}"
+    );
+    rig.sim
+        .submit_modal(
+            BOB,
+            serde_json::json!({"client_name": {"name": {"type": "plain_text_input", "value": "editor"}}}),
+        )
+        .await
+        .unwrap();
+    let (note, token) = dmed_token(&rig, BOB).await;
+    assert!(token.starts_with("mrtg_user_"), "{token}");
+    assert!(note.contains("murtaugh-client login"), "{note}");
+    assert!(!granted(&rig, BOB).await, "a client token granted nodes");
+    let selector = eventually("the client token listed", || {
+        let home = rig.sim.home(BOB)?;
+        home.as_array()?.iter().find_map(|block| {
+            let id = block["block_id"].as_str()?;
+            id.strip_prefix("home_client:").map(str::to_owned)
+        })
+    })
+    .await;
+
+    rig.sim
+        .click_home(BOB, murtaugh_gateway::home::CLIENT_REVOKE, &selector)
+        .await
+        .unwrap();
+    settled("the client token revoked", async || {
+        rig.store
+            .user_tokens()
+            .await
+            .unwrap()
+            .iter()
+            .all(|token| token.revoked_at.is_some())
     })
     .await;
     assert_eq!(rig.sim.violations(), vec![]);

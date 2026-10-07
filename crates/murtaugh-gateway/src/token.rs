@@ -1,12 +1,14 @@
-//! Node credentials: `mrtg_node_<selector>_<secret>`. The selector finds the record; only the
-//! secret's SHA-256 is stored, so the database never holds anything a node could present.
+//! Credentials: `mrtg_node_<selector>_<secret>` for a node, `mrtg_user_<selector>_<secret>` for a
+//! person's own client. The selector finds the record; only the secret's SHA-256 is stored, so the
+//! database never holds anything a node or a client could present.
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
-pub const PREFIX: &str = "mrtg_node_";
+pub const NODE_PREFIX: &str = "mrtg_node_";
+pub const USER_PREFIX: &str = "mrtg_user_";
 const SELECTOR_BYTES: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,18 +24,20 @@ pub struct Minted {
     pub secret_hash: String,
 }
 
-pub fn mint() -> Minted {
+pub fn mint(prefix: &str) -> Minted {
     let selector = hex::encode(rand::random::<[u8; SELECTOR_BYTES]>());
     let secret = URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>());
     Minted {
-        token: format!("{PREFIX}{selector}_{secret}"),
+        token: format!("{prefix}{selector}_{secret}"),
         secret_hash: hash(&secret),
         selector,
     }
 }
 
-pub fn parse(presented: &str) -> Option<Credential> {
-    let rest = presented.trim().strip_prefix(PREFIX)?;
+/// Only a credential of the kind `prefix` names: a node's token never opens a client's link, nor
+/// the reverse.
+pub fn parse(prefix: &str, presented: &str) -> Option<Credential> {
+    let rest = presented.trim().strip_prefix(prefix)?;
     let (selector, secret) = rest.split_once('_')?;
     let valid_selector = selector.len() == SELECTOR_BYTES * 2
         && selector.bytes().all(|byte| byte.is_ascii_hexdigit());
@@ -58,8 +62,8 @@ mod tests {
 
     #[test]
     fn a_minted_token_parses_and_matches_only_its_own_hash() {
-        let minted = mint();
-        let credential = parse(&minted.token).unwrap();
+        let minted = mint(NODE_PREFIX);
+        let credential = parse(NODE_PREFIX, &minted.token).unwrap();
         assert_eq!(credential.selector, minted.selector);
         assert!(matches(&credential.secret, &minted.secret_hash));
         assert!(!matches("another-secret", &minted.secret_hash));
@@ -77,7 +81,16 @@ mod tests {
             "mrtg_node_0123456789abcdeg_secret",
             "xoxb-0123456789abcdef_secret",
         ] {
-            assert!(parse(bad).is_none(), "{bad:?} parsed");
+            assert!(parse(NODE_PREFIX, bad).is_none(), "{bad:?} parsed");
         }
+    }
+
+    #[test]
+    fn a_token_parses_only_as_its_own_kind() {
+        let user = mint(USER_PREFIX);
+        assert!(user.token.starts_with("mrtg_user_"));
+        assert!(parse(USER_PREFIX, &user.token).is_some());
+        assert!(parse(NODE_PREFIX, &user.token).is_none());
+        assert!(parse(USER_PREFIX, &mint(NODE_PREFIX).token).is_none());
     }
 }

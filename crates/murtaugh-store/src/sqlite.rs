@@ -10,6 +10,7 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::{
     Conversation, Grant, NodeToken, Pin, Result, Store, StoreError, ToolMode, UserConfig, UserId,
+    UserToken,
 };
 
 const SCHEMA: &str = "
@@ -43,6 +44,14 @@ CREATE TABLE IF NOT EXISTS node_tokens (
     created_at TEXT NOT NULL,
     revoked_at TEXT,
     disabled_at TEXT
+);
+CREATE TABLE IF NOT EXISTS user_tokens (
+    selector TEXT PRIMARY KEY,
+    secret_hash TEXT NOT NULL,
+    owner TEXT NOT NULL,
+    name TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    revoked_at TEXT
 );
 CREATE TABLE IF NOT EXISTS pins (
     channel TEXT NOT NULL,
@@ -230,6 +239,20 @@ fn token_row(row: &Row<'_>) -> rusqlite::Result<NodeToken> {
             .transpose()?,
         disabled_at: row
             .get::<_, Option<String>>(6)?
+            .map(|raw| parse_stamp(&raw))
+            .transpose()?,
+    })
+}
+
+fn user_token_row(row: &Row<'_>) -> rusqlite::Result<UserToken> {
+    Ok(UserToken {
+        selector: row.get(0)?,
+        secret_hash: row.get(1)?,
+        owner: parse_user(&row.get::<_, String>(2)?)?,
+        name: row.get(3)?,
+        created_at: parse_stamp(&row.get::<_, String>(4)?)?,
+        revoked_at: row
+            .get::<_, Option<String>>(5)?
             .map(|raw| parse_stamp(&raw))
             .transpose()?,
     })
@@ -441,6 +464,54 @@ impl Store for SqliteStore {
                 params![selector, at],
             )?;
             Ok(())
+        })
+        .await
+    }
+
+    async fn user_tokens(&self) -> Result<Vec<UserToken>> {
+        self.run(|db| {
+            let mut query = db.prepare(
+                "SELECT selector, secret_hash, owner, name, created_at, revoked_at
+                 FROM user_tokens ORDER BY created_at",
+            )?;
+            let tokens = query
+                .query_map([], user_token_row)?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(tokens)
+        })
+        .await
+    }
+
+    async fn add_user_token(&self, token: &UserToken) -> Result<()> {
+        let token = token.clone();
+        let created = stamp(token.created_at)?;
+        let revoked = token.revoked_at.map(stamp).transpose()?;
+        self.run(move |db| {
+            db.execute(
+                "INSERT INTO user_tokens (selector, secret_hash, owner, name, created_at, revoked_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    token.selector,
+                    token.secret_hash,
+                    token.owner.as_str(),
+                    token.name,
+                    created,
+                    revoked
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn revoke_user_token(&self, selector: &str) -> Result<bool> {
+        let (selector, at) = (selector.to_owned(), stamp(now())?);
+        self.run(move |db| {
+            let revoked = db.execute(
+                "UPDATE user_tokens SET revoked_at = ?2 WHERE selector = ?1 AND revoked_at IS NULL",
+                params![selector, at],
+            )?;
+            Ok(revoked > 0)
         })
         .await
     }
