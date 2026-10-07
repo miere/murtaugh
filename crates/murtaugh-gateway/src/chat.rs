@@ -126,6 +126,25 @@ struct Incoming {
     text: String,
     files: Vec<FileRef>,
     direct: bool,
+    /// Set when the message came from the workloads endpoint rather than from Slack.
+    workload: Option<WorkloadRun>,
+}
+
+/// A workload as the chat side runs it: the person whose token posted it.
+#[derive(Debug, Clone)]
+pub struct WorkloadRun {
+    pub caller: UserId,
+}
+
+/// A workload ready to run: checked, with its thread resolved.
+#[derive(Debug, Clone)]
+pub struct Workload {
+    pub owner: UserId,
+    pub channel: String,
+    /// The thread to continue, or `None` to start one with an opening message.
+    pub thread_ts: Option<String>,
+    pub prompt: String,
+    pub direct: bool,
 }
 
 struct Seat {
@@ -265,6 +284,7 @@ impl Chat {
                 text,
                 files,
                 direct: false,
+                workload: None,
             },
             Event::Message {
                 channel,
@@ -285,6 +305,7 @@ impl Chat {
                     text,
                     files,
                     direct: true,
+                    workload: None,
                 }
             }
             Event::Message { .. } => {
@@ -684,6 +705,58 @@ impl Chat {
             self.alert(conversation, &faults::turn_failed(&node.name, reported))
                 .await;
         }
+    }
+
+    /// Whether a turn is running, or queued, in this conversation.
+    pub fn is_busy(&self, channel: &str, thread_ts: &str) -> bool {
+        let conversation = Conversation {
+            channel: channel.to_owned(),
+            thread_ts: thread_ts.to_owned(),
+        };
+        lock(&self.turns).contains_key(&conversation)
+    }
+
+    /// Runs a workload as if its owner had written the prompt in the thread: an opening message
+    /// marks who sent it, and starts the thread when there is none. Returns the thread.
+    pub async fn start_workload(
+        self: &Arc<Self>,
+        workload: Workload,
+    ) -> Result<(String, String), String> {
+        let first_line = workload.prompt.lines().next().unwrap_or_default();
+        let opening = PostMessage {
+            channel: workload.channel.clone(),
+            thread_ts: workload.thread_ts.clone(),
+            text: format!(
+                "<@{}> sent a workload:\n>{}",
+                workload.owner,
+                render::escape(&alerts::clip(first_line, 200))
+            ),
+            blocks: Vec::new(),
+        };
+        let posted = self
+            .slack
+            .post_message(&opening)
+            .await
+            .map_err(|err| format!("could not post into {}: {err}", workload.channel))?;
+        let thread_ts = workload
+            .thread_ts
+            .clone()
+            .unwrap_or_else(|| posted.ts.clone());
+        let incoming = Incoming {
+            user: workload.owner.to_string(),
+            channel: posted.channel.clone(),
+            ts: posted.ts,
+            thread_ts: workload.thread_ts,
+            text: workload.prompt,
+            files: Vec::new(),
+            direct: workload.direct,
+            workload: Some(WorkloadRun {
+                caller: workload.owner,
+            }),
+        };
+        let chat = self.clone();
+        tokio::spawn(async move { chat.message(incoming, Instant::now()).await });
+        Ok((posted.channel, thread_ts))
     }
 
     async fn message(&self, incoming: Incoming, received: Instant) {
@@ -1296,7 +1369,10 @@ impl Chat {
     ) -> Option<Instant> {
         let recipient = (!incoming.direct).then(|| (self.team.clone(), incoming.user.clone()));
         let mut first_output = None;
-        let turn = Turn::default();
+        let turn = Turn {
+            workload: incoming.workload.clone(),
+            ..Turn::default()
+        };
         let mut active = Instant::now();
         let mut stalled = false;
         let mut wedged = None;
@@ -1525,9 +1601,20 @@ impl Chat {
                     link: node.link.clone(),
                     node_name: node.name.clone(),
                     owner: node.owner.clone(),
-                    channel: target.channel.clone(),
-                    thread_ts: Some(target.thread_ts.clone()),
-                    requester: None,
+                    // A workload may post into a channel full of people; the card is the node
+                    // owner's alone, so it goes to them.
+                    channel: match &turn.workload {
+                        Some(_) => node.owner.to_string(),
+                        None => target.channel.clone(),
+                    },
+                    thread_ts: match &turn.workload {
+                        Some(_) => None,
+                        None => Some(target.thread_ts.clone()),
+                    },
+                    requester: turn
+                        .workload
+                        .as_ref()
+                        .map(|run| format!("<@{}>'s workload", run.caller)),
                     tool,
                     timeout: self.approval_timeout,
                     turn: turn.token.clone(),
@@ -1816,6 +1903,8 @@ fn cancel_turn(link: GatewayLink, session_id: SessionId) {
 /// takes twenty minutes and says nothing in between is working, not silent.
 #[derive(Default)]
 struct Turn {
+    /// A workload's approvals go to the node owner's DM rather than into its thread.
+    workload: Option<WorkloadRun>,
     token: CancellationToken,
     waiting: Arc<AtomicUsize>,
     tools: Mutex<HashMap<String, InFlight>>,

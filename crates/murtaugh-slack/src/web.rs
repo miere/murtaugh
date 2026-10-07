@@ -345,6 +345,37 @@ impl SlackClient {
         Ok(page.messages.into_iter().find(|m| m.ts == ts))
     }
 
+    /// What the bot may do in a conversation, from `conversations.info`. A private channel the bot
+    /// is not in answers `channel_not_found`, as Slack does.
+    pub async fn conversation_info(&self, channel: &str) -> Result<ConversationInfo, SlackError> {
+        #[derive(Deserialize)]
+        struct Info {
+            channel: ConversationInfo,
+        }
+        let params = vec![("channel", channel.to_owned())];
+        let info: Info = self
+            .call("conversations.info", Token::Bot, Body::Form(params))
+            .await?;
+        Ok(info.channel)
+    }
+
+    /// The bot's DM with `user`, opened if it has to be. Returns its channel id.
+    pub async fn open_dm(&self, user: &str) -> Result<String, SlackError> {
+        #[derive(Deserialize)]
+        struct Opened {
+            channel: Id,
+        }
+        #[derive(Deserialize)]
+        struct Id {
+            id: String,
+        }
+        let params = vec![("users", user.to_owned())];
+        let opened: Opened = self
+            .call("conversations.open", Token::Bot, Body::Form(params))
+            .await?;
+        Ok(opened.channel.id)
+    }
+
     /// The whole thread, parent first; Slack repeats the parent on every page, so it is deduped.
     pub async fn replies(&self, channel: &str, ts: &str) -> Result<Vec<Message>, SlackError> {
         #[derive(Deserialize)]
@@ -720,4 +751,16 @@ fn content_type(headers: &HeaderMap) -> String {
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default()
         .to_ascii_lowercase()
+}
+
+/// A conversation as the bot sees it. A DM has no membership flag: the bot is always in its own.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ConversationInfo {
+    pub id: String,
+    #[serde(default)]
+    pub is_member: bool,
+    #[serde(default)]
+    pub is_im: bool,
+    #[serde(default)]
+    pub is_archived: bool,
 }

@@ -141,6 +141,25 @@ pub async fn serve(
             timeout: options.approval_timeout,
         }),
     );
+    let chat = Chat::new(chat::Parts {
+        slack: slack.clone(),
+        bot_user: identity.user_id.clone(),
+        team: identity.team_id.clone(),
+        store: store.clone(),
+        access: access.clone(),
+        fleet: fleet.clone(),
+        files: files.clone(),
+        turn_timings: config.log.turn_timings,
+        approval_timeout: options.approval_timeout,
+        prompt_timeout: options.prompt_timeout,
+        sign_ins: sign_ins.clone(),
+        turn_idle_timeout: options.turn_idle_timeout,
+        tool_ceiling: options.tool_ceiling,
+        tools: tools.clone(),
+        lent: lent.clone(),
+        relay: relay.clone(),
+        approvals,
+    });
     let mut hub = hub::start(
         config.listen,
         hub::RETAIN_FOR,
@@ -151,7 +170,13 @@ pub async fn serve(
         lent.clone(),
         sign_ins.clone(),
         relay.clone(),
-        axum::Router::new(),
+        crate::workloads::Workloads::new(
+            access.clone(),
+            fleet.clone(),
+            slack.clone(),
+            chat.clone(),
+        )
+        .router(),
         shutdown.clone(),
     )
     .await
@@ -165,25 +190,6 @@ pub async fn serve(
         options.refresh,
         shutdown.clone(),
     ));
-    let chat = Chat::new(chat::Parts {
-        slack: slack.clone(),
-        bot_user: identity.user_id.clone(),
-        team: identity.team_id.clone(),
-        store: store.clone(),
-        access,
-        fleet,
-        files,
-        turn_timings: config.log.turn_timings,
-        approval_timeout: options.approval_timeout,
-        prompt_timeout: options.prompt_timeout,
-        sign_ins,
-        turn_idle_timeout: options.turn_idle_timeout,
-        tool_ceiling: options.tool_ceiling,
-        tools,
-        lent,
-        relay,
-        approvals,
-    });
     tracing::info!(listen = %hub.server.local_addr(), team = %identity.team_id, %holder, "murtaugh gateway started; waiting to lead");
     let mut seen = Seen::default();
     loop {
