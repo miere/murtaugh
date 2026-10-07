@@ -171,10 +171,12 @@ impl UserToken {
 pub enum Scope {
     /// Dialling the RAX API as a gateway, to run sessions on the gateway's nodes.
     Rax,
+    /// Posting workloads over HTTP, which run on the token owner's nodes and answer in Slack.
+    Workloads,
 }
 
 impl Scope {
-    pub const ALL: [Scope; 1] = [Scope::Rax];
+    pub const ALL: [Scope; 2] = [Scope::Rax, Scope::Workloads];
 
     /// What a token minted before scopes existed may do, which is exactly what it always could.
     pub fn legacy() -> BTreeSet<Scope> {
@@ -184,12 +186,14 @@ impl Scope {
     pub fn as_str(self) -> &'static str {
         match self {
             Scope::Rax => "rax",
+            Scope::Workloads => "workloads",
         }
     }
 
     pub fn describe(self) -> &'static str {
         match self {
             Scope::Rax => "RAX API",
+            Scope::Workloads => "Workloads API",
         }
     }
 
@@ -224,7 +228,7 @@ impl fmt::Display for Scope {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("{0:?} is not a token scope; use rax")]
+#[error("{0:?} is not a token scope; use rax or workloads")]
 pub struct ScopeError(pub String);
 
 impl FromStr for Scope {
@@ -233,6 +237,7 @@ impl FromStr for Scope {
     fn from_str(raw: &str) -> Result<Self, Self::Err> {
         match raw.trim() {
             "rax" => Ok(Scope::Rax),
+            "workloads" => Ok(Scope::Workloads),
             other => Err(ScopeError(other.to_owned())),
         }
     }
@@ -268,5 +273,7 @@ mod tests {
         assert_eq!(Scope::join(&scopes), "rax");
         assert!(Scope::split("").is_err());
         assert!(Scope::split("rax,admin").is_err());
+        let both = Scope::split("workloads,rax").unwrap();
+        assert_eq!(Scope::join(&both), "rax,workloads");
     }
 }

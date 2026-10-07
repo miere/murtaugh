@@ -157,7 +157,8 @@ pub struct UserTokenMintArgs {
     /// A name for the client, such as "editor"
     #[arg(long)]
     pub name: String,
-    /// An entry point the token opens; repeat it for several. `rax` is the RAX API
+    /// An entry point the token opens; repeat it for several: `rax` (the RAX API) or
+    /// `workloads` (the workloads endpoint)
     #[arg(long = "scope", value_name = "SCOPE", default_values_t = vec!["rax".to_owned()])]
     pub scopes: Vec<String>,
     /// Write the token to this file (mode 0600) instead of printing it
