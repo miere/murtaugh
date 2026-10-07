@@ -144,9 +144,9 @@ pub struct NodeToken {
     pub disabled_at: Option<OffsetDateTime>,
 }
 
-/// A credential a person's own client presents to use the gateway's nodes over the RAX API, such as
-/// an editor bridge. Unlike a node token it runs nothing: anyone allowed on the gateway may hold
-/// one, and it stops working when they stop being allowed.
+/// A credential a person's own client presents to use the gateway's nodes on their behalf. Unlike
+/// a node token it runs nothing: anyone allowed on the gateway may hold one, and it stops working
+/// when they stop being allowed. Its scopes say which of the gateway's entry points it opens.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserToken {
     pub selector: String,
@@ -155,6 +155,87 @@ pub struct UserToken {
     pub name: String,
     pub created_at: OffsetDateTime,
     pub revoked_at: Option<OffsetDateTime>,
+    /// Never empty. Each entry point checks for its own scope and ignores the rest.
+    pub scopes: BTreeSet<Scope>,
+}
+
+impl UserToken {
+    pub fn allows(&self, scope: Scope) -> bool {
+        self.scopes.contains(&scope)
+    }
+}
+
+/// An entry point of the gateway a user token may open. Named for what the gateway exposes, never
+/// for the client on the other end: anything may speak RAX.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Scope {
+    /// Dialling the RAX API as a gateway, to run sessions on the gateway's nodes.
+    Rax,
+}
+
+impl Scope {
+    pub const ALL: [Scope; 1] = [Scope::Rax];
+
+    /// What a token minted before scopes existed may do, which is exactly what it always could.
+    pub fn legacy() -> BTreeSet<Scope> {
+        BTreeSet::from([Scope::Rax])
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Scope::Rax => "rax",
+        }
+    }
+
+    pub fn describe(self) -> &'static str {
+        match self {
+            Scope::Rax => "RAX API",
+        }
+    }
+
+    /// Stored and shown comma-separated, in a stable order.
+    pub fn join(scopes: &BTreeSet<Scope>) -> String {
+        scopes
+            .iter()
+            .map(|scope| scope.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    /// The inverse of [`Scope::join`]. An empty list is an error: a token must open something.
+    pub fn split(raw: &str) -> Result<BTreeSet<Scope>, ScopeError> {
+        let scopes = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .map(str::parse)
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        if scopes.is_empty() {
+            return Err(ScopeError(raw.to_owned()));
+        }
+        Ok(scopes)
+    }
+}
+
+impl fmt::Display for Scope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{0:?} is not a token scope; use rax")]
+pub struct ScopeError(pub String);
+
+impl FromStr for Scope {
+    type Err = ScopeError;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw.trim() {
+            "rax" => Ok(Scope::Rax),
+            other => Err(ScopeError(other.to_owned())),
+        }
+    }
 }
 
 /// A Slack thread; a top-level message is a thread of its own ts.
@@ -172,4 +253,20 @@ pub struct Pin {
     pub session_id: String,
     pub user: UserId,
     pub pinned_at: OffsetDateTime,
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    #[test]
+    fn scopes_are_a_non_empty_set_stored_in_a_stable_order() {
+        let scopes = Scope::split("rax, rax").unwrap();
+        assert_eq!(scopes, Scope::legacy());
+        assert_eq!(Scope::join(&scopes), "rax");
+        assert!(Scope::split("").is_err());
+        assert!(Scope::split("rax,admin").is_err());
+    }
 }

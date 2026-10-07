@@ -150,7 +150,7 @@ murtaugh-gateway grant approve U0456ALICE             # Alice may run nodes, and
 murtaugh-gateway user allow U0789BOB                  # Bob may use the gateway
 murtaugh-gateway grant revoke U0456ALICE              # her tokens are revoked for good
 murtaugh-gateway node revoke <selector>               # one node is disconnected
-murtaugh-gateway user token mint --owner U0789BOB --name editor --out bob-editor.token
+murtaugh-gateway user token mint --owner U0789BOB --name editor --scope rax --out bob-editor.token
                                                       # a client token; also allows Bob
 murtaugh-gateway user token revoke <selector>         # one client is disconnected
 ```
@@ -158,7 +158,9 @@ murtaugh-gateway user token revoke <selector>         # one client is disconnect
 A client token, `mrtg_user_…`, lets a person's own client use the gateway's nodes without running
 one, such as an editor bridged by `murtaugh-client`. Anyone allowed may mint one for themselves
 from the Home tab, and the admin may mint one for anyone. It needs no grant, and it stops working
-as soon as its owner is no longer allowed.
+as soon as its owner is no longer allowed. Each token carries one or more scopes, the gateway's
+entry points it may open; each entry point checks only for its own. Today there is one, `rax`, the
+RAX API below (`--scope`, repeatable, on the CLI; checkboxes on the Home tab).
 
 A node can dial as soon as its token is minted: the gateway checks the store for a token it has
 not seen yet. The gateway never shows a token twice. Someone who isn't allowed gets a 🤐 reaction

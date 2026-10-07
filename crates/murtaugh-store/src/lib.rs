@@ -11,8 +11,8 @@ use async_trait::async_trait;
 pub use firestore::{FirestoreLeader, FirestoreOptions, FirestoreStore};
 pub use leader::{Leader, Lease, SqliteLeader};
 pub use model::{
-    Conversation, Grant, NodeToken, Pin, ToolMode, ToolModeError, UserConfig, UserId, UserIdError,
-    UserToken,
+    Conversation, Grant, NodeToken, Pin, Scope, ScopeError, ToolMode, ToolModeError, UserConfig,
+    UserId, UserIdError, UserToken,
 };
 pub use sqlite::{LeaderLock, SqliteStore};
 

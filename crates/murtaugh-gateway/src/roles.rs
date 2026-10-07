@@ -3,7 +3,9 @@
 //! takes every token resting on it. Allowing and disallowing people, granting, minting and
 //! revoking all go through here, from the CLI and the Home tab alike, so the two cannot drift.
 
-use murtaugh_store::{Grant, NodeToken, Result, Store, UserId, UserToken};
+use std::collections::BTreeSet;
+
+use murtaugh_store::{Grant, NodeToken, Result, Scope, Store, StoreError, UserId, UserToken};
 use time::OffsetDateTime;
 
 use crate::token;
@@ -85,10 +87,20 @@ pub async fn mint(store: &dyn Store, owner: &UserId, name: &str, by: &UserId) ->
     })
 }
 
-/// Mints a token for one of `owner`'s own clients, such as an editor bridge, allowing them first:
-/// a client runs nothing, so being allowed is all it rests on. Who may mint for whom is the
-/// caller's to check.
-pub async fn mint_client(store: &dyn Store, owner: &UserId, name: &str) -> Result<Minted> {
+/// Mints a token for one of `owner`'s own clients, opening the entry points `scopes` names,
+/// allowing them first: a client runs nothing, so being allowed is all it rests on. Who may mint
+/// for whom is the caller's to check.
+pub async fn mint_client(
+    store: &dyn Store,
+    owner: &UserId,
+    name: &str,
+    scopes: BTreeSet<Scope>,
+) -> Result<Minted> {
+    if scopes.is_empty() {
+        return Err(StoreError::Corrupt(
+            "a client token must open at least one scope".to_owned(),
+        ));
+    }
     allow(store, owner).await?;
     let minted = token::mint(token::USER_PREFIX);
     store
@@ -99,6 +111,7 @@ pub async fn mint_client(store: &dyn Store, owner: &UserId, name: &str) -> Resul
             name: name.to_owned(),
             created_at: OffsetDateTime::now_utc(),
             revoked_at: None,
+            scopes,
         })
         .await?;
     Ok(Minted {

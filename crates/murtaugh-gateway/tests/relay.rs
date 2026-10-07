@@ -191,9 +191,14 @@ impl Rig {
 
     /// A client of `owner`'s, dialled in and initialized.
     async fn client(&self, owner: &str) -> SimNode {
-        let minted = roles::mint_client(&*self.store, &user(owner), "editor")
-            .await
-            .unwrap();
+        let minted = roles::mint_client(
+            &*self.store,
+            &user(owner),
+            "editor",
+            murtaugh_store::Scope::legacy(),
+        )
+        .await
+        .unwrap();
         self.reload().await;
         let client = self.dial(&minted.token);
         assert!(matches!(

@@ -8,8 +8,8 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::leader::{Leader, Lease};
 use crate::{
-    Conversation, Grant, NodeToken, Pin, Result, Store, StoreError, ToolMode, UserConfig, UserId,
-    UserToken,
+    Conversation, Grant, NodeToken, Pin, Result, Scope, Store, StoreError, ToolMode, UserConfig,
+    UserId, UserToken,
 };
 
 const SCOPE: &str = "https://www.googleapis.com/auth/datastore";
@@ -444,7 +444,24 @@ fn user_token_of(doc: &Doc) -> Result<UserToken> {
         name: doc.string("name")?,
         created_at: doc.required_time("created_at")?,
         revoked_at: doc.time("revoked_at")?,
+        scopes: scopes_of(doc)?,
     })
+}
+
+/// Absent on a token minted before scopes existed, which may do what it always could.
+fn scopes_of(doc: &Doc) -> Result<std::collections::BTreeSet<Scope>> {
+    let Some(values) = doc
+        .fields
+        .get("scopes")
+        .and_then(|v| v["arrayValue"]["values"].as_array())
+    else {
+        return Ok(Scope::legacy());
+    };
+    let raw: Vec<&str> = values
+        .iter()
+        .filter_map(|v| v["stringValue"].as_str())
+        .collect();
+    Scope::split(&raw.join(",")).map_err(|err| StoreError::Corrupt(err.to_string()))
 }
 
 fn grant_of(doc: &Doc) -> Result<Grant> {
@@ -641,6 +658,11 @@ impl Store for FirestoreStore {
             "owner": string(token.owner.as_str()),
             "name": string(&token.name),
             "created_at": timestamp(token.created_at)?,
+            "scopes": {"arrayValue": {"values": token
+                .scopes
+                .iter()
+                .map(|scope| string(scope.as_str()))
+                .collect::<Vec<_>>()}},
         });
         if let Some(revoked_at) = token.revoked_at {
             fields["revoked_at"] = timestamp(revoked_at)?;
