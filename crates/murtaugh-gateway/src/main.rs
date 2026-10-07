@@ -6,6 +6,8 @@ use murtaugh_gateway::cli::{Cli, Command, InstallArgs, LaunchdCommand, VersionAr
 use murtaugh_gateway::launchd::{self, Job, Launchctl, Plan};
 use murtaugh_gateway::logging::redact;
 use murtaugh_gateway::version::{self, GitHub, VERSION};
+
+const BINARY: &str = "murtaugh-gateway";
 use murtaugh_gateway::{admin, config, open_store};
 
 fn main() -> ExitCode {
@@ -76,10 +78,10 @@ fn launchd_command(
     alias: &str,
     command: LaunchdCommand,
 ) -> Result<String, String> {
-    launchd::ensure_macos().map_err(|err| err.to_string())?;
+    launchd::ensure_macos(BINARY).map_err(|err| err.to_string())?;
     let home =
         config::home().ok_or("HOME is not set, so there is no LaunchAgents folder to write to")?;
-    let job = Job::new(alias, home).map_err(|err| err.to_string())?;
+    let job = Job::new(BINARY, alias, home).map_err(|err| err.to_string())?;
     if let LaunchdCommand::Install(args) = command {
         return install_launchd(flag, job, args);
     }
@@ -116,7 +118,11 @@ fn install_launchd(flag: Option<PathBuf>, job: Job, args: InstallArgs) -> Result
     let plan = Plan {
         job,
         binary,
-        config,
+        arguments: vec![
+            "--config".to_owned(),
+            config.display().to_string(),
+            "run".to_owned(),
+        ],
     };
     let installed = launchd::install(&plan, args.update_existing).map_err(|err| err.to_string())?;
     let verb = if installed.replaced {
@@ -129,10 +135,10 @@ fn install_launchd(flag: Option<PathBuf>, job: Job, args: InstallArgs) -> Result
         installed.path.display(),
         installed.label
     );
-    if !plan.config.exists() {
+    if !config.exists() {
         out.push_str(&format!(
             "\nNote: {} does not exist yet; create it before starting the job.",
-            plan.config.display()
+            config.display()
         ));
     }
     out.push_str(&format!(
@@ -154,6 +160,7 @@ fn print_version(args: VersionArgs) -> Result<String, String> {
     if !args.check {
         return Ok(format!("murtaugh-gateway {VERSION}"));
     }
-    let checked = version::check(VERSION, &GitHub).map_err(|err| err.to_string())?;
-    Ok(checked.to_string())
+    let checked =
+        version::check(VERSION, &GitHub { binary: BINARY }).map_err(|err| err.to_string())?;
+    Ok(checked.message(BINARY))
 }

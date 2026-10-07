@@ -12,7 +12,6 @@ pub mod files;
 pub mod fleet;
 pub mod home;
 pub mod hub;
-pub mod launchd;
 pub mod logging;
 pub mod manifest;
 pub mod node_access;
@@ -27,10 +26,9 @@ pub mod roles;
 pub mod run;
 pub mod signin;
 pub mod thread_commands;
-pub mod tls;
-pub mod token;
 pub mod tools;
-pub mod version;
+
+pub use murtaugh_common::{launchd, tls, token, version};
 
 use std::sync::Arc;
 use std::time::Duration;

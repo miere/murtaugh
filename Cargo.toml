@@ -20,6 +20,7 @@ panic = "deny"
 rax = { git = "https://github.com/miere/rax-rs", tag = "0.6.0" }
 rax-tokio = { git = "https://github.com/miere/rax-rs", tag = "0.6.0" }
 rax-sim = { git = "https://github.com/miere/rax-rs", tag = "0.6.0" }
+murtaugh-common = { path = "crates/murtaugh-common" }
 murtaugh-slack = { path = "crates/murtaugh-slack" }
 murtaugh-store = { path = "crates/murtaugh-store" }
 slack-sim = { path = "crates/slack-sim" }

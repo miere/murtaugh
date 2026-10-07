@@ -18,9 +18,9 @@ const PATH_DIRS: [&str; 6] = [
 #[derive(Debug, thiserror::Error)]
 pub enum LaunchdError {
     #[error(
-        "murtaugh-gateway launchd is macOS only; this is {os}. Run the gateway under whatever supervisor this system uses"
+        "{command} launchd is macOS only; this is {os}. Run it under whatever supervisor this system uses"
     )]
-    NotMacos { os: &'static str },
+    NotMacos { command: String, os: &'static str },
     #[error(
         "alias {0:?} cannot be used in a launchd label; use letters, digits, dots, dashes or underscores"
     )]
@@ -29,8 +29,8 @@ pub enum LaunchdError {
         "{path} already exists (label {label}): pass --update-existing to replace it. It may be running a live daemon, so this command will not overwrite one by accident"
     )]
     Exists { path: PathBuf, label: String },
-    #[error("no LaunchAgent at {path}; run `murtaugh-gateway launchd install` first")]
-    NotInstalled { path: PathBuf },
+    #[error("no LaunchAgent at {path}; run `{command} launchd install` first")]
+    NotInstalled { path: PathBuf, command: String },
     #[error("{path}: {source}")]
     Io {
         path: PathBuf,
@@ -84,14 +84,16 @@ impl Control for Launchctl {
 }
 
 /// One installed daemon, named by its alias. Enough to address the job; not enough to write it.
+/// `command` is the binary's name, which messages tell the reader to run.
 #[derive(Debug, Clone)]
 pub struct Job {
+    command: String,
     alias: String,
     home: PathBuf,
 }
 
 impl Job {
-    pub fn new(alias: &str, home: PathBuf) -> Result<Self, LaunchdError> {
+    pub fn new(command: &str, alias: &str, home: PathBuf) -> Result<Self, LaunchdError> {
         let valid = !alias.is_empty()
             && alias
                 .chars()
@@ -100,9 +102,14 @@ impl Job {
             return Err(LaunchdError::Alias(alias.to_owned()));
         }
         Ok(Self {
+            command: command.to_owned(),
             alias: alias.to_owned(),
             home,
         })
+    }
+
+    pub fn command(&self) -> &str {
+        &self.command
     }
 
     pub fn alias(&self) -> &str {
@@ -144,11 +151,12 @@ impl Job {
     }
 }
 
+/// What the LaunchAgent runs: `binary` with `arguments`.
 #[derive(Debug, Clone)]
 pub struct Plan {
     pub job: Job,
     pub binary: PathBuf,
-    pub config: PathBuf,
+    pub arguments: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -194,6 +202,7 @@ impl Outcome {
 /// What launchd currently thinks of the job, which is the thing `launchctl print` buries.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Status {
+    pub command: String,
     pub label: String,
     pub plist: PathBuf,
     pub installed: bool,
@@ -216,8 +225,8 @@ impl fmt::Display for Status {
         }
         let headline = match (self.loaded, self.pid) {
             (false, _) => format!(
-                "{} is installed but not loaded; `murtaugh-gateway launchd start` hands it to launchd.",
-                self.label
+                "{} is installed but not loaded; `{} launchd start` hands it to launchd.",
+                self.label, self.command
             ),
             (true, Some(pid)) => format!("{} is running (pid {pid}).", self.label),
             (true, None) => format!("{} is loaded but not running right now.", self.label),
@@ -236,6 +245,7 @@ pub fn status(job: &Job, ctl: &dyn Control) -> Result<Status, LaunchdError> {
     let plist = job.path();
     let installed = plist.exists();
     let mut status = Status {
+        command: job.command.clone(),
         label: job.label(),
         plist,
         installed,
@@ -270,11 +280,12 @@ fn field<'a>(out: &'a str, key: &str) -> Option<&'a str> {
     })
 }
 
-pub fn ensure_macos() -> Result<(), LaunchdError> {
+pub fn ensure_macos(command: &str) -> Result<(), LaunchdError> {
     if cfg!(target_os = "macos") {
         Ok(())
     } else {
         Err(LaunchdError::NotMacos {
+            command: command.to_owned(),
             os: std::env::consts::OS,
         })
     }
@@ -286,15 +297,12 @@ impl Plan {
         let home = &self.job.home;
         let mut path = vec![home.join(".local/bin").display().to_string()];
         path.extend(PATH_DIRS.iter().map(|dir| (*dir).to_owned()));
-        let args = [
-            self.binary.display().to_string(),
-            "--config".to_owned(),
-            self.config.display().to_string(),
-            "run".to_owned(),
-        ]
-        .iter()
-        .map(|arg| format!("\t\t<string>{}</string>\n", escape(arg)))
-        .collect::<String>();
+        let args = std::iter::once(self.binary.display().to_string())
+            .chain(self.arguments.iter().cloned())
+            .collect::<Vec<_>>()
+            .iter()
+            .map(|arg| format!("\t\t<string>{}</string>\n", escape(arg)))
+            .collect::<String>();
         format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -416,7 +424,10 @@ fn require_installed(job: &Job) -> Result<PathBuf, LaunchdError> {
     if path.exists() {
         Ok(path)
     } else {
-        Err(LaunchdError::NotInstalled { path })
+        Err(LaunchdError::NotInstalled {
+            path,
+            command: job.command.clone(),
+        })
     }
 }
 
@@ -574,14 +585,18 @@ mod tests {
     }
 
     fn job(home: &Path) -> Job {
-        Job::new("work", home.to_path_buf()).unwrap()
+        Job::new("murtaugh-gateway", "work", home.to_path_buf()).unwrap()
     }
 
     fn plan(home: &Path) -> Plan {
         Plan {
             job: job(home),
             binary: PathBuf::from("/opt/murtaugh/bin/murtaugh-gateway"),
-            config: PathBuf::from("/Users/me/.config/murtaugh/work/murtaugh.toml"),
+            arguments: vec![
+                "--config".into(),
+                "/Users/me/.config/murtaugh/work/murtaugh.toml".into(),
+                "run".into(),
+            ],
         }
     }
 
@@ -637,7 +652,7 @@ mod tests {
     fn an_alias_that_would_break_the_label_is_refused() {
         let home = tempfile::tempdir().unwrap();
         for alias in ["", "a b", "a/b"] {
-            let refused = Job::new(alias, home.path().to_path_buf());
+            let refused = Job::new("murtaugh-gateway", alias, home.path().to_path_buf());
             assert!(matches!(refused, Err(LaunchdError::Alias(_))), "{alias:?}");
         }
     }
@@ -646,7 +661,7 @@ mod tests {
     fn values_are_escaped_for_xml() {
         let home = tempfile::tempdir().unwrap();
         let mut plan = plan(home.path());
-        plan.config = PathBuf::from("/tmp/a&b<c>.toml");
+        plan.arguments[1] = "/tmp/a&b<c>.toml".to_owned();
         assert!(plan.plist().contains("/tmp/a&amp;b&lt;c&gt;.toml"));
         install(&plan, false).unwrap();
     }
