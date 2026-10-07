@@ -2025,7 +2025,7 @@ async fn a_turn_that_fails_partway_keeps_its_answer_and_gets_a_card_of_its_own()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_failing_credential_is_told_to_the_owner_by_dm_and_settled_on_recovery() {
+async fn a_failing_credential_is_logged_without_a_dm() {
     let rig = rig().await;
     let laptop = rig.node(ALICE, "laptop").await;
     let health = |degraded: bool| rax::credential::CredentialHealth {
@@ -2035,33 +2035,15 @@ async fn a_failing_credential_is_told_to_the_owner_by_dm_and_settled_on_recovery
         since: None,
         expires_at: None,
     };
-    let call = rax::NodeCall::CredentialHealth(health(true));
-    within(laptop.handle.call(call)).await.unwrap();
-    within(
-        laptop
-            .handle
-            .call(rax::NodeCall::CredentialHealth(health(true))),
-    )
-    .await
-    .unwrap();
-    let dm = rig.sim.im_channel(ALICE).expect("no DM with the owner");
-    let cards = rig.sim.messages(&dm);
-    assert_eq!(cards.len(), 1, "a repeat report posted a second card");
-    assert_eq!(cards[0].text, "A credential on laptop is failing");
-    assert!(card_says(&cards[0], "token expired"));
-    assert!(card_says(&cards[0], "credential_renew"));
-
-    within(
-        laptop
-            .handle
-            .call(rax::NodeCall::CredentialHealth(health(false))),
-    )
-    .await
-    .unwrap();
-    let cards = rig.sim.messages(&dm);
-    assert_eq!(cards.len(), 1);
-    assert_eq!(cards[0].text, "A credential on laptop recovered");
-    assert!(!card_says(&cards[0], "credential_renew"));
+    for degraded in [true, true, false] {
+        let call = rax::NodeCall::CredentialHealth(health(degraded));
+        within(laptop.handle.call(call)).await.unwrap();
+    }
+    let dm = rig.sim.im_channel(ALICE);
+    assert!(
+        dm.is_none_or(|dm| rig.sim.messages(&dm).is_empty()),
+        "a credential report reached the owner's DMs"
+    );
     assert_eq!(rig.sim.violations(), vec![]);
     rig.shutdown.cancel();
 }

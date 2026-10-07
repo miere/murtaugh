@@ -19,7 +19,6 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::access::{Access, Snapshot};
-use crate::alerts::{Credentials, Reporter};
 use crate::files::Files;
 use crate::fleet::{Fleet, Node};
 use crate::node_access;
@@ -72,7 +71,6 @@ pub async fn start(
     files: Files,
     tools: Tools,
     lent: Lent,
-    credentials: Credentials,
     sign_ins: SignIns,
     shutdown: CancellationToken,
 ) -> std::io::Result<Hub> {
@@ -86,7 +84,6 @@ pub async fn start(
         files,
         tools,
         lent,
-        credentials,
         sign_ins,
         changes,
         backgrounds,
@@ -142,7 +139,6 @@ struct Serving {
     files: Files,
     tools: Tools,
     lent: Lent,
-    credentials: Credentials,
     sign_ins: SignIns,
     changes: mpsc::Sender<FleetChange>,
     backgrounds: mpsc::Sender<Background>,
@@ -168,7 +164,6 @@ async fn serve(link: GatewayLink, mut events: LinkEvents, serving: Serving) {
         files,
         tools,
         lent,
-        credentials,
         sign_ins,
         changes,
         backgrounds,
@@ -247,13 +242,13 @@ async fn serve(link: GatewayLink, mut events: LinkEvents, serving: Serving) {
                 id,
                 call: NodeCall::CredentialHealth(health),
             } => {
-                tracing::info!(node = %name, credential = %health.credential, degraded = health.degraded, reason = ?health.reason, "node credential health");
-                let from = Reporter {
-                    selector: &selector,
-                    name: &name,
-                    owner: &owner,
-                };
-                credentials.report(from, &health).await;
+                // Logged, not DMed: the node asks its owner to sign in, and that request is the one
+                // message they need.
+                if health.degraded {
+                    tracing::error!(node = %name, %owner, credential = %health.credential, reason = ?health.reason, since = ?health.since, expires_at = ?health.expires_at, "a node credential is failing");
+                } else {
+                    tracing::info!(node = %name, credential = %health.credential, "node credential health");
+                }
                 if let Err(err) = link.reply(id, NodeReply::CredentialHealth).await {
                     tracing::debug!(node = %name, error = %err, "could not answer a node call");
                 }

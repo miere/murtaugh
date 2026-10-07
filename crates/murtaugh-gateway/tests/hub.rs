@@ -51,7 +51,6 @@ async fn rig() -> Rig {
         murtaugh_gateway::files::Files::default(),
         murtaugh_gateway::tools::Tools::default(),
         murtaugh_gateway::tools::Lent::new(store.clone()),
-        murtaugh_gateway::alerts::Credentials::default(),
         murtaugh_gateway::signin::SignIns::new(None, access.clone()),
         shutdown.clone(),
     )

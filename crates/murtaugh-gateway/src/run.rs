@@ -123,7 +123,6 @@ pub async fn serve(
         ))),
     ]);
     let lent = crate::tools::Lent::new(store.clone());
-    let credentials = crate::alerts::Credentials::new(slack.clone());
     let sign_ins = crate::signin::SignIns::new(Some(slack.clone()), access.clone());
     let mut hub = hub::start(
         config.listen,
@@ -132,7 +131,6 @@ pub async fn serve(
         files.clone(),
         tools.clone(),
         lent.clone(),
-        credentials,
         sign_ins.clone(),
         shutdown.clone(),
     )
