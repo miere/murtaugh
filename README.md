@@ -194,13 +194,42 @@ the fleet. That is how `murtaugh-client acp` puts an editor's agent sessions on 
 | Crate | What it is |
 |---|---|
 | `murtaugh-gateway` | The `murtaugh-gateway` binary. |
+| `murtaugh-client` | The `murtaugh-client` binary: a person's own client for the RAX API, such as an editor's ACP bridge. |
+| `murtaugh-common` | What both binaries share: credentials, logging that redacts them, the version check, the launchd job. |
 | `murtaugh-store` | Where the gateway keeps its configuration: SQLite on one machine, Firestore for a cluster. |
 | `murtaugh-slack` | A Slack client: Socket Mode and the Web API methods the gateway calls. |
 | `slack-sim` | A fake Slack that validates and records every call, for testing without a workspace. |
 
+## murtaugh-client
+
+`murtaugh-client acp` lets an editor that speaks [ACP](https://agentclientprotocol.com) run its
+agent sessions on your Murtaugh fleet. The editor starts it as an agent over stdio; it dials
+Murtaugh's RAX API with a client token and relays each session to a node.
+
+Mint a client token from the Home tab (*New client token*) and save it with Murtaugh's address:
+
+```sh
+murtaugh-client login --gateway wss://murtaugh.example.com < editor.token
+```
+
+That writes `~/.config/murtaugh/client/default.toml` and a `default.token` beside it, readable by
+you alone; `--profile <alias>` keeps several apart. Then point the editor's agent entry at:
+
+```sh
+murtaugh-client acp --name openknowledge
+```
+
+- `--name` is the namespace the editor's tools are lent under: `[a-z0-9_]`, at most 27 characters,
+  `acp` by default. `--gateway` and `--token-file` override the profile.
+- The MCP servers the editor names for a session are connected here, on your machine, and lent to
+  the session as one group; so are the editor's file reads and writes when it offers them. Files
+  the editor links are read through the editor, unsaved changes included.
+- A tool call your node's tool rules leave to a person is asked in the editor.
+- Logs go to `~/Library/Logs/murtaugh/client/<profile>.log`, never stdout, which carries ACP.
+
 ## Releasing
 
-Push a tag such as `v0.1.0`. The release workflow builds every target, stamps the version from the
+Push a tag such as `v0.1.0`. The release workflow builds both binaries for every target, stamps the version from the
 tag, and publishes the archives with their SHA-256 sums. Both workflows need a `RAX_READ_TOKEN`
 secret that can read `miere/rax-rs`, since Cargo fetches the RAX crates from that private
 repository.
