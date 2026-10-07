@@ -161,13 +161,6 @@ async fn accept(
         return Ok((StatusCode::ACCEPTED, axum::Json(accepted)).into_response());
     }
     let request = parse(&body)?;
-    if request.output == Output::Quiet {
-        return Err(Refusal::new(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "`output` may only be `stream` for now",
-        ));
-    }
     let (channel, thread_ts, direct) = target(inner, &token, request.target).await?;
     if let Some(thread_ts) = &thread_ts
         && inner.chat.is_busy(&channel, thread_ts)
@@ -193,6 +186,7 @@ async fn accept(
         thread_ts,
         prompt: request.prompt,
         direct,
+        quiet: request.output == Output::Quiet,
     };
     let (channel, thread_ts) = inner
         .chat

@@ -87,6 +87,8 @@ pub struct Reply {
     beats: Vec<Beat>,
     open: Option<usize>,
     written: bool,
+    /// Draws nothing: the agent's words and tool cards stay off the thread.
+    quiet: bool,
 }
 
 impl Reply {
@@ -102,6 +104,16 @@ impl Reply {
             beats: Vec::new(),
             open: None,
             written: false,
+            quiet: false,
+        }
+    }
+
+    /// A reply that posts nothing of the agent's words or tools, for a run whose agent speaks for
+    /// itself with `send_message`. What the gateway itself has to say still goes to the target.
+    pub fn quiet(slack: SlackClient, target: Target) -> Self {
+        Self {
+            quiet: true,
+            ..Self::new(slack, target)
         }
     }
 
@@ -119,7 +131,7 @@ impl Reply {
     }
 
     pub async fn text(&mut self, text: &str) {
-        if text.is_empty() {
+        if text.is_empty() || self.quiet {
             return;
         }
         self.pending.push_str(text);
@@ -306,7 +318,7 @@ impl Reply {
 
     /// Settled states always go out; a running beat is redrawn at most once a `TASK_INTERVAL`.
     pub async fn task(&mut self, id: &str, card: TaskCard<'_>, status: TaskStatus) {
-        if matches!(self.mode, Mode::Buffered { .. }) {
+        if matches!(self.mode, Mode::Buffered { .. }) || self.quiet {
             return;
         }
         // Any words still pending belong before this tool, and close the beat it would join.
@@ -368,6 +380,9 @@ impl Reply {
     }
 
     pub async fn finish(&mut self) {
+        if self.quiet {
+            return;
+        }
         let pending = self.pending.len();
         self.emit(pending).await;
         if let Mode::Streaming(Some(stream)) = &self.mode {

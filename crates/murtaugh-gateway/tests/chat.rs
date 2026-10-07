@@ -3846,3 +3846,61 @@ async fn eventually_async<T>(what: &str, mut check: impl AsyncFnMut() -> Option<
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }
+
+/// A quiet workload posts nothing of the turn: no thinking line, no streamed words, no tool cards.
+/// What reaches the thread is what the agent sends itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_quiet_workload_posts_only_what_the_agent_sends() {
+    let rig = rig().await;
+    let mut laptop = rig.node_lent(ALICE, "laptop", Groups::Takes).await;
+    let token = client_token(&rig, ALICE, WORKLOADS).await;
+    let ask = serde_json::json!({
+        "prompt": "write the report",
+        "target": {"channel": GENERAL},
+        "output": "quiet",
+    });
+    let (status, accepted, _) = workload(&rig, Some(&token), ask, None).await;
+    assert_eq!(status, 202, "{accepted}");
+    let thread = accepted["thread_ts"].as_str().unwrap().to_owned();
+    let (session, _) = laptop.next_opened().await;
+    laptop.next_prompt().await;
+    laptop
+        .call_tool(
+            &session,
+            Some("slack"),
+            "send_message",
+            serde_json::json!({"text": "**Report** ready"}),
+        )
+        .await
+        .unwrap();
+    eventually("the agent's own message", || {
+        rig.sim
+            .thread(GENERAL, &thread)
+            .iter()
+            .find(|m| m.text.contains("*Report* ready"))
+            .map(drop)
+    })
+    .await;
+    // The node has long finished its turn, whose words would have streamed by now.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let posted: Vec<String> = rig
+        .sim
+        .thread(GENERAL, &thread)
+        .iter()
+        .map(|m| m.text.clone())
+        .collect();
+    assert_eq!(posted.len(), 2, "{posted:?}");
+    assert!(
+        !posted.iter().any(|text| text.contains("pong to")),
+        "{posted:?}"
+    );
+    assert!(
+        !rig.sim.calls().iter().any(|c| {
+            c.method == "assistant.threads.setStatus"
+                && c.params["thread_ts"].as_str() == Some(thread.as_str())
+        }),
+        "a quiet workload showed that it was thinking"
+    );
+    assert_eq!(rig.sim.violations(), vec![]);
+    rig.shutdown.cancel();
+}
