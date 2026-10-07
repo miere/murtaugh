@@ -1246,6 +1246,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
+name = "murtaugh-common"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "hex",
+ "rand 0.10.2",
+ "rustls",
+ "semver",
+ "serde",
+ "sha2",
+ "subtle",
+ "tempfile",
+ "thiserror",
+ "tracing",
+ "tracing-subscriber",
+ "ureq",
+]
+
+[[package]]
 name = "murtaugh-gateway"
 version = "0.1.0"
 dependencies = [
@@ -1254,6 +1273,7 @@ dependencies = [
  "clap",
  "dotenvy",
  "hex",
+ "murtaugh-common",
  "murtaugh-slack",
  "murtaugh-store",
  "rand 0.10.2",

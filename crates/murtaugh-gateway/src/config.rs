@@ -177,19 +177,11 @@ struct LogFile {
     turn_timings: Option<bool>,
 }
 
-pub fn home() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from)
-}
+pub use murtaugh_common::paths::{absolute, home};
 
 pub fn default_path(alias: &str) -> Result<PathBuf, ConfigError> {
     let home = home().ok_or(ConfigError::NoHome)?;
     Ok(home.join(".config/murtaugh").join(alias).join(FILE_NAME))
-}
-
-pub fn absolute(path: &Path) -> PathBuf {
-    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn read(path: &Path) -> Result<File, ConfigError> {
@@ -219,12 +211,7 @@ fn dir_of(path: &Path) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/"))
 }
 
-fn expand_home(raw: &str) -> PathBuf {
-    match (raw.strip_prefix("~/"), home()) {
-        (Some(rest), Some(home)) => home.join(rest),
-        _ => PathBuf::from(raw),
-    }
-}
+use murtaugh_common::paths::expand_home;
 
 /// Relative paths are resolved against the configuration's folder, so an alias is self-contained.
 fn resolve(dir: &Path, raw: &str) -> PathBuf {

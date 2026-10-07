@@ -1,4 +1,3 @@
-use std::fmt;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -31,7 +30,10 @@ pub trait Releases {
     fn latest(&self) -> Result<Release, VersionError>;
 }
 
-pub struct GitHub;
+/// Asks GitHub as `binary`, which names itself in the user agent.
+pub struct GitHub {
+    pub binary: &'static str,
+}
 
 impl Releases for GitHub {
     fn latest(&self) -> Result<Release, VersionError> {
@@ -43,7 +45,7 @@ impl Releases for GitHub {
         let mut request = agent
             .get(LATEST_RELEASE)
             .header("Accept", "application/vnd.github+json")
-            .header("User-Agent", format!("murtaugh-gateway/{VERSION}"));
+            .header("User-Agent", format!("{}/{VERSION}", self.binary));
         if let Some(token) = &token {
             request = request.header("Authorization", format!("Bearer {token}"));
         }
@@ -95,26 +97,22 @@ pub enum Check {
     },
 }
 
-impl fmt::Display for Check {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Check {
+    /// What `binary version --check` prints.
+    pub fn message(&self, binary: &str) -> String {
         match self {
             Self::UpToDate { current, latest } => {
-                write!(
-                    f,
-                    "murtaugh-gateway {current} is up to date (latest release: {latest})"
-                )
+                format!("{binary} {current} is up to date (latest release: {latest})")
             }
             Self::UpdateAvailable {
                 current,
                 latest,
                 url,
-            } => write!(
-                f,
-                "murtaugh-gateway {current} is installed; {latest} is available.\nRelease notes: {url}"
+            } => format!(
+                "{binary} {current} is installed; {latest} is available.\nRelease notes: {url}"
             ),
-            Self::Uncomparable { current, latest } => write!(
-                f,
-                "murtaugh-gateway {current} is not a release build, so it cannot tell whether an update applies (latest release: {latest})"
+            Self::Uncomparable { current, latest } => format!(
+                "{binary} {current} is not a release build, so it cannot tell whether an update applies (latest release: {latest})"
             ),
         }
     }
@@ -160,7 +158,11 @@ mod tests {
         assert!(
             matches!(checked, Check::UpdateAvailable { ref url, .. } if url.ends_with("v0.2.0"))
         );
-        assert!(checked.to_string().contains("v0.2.0 is available"));
+        assert!(
+            checked
+                .message("murtaugh-gateway")
+                .contains("v0.2.0 is available")
+        );
     }
 
     #[test]
