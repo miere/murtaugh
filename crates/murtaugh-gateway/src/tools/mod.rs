@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
-use murtaugh_store::Store;
+use murtaugh_store::{Conversation, Store};
 use rax::id::{RequestId, SessionId};
 use rax::tool::{CallTool, ToolDef, ToolGroup, ToolOutcome};
 use rax::{Error, ErrorKind, NodeReply};
@@ -15,6 +15,7 @@ use rax_tokio::gateway::GatewayLink;
 use serde_json::Value;
 
 pub mod canvas;
+pub mod send_message;
 pub mod slack_message;
 
 /// The group every Slack thread's session is lent, so the agent sees `mcp__slack__…`.
@@ -34,6 +35,19 @@ pub trait Tool: Send + Sync {
     /// `Err` is the tool's own answer, which the agent reads and may act on — not a failure of the
     /// call. A call that cannot run at all never reaches here.
     async fn invoke(&self, arguments: Value) -> Result<String, String>;
+
+    /// For a tool that acts inside the calling session's conversation. Most do not.
+    async fn invoke_in(&self, context: &Context, arguments: Value) -> Result<String, String> {
+        let _ = context;
+        self.invoke(arguments).await
+    }
+}
+
+/// Where a call came from, resolved by the gateway and never taken from the node.
+#[derive(Debug, Default)]
+pub struct Context {
+    /// The Slack thread the calling session is pinned to, if any.
+    pub conversation: Option<Conversation>,
 }
 
 #[derive(Clone, Default)]
@@ -123,7 +137,13 @@ impl Tools {
             }
             return;
         };
-        let outcome = match tool.invoke(call.arguments.unwrap_or(Value::Null)).await {
+        let context = Context {
+            conversation: lent.conversation(selector, &call.session_id).await,
+        };
+        let outcome = match tool
+            .invoke_in(&context, call.arguments.unwrap_or(Value::Null))
+            .await
+        {
             Ok(content) => ToolOutcome {
                 content,
                 is_error: false,
@@ -174,6 +194,20 @@ impl Lent {
     /// found through its pin.
     pub fn detached(&self, selector: &str) {
         lock(&self.sessions).retain(|(node, _), _| node != selector);
+    }
+
+    /// The Slack thread a session is pinned to.
+    pub async fn conversation(&self, selector: &str, session: &SessionId) -> Option<Conversation> {
+        match self.store.pins().await {
+            Ok(pins) => pins
+                .into_iter()
+                .find(|pin| pin.node == selector && pin.session_id == session.0)
+                .map(|pin| pin.conversation),
+            Err(err) => {
+                tracing::warn!(error = %err, "could not read the pins to find a session's thread");
+                None
+            }
+        }
     }
 
     pub async fn groups(&self, selector: &str, session: &SessionId) -> Vec<String> {

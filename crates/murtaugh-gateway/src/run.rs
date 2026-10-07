@@ -121,6 +121,9 @@ pub async fn serve(
         Box::new(crate::tools::canvas::edit::EditCanvas::new(Some(
             slack.clone(),
         ))),
+        Box::new(crate::tools::send_message::SendMessage::new(Some(
+            slack.clone(),
+        ))),
     ]);
     let lent = crate::tools::Lent::new(store.clone());
     let sign_ins = crate::signin::SignIns::new(Some(slack.clone()), access.clone());

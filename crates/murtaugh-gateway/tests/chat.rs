@@ -3539,3 +3539,57 @@ async fn a_call_from_someone_elses_client_is_approved_by_the_node_owner_in_their
     assert_eq!(rig.sim.violations(), vec![]);
     rig.shutdown.cancel();
 }
+
+/// `send_message` posts into the calling session's own thread, which the gateway resolves; the
+/// agent never names one.
+#[tokio::test(flavor = "multi_thread")]
+async fn send_message_posts_into_the_sessions_own_thread() {
+    let rig = rig().await;
+    let mut laptop = rig.node_lent(ALICE, "laptop", Groups::Takes).await;
+    let ts = rig.sim.mention(ALICE, GENERAL, "ping", None).await.unwrap();
+    let (session, _) = laptop.next_opened().await;
+    laptop.next_prompt().await;
+
+    let sent = laptop
+        .call_tool(
+            &session,
+            Some("slack"),
+            "send_message",
+            serde_json::json!({"text": "**Deploy** finished"}),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            &sent,
+            NodeReply::CallTool(ToolOutcome {
+                is_error: false,
+                ..
+            })
+        ),
+        "{sent:?}"
+    );
+    eventually("the posted message", || {
+        rig.sim
+            .thread(GENERAL, &ts)
+            .iter()
+            .find(|m| m.text.contains("*Deploy* finished"))
+            .map(drop)
+    })
+    .await;
+    let empty = laptop
+        .call_tool(
+            &session,
+            Some("slack"),
+            "send_message",
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        empty,
+        NodeReply::CallTool(ToolOutcome { is_error: true, .. })
+    ));
+    assert_eq!(rig.sim.violations(), vec![]);
+    rig.shutdown.cancel();
+}
