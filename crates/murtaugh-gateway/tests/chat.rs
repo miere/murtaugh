@@ -3812,6 +3812,13 @@ async fn a_workload_can_answer_in_its_owners_dm() {
     laptop.next_prompt().await;
     let thread = accepted["thread_ts"].as_str().unwrap();
     wait_for_turn_end(&rig, &dm, thread, "pong to: nightly report").await;
+
+    // `me` names the token's owner, for a caller that does not know its Slack id.
+    let ask = serde_json::json!({"prompt": "weekly report", "target": {"dm": "me"}});
+    let (status, accepted, _) = workload(&rig, Some(&token), ask, None).await;
+    assert_eq!(status, 202, "{accepted}");
+    assert_eq!(accepted["channel"].as_str(), Some(dm.as_str()));
+    laptop.next_prompt().await;
     rig.shutdown.cancel();
 }
 

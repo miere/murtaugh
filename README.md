@@ -217,7 +217,8 @@ curl -X POST https://murtaugh.example.com/api/v1/workloads \
 ```
 
 - `target` is `{"channel": …}` for a new thread, `{"channel": …, "thread_ts": …}` to continue one
-  (as if its owner had written there), or `{"dm": …}`, which may only name the token's owner.
+  (as if its owner had written there), or `{"dm": …}`, which may only name the token's owner, or
+  `"me"` for the same.
 - It fails closed, with `{"error": …, "message": …}`: `401` for no live token, `403
   insufficient_scope`, `400`/`413` for a bad body or a prompt over 32 KiB, `403 bot_cannot_post`
   when the bot is not in the channel, `404 thread_not_found`, `409 busy` when the thread has a turn
