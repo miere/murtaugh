@@ -291,7 +291,9 @@ async fn target(
     };
     let (channel, thread_ts) = match target {
         Target::Dm { dm } => {
-            if UserId::parse(&dm).ok().as_ref() != Some(&token.owner) {
+            // `me` is the token's owner, for a caller that knows its token but not its Slack id.
+            let is_owner = dm == "me" || UserId::parse(&dm).ok().as_ref() == Some(&token.owner);
+            if !is_owner {
                 return Err(Refusal::new(
                     StatusCode::FORBIDDEN,
                     "dm_not_owner",
