@@ -257,6 +257,19 @@ murtaugh-client acp --name openknowledge
 - A tool call your node's tool rules leave to a person is asked in the editor.
 - Logs go to `~/Library/Logs/murtaugh/client/<profile>.log`, never stdout, which carries ACP.
 
+`murtaugh-client workload` sends a workload from the command line with a profile's token, which
+needs the `workloads` scope. It posts to the profile's Murtaugh, prints what was started as JSON,
+and exits non-zero with Murtaugh's reason when refused:
+
+```sh
+murtaugh-client workload --channel C0123ABCD "Summarise the deploys from yesterday"
+echo "What changed today?" | murtaugh-client workload --dm --quiet --idempotency-key daily-2026-10-08
+murtaugh-client workload --channel C0123ABCD --thread 1791355057.511709 "And the day before?"
+```
+
+`--dm` is your own DM with the bot; `--quiet` posts only what the agent sends; `--profile`,
+`--gateway` and `--token-file` work as they do for `acp`.
+
 ## Releasing
 
 Push a tag such as `v0.1.0`. The release workflow builds both binaries for every target, stamps the version from the

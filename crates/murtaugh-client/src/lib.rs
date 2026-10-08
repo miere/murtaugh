@@ -4,3 +4,4 @@
 pub mod bridge;
 pub mod mcp;
 pub mod profile;
+pub mod workload;

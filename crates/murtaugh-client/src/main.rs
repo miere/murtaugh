@@ -6,6 +6,7 @@ use agent_client_protocol::Stdio;
 use clap::{Args, Parser, Subcommand};
 use murtaugh_client::bridge::{self, Options};
 use murtaugh_client::profile::{self, DEFAULT_PROFILE};
+use murtaugh_client::workload::{self, Target};
 use murtaugh_common::logging;
 use murtaugh_common::version::{self, GitHub, VERSION};
 
@@ -24,6 +25,8 @@ enum Command {
     Acp(AcpArgs),
     /// Save a client token, read from stdin, into a profile
     Login(LoginArgs),
+    /// Run a prompt on your nodes and answer in Slack; prints what was started, as JSON
+    Workload(WorkloadArgs),
     Version {
         /// Also ask GitHub whether a newer release exists
         #[arg(long)]
@@ -48,6 +51,36 @@ struct AcpArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(group(clap::ArgGroup::new("target").required(true).args(["channel", "dm"])))]
+struct WorkloadArgs {
+    /// The prompt; read from stdin when absent or `-`
+    prompt: Option<String>,
+    /// Answer in a new thread in this channel (its id, such as C0123ABCD)
+    #[arg(long, value_name = "CHANNEL")]
+    channel: Option<String>,
+    /// Continue this thread of --channel instead of starting one
+    #[arg(long, value_name = "TS", requires = "channel")]
+    thread: Option<String>,
+    /// Answer in your own DM with the bot
+    #[arg(long)]
+    dm: bool,
+    /// Post nothing of the turn itself, only what the agent sends
+    #[arg(long)]
+    quiet: bool,
+    /// Names this run: sending the same key again within a day starts nothing new
+    #[arg(long, value_name = "KEY")]
+    idempotency_key: Option<String>,
+    /// Murtaugh's address; overrides the profile
+    #[arg(long, value_name = "URL")]
+    gateway: Option<String>,
+    /// The client token file; overrides the profile
+    #[arg(long, value_name = "PATH")]
+    token_file: Option<PathBuf>,
+    #[arg(long, default_value = DEFAULT_PROFILE, value_name = "ALIAS")]
+    profile: String,
+}
+
+#[derive(Debug, Args)]
 struct LoginArgs {
     /// Also save Murtaugh's RAX address in the profile
     #[arg(long, value_name = "URL")]
@@ -61,6 +94,7 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Command::Acp(args) => acp(args),
         Command::Login(args) => login(args),
+        Command::Workload(args) => run_workload(args),
         Command::Version { check } => print_version(check),
     };
     match result {
@@ -107,6 +141,43 @@ fn acp(args: AcpArgs) -> Result<(), String> {
     runtime
         .block_on(bridge::serve(options, Stdio::new()))
         .map_err(|err| err.to_string())
+}
+
+fn run_workload(args: WorkloadArgs) -> Result<(), String> {
+    let prompt = match args.prompt.as_deref() {
+        Some(prompt) if prompt != "-" => prompt.to_owned(),
+        _ => {
+            let mut prompt = String::new();
+            std::io::stdin()
+                .read_to_string(&mut prompt)
+                .map_err(|err| format!("cannot read the prompt from stdin: {err}"))?;
+            prompt
+        }
+    };
+    let target = match (args.channel, args.thread) {
+        (Some(channel), Some(thread_ts)) => Target::Thread { channel, thread_ts },
+        (Some(channel), None) => Target::Channel(channel),
+        (None, _) => Target::OwnDm,
+    };
+    let profile_path = profile::path(&args.profile).map_err(|err| err.to_string())?;
+    let saved = profile::load(&profile_path).map_err(|err| err.to_string())?;
+    let resolved = profile::resolve(&saved, &profile_path, args.gateway, args.token_file)
+        .map_err(|err| err.to_string())?;
+    let token = profile::read_token(&resolved.token_file).map_err(|err| err.to_string())?;
+    murtaugh_common::tls::init();
+    let request = workload::Request {
+        prompt,
+        target,
+        quiet: args.quiet,
+        idempotency_key: args.idempotency_key,
+    };
+    let accepted =
+        workload::send(&resolved.gateway, &token, &request).map_err(|err| err.to_string())?;
+    println!(
+        "{}",
+        serde_json::to_string(&accepted).map_err(|err| err.to_string())?
+    );
+    Ok(())
 }
 
 fn login(args: LoginArgs) -> Result<(), String> {
