@@ -60,7 +60,6 @@ pub fn capabilities(tools: &Tools) -> GatewayCapabilities {
         resource_schemes: vec!["chat".into()],
         readable_schemes: vec![crate::files::SCHEME.into(), relay::SCHEME.into()],
         tools: tools.catalogue(),
-        attachment_receipts: true,
     }
 }
 
@@ -227,6 +226,7 @@ async fn serve(link: GatewayLink, mut events: LinkEvents, serving: Serving) {
     };
     report_ignored(&link, &name, &read.ignored).await;
     let capabilities = initialized.capabilities;
+    let local_files = capabilities.local_files;
     tracing::info!(node = %name, %owner, tool_gate = ?capabilities.tool_gate, access = ?read.access, "node attached");
     let attachment = fleet.attach(Node {
         selector: selector.clone(),
@@ -282,7 +282,11 @@ async fn serve(link: GatewayLink, mut events: LinkEvents, serving: Serving) {
             } => {
                 let (tools, lent, link, name) =
                     (tools.clone(), lent.clone(), link.clone(), name.clone());
-                tokio::spawn(async move { tools.serve(&link, &lent, &name, id, call).await });
+                tokio::spawn(async move {
+                    tools
+                        .serve(&link, &lent, &name, local_files, id, call)
+                        .await
+                });
             }
             LinkEvent::Request {
                 id,

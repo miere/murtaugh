@@ -4,13 +4,14 @@
 use murtaugh_store::{Store, ToolMode, UserConfig, UserId};
 use rax::tool::{Decision, DeniedBy};
 
-/// The node's own tools for reaching the people in the conversation. They do nothing to the
-/// owner's machine, so asking the owner's permission to ask them a question helps nobody.
+/// The tools for reaching the people in the conversation. They do nothing to the owner's
+/// machine, so asking the owner's permission to ask them a question helps nobody.
 const TALKING_TOOLS: [&str; 4] = [
     "mcp__riggs__ask",
     "mcp__riggs__present_plan",
-    "mcp__riggs__attach",
     "mcp__riggs__auth",
+    // Lent by this gateway, in its `slack` group.
+    "mcp__slack__attach",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
