@@ -1,10 +1,10 @@
-# syntax=docker/dockerfile:1
-
 # Downloads the prebuilt Linux release binary instead of compiling from source, so this build
 # never needs the RAX_READ_TOKEN the release workflow uses for Cargo. The releases are public;
 # a token is optional, passed as a BuildKit secret (never baked into the image), and only
 # there to lift GitHub's anonymous API rate limit.
-FROM debian:trixie-slim AS fetch
+# Docker Hub throttles anonymous pulls from shared CI runners (429), so the base comes from
+# Google's mirror of it, and there is no "# syntax=" line to fetch a frontend from the Hub.
+FROM mirror.gcr.io/library/debian:trixie-slim AS fetch
 ARG VERSION
 ARG TARGET=x86_64-unknown-linux-gnu
 ARG REPO=miere/murtaugh
