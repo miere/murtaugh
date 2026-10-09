@@ -14,6 +14,7 @@ pub mod home;
 pub mod hub;
 pub mod logging;
 pub mod manifest;
+pub mod mentions;
 pub mod node_access;
 pub mod panel;
 pub mod picker;

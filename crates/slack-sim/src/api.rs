@@ -28,6 +28,7 @@ const METHODS: &[&str] = &[
     "conversations.replies",
     "conversations.info",
     "conversations.open",
+    "users.info",
     "files.info",
     "files.getUploadURLExternal",
     "files.completeUploadExternal",
@@ -287,6 +288,7 @@ fn dispatch(
         "conversations.replies" => replies(st, params),
         "conversations.info" => conversation_info(st, params),
         "conversations.open" => open_conversation(st, params),
+        "users.info" => user_info(st, params),
         "files.getUploadURLExternal" => crate::upload::reserve(st, params),
         "files.completeUploadExternal" => crate::upload::complete(st, params),
         "canvases.edit" => crate::canvas::edit(st, params),
@@ -605,6 +607,22 @@ fn conversation_info(st: &mut State, params: &Map<String, Value>) -> Result<Valu
         info["is_member"] = json!(chan.bot_member);
     }
     Ok(json!({"channel": info}))
+}
+
+fn user_info(st: &mut State, params: &Map<String, Value>) -> Result<Value, ApiError> {
+    let id = arg(params, "user")?.unwrap_or_default();
+    let user = st.users.get(&id).ok_or_else(|| benign("user_not_found"))?;
+    // A bot has a real name and no display name, which is what Slack sends for one.
+    let display_name = match id == BOT_USER_ID {
+        true => "",
+        false => user.name.as_str(),
+    };
+    Ok(json!({"user": {
+        "id": id,
+        "name": user.name,
+        "real_name": user.name,
+        "profile": {"display_name": display_name, "real_name": user.name},
+    }}))
 }
 
 fn open_conversation(st: &mut State, params: &Map<String, Value>) -> Result<Value, ApiError> {

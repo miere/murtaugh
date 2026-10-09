@@ -54,6 +54,11 @@ fn user(raw: &str) -> UserId {
     UserId::parse(raw).unwrap()
 }
 
+/// `text` as a node reads it once somebody has sent it with a mention of the bot.
+fn mentioned(text: &str) -> String {
+    format!("<@{BOT_USER_ID}|murtaugh> {text}")
+}
+
 /// What a scripted node saw, so a test can assert on the prompts it was given.
 #[derive(Debug, Clone)]
 enum Seen {
@@ -69,10 +74,12 @@ enum Seen {
     Ignored(String),
     /// The gateway ended the link over this node's metadata.
     Rejected(rax::Rejection),
-    /// A session opened, with the namespaces of the tool groups it was lent.
+    /// A session opened, with the namespaces of the tool groups it was lent and the words in the
+    /// context it was given.
     Opened {
         session: SessionId,
         groups: Vec<String>,
+        told: Vec<String>,
     },
     /// What the gateway said became of an attachment.
     Receipt(rax::attachment::AttachmentReceipt),
@@ -123,8 +130,20 @@ impl FakeNode {
 
     async fn next_opened(&mut self) -> (SessionId, Vec<String>) {
         loop {
-            if let Seen::Opened { session, groups } = within(self.seen.recv()).await.unwrap() {
+            if let Seen::Opened {
+                session, groups, ..
+            } = within(self.seen.recv()).await.unwrap()
+            {
                 return (session, groups);
+            }
+        }
+    }
+
+    /// What the next session to open was told about where it is.
+    async fn next_told(&mut self) -> Vec<String> {
+        loop {
+            if let Seen::Opened { told, .. } = within(self.seen.recv()).await.unwrap() {
+                return told;
             }
         }
     }
@@ -514,9 +533,18 @@ async fn answer(script: Script, id: RequestId, call: GatewayCall) {
                     .collect(),
                 _ => vec![],
             };
+            let told = request
+                .context
+                .iter()
+                .filter_map(|block| match block {
+                    Open::Known(ContentBlock::Text { text }) => Some(text.clone()),
+                    _ => None,
+                })
+                .collect();
             let _ = seen.send(Seen::Opened {
                 session: session_id.clone(),
                 groups: lent,
+                told,
             });
             let reply = GatewayReply::NewSession(SessionCreated {
                 session_id,
@@ -691,7 +719,8 @@ async fn answer(script: Script, id: RequestId, call: GatewayCall) {
                     .await
                     .unwrap();
             }
-            let last = text.lines().last().unwrap_or_default().to_owned();
+            let last = text.lines().last().unwrap_or_default();
+            let last = last.strip_prefix(&mentioned("")).unwrap_or(last).to_owned();
             let mut heard = String::new();
             let asked = if text.contains("ask me") {
                 Some(Event::Question {
@@ -806,7 +835,7 @@ async fn a_mention_is_answered_in_its_thread_by_the_persons_own_node() {
     let ts = rig.sim.mention(ALICE, GENERAL, "ping", None).await.unwrap();
     let (session, text) = laptop.next_prompt().await;
     assert_eq!(session.0, "laptop-1");
-    assert_eq!(text, "ping");
+    assert_eq!(text, mentioned("ping"));
     let replies = rig
         .bot_replies(&ts, |replies| {
             replies
@@ -898,7 +927,7 @@ async fn an_allowed_person_uses_a_shared_node_and_hears_when_none_is_up() {
 
     let mut desktop = rig.node_sharing(ALICE, "desktop").await;
     let ts = rig.sim.mention(BOB, GENERAL, "now?", None).await.unwrap();
-    assert_eq!(desktop.next_prompt().await.1, "now?");
+    assert_eq!(desktop.next_prompt().await.1, mentioned("now?"));
     rig.bot_replies(&ts, |replies| {
         replies
             .iter()
@@ -919,7 +948,7 @@ async fn a_node_that_says_nothing_serves_its_owner_alone_even_the_admins() {
     zipped(&rig, &ts).await;
 
     rig.sim.mention(ADMIN, GENERAL, "mine", None).await.unwrap();
-    assert_eq!(desktop.next_prompt().await.1, "mine");
+    assert_eq!(desktop.next_prompt().await.1, mentioned("mine"));
     rig.shutdown.cancel();
 }
 
@@ -1071,7 +1100,7 @@ async fn a_standby_stays_off_slack_until_the_leader_stops_then_serves_the_same_n
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
-    assert_eq!(laptop.next_prompt().await.1, "still there?");
+    assert_eq!(laptop.next_prompt().await.1, mentioned("still there?"));
     assert_eq!(rig.sim.violations(), vec![]);
     standby.cancel();
 }
@@ -1404,7 +1433,7 @@ async fn a_file_shared_with_a_mention_is_readable_by_its_node_and_no_other() {
         .await
         .unwrap();
     let (_, text, links) = laptop.next_prompt_with_links().await;
-    assert_eq!(text, "what's in this?");
+    assert_eq!(text, mentioned("what's in this?"));
     let uri = format!("gateway://files/{file_id}");
     assert_eq!(
         links,
@@ -2755,7 +2784,7 @@ async fn a_disabled_node_drops_its_thread_and_takes_it_back_once_re_enabled() {
 async fn next_cancel(node: &mut FakeNode) -> String {
     loop {
         let (_, text) = node.next_prompt().await;
-        if text.starts_with('<') {
+        if text.starts_with('<') && !text.starts_with("<@") {
             return text;
         }
     }
@@ -2771,7 +2800,7 @@ async fn a_message_mid_turn_interrupts_it_and_the_waiting_ones_run_together() {
         .mention(ALICE, GENERAL, "slow job", None)
         .await
         .unwrap();
-    assert_eq!(laptop.next_prompt().await.1, "slow job");
+    assert_eq!(laptop.next_prompt().await.1, mentioned("slow job"));
     rig.bot_replies(&ts, |r| r.iter().any(|m| m.text.contains("slowly")))
         .await;
 
@@ -2786,7 +2815,12 @@ async fn a_message_mid_turn_interrupts_it_and_the_waiting_ones_run_together() {
     assert_eq!(next_cancel(&mut laptop).await, "<cancelled>");
     let (_, merged) = laptop.next_prompt().await;
     assert!(
-        merged == "<@U0ALICE01>: actually, do this\n\n<@U0BOB0001>: and this too",
+        merged
+            == format!(
+                "<@U0ALICE01|alice>: {}\n\n<@U0BOB0001|bob>: {}",
+                mentioned("actually, do this"),
+                mentioned("and this too")
+            ),
         "{merged}"
     );
     let replies = rig
@@ -2921,6 +2955,55 @@ async fn a_mentioned_stop_cancels_the_turn_and_never_reaches_the_node() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_mention_stays_where_it_was_written_and_everyone_in_it_is_named() {
+    let rig = rig().await;
+    let mut laptop = rig.node(ALICE, "laptop").await;
+    let about = format!("hey <@{BOB}> I wonder what <@{BOT_USER_ID}> would think");
+    rig.sim.mention(ALICE, GENERAL, &about, None).await.unwrap();
+
+    let told = laptop.next_told().await;
+    assert_eq!(told.len(), 1, "{told:?}");
+    let me = format!("<@{BOT_USER_ID}|murtaugh>");
+    assert!(
+        told[0].starts_with(&format!("In this Slack workspace you are {me}.")),
+        "{told:?}"
+    );
+    assert_eq!(
+        laptop.next_prompt().await.1,
+        format!("hey <@{BOB}|bob> I wonder what {me} would think")
+    );
+    assert_eq!(rig.sim.violations(), vec![]);
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slash_command_after_the_mention_still_opens_the_prompt() {
+    let rig = rig().await;
+    let mut laptop = rig.node(ALICE, "laptop").await;
+    rig.sim
+        .mention(ALICE, GENERAL, "/code-review the last commit", None)
+        .await
+        .unwrap();
+    assert_eq!(laptop.next_prompt().await.1, "/code-review the last commit");
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bot_that_may_not_read_names_still_knows_its_own() {
+    let rig = rig().await;
+    let mut laptop = rig.node(ALICE, "laptop").await;
+    // One refusal for the bot's own name, read as the session opens, and one for Bob's.
+    rig.sim.fail("users.info", "missing_scope");
+    rig.sim.fail("users.info", "missing_scope");
+    let ask = format!("ask <@{BOB}>");
+    rig.sim.mention(ALICE, GENERAL, &ask, None).await.unwrap();
+
+    assert_eq!(laptop.next_prompt().await.1, mentioned(&ask));
+    assert_eq!(rig.sim.violations(), vec![]);
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_command_in_backticks_is_a_prompt_the_node_answers() {
     let rig = rig().await;
     let mut laptop = rig.node(ALICE, "laptop").await;
@@ -2929,7 +3012,7 @@ async fn a_command_in_backticks_is_a_prompt_the_node_answers() {
         .mention(ALICE, GENERAL, "`/stop`", None)
         .await
         .unwrap();
-    assert_eq!(laptop.next_prompt().await.1, "`/stop`");
+    assert_eq!(laptop.next_prompt().await.1, mentioned("`/stop`"));
     rig.bot_replies(&ts, |r| r.iter().any(|m| m.text.contains("pong to:")))
         .await;
     // Nothing was intercepted, so nobody was told a command had run.
@@ -2961,7 +3044,7 @@ async fn a_turn_the_agent_goes_silent_on_is_stopped_after_the_idle_timeout() {
         .mention(ALICE, GENERAL, "hello again", Some(&ts))
         .await
         .unwrap();
-    assert_eq!(laptop.next_prompt().await.1, "hello again");
+    assert_eq!(laptop.next_prompt().await.1, mentioned("hello again"));
     let _ = next;
     rig.shutdown.cancel();
 }
@@ -3160,7 +3243,7 @@ async fn an_allow_list_lets_in_the_owner_and_the_listed_and_keeps_even_the_admin
         .mention(ALICE, GENERAL, "first", None)
         .await
         .unwrap();
-    assert_eq!(laptop.next_prompt().await.1, "first");
+    assert_eq!(laptop.next_prompt().await.1, mentioned("first"));
     rig.bot_replies(&ts, |replies| {
         replies.iter().any(|m| m.text.contains("pong to: first"))
     })
@@ -3169,7 +3252,7 @@ async fn an_allow_list_lets_in_the_owner_and_the_listed_and_keeps_even_the_admin
         .mention(BOB, GENERAL, "from bob", Some(&ts))
         .await
         .unwrap();
-    assert_eq!(laptop.next_prompt().await.1, "from bob");
+    assert_eq!(laptop.next_prompt().await.1, mentioned("from bob"));
     rig.bot_replies(&ts, |replies| {
         replies.iter().any(|m| m.text.contains("pong to: from bob"))
     })
@@ -3185,7 +3268,7 @@ async fn an_allow_list_lets_in_the_owner_and_the_listed_and_keeps_even_the_admin
         .mention(ALICE, GENERAL, "second", Some(&ts))
         .await
         .unwrap();
-    assert_eq!(laptop.next_prompt().await.1, "second");
+    assert_eq!(laptop.next_prompt().await.1, mentioned("second"));
     assert_eq!(rig.sim.violations(), vec![]);
     rig.shutdown.cancel();
 }
@@ -3311,7 +3394,7 @@ async fn a_node_changes_who_it_lets_in_live_and_a_bad_change_ends_its_link() {
         .mention(BOB, GENERAL, "one", Some(&ts))
         .await
         .unwrap();
-    assert_eq!(laptop.next_prompt().await.1, "one");
+    assert_eq!(laptop.next_prompt().await.1, mentioned("one"));
     rig.bot_replies(&ts, |replies| {
         replies.iter().any(|m| m.text.contains("pong to: one"))
     })
