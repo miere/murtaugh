@@ -36,7 +36,8 @@
         "groups:history",
         "im:history",
         "mpim:history",
-        "reactions:write"
+        "reactions:write",
+        "users:read"
       ]
     }
   },

@@ -39,6 +39,15 @@ pub fn parse(text: &str, bot_user: &str) -> Option<Command> {
         .find(|command| verb.eq_ignore_ascii_case(command.verb()))
 }
 
+/// What follows the bot's mention when that is a slash command, of any verb.
+pub fn slash<'a>(text: &'a str, bot_user: &str) -> Option<&'a str> {
+    let text = text.trim();
+    let body = without_leading_mention(text, bot_user);
+    (body.len() < text.len())
+        .then(|| body.trim_start())
+        .filter(|body| body.starts_with('/'))
+}
+
 /// Slack also writes the older `<@ID|name>` form.
 fn without_leading_mention<'a>(text: &'a str, bot_user: &str) -> &'a str {
     let Some(rest) = text.strip_prefix("<@") else {
@@ -97,6 +106,18 @@ mod tests {
         assert_eq!(read("<@U0MURTAUGH> /stop the deploy"), None);
         assert_eq!(read("<@U0MURTAUGH> please /stop"), None);
         assert_eq!(read("<@U0MURTAUGH> /stop."), None);
+    }
+
+    #[test]
+    fn a_slash_command_is_what_follows_the_bots_mention_and_nothing_else() {
+        assert_eq!(
+            slash(" <@U0MURTAUGH>  /code-review now ", BOT),
+            Some("/code-review now")
+        );
+        assert_eq!(slash("<@U0MURTAUGH|murtaugh> /stop", BOT), Some("/stop"));
+        assert_eq!(slash("<@U0MURTAUGH> please /stop", BOT), None);
+        assert_eq!(slash("<@U0ALICE01> /stop", BOT), None);
+        assert_eq!(slash("/stop", BOT), None);
     }
 
     #[test]

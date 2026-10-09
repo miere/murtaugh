@@ -60,6 +60,9 @@ pub struct Identity {
     pub team_id: String,
     pub user_id: String,
     pub bot_id: String,
+    /// The bot's handle. `auth.test` gives it with no scope, unlike `users.info`.
+    #[serde(default)]
+    pub user: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -357,6 +360,44 @@ impl SlackClient {
             .call("conversations.info", Token::Bot, Body::Form(params))
             .await?;
         Ok(info.channel)
+    }
+
+    /// What Slack shows a person as: their display name, or their real name when they have set
+    /// none, as a bot never has. Needs `users:read`.
+    pub async fn user_name(&self, user: &str) -> Result<Option<String>, SlackError> {
+        #[derive(Deserialize)]
+        struct Info {
+            user: User,
+        }
+        #[derive(Deserialize)]
+        struct User {
+            #[serde(default)]
+            name: String,
+            #[serde(default)]
+            real_name: String,
+            #[serde(default)]
+            profile: Profile,
+        }
+        #[derive(Default, Deserialize)]
+        struct Profile {
+            #[serde(default)]
+            display_name: String,
+            #[serde(default)]
+            real_name: String,
+        }
+        let params = vec![("user", user.to_owned())];
+        let info: Info = self
+            .call("users.info", Token::Bot, Body::Form(params))
+            .await?;
+        let User {
+            name,
+            real_name,
+            profile,
+        } = info.user;
+        Ok([profile.display_name, profile.real_name, real_name, name]
+            .into_iter()
+            .map(|name| name.trim().to_owned())
+            .find(|name| !name.is_empty()))
     }
 
     /// The bot's DM with `user`, opened if it has to be. Returns its channel id.

@@ -64,6 +64,8 @@ mod tests {
             "canvases:read",
             "canvases:write",
             "files:read",
+            // the names mentions are labelled with.
+            "users:read",
         ] {
             assert!(scopes.contains(&scope), "missing {scope}");
         }

@@ -34,6 +34,7 @@ use crate::faults::{self, Refusal};
 use crate::files::Files;
 use crate::fleet::{Fleet, Node};
 use crate::hub::{Background, FleetChange};
+use crate::mentions::Names;
 use crate::panel::Panel;
 use crate::picker;
 use crate::policy::{self, Ruling};
@@ -72,6 +73,7 @@ const RETRIES_MOST: usize = 256;
 pub struct Chat {
     slack: SlackClient,
     bot_user: String,
+    names: Names,
     store: Arc<dyn Store>,
     access: Access,
     fleet: Fleet,
@@ -195,6 +197,8 @@ pub fn thread_link(conversation: &Conversation) -> ContentBlock {
 pub struct Parts {
     pub slack: SlackClient,
     pub bot_user: String,
+    /// The bot's handle, as `auth.test` gave it.
+    pub bot_handle: String,
     pub team: String,
     pub store: Arc<dyn Store>,
     pub access: Access,
@@ -218,6 +222,7 @@ impl Chat {
         let Parts {
             slack,
             bot_user,
+            bot_handle,
             team,
             store,
             access,
@@ -244,6 +249,7 @@ impl Chat {
         };
         Arc::new(Self {
             panel,
+            names: Names::new(slack.clone(), bot_user.clone(), bot_handle),
             slack,
             bot_user,
             store,
@@ -914,7 +920,7 @@ impl Chat {
         let text = queued
             .iter()
             .map(|i| {
-                let words = self.strip_mention(&i.text);
+                let words = self.addressed(&i.text);
                 if speakers.len() > 1 {
                     format!("<@{}>: {words}", i.user)
                 } else {
@@ -1062,13 +1068,13 @@ impl Chat {
             let seat = self.seat(user, conversation, batch).await?;
             let merged = self.admitted(&seat.node, batch).await?;
             let incoming = &merged;
-            let text = self.strip_mention(&incoming.text);
             let mut words = String::new();
             if let Some(history) = &seat.history {
                 words.push_str(history);
                 words.push_str("\n\n");
             }
-            words.push_str(&text);
+            words.push_str(&incoming.text);
+            let words = self.names.label(&words).await;
             let prompt = GatewayCall::Prompt(Prompt {
                 session_id: seat.session_id.clone(),
                 content: std::iter::once(ContentBlock::text(words))
@@ -1300,8 +1306,12 @@ impl Chat {
             true => self.tools.group().into_iter().collect(),
             false => Vec::new(),
         };
+        let identity = ContentBlock::text(self.names.identity().await);
         let call = GatewayCall::NewSession(NewSession {
-            context: vec![Open::Known(thread_link(conversation))],
+            context: vec![
+                Open::Known(thread_link(conversation)),
+                Open::Known(identity),
+            ],
             tool_groups: tool_groups.clone(),
         });
         let pending = node.link.call(call).await?;
@@ -1741,8 +1751,12 @@ impl Chat {
         }
     }
 
-    fn strip_mention(&self, text: &str) -> String {
-        text.replace(&format!("<@{}>", self.bot_user), "")
+    /// A message as the agent reads it. The bot's mention stays where it was written, except
+    /// ahead of a slash command, which then still opens the prompt as it did when every mention
+    /// of the bot was stripped.
+    fn addressed(&self, text: &str) -> String {
+        thread_commands::slash(text, &self.bot_user)
+            .unwrap_or(text)
             .trim()
             .to_owned()
     }

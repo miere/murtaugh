@@ -144,6 +144,7 @@ pub async fn serve(
     let chat = Chat::new(chat::Parts {
         slack: slack.clone(),
         bot_user: identity.user_id.clone(),
+        bot_handle: identity.user.clone(),
         team: identity.team_id.clone(),
         store: store.clone(),
         access: access.clone(),
