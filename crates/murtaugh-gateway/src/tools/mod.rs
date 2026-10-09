@@ -5,15 +5,18 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use murtaugh_store::{Conversation, Store};
-use rax::id::{RequestId, SessionId};
+use rax::id::{LocalFileId, RequestId, SessionId};
+use rax::local_file::{ReadLocalFile, takes_local_files};
 use rax::tool::{CallTool, ToolDef, ToolGroup, ToolOutcome};
 use rax::{Error, ErrorKind, NodeReply};
-use rax_tokio::gateway::GatewayLink;
+use rax_tokio::gateway::{GatewayLink, LocalFile};
 use serde_json::Value;
 
+pub mod attach;
 pub mod canvas;
 pub mod send_message;
 pub mod slack_message;
@@ -44,10 +47,54 @@ pub trait Tool: Send + Sync {
 }
 
 /// Where a call came from, resolved by the gateway and never taken from the node.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct Context {
     /// The Slack thread the calling session is pinned to, if any.
     pub conversation: Option<Conversation>,
+    /// The calling node's files, for a tool with an argument marked as a local file.
+    pub local_files: Option<Arc<dyn LocalFiles>>,
+}
+
+/// Reads what a node offered in place of a path. `Err` is worded for the agent.
+#[async_trait]
+pub trait LocalFiles: Send + Sync {
+    async fn read(&self, id: &str) -> Result<LocalFile, String>;
+}
+
+/// Long enough for 100 MiB over a home connection; a node that stalls must not hold the call
+/// open for good.
+const LOCAL_FILE_WAIT: Duration = Duration::from_secs(120);
+
+/// The files of the node on the other end of one link.
+struct NodeFiles {
+    link: GatewayLink,
+}
+
+#[async_trait]
+impl LocalFiles for NodeFiles {
+    async fn read(&self, id: &str) -> Result<LocalFile, String> {
+        let read = ReadLocalFile {
+            id: LocalFileId(id.to_owned()),
+            max_bytes: None,
+        };
+        match tokio::time::timeout(LOCAL_FILE_WAIT, self.link.read_local_file(read)).await {
+            Ok(Ok(file)) => Ok(file),
+            Ok(Err(err)) => Err(format!("your machine did not hand it over ({err})")),
+            Err(_) => Err(format!(
+                "your machine did not hand it over within {} seconds",
+                LOCAL_FILE_WAIT.as_secs()
+            )),
+        }
+    }
+}
+
+/// Whether a tool needs a node that swaps paths for local file identifiers. Any other node would
+/// send the raw path, which this gateway could do nothing with.
+fn takes_files(tool: &dyn Tool) -> bool {
+    tool.def()
+        .input_schema
+        .as_ref()
+        .is_some_and(takes_local_files)
 }
 
 #[derive(Clone, Default)]
@@ -63,35 +110,47 @@ impl Tools {
     }
 
     /// The group a Slack thread's session is opened with. `None` when this gateway offers nothing,
-    /// so it lends no group rather than an empty one.
-    pub fn group(&self) -> Option<ToolGroup> {
-        if self.tools.is_empty() {
+    /// so it lends no group rather than an empty one. A tool that takes a file from the node is
+    /// lent only to a node that declared `local_files`.
+    pub fn group(&self, local_files: bool) -> Option<ToolGroup> {
+        let tools: Vec<ToolDef> = self
+            .tools
+            .iter()
+            .filter(|tool| local_files || !takes_files(tool.as_ref()))
+            .map(|tool| tool.def())
+            .collect();
+        if tools.is_empty() {
             return None;
         }
         Some(ToolGroup {
             namespace: NAMESPACE.to_owned(),
-            tools: self.tools.iter().map(|tool| tool.def()).collect(),
+            tools,
         })
     }
 
     /// The deprecated per-link catalogue, for nodes that do not declare `tool_groups`. It keeps
     /// the namespace and names those nodes have always published.
     pub fn catalogue(&self) -> Option<ToolGroup> {
-        if self.tools.is_empty() {
-            return None;
-        }
-        let tools = self
-            .tools
-            .iter()
+        let tools: Vec<ToolDef> = self
+            .legacy()
             .map(|tool| ToolDef {
                 name: tool.legacy_name(),
                 ..tool.def()
             })
             .collect();
+        if tools.is_empty() {
+            return None;
+        }
         Some(ToolGroup {
             namespace: LEGACY_NAMESPACE.to_owned(),
             tools,
         })
+    }
+
+    /// What a node that only knows the `initialize` catalogue may call. Such a node predates
+    /// local files, so a tool that takes one is not among them.
+    fn legacy(&self) -> impl Iterator<Item = &Box<dyn Tool>> {
+        self.tools.iter().filter(|tool| !takes_files(tool.as_ref()))
     }
 
     /// Runs a call if its session was lent the group it names. A call naming no group comes from
@@ -102,6 +161,7 @@ impl Tools {
         link: &GatewayLink,
         lent: &Lent,
         node: &str,
+        local_files: bool,
         id: RequestId,
         call: CallTool,
     ) {
@@ -110,15 +170,15 @@ impl Tools {
             Some(namespace) => {
                 let lent = lent.groups(selector, &call.session_id).await;
                 if lent.iter().any(|group| group == namespace) && namespace == NAMESPACE {
-                    self.tools.iter().find(|tool| tool.def().name == call.name)
+                    self.tools
+                        .iter()
+                        .filter(|tool| local_files || !takes_files(tool.as_ref()))
+                        .find(|tool| tool.def().name == call.name)
                 } else {
                     None
                 }
             }
-            None => self
-                .tools
-                .iter()
-                .find(|tool| tool.legacy_name() == call.name),
+            None => self.legacy().find(|tool| tool.legacy_name() == call.name),
         };
         let Some(tool) = tool else {
             // The discipline `resource.read` already uses: a node cannot find a tool by guessing.
@@ -139,6 +199,7 @@ impl Tools {
         };
         let context = Context {
             conversation: lent.conversation(selector, &call.session_id).await,
+            local_files: Some(Arc::new(NodeFiles { link: link.clone() })),
         };
         let outcome = match tool
             .invoke_in(&context, call.arguments.unwrap_or(Value::Null))
@@ -242,14 +303,14 @@ mod tests {
     /// one a node would have to tell apart from a real offer.
     #[test]
     fn a_gateway_with_no_tools_lends_nothing() {
-        assert!(Tools::default().group().is_none());
+        assert!(Tools::default().group(true).is_none());
         assert!(Tools::default().catalogue().is_none());
     }
 
     #[test]
     fn the_group_names_its_namespace_and_every_tool() {
         let tools = Tools::new(vec![Box::new(slack_message::SlackReadMessage::new(None))]);
-        let group = tools.group().expect("a group");
+        let group = tools.group(true).expect("a group");
         assert_eq!(group.namespace, "slack");
         let names: Vec<&str> = group.tools.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, vec!["read_message"]);
@@ -295,10 +356,31 @@ mod tests {
         lent.opened(
             "node-c",
             &s1,
-            &Tools::default().group().into_iter().collect::<Vec<_>>(),
+            &Tools::default().group(true).into_iter().collect::<Vec<_>>(),
         );
         lent.detached("node-c");
         assert!(lent.groups("node-c", &s1).await.is_empty());
+    }
+
+    /// A node that does not swap paths for identifiers would send `attach` a raw path, so it is
+    /// never offered the tool: not in the group, and not in the catalogue older nodes read.
+    #[test]
+    fn a_tool_that_takes_a_file_is_lent_only_to_a_node_that_hands_files_over() {
+        let tools = Tools::new(vec![
+            Box::new(slack_message::SlackReadMessage::new(None)),
+            Box::new(attach::Attach::new(None)),
+        ]);
+        let names = |group: Option<ToolGroup>| -> Vec<String> {
+            let tools = group.into_iter().flat_map(|group| group.tools);
+            tools.map(|tool| tool.name).collect()
+        };
+        assert_eq!(names(tools.group(true)), ["read_message", "attach"]);
+        assert_eq!(names(tools.group(false)), ["read_message"]);
+        assert_eq!(names(tools.catalogue()), ["slack_read_message"]);
+
+        let only_attach = Tools::new(vec![Box::new(attach::Attach::new(None))]);
+        assert!(only_attach.group(false).is_none());
+        assert!(only_attach.catalogue().is_none());
     }
 
     /// An older node keeps publishing `mcp__murtaugh__slack_read_message` until it upgrades.

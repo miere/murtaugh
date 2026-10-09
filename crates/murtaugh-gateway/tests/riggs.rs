@@ -36,6 +36,8 @@ struct Stack {
     sim: SlackSim,
     shutdown: CancellationToken,
     _riggs: Killed,
+    /// The agent's working directory on the node.
+    work: std::path::PathBuf,
     _dir: tempfile::TempDir,
 }
 
@@ -136,6 +138,7 @@ async fn stack(riggs: &str, fake_claude: &str, script: &str, tool_mode: Option<T
         sim,
         shutdown,
         _riggs: riggs,
+        work,
         _dir: dir,
     }
 }
@@ -144,6 +147,11 @@ impl Stack {
     /// Mentions the bot with `text` until a reply contains `wanted`, asking again while no machine
     /// has attached yet. Returns every bot reply in that thread.
     async fn ask(&self, text: &str, wanted: &str) -> Vec<String> {
+        self.ask_in_thread(text, wanted).await.1
+    }
+
+    /// Like [`Self::ask`], and also says which thread was answered.
+    async fn ask_in_thread(&self, text: &str, wanted: &str) -> (String, Vec<String>) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
         'asking: loop {
             let ts = self.sim.mention(ALICE, GENERAL, text, None).await.unwrap();
@@ -156,7 +164,7 @@ impl Stack {
                     .map(|m| m.text)
                     .collect();
                 if replies.iter().any(|text| text.contains(wanted)) {
-                    return replies;
+                    return (ts, replies);
                 }
                 assert!(
                     tokio::time::Instant::now() < deadline,
@@ -240,5 +248,59 @@ async fn riggs_reads_a_slack_message_through_the_sessions_slack_tools() {
         .find(|text| text.contains("it said:"))
         .unwrap();
     assert!(answer.contains("the build is green"), "{answer}");
+    assert_eq!(stack.sim.violations(), vec![]);
+}
+
+/// The agent on a real Riggs node posts a file from its machine. Riggs has no attach tool of its
+/// own: it sees a marked argument in the `slack` group, swaps the path for an identifier, and the
+/// gateway reads the file back from it and uploads it. Nobody is asked to approve it.
+#[tokio::test(flavor = "multi_thread")]
+async fn riggs_posts_a_file_through_the_sessions_slack_tools() {
+    let Some((riggs, fake_claude)) = binaries() else {
+        eprintln!("skipped: set RIGGS_BIN and FAKE_CLAUDE_BIN");
+        return;
+    };
+    let scripts = tempfile::tempdir().unwrap();
+    let script = scripts.path().join("attach.json");
+    let call = serde_json::json!({"turns": [[
+        {"hook": {
+            "id": "toolu_01SLACKATTACHaaaaaaaaaa",
+            "name": "mcp__slack__attach",
+            "input": {"path": "report.md"},
+            "allow": [
+                {"call_tool": {"id": "toolu_01SLACKATTACHaaaaaaaaaa", "server": "slack",
+                               "name": "attach",
+                               "arguments": {"path": "report.md", "comment": "Here it is"},
+                               "as": "posted"}},
+                {"say": "it said: {{posted}}"},
+            ],
+        }},
+        {"result": {"text": "done", "num_turns": 2}},
+    ]]});
+    std::fs::write(&script, call.to_string()).unwrap();
+    let stack = stack(&riggs, &fake_claude, &script.display().to_string(), None).await;
+    std::fs::write(stack.work.join("report.md"), "# Report\n").unwrap();
+
+    let (ts, replies) = stack.ask_in_thread("send the report", "it said:").await;
+    let answer = replies
+        .iter()
+        .find(|text| text.contains("it said:"))
+        .unwrap();
+    assert!(
+        answer.contains("Posted report.md (9 bytes) to the thread."),
+        "{answer}"
+    );
+    let shared = stack
+        .sim
+        .thread(GENERAL, &ts)
+        .into_iter()
+        .find(|m| !m.files.is_empty())
+        .expect("no file in the thread");
+    assert_eq!(shared.text, "Here it is");
+    let file = stack.sim.file(&shared.files[0]).unwrap();
+    assert_eq!(
+        (file.name.as_str(), file.bytes.as_slice()),
+        ("report.md", b"# Report\n".as_slice())
+    );
     assert_eq!(stack.sim.violations(), vec![]);
 }

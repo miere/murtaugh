@@ -8,7 +8,6 @@ use std::time::Duration;
 use murtaugh_gateway::run::{self, Options};
 use murtaugh_gateway::token;
 use murtaugh_store::{NodeToken, SqliteStore, Store, UserId};
-use rax::attachment::ReceiptOutcome;
 use rax::content::ContentBlock;
 use rax::event::BackgroundEvent;
 use rax::id::PromptId;
@@ -30,6 +29,8 @@ const ADMIN: &str = "U0ADMIN01";
 const STRANGER: &str = "U0STRANGE";
 const BOB: &str = "U0BOB0001";
 const CHART: &[u8] = b"\x89PNG a very fine chart";
+/// The identifier a scripted node puts in a call in place of the chart's path.
+const OFFERED_CHART: &str = "lf_chart";
 
 async fn within<F: std::future::Future>(future: F) -> F::Output {
     tokio::time::timeout(Duration::from_secs(20), future)
@@ -81,8 +82,6 @@ enum Seen {
         groups: Vec<String>,
         told: Vec<String>,
     },
-    /// What the gateway said became of an attachment.
-    Receipt(rax::attachment::AttachmentReceipt),
 }
 
 /// What a scripted node does with the tool groups a session is lent.
@@ -91,6 +90,8 @@ enum Groups {
     /// An older node: it never declares `tool_groups`.
     Ignores,
     Takes,
+    /// Takes them, and hands a gateway tool its files by identifier.
+    TakesFiles,
     /// Declares the capability, then reports every group it is lent as unpublished.
     Refuses,
 }
@@ -116,14 +117,6 @@ impl FakeNode {
             } = within(self.seen.recv()).await.unwrap()
             {
                 return (session, text, links);
-            }
-        }
-    }
-
-    async fn next_receipt(&mut self) -> rax::attachment::AttachmentReceipt {
-        loop {
-            if let Seen::Receipt(receipt) = within(self.seen.recv()).await.unwrap() {
-                return receipt;
             }
         }
     }
@@ -408,9 +401,6 @@ impl Rig {
                     NodeEvent::Answer(answer) => {
                         let _ = script.answers.send(answer);
                     }
-                    NodeEvent::Receipt(receipt) => {
-                        let _ = script.seen.send(Seen::Receipt(receipt));
-                    }
                     NodeEvent::Unhandled {
                         body:
                             rax::Unhandled {
@@ -495,7 +485,7 @@ async fn answer(script: Script, id: RequestId, call: GatewayCall) {
                 capabilities: NodeCapabilities {
                     tool_gate: ToolGate::EveryCall,
                     tool_groups: groups != Groups::Ignores,
-                    attachment_receipts: true,
+                    local_files: groups == Groups::TakesFiles,
                     ..Default::default()
                 },
                 metadata,
@@ -822,6 +812,20 @@ async fn answer(script: Script, id: RequestId, call: GatewayCall) {
                 .await
                 .unwrap();
             node.end(id).await.unwrap();
+        }
+        // The one file this node offers; any other identifier is one it does not hold.
+        GatewayCall::ReadLocalFile(read) if read.id.0 == OFFERED_CHART => {
+            let described = rax_tokio::node::LocalFile {
+                name: Some("chart.png".into()),
+                mimetype: Some("image/png".into()),
+            };
+            node.serve_local_file(id, &read, CHART, described)
+                .await
+                .unwrap();
+        }
+        GatewayCall::ReadLocalFile(_) => {
+            let gone = rax::Error::new(rax::ErrorKind::NotFound, "this node holds no such file");
+            node.fault(id, gone).await.unwrap();
         }
         _ => {}
     }
@@ -1508,8 +1512,6 @@ async fn an_attachment_from_the_agent_is_uploaded_into_the_thread() {
         .unwrap();
     laptop.next_prompt().await;
     wait_for_turn_end(&rig, GENERAL, &ts, "pong to: attach a chart").await;
-    let receipt = laptop.next_receipt().await;
-    assert_eq!(receipt.outcome, ReceiptOutcome::Delivered, "{receipt:?}");
 
     let shared = rig
         .sim
@@ -1542,10 +1544,6 @@ async fn an_attachment_whose_bytes_do_not_match_is_reported_not_uploaded() {
         .unwrap();
     laptop.next_prompt().await;
     wait_for_turn_end(&rig, GENERAL, &ts, "pong to: attach and lie").await;
-    let receipt = laptop.next_receipt().await;
-    assert_eq!(receipt.outcome, ReceiptOutcome::Failed, "{receipt:?}");
-    let reason = receipt.reason.unwrap_or_default();
-    assert!(reason.contains("bytes arrived"), "{reason}");
 
     let thread = rig.sim.thread(GENERAL, &ts);
     assert!(thread.iter().all(|m| m.files.is_empty()), "{thread:?}");
@@ -3639,6 +3637,91 @@ async fn a_call_from_someone_elses_client_is_approved_by_the_node_owner_in_their
             .iter()
             .any(|event| matches!(event, Open::Known(Event::ToolCall { .. }))),
         "Bob's client was asked to approve a call on Alice's machine"
+    );
+    assert_eq!(rig.sim.violations(), vec![]);
+    rig.shutdown.cancel();
+}
+
+/// `attach` gets an identifier where the agent wrote a path, reads the file from the node that
+/// called, and posts it into the session's own thread. Its answer is what Slack did with it.
+#[tokio::test(flavor = "multi_thread")]
+async fn attach_reads_the_nodes_file_and_posts_it_into_the_sessions_thread() {
+    let rig = rig().await;
+    let mut laptop = rig.node_lent(ALICE, "laptop", Groups::TakesFiles).await;
+    let ts = rig.sim.mention(ALICE, GENERAL, "ping", None).await.unwrap();
+    let (session, _) = laptop.next_opened().await;
+    laptop.next_prompt().await;
+    let attach = |path: &str| {
+        let arguments =
+            serde_json::json!({"path": path, "title": "The chart", "comment": "Your chart"});
+        laptop.call_tool(&session, Some("slack"), "attach", arguments)
+    };
+
+    let posted = attach(OFFERED_CHART).await.unwrap();
+    let NodeReply::CallTool(ToolOutcome { content, is_error }) = posted else {
+        panic!("expected a tool outcome, got {posted:?}")
+    };
+    assert!(!is_error, "{content}");
+    assert_eq!(content, "Posted chart.png (22 bytes) to the thread.");
+    let shared = rig
+        .sim
+        .thread(GENERAL, &ts)
+        .into_iter()
+        .find(|m| m.user.as_deref() == Some(BOT_USER_ID) && !m.files.is_empty())
+        .expect("no file in the thread");
+    assert_eq!(shared.text, "Your chart");
+    let file = rig.sim.file(&shared.files[0]).unwrap();
+    assert_eq!(
+        (
+            file.name.as_str(),
+            file.title.as_str(),
+            file.bytes.as_slice()
+        ),
+        ("chart.png", "The chart", CHART)
+    );
+
+    // A file the node will not hand over, and one Slack will not take, are both the tool's own
+    // answer: the agent is told the file did not arrive.
+    for (path, fails, expected) in [
+        ("lf_gone", None, "your machine did not hand it over"),
+        (
+            OFFERED_CHART,
+            Some("files.getUploadURLExternal"),
+            "Slack did not take chart.png",
+        ),
+    ] {
+        if let Some(method) = fails {
+            rig.sim.fail(method, "storage_limit_reached");
+        }
+        let refused = attach(path).await.unwrap();
+        let NodeReply::CallTool(ToolOutcome { content, is_error }) = refused else {
+            panic!("expected a tool outcome, got {refused:?}")
+        };
+        assert!(is_error, "{content}");
+        assert!(content.contains(expected), "{content}");
+        assert!(content.contains("did not arrive"), "{content}");
+    }
+    assert_eq!(rig.sim.violations(), vec![]);
+    rig.shutdown.cancel();
+}
+
+/// A node that does not swap paths for identifiers is never lent `attach`, so it cannot call it:
+/// the gateway would get a raw path it can do nothing with.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_that_hands_over_no_files_cannot_call_attach() {
+    let rig = rig().await;
+    let mut laptop = rig.node_lent(ALICE, "laptop", Groups::Takes).await;
+    rig.sim.mention(ALICE, GENERAL, "ping", None).await.unwrap();
+    let (session, _) = laptop.next_opened().await;
+    laptop.next_prompt().await;
+
+    let arguments = serde_json::json!({"path": "/etc/hosts"});
+    let refused = laptop
+        .call_tool(&session, Some("slack"), "attach", arguments)
+        .await;
+    assert!(
+        matches!(&refused, Err(CallError::Fault(fault)) if fault.kind == rax::ErrorKind::Forbidden),
+        "{refused:?}"
     );
     assert_eq!(rig.sim.violations(), vec![]);
     rig.shutdown.cancel();

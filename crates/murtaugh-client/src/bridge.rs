@@ -314,7 +314,6 @@ async fn initialize(shared: &Shared, link: &GatewayLink) -> Result<(), String> {
             resource_schemes: vec![],
             readable_schemes: if fs.read { vec!["file".into()] } else { vec![] },
             tools: None,
-            attachment_receipts: false,
         },
     });
     match call(link, offer).await {
