@@ -1,6 +1,9 @@
 //! Posts a message into the session's own Slack thread. This is how an agent speaks when its
 //! reply is not shown there, such as a quiet workload.
 //!
+//! The Markdown goes out as Slack's `markdown` block, which renders it as written: tables, and
+//! code fences highlighted for the language they name.
+//!
 //! It posts nowhere but the session's thread: the thread is resolved here from the session, never
 //! taken from the agent, so a session cannot write into a conversation it is not part of.
 //!
@@ -12,13 +15,14 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use murtaugh_slack::{PostMessage, SlackClient};
+use murtaugh_slack::{Block, PostMessage, SlackClient};
 use murtaugh_store::Conversation;
 use rax::tool::{ToolDef, ToolKind};
 use serde_json::{Value, json};
 
 use super::{Context, Tool, lock};
-use crate::render::{self, MESSAGE_LIMIT};
+use crate::render;
+use crate::reply::{STREAM_BUDGET, markdown_parts};
 
 pub const NAME: &str = "send_message";
 
@@ -117,12 +121,13 @@ impl Tool for SendMessage {
             .map(str::trim)
             .filter(|text| !text.is_empty())
             .ok_or("`text` is empty, so there is nothing to post.")?;
-        for part in render::split(&render::mrkdwn(text), MESSAGE_LIMIT) {
+        // The block is what Slack shows; `text` is what a notification reads out.
+        for part in markdown_parts(text, STREAM_BUDGET) {
             let message = PostMessage {
                 channel: conversation.channel.clone(),
                 thread_ts: Some(conversation.thread_ts.clone()),
-                text: part,
-                blocks: Vec::new(),
+                text: render::mrkdwn(&part),
+                blocks: vec![Block::Raw(json!({"type": "markdown", "text": part}))],
             };
             slack
                 .post_message(&message)
