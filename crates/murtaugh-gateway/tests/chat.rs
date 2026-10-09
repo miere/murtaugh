@@ -3744,7 +3744,7 @@ async fn send_message_refuses_the_thread_a_reply_is_being_written_into() {
     // The turn stays open until its plan card is answered.
     let card = eventually("the plan card", || prompt_card(&rig, &ts)).await;
 
-    let send = |text: &'static str| {
+    let send = |text: &str| {
         laptop.call_tool(
             &session,
             Some("slack"),
@@ -3783,14 +3783,37 @@ async fn send_message_refuses_the_thread_a_reply_is_being_written_into() {
         ),
         "{sent:?}"
     );
-    eventually("the posted message", || {
+    let posted = eventually("the posted message", || {
         rig.sim
             .thread(GENERAL, &ts)
             .iter()
             .find(|m| m.text.contains("*Report* ready"))
-            .map(drop)
+            .cloned()
     })
     .await;
+    // Slack renders the Markdown itself, so the block carries it as the agent wrote it.
+    assert_eq!(
+        posted.blocks,
+        Some(serde_json::json!([{"type": "markdown", "text": "**Report** ready"}]))
+    );
+
+    // More Markdown than one block may hold goes out as several messages, each within it.
+    let long = format!("```kotlin\n{}```", "val answer = 42\n".repeat(1_000));
+    send(&long).await.unwrap();
+    let parts = eventually("the long message", || {
+        let thread = rig.sim.thread(GENERAL, &ts);
+        let parts: Vec<String> = thread
+            .iter()
+            .filter_map(|m| m.blocks.as_ref()?[0]["text"].as_str().map(str::to_owned))
+            .filter(|text| text.contains("val answer"))
+            .collect();
+        (parts.len() == 2).then_some(parts)
+    })
+    .await;
+    for part in &parts {
+        assert!(part.chars().count() <= 12_000);
+        assert!(part.starts_with("```kotlin\n") && part.ends_with("\n```"));
+    }
     let empty = send("").await.unwrap();
     assert!(matches!(
         empty,

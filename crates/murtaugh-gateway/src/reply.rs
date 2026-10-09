@@ -466,6 +466,39 @@ fn split_at_budget(text: &str, room: usize) -> (&str, &str) {
     text.split_at(cut)
 }
 
+/// Cuts Markdown into pieces of at most `budget` characters, one per `markdown` block, since
+/// Slack takes no more than 12,000 characters of them in a message. A code fence open at a cut is
+/// closed in that piece and reopened in the next, so each one renders on its own.
+pub fn markdown_parts(text: &str, budget: usize) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut fence = Fence::default();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let mut part = fence.reopen().unwrap_or_default();
+        let room = budget
+            .saturating_sub(part.chars().count() + FENCE_CLOSER)
+            .max(1);
+        let (piece, after) = split_at_budget(rest, room);
+        fence.consume(piece);
+        fence.rolled_over();
+        part.push_str(piece);
+        if !after.is_empty()
+            && let Some(closer) = fence.closer()
+        {
+            part.truncate(part.trim_end().len());
+            part.push_str(closer.trim_end());
+        }
+        if !part.trim().is_empty() {
+            parts.push(part.trim_end().to_owned());
+        }
+        rest = after;
+    }
+    parts
+}
+
+/// The longest thing `Fence::closer` adds to a piece: a newline and three fence characters.
+const FENCE_CLOSER: usize = 4;
+
 /// Tracks whether the text so far ends inside a code fence, so a rollover can close it in the
 /// old message and reopen it in the new one.
 #[derive(Default)]
@@ -518,6 +551,24 @@ mod tests {
         assert_eq!(split_at_budget("abcdef", 3), ("abc", "def"));
         assert_eq!(split_at_budget("short", 10), ("short", ""));
         assert_eq!(split_at_budget("x", 0), ("", "x"));
+    }
+
+    #[test]
+    fn markdown_parts_each_stand_alone_within_the_budget() {
+        assert_eq!(markdown_parts("short", 100), ["short"]);
+        assert_eq!(markdown_parts("aa\n\nbb cc", 11), ["aa", "bb cc"]);
+        assert!(markdown_parts(" \n", 100).is_empty());
+
+        let code = "```kotlin\nval a = 1\nval b = 2\nval c = 3\n```\ndone";
+        let parts = markdown_parts(code, 34);
+        assert_eq!(
+            parts,
+            [
+                "```kotlin\nval a = 1\nval b = 2\n```",
+                "```kotlin\nval c = 3\n```\ndone"
+            ]
+        );
+        assert!(parts.iter().all(|part| part.chars().count() <= 34));
     }
 
     #[test]
