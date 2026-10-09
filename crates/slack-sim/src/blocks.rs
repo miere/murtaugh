@@ -14,15 +14,10 @@ fn invalid(detail: String) -> Invalid {
     }
 }
 
-const SHALLOW_TYPES: &[&str] = &[
-    "image",
-    "rich_text",
-    "input",
-    "file",
-    "video",
-    "markdown",
-    "table",
-];
+/// Slack caps the Markdown a message carries in `markdown` blocks.
+const MAX_MARKDOWN_TEXT: usize = 12_000;
+
+const SHALLOW_TYPES: &[&str] = &["image", "rich_text", "input", "file", "video", "table"];
 const ELEMENT_TYPES: &[&str] = &[
     "button",
     "checkboxes",
@@ -140,6 +135,15 @@ fn validate_block(block: &Value, at: &str) -> Result<(), Invalid> {
                 )));
             }
             text_object(text, &["plain_text"], 150, &format!("{at}/text"))
+        }
+        "markdown" => {
+            let len = string(obj, "text", at)?.chars().count();
+            if len == 0 || len > MAX_MARKDOWN_TEXT {
+                return Err(invalid(format!(
+                    "must be between 1 and {MAX_MARKDOWN_TEXT} characters [json-pointer:{at}/text]"
+                )));
+            }
+            Ok(())
         }
         k if SHALLOW_TYPES.contains(&k) => Ok(()),
         other => Err(invalid(format!(
