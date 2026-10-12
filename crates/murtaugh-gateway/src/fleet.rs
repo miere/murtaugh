@@ -5,8 +5,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use murtaugh_store::UserId;
+use rax::Activity;
 use rax::session::NodeCapabilities;
 use rax_tokio::gateway::GatewayLink;
+use time::OffsetDateTime;
 
 use crate::access::Snapshot;
 use crate::node_access::NodeAccess;
@@ -31,10 +33,21 @@ impl Node {
     }
 }
 
+/// What a node last said it was doing. Only the node knows: it may serve other gateways, and run
+/// work no turn of this one covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reported {
+    pub activity: Activity,
+    /// When it last went from working to idle or back, as this gateway heard it.
+    pub since: OffsetDateTime,
+}
+
 struct Entry {
     node: Node,
     attachment: u64,
     sessions: usize,
+    /// `None` until the node reports, and for good on a node too old to.
+    activity: Option<Reported>,
 }
 
 #[derive(Clone, Default)]
@@ -52,6 +65,7 @@ pub struct Summary {
     pub connected: bool,
     /// Who its owner lets in, as the node last declared it.
     pub access: NodeAccess,
+    pub activity: Option<Reported>,
 }
 
 impl Fleet {
@@ -69,6 +83,7 @@ impl Fleet {
             node,
             attachment,
             sessions: 0,
+            activity: None,
         };
         self.nodes().insert(entry.node.selector.clone(), entry);
         attachment
@@ -101,6 +116,25 @@ impl Fleet {
         {
             entry.node.access = access;
         }
+    }
+
+    /// True when the report differs from the last, so the node's row needs drawing again. Only
+    /// for the link it came on, as with `set_access`.
+    pub fn set_activity(&self, selector: &str, attachment: u64, activity: Activity) -> bool {
+        let mut nodes = self.nodes();
+        let Some(entry) = nodes
+            .get_mut(selector)
+            .filter(|entry| entry.attachment == attachment)
+        else {
+            return false;
+        };
+        let since = match entry.activity {
+            Some(last) if last.activity == activity => return false,
+            Some(last) if last.activity.is_idle() == activity.is_idle() => last.since,
+            _ => OffsetDateTime::now_utc(),
+        };
+        entry.activity = Some(Reported { activity, since });
+        true
     }
 
     pub fn get(&self, selector: &str) -> Option<Node> {
@@ -157,6 +191,7 @@ impl Fleet {
                 sessions: entry.sessions,
                 connected: entry.node.connected,
                 access: entry.node.access.clone(),
+                activity: entry.activity,
             })
             .collect();
         choices.sort_by(|a, b| a.name.cmp(&b.name));
@@ -194,6 +229,7 @@ impl Fleet {
                 sessions: entry.sessions,
                 connected: entry.node.connected,
                 access: entry.node.access.clone(),
+                activity: entry.activity,
             })
             .collect();
         summaries.sort_by(|a, b| a.name.cmp(&b.name));

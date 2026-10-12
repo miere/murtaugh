@@ -1,7 +1,7 @@
 //! A conversation is a Slack thread pinned to one node's session. This turns Slack messages into
 //! RAX prompts and streams each turn back into the thread.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -58,6 +58,8 @@ pub const TURN_IDLE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 pub const TOOL_CEILING: Duration = Duration::from_secs(60 * 60);
 /// The chunks precede the `attachment` event on the link, so the bytes are normally there already.
 const ATTACHMENT_WAIT: Duration = Duration::from_secs(60);
+/// How long a node's change of activity waits before its Home tab row is drawn again.
+const HOME_REDRAW_DELAY: Duration = Duration::from_secs(2);
 /// Slack clears the status once a chunk lands, so it is re-asserted until the turn ends.
 pub const THINKING_REFRESH: Duration = Duration::from_secs(2);
 /// Long enough for a node to fetch the files a prompt links before accepting it.
@@ -90,6 +92,8 @@ pub struct Chat {
     /// Threads `/node` moved, which catch up from the thread on their next turn even though they
     /// are pinned: the machine they moved to has none of the conversation.
     moved: Mutex<HashSet<Conversation>>,
+    /// Nodes whose Home tab row is about to be drawn again.
+    redrawing: Mutex<HashSet<String>>,
     turns: Mutex<HashMap<Conversation, Running>>,
     turn_idle_timeout: Duration,
     tool_ceiling: Duration,
@@ -270,6 +274,7 @@ impl Chat {
             sign_ins,
             orphaned: Mutex::new(HashSet::new()),
             moved: Mutex::new(HashSet::new()),
+            redrawing: Mutex::new(HashSet::new()),
             turns: Mutex::new(HashMap::new()),
             turn_idle_timeout,
             tool_ceiling,
@@ -556,9 +561,31 @@ impl Chat {
         self.panel.submit(submission).await;
     }
 
-    pub async fn on_fleet(self: Arc<Self>, change: FleetChange) {
-        let FleetChange::Gone { selector } = change else {
+    /// Shows a node's owner and the admin its row as it now stands. It waits a moment first, so
+    /// a node that starts and ends turns in quick succession is drawn once, not at every step.
+    async fn redraw_node(&self, selector: String) {
+        if !lock(&self.redrawing).insert(selector.clone()) {
             return;
+        }
+        tokio::time::sleep(HOME_REDRAW_DELAY).await;
+        // Before the drawing, so a change that lands during it is drawn after.
+        lock(&self.redrawing).remove(&selector);
+        let snapshot = self.access.snapshot();
+        let viewers: BTreeSet<&UserId> = snapshot
+            .owner(&selector)
+            .into_iter()
+            .chain(snapshot.admin())
+            .collect();
+        for viewer in viewers {
+            self.panel.show(viewer).await;
+        }
+    }
+
+    pub async fn on_fleet(self: Arc<Self>, change: FleetChange) {
+        let selector = match change {
+            FleetChange::Gone { selector } => selector,
+            FleetChange::Activity { selector } => return self.redraw_node(selector).await,
+            FleetChange::Attached { .. } => return,
         };
         match self.store.remove_pins_on(&selector).await {
             Ok(conversations) => lock(&self.orphaned).extend(conversations),

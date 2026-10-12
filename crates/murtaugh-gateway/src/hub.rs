@@ -38,8 +38,16 @@ pub const RETAIN_FOR: Duration = Duration::from_secs(300);
 /// What the chat side must hear about: a node that left takes its conversations' pins with it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FleetChange {
-    Attached { selector: String },
-    Gone { selector: String },
+    Attached {
+        selector: String,
+    },
+    Gone {
+        selector: String,
+    },
+    /// The node said it is doing something else than it last said.
+    Activity {
+        selector: String,
+    },
 }
 
 /// Something a node's session did with no turn open, for the chat side to show in its thread:
@@ -353,6 +361,24 @@ async fn serve(link: GatewayLink, mut events: LinkEvents, serving: Serving) {
                     link.reject(rejection).await;
                 }
             },
+            LinkEvent::Request {
+                id,
+                call: NodeCall::Activity(activity),
+            } => {
+                if fleet.set_activity(&selector, attachment, activity) {
+                    tracing::debug!(node = %name, turns = activity.turns, background_tasks = activity.background_tasks, "node activity");
+                    let change = FleetChange::Activity {
+                        selector: selector.clone(),
+                    };
+                    // Never waited for: it only redraws a row, and a busy node sends many.
+                    if changes.try_send(change).is_err() {
+                        tracing::debug!(node = %name, "nobody to tell of a node's activity");
+                    }
+                }
+                if let Err(err) = link.reply(id, NodeReply::Activity).await {
+                    tracing::debug!(node = %name, error = %err, "could not answer a node call");
+                }
+            }
             LinkEvent::Background { session_id, event } if relay.owns(&selector, &session_id) => {
                 if let Some(node) = fleet.get(&selector) {
                     relay.background(&node, &session_id, event).await;

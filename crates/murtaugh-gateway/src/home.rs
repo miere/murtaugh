@@ -8,7 +8,9 @@ use std::collections::HashMap;
 
 use murtaugh_slack::{Block, Text};
 use murtaugh_store::{Scope, ToolMode, UserId};
+use rax::Activity;
 use serde_json::{Value, json};
+use time::OffsetDateTime;
 
 use crate::access::Snapshot;
 use crate::fleet::Summary;
@@ -288,25 +290,7 @@ fn node_blocks(
     let shown = nodes.len().min(MAX_NODES);
     for token in &nodes[..shown] {
         let summary = attached.get(token.selector.as_str());
-        // Disabled overrides whatever the socket is doing: it is not taking new work either way,
-        // and that is the fact this row exists to report.
-        let mut status = if token.disabled_at.is_some() {
-            ":no_entry: Disabled — not routed any new work".to_owned()
-        } else {
-            match summary {
-                Some(summary) if summary.connected => format!(
-                    ":large_green_circle: Connected · {} live {}",
-                    summary.sessions,
-                    if summary.sessions == 1 {
-                        "conversation"
-                    } else {
-                        "conversations"
-                    }
-                ),
-                Some(_) => ":large_yellow_circle: Reconnecting".to_owned(),
-                None => ":white_circle: Offline".to_owned(),
-            }
-        };
+        let mut status = node_status(token.disabled_at.is_some(), summary.copied());
         // Who a node serves is what it declared when it connected, so an offline one says nothing.
         if let Some(summary) = summary {
             status.push_str(" · ");
@@ -445,6 +429,78 @@ fn client_blocks(
         ))]));
     }
     blocks
+}
+
+/// What a node's row says it is doing. A node that reports its activity is working or idle. One
+/// too old to report is only connected: a guess must never read as safe to restart.
+fn node_status(disabled: bool, summary: Option<&Summary>) -> String {
+    let reported = summary
+        .filter(|summary| summary.connected)
+        .and_then(|summary| summary.activity);
+    // Disabled overrides whatever the socket is doing: it is not taking new work either way,
+    // and that is the fact this row exists to report.
+    if disabled {
+        let mut status = ":no_entry: Disabled — not routed any new work".to_owned();
+        // Disabling is how an owner drains a node, so the row says when the drain is over.
+        match reported {
+            Some(reported) if reported.activity.is_idle() => {
+                status.push_str(" · idle, safe to restart");
+            }
+            Some(reported) => {
+                status.push_str(" · still working: ");
+                status.push_str(&work(reported.activity));
+            }
+            None => {}
+        }
+        return status;
+    }
+    match (summary, reported) {
+        (None, _) => ":white_circle: Offline".to_owned(),
+        (Some(summary), _) if !summary.connected => ":large_yellow_circle: Reconnecting".to_owned(),
+        (Some(_), Some(reported)) if reported.activity.is_idle() => format!(
+            ":large_blue_circle: Idle · safe to restart · since {}",
+            when(reported.since)
+        ),
+        (Some(_), Some(reported)) => {
+            format!(":large_green_circle: Working · {}", work(reported.activity))
+        }
+        (Some(summary), None) => format!(
+            ":large_green_circle: Connected · {} live {}",
+            summary.sessions,
+            if summary.sessions == 1 {
+                "conversation"
+            } else {
+                "conversations"
+            }
+        ),
+    }
+}
+
+/// What keeps a node busy, such as `2 turns, 1 background task`.
+fn work(activity: Activity) -> String {
+    let count = |many: u32, one: &str| match many {
+        0 => None,
+        1 => Some(format!("1 {one}")),
+        many => Some(format!("{many} {one}s")),
+    };
+    [
+        count(activity.turns, "turn"),
+        count(activity.background_tasks, "background task"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(", ")
+}
+
+/// A moment in the reader's own time zone, which only Slack knows.
+fn when(at: OffsetDateTime) -> String {
+    format!(
+        "<!date^{}^{{date_short_pretty}} at {{time}}|{:02}:{:02} UTC>",
+        at.unix_timestamp(),
+        at.hour(),
+        at.minute()
+    )
 }
 
 fn audience(owner: &UserId, access: &NodeAccess) -> String {
@@ -637,6 +693,79 @@ mod tests {
         assert!(
             shown.contains("*editor* on *laptop* · <@U0BOB0001>"),
             "{shown}"
+        );
+    }
+
+    #[allow(clippy::unwrap_used)]
+    fn node(connected: bool, activity: Option<(u32, u32)>) -> Summary {
+        Summary {
+            selector: "abc123".into(),
+            owner: UserId::parse("U0ALICE01").unwrap(),
+            name: "laptop".into(),
+            sessions: 3,
+            connected,
+            access: NodeAccess::default(),
+            activity: activity.map(|(turns, background_tasks)| crate::fleet::Reported {
+                activity: Activity {
+                    turns,
+                    background_tasks,
+                },
+                since: OffsetDateTime::UNIX_EPOCH,
+            }),
+        }
+    }
+
+    #[test]
+    fn a_node_that_reports_is_working_or_idle() {
+        assert_eq!(
+            node_status(false, Some(&node(true, Some((2, 1))))),
+            ":large_green_circle: Working · 2 turns, 1 background task"
+        );
+        assert_eq!(
+            node_status(false, Some(&node(true, Some((0, 1))))),
+            ":large_green_circle: Working · 1 background task"
+        );
+        assert_eq!(
+            node_status(false, Some(&node(true, Some((0, 0))))),
+            ":large_blue_circle: Idle · safe to restart · since \
+             <!date^0^{date_short_pretty} at {time}|00:00 UTC>"
+        );
+    }
+
+    #[test]
+    fn a_node_too_old_to_report_is_never_called_idle() {
+        assert_eq!(
+            node_status(false, Some(&node(true, None))),
+            ":large_green_circle: Connected · 3 live conversations"
+        );
+    }
+
+    #[test]
+    fn a_node_whose_socket_is_down_says_nothing_of_its_work() {
+        assert_eq!(
+            node_status(false, Some(&node(false, Some((0, 0))))),
+            ":large_yellow_circle: Reconnecting"
+        );
+        assert_eq!(node_status(false, None), ":white_circle: Offline");
+        assert_eq!(
+            node_status(true, Some(&node(false, Some((0, 0))))),
+            ":no_entry: Disabled — not routed any new work"
+        );
+    }
+
+    #[test]
+    fn a_disabled_node_says_when_its_drain_is_over() {
+        assert_eq!(
+            node_status(true, Some(&node(true, Some((1, 0))))),
+            ":no_entry: Disabled — not routed any new work · still working: 1 turn"
+        );
+        assert_eq!(
+            node_status(true, Some(&node(true, Some((0, 0))))),
+            ":no_entry: Disabled — not routed any new work · idle, safe to restart"
+        );
+        assert_eq!(
+            node_status(true, Some(&node(true, None))),
+            ":no_entry: Disabled — not routed any new work"
         );
     }
 

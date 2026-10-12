@@ -2269,6 +2269,47 @@ async fn home_of(rig: &Rig, user: &str) -> String {
     .await
 }
 
+/// Nobody opens the tab again here: a node's row is drawn for its owner and the admin as the
+/// node changes, or "safe to restart" would be read off a stale page.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_nodes_row_follows_what_the_node_says_it_is_doing() {
+    let rig = rig().await;
+    let laptop = rig.node(ALICE, "laptop").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let alice = home_of(&rig, ALICE).await;
+    assert!(
+        alice.contains("Connected · 0 live conversations"),
+        "a node that has not reported must not look idle: {alice}"
+    );
+    let report = async |turns, background_tasks| {
+        let activity = rax::Activity {
+            turns,
+            background_tasks,
+        };
+        let call = rax::NodeCall::Activity(activity);
+        assert!(matches!(
+            laptop.handle.call(call).await,
+            Ok(rax::NodeReply::Activity)
+        ));
+    };
+    let shows = async |who: &str, wanted: &str| {
+        eventually(wanted, || {
+            let home = rig.sim.home(who)?.to_string();
+            home.contains(wanted).then_some(())
+        })
+        .await;
+    };
+
+    report(1, 1).await;
+    shows(ALICE, "Working · 1 turn, 1 background task").await;
+    shows(ADMIN, "Working · 1 turn, 1 background task").await;
+
+    report(0, 0).await;
+    shows(ALICE, "Idle · safe to restart").await;
+    shows(ADMIN, "Idle · safe to restart").await;
+    rig.shutdown.cancel();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_home_tab_shows_the_version_and_the_viewers_nodes_or_all_for_the_admin() {
     let rig = rig().await;
