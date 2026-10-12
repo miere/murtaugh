@@ -18,6 +18,7 @@ use serde_json::Value;
 
 pub mod attach;
 pub mod canvas;
+pub mod replying;
 pub mod send_message;
 pub mod slack_message;
 

@@ -11,59 +11,17 @@
 //! a thread by when each message started, so a message posted mid-reply lands below a reply that
 //! is still being written above it.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-
 use async_trait::async_trait;
 use murtaugh_slack::{Block, PostMessage, SlackClient};
-use murtaugh_store::Conversation;
 use rax::tool::{ToolDef, ToolKind};
 use serde_json::{Value, json};
 
-use super::{Context, Tool, lock};
+use super::replying::Replying;
+use super::{Context, Tool};
 use crate::render;
 use crate::reply::{STREAM_BUDGET, markdown_parts};
 
 pub const NAME: &str = "send_message";
-
-/// The threads the gateway is writing an agent's reply into right now.
-#[derive(Clone, Default)]
-pub struct Replying {
-    threads: Arc<Mutex<HashMap<Conversation, usize>>>,
-}
-
-impl Replying {
-    /// Marks a thread until the guard is dropped. Counted, because a turn and a session's
-    /// background run can both be writing into one thread.
-    pub fn hold(&self, conversation: &Conversation) -> Held {
-        *lock(&self.threads).entry(conversation.clone()).or_default() += 1;
-        Held {
-            replying: self.clone(),
-            conversation: conversation.clone(),
-        }
-    }
-
-    fn contains(&self, conversation: &Conversation) -> bool {
-        lock(&self.threads).contains_key(conversation)
-    }
-}
-
-pub struct Held {
-    replying: Replying,
-    conversation: Conversation,
-}
-
-impl Drop for Held {
-    fn drop(&mut self) {
-        let mut threads = lock(&self.replying.threads);
-        if let Some(held) = threads.get_mut(&self.conversation) {
-            *held -= 1;
-            if *held == 0 {
-                threads.remove(&self.conversation);
-            }
-        }
-    }
-}
 
 pub struct SendMessage {
     slack: Option<SlackClient>,

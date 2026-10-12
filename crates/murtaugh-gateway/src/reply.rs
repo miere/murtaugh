@@ -8,8 +8,9 @@
 use std::time::Duration;
 
 use murtaugh_slack::{
-    Chunk, Icon, PlanTask, PostMessage, RichText, STREAM_FINALIZED, STREAMING_UNSUPPORTED,
-    SlackClient, SlackError, StartStream, TaskDisplayMode, TaskStatus, UpdateMessage,
+    Block, Chunk, Icon, PlanTask, PostMessage, Posted, RichText, STREAM_FINALIZED,
+    STREAMING_UNSUPPORTED, SlackClient, SlackError, StartStream, TaskDisplayMode, TaskStatus,
+    UpdateMessage,
 };
 use tokio::time::Instant;
 
@@ -89,6 +90,8 @@ pub struct Reply {
     written: bool,
     /// Draws nothing: the agent's words and tool cards stay off the thread.
     quiet: bool,
+    /// A message was placed under the one being written, so what comes next starts a new one.
+    placed: bool,
 }
 
 impl Reply {
@@ -105,6 +108,7 @@ impl Reply {
             open: None,
             written: false,
             quiet: false,
+            placed: false,
         }
     }
 
@@ -173,6 +177,7 @@ impl Reply {
         self.written = true;
         // Words end the run of tool calls they follow, so the next one opens a list of its own.
         self.open = None;
+        self.leave_placed().await;
         match &mut self.mode {
             Mode::Streaming(_) => self.paint(&text).await,
             Mode::Buffered { text: all, .. } => {
@@ -329,6 +334,9 @@ impl Reply {
             .beats
             .iter()
             .position(|beat| beat.tasks.iter().any(|task| task.task_id == id));
+        if known.is_none() && self.open.is_none() {
+            self.leave_placed().await;
+        }
         let at = match known.or(self.open) {
             Some(at) => at,
             None => {
@@ -377,6 +385,39 @@ impl Reply {
         let chunk = beat.chunk();
         self.written = true;
         self.append(vec![chunk]).await;
+    }
+
+    /// Posts a message of its own where the reply has got to: under the words so far and above
+    /// whatever comes next. Slack orders a thread by when each message started, so the message
+    /// being written is left open for the tool that asked to settle in, and the words or tools
+    /// after it start a new one.
+    pub async fn place(&mut self, text: String, blocks: Vec<Block>) -> Result<Posted, SlackError> {
+        let pending = self.pending.len();
+        self.emit(pending).await;
+        let message = PostMessage {
+            channel: self.target.channel.clone(),
+            thread_ts: Some(self.target.thread_ts.clone()),
+            text,
+            blocks,
+        };
+        let posted = self.slack.post_message(&message).await?;
+        self.written = true;
+        self.open = None;
+        self.placed = true;
+        Ok(posted)
+    }
+
+    async fn leave_placed(&mut self) {
+        if !std::mem::take(&mut self.placed) {
+            return;
+        }
+        match &mut self.mode {
+            Mode::Streaming(_) => self.rollover().await,
+            Mode::Buffered { text, posted } => {
+                text.clear();
+                posted.clear();
+            }
+        }
     }
 
     pub async fn finish(&mut self) {

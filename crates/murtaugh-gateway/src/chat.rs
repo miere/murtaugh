@@ -43,7 +43,7 @@ use crate::render;
 use crate::reply::{Reply, Target, TaskCard};
 use crate::signin::{self, SignIns};
 use crate::thread_commands::{self, Command};
-use crate::tools::send_message::Replying;
+use crate::tools::replying::{Placement, Replying};
 use crate::tools::{Lent, Tools};
 
 pub const UNAUTHORISED_REACTION: &str = "zipper_mouth_face";
@@ -674,6 +674,7 @@ impl Chat {
             (!is_direct(&conversation.channel)).then(|| (self.team.clone(), pin.user.to_string()));
         let thinking = Thinking::start(self.slack.clone(), conversation);
         let _replying = self.replying.hold(conversation);
+        let mut placements = self.replying.writer(conversation);
         let turn = Turn::default();
         let mut reply = Reply::new(
             self.slack.clone(),
@@ -696,6 +697,11 @@ impl Chat {
             let due = reply.due();
             let event = tokio::select! {
                 event = events.recv() => event,
+                Some(placement) = placements.recv() => {
+                    placement.onto(&mut reply).await;
+                    active = Instant::now();
+                    continue;
+                }
                 () = sleep_until_due(due) => {
                     reply.flush_due().await;
                     continue;
@@ -1449,10 +1455,18 @@ impl Chat {
             true => Reply::quiet(self.slack.clone(), target),
             false => Reply::new(self.slack.clone(), target),
         };
+        // A quiet turn writes no reply, so there is nothing to place a message in.
+        let mut placements = (!quiet).then(|| self.replying.writer(conversation));
         loop {
             let due = reply.due();
             let event = tokio::select! {
                 event = events.recv() => event,
+                placement = placed(&mut placements) => {
+                    placement.onto(&mut reply).await;
+                    active = Instant::now();
+                    first_output.get_or_insert_with(Instant::now);
+                    continue;
+                }
                 () = sleep_until_due(due) => {
                     reply.flush_due().await;
                     continue;
@@ -2100,6 +2114,18 @@ impl Thinking {
 async fn sleep_until_due(due: Option<Instant>) {
     match due {
         Some(due) => tokio::time::sleep_until(due).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// The next message a tool wants placed in the reply, from a turn that takes them.
+async fn placed(placements: &mut Option<mpsc::UnboundedReceiver<Placement>>) -> Placement {
+    let next = match placements {
+        Some(placements) => placements.recv().await,
+        None => None,
+    };
+    match next {
+        Some(placement) => placement,
         None => std::future::pending().await,
     }
 }
