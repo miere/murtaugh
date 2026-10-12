@@ -111,6 +111,7 @@ pub async fn serve(
     let access = Access::reloading(snapshot, store.clone());
     let fleet = Fleet::default();
     let files = Files::new(slack.clone());
+    let replying = crate::tools::send_message::Replying::default();
     let tools = crate::tools::Tools::new(vec![
         Box::new(crate::tools::slack_message::SlackReadMessage::new(Some(
             slack.clone(),
@@ -121,9 +122,10 @@ pub async fn serve(
         Box::new(crate::tools::canvas::edit::EditCanvas::new(Some(
             slack.clone(),
         ))),
-        Box::new(crate::tools::send_message::SendMessage::new(Some(
-            slack.clone(),
-        ))),
+        Box::new(crate::tools::send_message::SendMessage::new(
+            Some(slack.clone()),
+            replying.clone(),
+        )),
         Box::new(crate::tools::attach::Attach::new(Some(slack.clone()))),
     ]);
     let lent = crate::tools::Lent::new(store.clone());
@@ -159,6 +161,7 @@ pub async fn serve(
         tool_ceiling: options.tool_ceiling,
         tools: tools.clone(),
         lent: lent.clone(),
+        replying,
         relay: relay.clone(),
         approvals,
     });

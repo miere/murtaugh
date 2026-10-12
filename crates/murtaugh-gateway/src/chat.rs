@@ -43,6 +43,7 @@ use crate::render;
 use crate::reply::{Reply, Target, TaskCard};
 use crate::signin::{self, SignIns};
 use crate::thread_commands::{self, Command};
+use crate::tools::send_message::Replying;
 use crate::tools::{Lent, Tools};
 
 pub const UNAUTHORISED_REACTION: &str = "zipper_mouth_face";
@@ -94,6 +95,8 @@ pub struct Chat {
     tool_ceiling: Duration,
     tools: Tools,
     lent: Lent,
+    /// The threads a reply is being written into, which `send_message` stays out of.
+    replying: Replying,
     /// Messages a retryable failure left on the table, by the id their card's button carries.
     retries: Mutex<HashMap<String, Offer>>,
     /// The background run of each session that has one, by node and session: the one task that
@@ -212,6 +215,7 @@ pub struct Parts {
     pub tool_ceiling: Duration,
     pub tools: Tools,
     pub lent: Lent,
+    pub replying: Replying,
     pub relay: crate::relay::Relay,
     /// Shared with the relay, so a card it raised is answered by the same click handler.
     pub approvals: Approvals,
@@ -236,6 +240,7 @@ impl Chat {
             tool_ceiling,
             tools,
             lent,
+            replying,
             relay,
             approvals,
         } = parts;
@@ -270,6 +275,7 @@ impl Chat {
             tool_ceiling,
             tools,
             lent,
+            replying,
             retries: Mutex::new(HashMap::new()),
             backgrounds: Mutex::new(HashMap::new()),
         })
@@ -640,6 +646,7 @@ impl Chat {
         let recipient =
             (!is_direct(&conversation.channel)).then(|| (self.team.clone(), pin.user.to_string()));
         let thinking = Thinking::start(self.slack.clone(), conversation);
+        let _replying = self.replying.hold(conversation);
         let turn = Turn::default();
         let mut reply = Reply::new(
             self.slack.clone(),
@@ -820,7 +827,9 @@ impl Chat {
                 .and_then(|incoming| incoming.workload.as_ref())
                 .is_some_and(|run| run.quiet);
             let thinking = (!quiet).then(|| Thinking::start(self.slack.clone(), &conversation));
+            let replying = (!quiet).then(|| self.replying.hold(&conversation));
             let timing = self.converse(&user, &conversation, &batch).await;
+            drop(replying);
             if let Some(thinking) = thinking {
                 thinking.stop().await;
             }

@@ -1,27 +1,74 @@
-//! Posts a message into the session's own Slack thread. A turn's words already land there as it
-//! streams; this is how an agent speaks when the thread does not stream, such as a quiet workload,
-//! or when it wants something said on its own.
+//! Posts a message into the session's own Slack thread. This is how an agent speaks when its
+//! reply is not shown there, such as a quiet workload.
 //!
 //! It posts nowhere but the session's thread: the thread is resolved here from the session, never
 //! taken from the agent, so a session cannot write into a conversation it is not part of.
+//!
+//! While the gateway is writing the agent's reply into that thread, the tool refuses. Slack orders
+//! a thread by when each message started, so a message posted mid-reply lands below a reply that
+//! is still being written above it.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use murtaugh_slack::{PostMessage, SlackClient};
+use murtaugh_store::Conversation;
 use rax::tool::{ToolDef, ToolKind};
 use serde_json::{Value, json};
 
-use super::{Context, Tool};
+use super::{Context, Tool, lock};
 use crate::render::{self, MESSAGE_LIMIT};
 
 pub const NAME: &str = "send_message";
 
+/// The threads the gateway is writing an agent's reply into right now.
+#[derive(Clone, Default)]
+pub struct Replying {
+    threads: Arc<Mutex<HashMap<Conversation, usize>>>,
+}
+
+impl Replying {
+    /// Marks a thread until the guard is dropped. Counted, because a turn and a session's
+    /// background run can both be writing into one thread.
+    pub fn hold(&self, conversation: &Conversation) -> Held {
+        *lock(&self.threads).entry(conversation.clone()).or_default() += 1;
+        Held {
+            replying: self.clone(),
+            conversation: conversation.clone(),
+        }
+    }
+
+    fn contains(&self, conversation: &Conversation) -> bool {
+        lock(&self.threads).contains_key(conversation)
+    }
+}
+
+pub struct Held {
+    replying: Replying,
+    conversation: Conversation,
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        let mut threads = lock(&self.replying.threads);
+        if let Some(held) = threads.get_mut(&self.conversation) {
+            *held -= 1;
+            if *held == 0 {
+                threads.remove(&self.conversation);
+            }
+        }
+    }
+}
+
 pub struct SendMessage {
     slack: Option<SlackClient>,
+    replying: Replying,
 }
 
 impl SendMessage {
-    pub fn new(slack: Option<SlackClient>) -> Self {
-        Self { slack }
+    pub fn new(slack: Option<SlackClient>, replying: Replying) -> Self {
+        Self { slack, replying }
     }
 }
 
@@ -31,8 +78,9 @@ impl Tool for SendMessage {
         ToolDef {
             name: NAME.to_owned(),
             description: "Post a message into this conversation's Slack thread, in Markdown. \
-                 Use it to tell the people in the thread something now, such as a result, when \
-                 your reply is not being shown as you write it."
+                 It is only for when your reply is not shown in the thread, such as a quiet \
+                 workload. It refuses while your reply is shown there, because everything you \
+                 write already goes to the thread."
                 .to_owned(),
             input_schema: Some(json!({
                 "type": "object",
@@ -56,6 +104,13 @@ impl Tool for SendMessage {
         let Some(conversation) = &context.conversation else {
             return Err("This session has no Slack thread to post to.".into());
         };
+        if self.replying.contains(conversation) {
+            return Err(
+                "`send_message` was not designed to post into the thread you are replying in: \
+                 everything you write already goes to that thread. Nothing was posted."
+                    .into(),
+            );
+        }
         let text = arguments
             .get("text")
             .and_then(Value::as_str)
