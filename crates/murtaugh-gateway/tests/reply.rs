@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use murtaugh_gateway::reply::{Reply, Target, TaskCard};
-use murtaugh_slack::{SlackClient, TaskStatus, Tokens};
+use murtaugh_slack::{Block, SlackClient, TaskStatus, Tokens};
 use slack_sim::{ALICE, BOT_USER_ID, GENERAL, SimMessage, SlackSim, TEAM_ID};
 
 async fn setup() -> (SlackSim, Reply, String) {
@@ -214,4 +214,84 @@ async fn a_surface_that_cannot_stream_gets_ordinary_messages_instead() {
     assert_eq!(answers.len(), 1);
     assert!(answers[0].stream.is_none());
     assert_eq!(answers[0].text, "*Hello* from a canvas, still here.");
+}
+
+/// A message placed mid-reply sits where the reply had got to: the tool that asked for it settles
+/// in the message above, and the agent's next words start a new one below.
+#[tokio::test]
+async fn a_placed_message_sits_between_the_words_before_and_after_it() {
+    let (sim, mut reply, thread) = setup().await;
+    reply.text("Here are the numbers.\n").await;
+    let card = TaskCard {
+        title: Some("Show a table"),
+        ..TaskCard::default()
+    };
+    reply.task("t1", card, TaskStatus::InProgress).await;
+    let table = serde_json::json!({"type": "divider"});
+    reply
+        .place("the numbers".into(), vec![Block::Raw(table)])
+        .await
+        .unwrap();
+    reply.task("t1", card, TaskStatus::Complete).await;
+    reply.text("And that is the week.\n").await;
+    reply.finish().await;
+
+    let answers = answers(&sim, &thread);
+    let texts: Vec<&str> = answers.iter().map(|a| a.text.as_str()).collect();
+    assert_eq!(
+        texts,
+        [
+            "Here are the numbers.\n",
+            "the numbers",
+            "And that is the week.\n"
+        ]
+    );
+    // The tool's card settled where it was drawn, not in a second list under the placed message.
+    let streams: Vec<_> = answers.iter().map(|a| a.stream.as_ref()).collect();
+    let first = streams[0].unwrap();
+    assert!(!first.open);
+    assert_eq!(first.plan_blocks.len(), 1, "{:?}", first.plan_blocks);
+    assert_eq!(first.plan_blocks[0].tasks[0].status, "complete");
+    assert!(streams[1].is_none());
+    assert!(streams[2].unwrap().plan_blocks.is_empty());
+    assert!(sim.violations().is_empty(), "{:?}", sim.violations());
+}
+
+/// Two messages placed back to back stay together, and a code fence open around them is closed
+/// above and reopened below.
+#[tokio::test]
+async fn a_fence_open_around_placed_messages_is_closed_and_reopened() {
+    let (sim, mut reply, thread) = setup().await;
+    reply.text("```rust\nlet a = 1;\n").await;
+    for text in ["first", "second"] {
+        reply.place(text.into(), Vec::new()).await.unwrap();
+    }
+    reply.text("let b = 2;\n```\n").await;
+    reply.finish().await;
+    let texts: Vec<String> = answers(&sim, &thread).into_iter().map(|a| a.text).collect();
+    assert_eq!(
+        texts,
+        [
+            "```rust\nlet a = 1;\n\n```\n",
+            "first",
+            "second",
+            "```rust\nlet b = 2;\n```\n"
+        ]
+    );
+    assert!(sim.violations().is_empty(), "{:?}", sim.violations());
+}
+
+/// On a surface Slack cannot stream into, the words after a placed message go into a new message
+/// rather than back into the one above it.
+#[tokio::test]
+async fn a_placed_message_splits_a_reply_that_cannot_stream() {
+    let (sim, mut reply, thread) = setup().await;
+    sim.fail("chat.startStream", "channel_type_not_supported");
+    reply.text("Before.\n").await;
+    reply.place("placed".into(), Vec::new()).await.unwrap();
+    reply.text("After.\n").await;
+    reply.finish().await;
+    let texts: Vec<String> = answers(&sim, &thread).into_iter().map(|a| a.text).collect();
+    assert_eq!(texts, ["Before.\n", "placed", "After.\n"]);
+    assert!(sim.violations().is_empty(), "{:?}", sim.violations());
 }
