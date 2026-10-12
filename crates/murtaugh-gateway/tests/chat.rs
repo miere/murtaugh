@@ -4181,3 +4181,109 @@ async fn a_quiet_workload_posts_only_what_the_agent_sends() {
     assert_eq!(rig.sim.violations(), vec![]);
     rig.shutdown.cancel();
 }
+
+/// A table shown mid-reply sits where the reply had got to: under what was already in the thread
+/// and above the words the agent says next, as Slack's own table block. A table with too much
+/// data is refused as that, and nothing is posted.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_table_shown_mid_reply_sits_above_the_words_that_follow_it() {
+    let rig = rig().await;
+    let mut laptop = rig.node_lent(ALICE, "laptop", Groups::Takes).await;
+    let ts = rig
+        .sim
+        .mention(ALICE, GENERAL, "make a plan", None)
+        .await
+        .unwrap();
+    let (session, _) = laptop.next_opened().await;
+    laptop.next_prompt().await;
+    // The turn stays open until its plan card is answered, with its tool card already streamed.
+    let card = eventually("the plan card", || prompt_card(&rig, &ts)).await;
+
+    let show = |rows: serde_json::Value| {
+        let table = serde_json::json!({
+            "title": "Deploys this week",
+            "columns": ["Service", "Deploys"],
+            "rows": rows,
+        });
+        laptop.call_tool(&session, Some("slack"), "show_table", table)
+    };
+    let too_many: Vec<serde_json::Value> =
+        (0..201).map(|n| serde_json::json!(["api", n])).collect();
+    let refused = show(serde_json::json!(too_many)).await.unwrap();
+    let NodeReply::CallTool(ToolOutcome { content, is_error }) = refused else {
+        panic!("{refused:?}");
+    };
+    assert!(is_error, "{content}");
+    assert!(content.contains("too much data: 201 rows"), "{content}");
+    assert!(content.contains("Nothing was posted"), "{content}");
+
+    let shown = show(serde_json::json!([["api", 14], ["web", 9]]))
+        .await
+        .unwrap();
+    let NodeReply::CallTool(ToolOutcome { content, is_error }) = shown else {
+        panic!("{shown:?}");
+    };
+    assert!(!is_error, "{content}");
+    assert_eq!(content, "Showed the table (2 rows).");
+
+    rig.sim
+        .click(ALICE, GENERAL, &card.ts, murtaugh_gateway::prompts::PROCEED)
+        .await
+        .unwrap();
+    wait_for_turn_end(&rig, GENERAL, &ts, "Some(Proceed)").await;
+    let thread = rig.sim.thread(GENERAL, &ts);
+    let tables: Vec<&SimMessage> = thread
+        .iter()
+        .filter(|m| m.text.contains("Deploys this week"))
+        .collect();
+    assert_eq!(tables.len(), 1, "{thread:?}");
+    let table = tables[0];
+    assert_eq!(
+        table.text,
+        "*Deploys this week*\nService | Deploys\napi | 14\nweb | 9"
+    );
+    let block = &table.blocks.as_ref().unwrap()[0];
+    assert_eq!(block["type"], "data_table");
+    assert_eq!(block["caption"], "Deploys this week");
+    assert_eq!(block["rows"].as_array().unwrap().len(), 3);
+
+    // The tool card the turn had drawn is above the table, and the answer is a message below it.
+    let at = |found: &dyn Fn(&SimMessage) -> bool| thread.iter().position(found).unwrap();
+    let cards = at(&|m| m.stream.as_ref().is_some_and(|s| !s.plan_blocks.is_empty()));
+    let answer = at(&|m| m.text.contains("says pong to"));
+    assert!(cards < at(&|m| m.ts == table.ts), "{thread:?}");
+    assert!(at(&|m| m.ts == table.ts) < answer, "{thread:?}");
+    assert_eq!(rig.sim.violations(), vec![]);
+    rig.shutdown.cancel();
+}
+
+/// A quiet workload writes no reply, so the table is simply posted to its thread.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_quiet_workload_shows_a_table_in_its_thread() {
+    let rig = rig().await;
+    let mut laptop = rig.node_lent(ALICE, "laptop", Groups::Takes).await;
+    let token = client_token(&rig, ALICE, WORKLOADS).await;
+    let ask = serde_json::json!({
+        "prompt": "write the report",
+        "target": {"channel": GENERAL},
+        "output": "quiet",
+    });
+    let (status, accepted, _) = workload(&rig, Some(&token), ask, None).await;
+    assert_eq!(status, 202, "{accepted}");
+    let thread = accepted["thread_ts"].as_str().unwrap().to_owned();
+    let (session, _) = laptop.next_opened().await;
+    laptop.next_prompt().await;
+    let table = serde_json::json!({"title": "Totals", "columns": ["N"], "rows": [[1]]});
+    laptop
+        .call_tool(&session, Some("slack"), "show_table", table)
+        .await
+        .unwrap();
+    let shown = eventually("the table", || {
+        let thread = rig.sim.thread(GENERAL, &thread);
+        thread.iter().find(|m| m.text.contains("Totals")).cloned()
+    })
+    .await;
+    assert_eq!(shown.blocks.unwrap()[0]["type"], "data_table");
+    assert_eq!(rig.sim.violations(), vec![]);
+    rig.shutdown.cancel();
+}

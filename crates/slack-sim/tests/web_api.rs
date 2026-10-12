@@ -232,6 +232,66 @@ async fn blocks_are_validated_like_slack() {
     assert_eq!(sim.messages(GENERAL).len(), 1);
 }
 
+/// A data table is held to what Slack documents for it, so a table the real Slack would refuse
+/// cannot pass a test here.
+#[tokio::test]
+async fn a_data_table_is_validated_against_its_documented_limits() {
+    let sim = SlackSim::start().await.unwrap();
+    let text = |text: &str| json!({"type": "raw_text", "text": text});
+    let table = |rows: Value| json!([{"type": "data_table", "caption": "T", "rows": rows}]);
+    let post = |blocks: Value| {
+        bot(
+            &sim,
+            "chat.postMessage",
+            json!({"channel": GENERAL, "blocks": blocks, "text": "fallback"}),
+        )
+    };
+    let link = json!({"type": "rich_text", "elements": [{"type": "rich_text_section",
+        "elements": [{"type": "link", "text": "a", "url": "https://example.com"}]}]});
+    let fine = json!([{
+        "type": "data_table",
+        "caption": "T",
+        "page_size": 100,
+        "row_header_column_index": 1,
+        "rows": [
+            [text("Name"), text("Count")],
+            [link, {"type": "raw_number", "value": 3, "text": "3"}],
+        ],
+    }]);
+    let res = post(fine).await;
+    assert_eq!(res["ok"], true, "{res}");
+
+    let long: Vec<Value> = (0..202).map(|_| json!([text("x")])).collect();
+    let wide: Vec<Value> = (0..21).map(|_| text("x")).collect();
+    let heavy: Vec<Value> = (0..21).map(|_| json!([text(&"x".repeat(1_000))])).collect();
+    let half: Vec<Value> = (0..11).map(|_| json!([text(&"x".repeat(1_000))])).collect();
+    let two_halves = json!([
+        {"type": "data_table", "caption": "A", "rows": half},
+        {"type": "data_table", "caption": "B", "rows": half},
+    ]);
+    let cases = [
+        table(json!([[text("only a header")]])),
+        table(json!(long)),
+        table(json!([wide, wide])),
+        table(json!([[text("A"), text("B")], [text("a")]])),
+        table(json!([[text("A")], [text("")]])),
+        table(json!([[text("A")], [{"type": "raw_number", "value": "3", "text": "3"}]])),
+        table(json!([[link], [text("a")]])),
+        table(json!(heavy)),
+        two_halves,
+        json!([{"type": "data_table", "rows": [[text("A")], [text("a")]]}]),
+        json!([{"type": "data_table", "caption": "T", "page_size": 101,
+            "rows": [[text("A")], [text("a")]]}]),
+        json!([{"type": "data_table", "caption": "T", "row_header_column_index": 1,
+            "rows": [[text("A")], [text("a")]]}]),
+    ];
+    for blocks in &cases {
+        let res = post(blocks.clone()).await;
+        assert_eq!(res["error"], "invalid_blocks", "{blocks}");
+    }
+    assert_eq!(sim.messages(GENERAL).len(), 1);
+}
+
 #[tokio::test]
 async fn blocks_may_arrive_as_a_form_encoded_json_string() {
     let sim = sim().await;

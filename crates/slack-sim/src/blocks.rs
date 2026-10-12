@@ -67,6 +67,13 @@ pub(crate) fn validate(blocks: &[Value]) -> Result<(), Invalid> {
     for (i, block) in blocks.iter().enumerate() {
         validate_block(block, &format!("/blocks/{i}"))?;
     }
+    let cells: usize = blocks.iter().map(data_table_chars).sum();
+    if cells > DATA_TABLE_CHARS {
+        return Err(invalid(format!(
+            "the table cells of one message must be no more than {DATA_TABLE_CHARS} characters \
+             in all [json-pointer:/blocks]"
+        )));
+    }
     Ok(())
 }
 
@@ -145,10 +152,152 @@ fn validate_block(block: &Value, at: &str) -> Result<(), Invalid> {
             }
             Ok(())
         }
+        "data_table" => data_table(obj, at),
         k if SHALLOW_TYPES.contains(&k) => Ok(()),
         other => Err(invalid(format!(
             "unsupported block type: {other} [json-pointer:{at}/type]"
         ))),
+    }
+}
+
+const DATA_TABLE_CHARS: usize = 20_000;
+
+fn data_table(obj: &Map<String, Value>, at: &str) -> Result<(), Invalid> {
+    only_keys(
+        obj,
+        &[
+            "type",
+            "block_id",
+            "rows",
+            "caption",
+            "page_size",
+            "row_header_column_index",
+        ],
+        at,
+    )?;
+    string(obj, "caption", at)?;
+    let rows = obj
+        .get("rows")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid(format!("must provide an array [json-pointer:{at}/rows]")))?;
+    // The first row is the header, and a table has at least one row under it.
+    if !(2..=201).contains(&rows.len()) {
+        return Err(invalid(format!(
+            "must provide between 2 and 201 rows [json-pointer:{at}/rows]"
+        )));
+    }
+    let mut columns = None;
+    for (r, row) in rows.iter().enumerate() {
+        let at = format!("{at}/rows/{r}");
+        let cells = row
+            .as_array()
+            .ok_or_else(|| invalid(format!("must provide an array [json-pointer:{at}]")))?;
+        if !(1..=20).contains(&cells.len()) {
+            return Err(invalid(format!(
+                "must provide between 1 and 20 cells [json-pointer:{at}]"
+            )));
+        }
+        if *columns.get_or_insert(cells.len()) != cells.len() {
+            return Err(invalid(format!(
+                "all rows must have the same number of cells [json-pointer:{at}]"
+            )));
+        }
+        for (c, cell) in cells.iter().enumerate() {
+            data_table_cell(cell, r == 0, &format!("{at}/{c}"))?;
+        }
+    }
+    if let Some(size) = obj.get("page_size")
+        && !matches!(size.as_u64(), Some(1..=100))
+    {
+        return Err(invalid(format!(
+            "must be an integer between 1 and 100 [json-pointer:{at}/page_size]"
+        )));
+    }
+    let columns = columns.unwrap_or(0) as u64;
+    if let Some(index) = obj.get("row_header_column_index")
+        && index.as_u64().is_none_or(|index| index >= columns)
+    {
+        return Err(invalid(format!(
+            "must be the index of a column [json-pointer:{at}/row_header_column_index]"
+        )));
+    }
+    if data_table_chars(&Value::Object(obj.clone())) > DATA_TABLE_CHARS {
+        return Err(invalid(format!(
+            "the cells of a table must be no more than {DATA_TABLE_CHARS} characters in all \
+             [json-pointer:{at}/rows]"
+        )));
+    }
+    Ok(())
+}
+
+fn data_table_cell(cell: &Value, header: bool, at: &str) -> Result<(), Invalid> {
+    let obj = object(cell, at)?;
+    let filled = |key: &str| match string(obj, key, at) {
+        Ok("") => Err(invalid(format!(
+            "must be more than 0 characters [json-pointer:{at}/{key}]"
+        ))),
+        other => other.map(drop),
+    };
+    match string(obj, "type", at)? {
+        "raw_text" => {
+            only_keys(obj, &["type", "text"], at)?;
+            filled("text")
+        }
+        "raw_number" => {
+            only_keys(obj, &["type", "value", "text"], at)?;
+            if !obj.get("value").is_some_and(Value::is_number) {
+                return Err(invalid(format!(
+                    "must provide a number [json-pointer:{at}/value]"
+                )));
+            }
+            filled("text")
+        }
+        "rich_text" if header => Err(invalid(format!(
+            "rich_text cannot be used for header cells [json-pointer:{at}/type]"
+        ))),
+        "rich_text" => match obj.get("elements") {
+            Some(Value::Array(_)) => Ok(()),
+            _ => Err(invalid(format!(
+                "must provide an array [json-pointer:{at}/elements]"
+            ))),
+        },
+        "action_cell" => {
+            only_keys(obj, &["type", "element", "fallback"], at)?;
+            let button = obj.get("element").ok_or_else(|| {
+                invalid(format!(
+                    "missing required field: element [json-pointer:{at}]"
+                ))
+            })?;
+            element(button, &format!("{at}/element"))
+        }
+        other => Err(invalid(format!(
+            "unsupported cell type: {other} [json-pointer:{at}/type]"
+        ))),
+    }
+}
+
+/// How many characters a block's table cells hold; nothing for any other block.
+fn data_table_chars(block: &Value) -> usize {
+    if block.get("type").and_then(Value::as_str) != Some("data_table") {
+        return 0;
+    }
+    let rows = block.get("rows").and_then(Value::as_array);
+    let cells = rows.into_iter().flatten().filter_map(Value::as_array);
+    cells.flatten().map(text_chars).sum()
+}
+
+/// Every `text` under a cell: its own, a button's, or each run of a rich text.
+fn text_chars(value: &Value) -> usize {
+    match value {
+        Value::Object(obj) => obj
+            .iter()
+            .map(|(key, value)| match value {
+                Value::String(text) if key == "text" => text.chars().count(),
+                other => text_chars(other),
+            })
+            .sum(),
+        Value::Array(items) => items.iter().map(text_chars).sum(),
+        _ => 0,
     }
 }
 
