@@ -85,6 +85,7 @@ mod tests {
             sessions: 0,
             connected: true,
             access: Default::default(),
+            activity: None,
         }
     }
 

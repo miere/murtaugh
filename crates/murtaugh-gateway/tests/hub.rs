@@ -9,7 +9,7 @@ use murtaugh_gateway::hub::{self, FleetChange};
 use murtaugh_gateway::token;
 use murtaugh_store::{NodeToken, SqliteStore, Store, UserId};
 use rax::session::{Initialized, NodeCapabilities, ToolGate};
-use rax::{GatewayCall, GatewayReply};
+use rax::{Activity, GatewayCall, GatewayReply, NodeCall, NodeReply};
 use rax_tokio::node::{NodeConfig, NodeEvent, NodeEvents, NodeHandle, NodeLink};
 use time::OffsetDateTime;
 use tokio_util::sync::CancellationToken;
@@ -198,6 +198,56 @@ async fn a_revoked_grant_disconnects_the_node_and_its_redial_is_refused() {
             None => panic!("node events ended before the credential was rejected"),
         }
     }
+    rig.shutdown.cancel();
+}
+
+async fn report(node: &NodeHandle, turns: u32, background_tasks: u32) {
+    let activity = Activity {
+        turns,
+        background_tasks,
+    };
+    let answered = within(node.call(NodeCall::Activity(activity))).await;
+    assert!(matches!(answered, Ok(NodeReply::Activity)), "{answered:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_says_what_it_is_doing_and_only_a_change_is_passed_on() {
+    let mut rig = rig().await;
+    let (selector, token) = rig.mint("U0PERSON1").await;
+    let (node, mut events) = rig.dial(&token);
+    answer_initialize(&node, &mut events).await;
+    within(rig.hub.changes.recv()).await.unwrap();
+    // A node that has said nothing is not known to be idle.
+    assert_eq!(rig.fleet.summaries()[0].activity, None);
+    let changed = FleetChange::Activity {
+        selector: selector.clone(),
+    };
+
+    report(&node, 0, 0).await;
+    assert_eq!(within(rig.hub.changes.recv()).await.unwrap(), changed);
+    let idle = rig.fleet.summaries()[0].activity.unwrap();
+    assert!(idle.activity.is_idle());
+
+    report(&node, 1, 0).await;
+    assert_eq!(within(rig.hub.changes.recv()).await.unwrap(), changed);
+    let working = rig.fleet.summaries()[0].activity.unwrap();
+    assert_eq!(working.activity.turns, 1);
+    assert!(working.since >= idle.since);
+
+    // Still working: the counts move, and the moment it started working does not.
+    report(&node, 1, 2).await;
+    assert_eq!(within(rig.hub.changes.recv()).await.unwrap(), changed);
+    let busier = rig.fleet.summaries()[0].activity.unwrap();
+    assert_eq!(busier.activity.background_tasks, 2);
+    assert_eq!(busier.since, working.since);
+
+    report(&node, 1, 2).await;
+    let quiet = tokio::time::timeout(Duration::from_millis(300), rig.hub.changes.recv()).await;
+    assert!(
+        quiet.is_err(),
+        "a report that changed nothing was passed on"
+    );
+    node.close().await;
     rig.shutdown.cancel();
 }
 

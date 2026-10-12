@@ -139,7 +139,15 @@ too. Revoking one node leaves the grant alone, and revoking a grant leaves the p
 The admin does all of this from the app's Home tab. A node admin's Home tab shows their tool
 approval mode and their own nodes, which they can mint, disable and revoke. A new token goes to
 its owner by DM. Anyone allowed also sees their client tokens (see below). Everyone else sees only
-the footer. The same changes work from the CLI, which writes to the store directly and reaches a
+the footer.
+
+Each node's row says what the node is doing, as the node itself reports it: **Working**, with its
+open turns and background tasks counted across every gateway it serves, or **Idle**, which means a
+restart would interrupt nothing. A node too old to report shows as **Connected** and is never
+called idle. Idle is a snapshot, since a new turn can land a moment later. To restart a node
+safely, disable it, wait for its row to read *idle, safe to restart*, then restart it.
+
+The same changes work from the CLI, which writes to the store directly and reaches a
 running gateway within seconds:
 
 ```sh
