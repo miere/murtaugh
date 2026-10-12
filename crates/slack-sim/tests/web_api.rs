@@ -232,6 +232,65 @@ async fn blocks_are_validated_like_slack() {
     assert_eq!(sim.messages(GENERAL).len(), 1);
 }
 
+/// A chart is held to what Slack documents for it, above all that every series has a point for
+/// every category and for nothing else.
+#[tokio::test]
+async fn a_data_visualization_is_validated_against_its_documented_limits() {
+    let sim = SlackSim::start().await.unwrap();
+    let post = |blocks: Value| {
+        bot(
+            &sim,
+            "chat.postMessage",
+            json!({"channel": GENERAL, "blocks": blocks, "text": "fallback"}),
+        )
+    };
+    let point = |label: &str| json!({"label": label, "value": -1.5});
+    let line = |series: Value, categories: Value| {
+        json!({"type": "data_visualization", "title": "T", "chart": {
+            "type": "line", "series": series, "axis_config": {"categories": categories}}})
+    };
+    let pie = |segments: Value| {
+        json!({"type": "data_visualization", "title": "T",
+            "chart": {"type": "pie", "segments": segments}})
+    };
+    let series = |name: &str, labels: &[&str]| json!({"name": name, "data": labels.iter().map(|l| point(l)).collect::<Vec<_>>()});
+    let good = line(
+        json!([series("A", &["x", "y"]), series("B", &["y", "x"])]),
+        json!(["x", "y"]),
+    );
+    let slice = pie(json!([{"label": "a", "value": 1}]));
+    let res = post(json!([good, slice])).await;
+    assert_eq!(res["ok"], true, "{res}");
+
+    let many: Vec<Value> = (0..13).map(|i| series(&format!("s{i}"), &["x"])).collect();
+    let labels: Vec<String> = (0..21).map(|i| format!("c{i}")).collect();
+    let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+    let cases = [
+        json!([slice, slice, slice]),
+        json!([pie(json!([]))]),
+        json!([pie(json!([{"label": "a", "value": 0}]))]),
+        json!([pie(json!([{"label": "x".repeat(21), "value": 1}]))]),
+        json!([{"type": "data_visualization", "title": "x".repeat(51),
+            "chart": {"type": "pie", "segments": [{"label": "a", "value": 1}]}}]),
+        json!([{"type": "data_visualization", "title": "T", "chart": {"type": "scatter"}}]),
+        json!([{"type": "data_visualization", "title": "T",
+            "chart": {"type": "bar", "series": [series("A", &["x"])]}}]),
+        json!([line(json!([series("A", &["x"])]), json!(["x", "y"]))]),
+        json!([line(json!([series("A", &["x", "z"])]), json!(["x", "y"]))]),
+        json!([line(
+            json!([series("A", &["x"]), series("A", &["x"])]),
+            json!(["x"])
+        )]),
+        json!([line(json!(many), json!(["x"]))]),
+        json!([line(json!([series("A", &refs)]), json!(labels))]),
+    ];
+    for blocks in &cases {
+        let res = post(blocks.clone()).await;
+        assert_eq!(res["error"], "invalid_blocks", "{blocks}");
+    }
+    assert_eq!(sim.messages(GENERAL).len(), 1);
+}
+
 /// A data table is held to what Slack documents for it, so a table the real Slack would refuse
 /// cannot pass a test here.
 #[tokio::test]

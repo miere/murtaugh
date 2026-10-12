@@ -131,6 +131,10 @@ pub async fn serve(
             Some(slack.clone()),
             replying.clone(),
         )),
+        Box::new(crate::tools::show_chart::ShowChart::new(
+            Some(slack.clone()),
+            replying.clone(),
+        )),
     ]);
     let lent = crate::tools::Lent::new(store.clone());
     let sign_ins = crate::signin::SignIns::new(Some(slack.clone()), access.clone());
