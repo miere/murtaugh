@@ -20,6 +20,7 @@ pub mod attach;
 pub mod canvas;
 pub mod replying;
 pub mod send_message;
+pub mod show_chart;
 pub mod show_table;
 pub mod slack_message;
 

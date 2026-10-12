@@ -235,8 +235,9 @@ curl -X POST https://murtaugh.example.com/api/v1/workloads \
   card in the node owner's DM, never in the target channel.
 - `"output": "quiet"` posts nothing of the turn itself: no thinking line, no streamed words, no tool
   cards. The thread gets what the agent posts with the `slack` group's `send_message` tool, the
-  tables it shows with `show_table`, the files it attaches, and any failure notice. The default, `"stream"`, is the usual thread, where
-  `send_message` refuses: the agent's words already land there.
+  tables and charts it shows with `show_table` and `show_chart`, the files it attaches, and any
+  failure notice. The default, `"stream"`, is the usual thread, where `send_message` refuses: the
+  agent's words already land there.
 - A repeated `Idempotency-Key` within 24 hours answers with the run it already started.
 
 ## murtaugh-client

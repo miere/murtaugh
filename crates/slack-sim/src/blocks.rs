@@ -67,6 +67,13 @@ pub(crate) fn validate(blocks: &[Value]) -> Result<(), Invalid> {
     for (i, block) in blocks.iter().enumerate() {
         validate_block(block, &format!("/blocks/{i}"))?;
     }
+    let is_chart = |block: &&Value| block["type"] == "data_visualization";
+    if blocks.iter().filter(is_chart).count() > 2 {
+        return Err(invalid(
+            "a message holds no more than 2 data_visualization blocks [json-pointer:/blocks]"
+                .into(),
+        ));
+    }
     let cells: usize = blocks.iter().map(data_table_chars).sum();
     if cells > DATA_TABLE_CHARS {
         return Err(invalid(format!(
@@ -153,9 +160,128 @@ fn validate_block(block: &Value, at: &str) -> Result<(), Invalid> {
             Ok(())
         }
         "data_table" => data_table(obj, at),
+        "data_visualization" => data_visualization(obj, at),
         k if SHALLOW_TYPES.contains(&k) => Ok(()),
         other => Err(invalid(format!(
             "unsupported block type: {other} [json-pointer:{at}/type]"
+        ))),
+    }
+}
+
+fn data_visualization(obj: &Map<String, Value>, at: &str) -> Result<(), Invalid> {
+    only_keys(obj, &["type", "block_id", "title", "chart"], at)?;
+    label(obj, "title", 50, at)?;
+    let at = format!("{at}/chart");
+    let chart = obj
+        .get("chart")
+        .ok_or_else(|| invalid(format!("missing required field: chart [json-pointer:{at}]")))?;
+    let chart = object(chart, &at)?;
+    let kind = string(chart, "type", &at)?;
+    if kind == "pie" {
+        only_keys(chart, &["type", "segments"], &at)?;
+        let segments = list(chart, "segments", 12, &at)?;
+        for (i, segment) in segments.iter().enumerate() {
+            let at = format!("{at}/segments/{i}");
+            let segment = object(segment, &at)?;
+            only_keys(segment, &["label", "value"], &at)?;
+            label(segment, "label", 20, &at)?;
+            if !segment["value"].as_f64().is_some_and(|value| value > 0.0) {
+                return Err(invalid(format!(
+                    "must be a number greater than 0 [json-pointer:{at}/value]"
+                )));
+            }
+        }
+        return Ok(());
+    }
+    if !["bar", "area", "line"].contains(&kind) {
+        return Err(invalid(format!(
+            "unsupported chart type: {kind} [json-pointer:{at}/type]"
+        )));
+    }
+    only_keys(chart, &["type", "series", "axis_config"], &at)?;
+    let axis_at = format!("{at}/axis_config");
+    let axis = chart.get("axis_config").ok_or_else(|| {
+        invalid(format!(
+            "missing required field: axis_config [json-pointer:{at}]"
+        ))
+    })?;
+    let axis = object(axis, &axis_at)?;
+    only_keys(axis, &["categories", "x_label", "y_label"], &axis_at)?;
+    opt_string(axis, "x_label", 50, &axis_at)?;
+    opt_string(axis, "y_label", 50, &axis_at)?;
+    let mut categories = Vec::new();
+    for (i, category) in list(axis, "categories", 20, &axis_at)?.iter().enumerate() {
+        match category.as_str() {
+            Some(name) if name.chars().count() <= 20 => categories.push(name),
+            _ => {
+                return Err(invalid(format!(
+                    "must be a string of no more than 20 characters \
+                     [json-pointer:{axis_at}/categories/{i}]"
+                )));
+            }
+        }
+    }
+    let mut names = HashSet::new();
+    for (i, series) in list(chart, "series", 12, &at)?.iter().enumerate() {
+        let at = format!("{at}/series/{i}");
+        let series = object(series, &at)?;
+        only_keys(series, &["name", "data"], &at)?;
+        if !names.insert(label(series, "name", 20, &at)?) {
+            return Err(invalid(format!(
+                "series names must be unique [json-pointer:{at}/name]"
+            )));
+        }
+        let points = list(series, "data", 20, &at)?;
+        let mut labels = Vec::new();
+        for (p, point) in points.iter().enumerate() {
+            let at = format!("{at}/data/{p}");
+            let point = object(point, &at)?;
+            only_keys(point, &["label", "value"], &at)?;
+            labels.push(label(point, "label", 20, &at)?);
+            if !point.get("value").is_some_and(Value::is_number) {
+                return Err(invalid(format!(
+                    "must provide a number [json-pointer:{at}/value]"
+                )));
+            }
+        }
+        // Every category has exactly one point, and no point names anything else.
+        let matched = categories.iter().all(|category| labels.contains(category));
+        if labels.len() != categories.len() || !matched {
+            return Err(invalid(format!(
+                "must provide one data point for each of axis_config.categories \
+                 [json-pointer:{at}/data]"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// A required string of 1 to `max` characters.
+fn label<'a>(
+    obj: &'a Map<String, Value>,
+    key: &str,
+    max: usize,
+    at: &str,
+) -> Result<&'a str, Invalid> {
+    match opt_string(obj, key, max, at)? {
+        Some(text) if !text.is_empty() => Ok(text),
+        _ => Err(invalid(format!(
+            "must provide a string of more than 0 characters [json-pointer:{at}/{key}]"
+        ))),
+    }
+}
+
+/// A required array of 1 to `max` items.
+fn list<'a>(
+    obj: &'a Map<String, Value>,
+    key: &str,
+    max: usize,
+    at: &str,
+) -> Result<&'a Vec<Value>, Invalid> {
+    match obj.get(key).and_then(Value::as_array) {
+        Some(items) if (1..=max).contains(&items.len()) => Ok(items),
+        _ => Err(invalid(format!(
+            "must provide an array of between 1 and {max} items [json-pointer:{at}/{key}]"
         ))),
     }
 }

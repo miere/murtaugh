@@ -4287,3 +4287,75 @@ async fn a_quiet_workload_shows_a_table_in_its_thread() {
     assert_eq!(rig.sim.violations(), vec![]);
     rig.shutdown.cancel();
 }
+
+/// A chart shown mid-reply sits where the reply had got to, as Slack's own chart block with every
+/// point labelled by its category. A chart with too much data is refused as that.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chart_shown_mid_reply_sits_above_the_words_that_follow_it() {
+    let rig = rig().await;
+    let mut laptop = rig.node_lent(ALICE, "laptop", Groups::Takes).await;
+    let ts = rig
+        .sim
+        .mention(ALICE, GENERAL, "make a plan", None)
+        .await
+        .unwrap();
+    let (session, _) = laptop.next_opened().await;
+    laptop.next_prompt().await;
+    // The turn stays open until its plan card is answered.
+    let card = eventually("the plan card", || prompt_card(&rig, &ts)).await;
+
+    let show = |categories: Vec<String>| {
+        let values: Vec<usize> = (0..categories.len()).collect();
+        let chart = serde_json::json!({
+            "title": "Weekly sales",
+            "kind": "line",
+            "categories": categories,
+            "series": [{"name": "Online", "values": values}],
+        });
+        laptop.call_tool(&session, Some("slack"), "show_chart", chart)
+    };
+    let refused = show((0..21).map(|n| format!("W{n}")).collect())
+        .await
+        .unwrap();
+    let NodeReply::CallTool(ToolOutcome { content, is_error }) = refused else {
+        panic!("{refused:?}");
+    };
+    assert!(is_error, "{content}");
+    assert!(
+        content.contains("too much data: 21 categories"),
+        "{content}"
+    );
+    assert!(content.contains("Nothing was posted"), "{content}");
+
+    let shown = show(vec!["W1".into(), "W2".into()]).await.unwrap();
+    let NodeReply::CallTool(ToolOutcome { content, is_error }) = shown else {
+        panic!("{shown:?}");
+    };
+    assert!(!is_error, "{content}");
+    assert_eq!(content, "Showed the line chart.");
+
+    rig.sim
+        .click(ALICE, GENERAL, &card.ts, murtaugh_gateway::prompts::PROCEED)
+        .await
+        .unwrap();
+    wait_for_turn_end(&rig, GENERAL, &ts, "Some(Proceed)").await;
+    let thread = rig.sim.thread(GENERAL, &ts);
+    let at = |found: &dyn Fn(&SimMessage) -> bool| thread.iter().position(found).unwrap();
+    let chart = at(&|m| m.text.contains("Weekly sales"));
+    assert_eq!(
+        thread[chart].text,
+        "*Weekly sales* (line chart)\nOnline: W1 0, W2 1"
+    );
+    let block = &thread[chart].blocks.as_ref().unwrap()[0];
+    assert_eq!(block["type"], "data_visualization");
+    assert_eq!(
+        block["chart"]["series"][0]["data"],
+        serde_json::json!([{"label": "W1", "value": 0}, {"label": "W2", "value": 1}])
+    );
+    assert!(
+        chart < at(&|m| m.text.contains("says pong to")),
+        "{thread:?}"
+    );
+    assert_eq!(rig.sim.violations(), vec![]);
+    rig.shutdown.cancel();
+}
