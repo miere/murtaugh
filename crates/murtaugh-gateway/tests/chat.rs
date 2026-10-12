@@ -3727,25 +3727,52 @@ async fn a_node_that_hands_over_no_files_cannot_call_attach() {
     rig.shutdown.cancel();
 }
 
-/// `send_message` posts into the calling session's own thread, which the gateway resolves; the
-/// agent never names one.
+/// A turn's words already land in its thread, and a message posted beside them would sit below a
+/// reply still being written above it. So `send_message` refuses while the reply is shown there,
+/// and posts once nothing is being written.
 #[tokio::test(flavor = "multi_thread")]
-async fn send_message_posts_into_the_sessions_own_thread() {
+async fn send_message_refuses_the_thread_a_reply_is_being_written_into() {
     let rig = rig().await;
     let mut laptop = rig.node_lent(ALICE, "laptop", Groups::Takes).await;
-    let ts = rig.sim.mention(ALICE, GENERAL, "ping", None).await.unwrap();
+    let ts = rig
+        .sim
+        .mention(ALICE, GENERAL, "make a plan", None)
+        .await
+        .unwrap();
     let (session, _) = laptop.next_opened().await;
     laptop.next_prompt().await;
+    // The turn stays open until its plan card is answered.
+    let card = eventually("the plan card", || prompt_card(&rig, &ts)).await;
 
-    let sent = laptop
-        .call_tool(
+    let send = |text: &'static str| {
+        laptop.call_tool(
             &session,
             Some("slack"),
             "send_message",
-            serde_json::json!({"text": "**Deploy** finished"}),
+            serde_json::json!({"text": text}),
         )
+    };
+    let refused = send("**Deploy** finished").await.unwrap();
+    let NodeReply::CallTool(ToolOutcome { content, is_error }) = refused else {
+        panic!("{refused:?}");
+    };
+    assert!(is_error, "{content}");
+    assert!(content.contains("not designed"), "{content}");
+
+    rig.sim
+        .click(ALICE, GENERAL, &card.ts, murtaugh_gateway::prompts::PROCEED)
         .await
         .unwrap();
+    wait_for_turn_end(&rig, GENERAL, &ts, "Some(Proceed)").await;
+    assert!(
+        !rig.sim
+            .thread(GENERAL, &ts)
+            .iter()
+            .any(|m| m.text.contains("Deploy")),
+        "the refused message was posted"
+    );
+
+    let sent = send("**Report** ready").await.unwrap();
     assert!(
         matches!(
             &sent,
@@ -3760,19 +3787,11 @@ async fn send_message_posts_into_the_sessions_own_thread() {
         rig.sim
             .thread(GENERAL, &ts)
             .iter()
-            .find(|m| m.text.contains("*Deploy* finished"))
+            .find(|m| m.text.contains("*Report* ready"))
             .map(drop)
     })
     .await;
-    let empty = laptop
-        .call_tool(
-            &session,
-            Some("slack"),
-            "send_message",
-            serde_json::json!({}),
-        )
-        .await
-        .unwrap();
+    let empty = send("").await.unwrap();
     assert!(matches!(
         empty,
         NodeReply::CallTool(ToolOutcome { is_error: true, .. })
