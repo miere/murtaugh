@@ -7,7 +7,7 @@
 //! would carry on believing it.
 
 use async_trait::async_trait;
-use murtaugh_slack::{Message, SlackClient, SlackError};
+use murtaugh_slack::{FileRef, Message, SlackClient, SlackError};
 use rax::tool::{ToolDef, ToolKind};
 use serde_json::{Value, json};
 use url::Url;
@@ -39,6 +39,7 @@ impl Tool for SlackReadMessage {
             name: NAME.to_owned(),
             description: "Read a Slack message from its link, and optionally the thread under it. \
                  Use it whenever someone shares a Slack link and you need what it says. \
+                 Attached files are listed with their id and link; read one with read_file. \
                  Returns an error if this bot is not a member of that channel — when that happens, \
                  say so and ask to be invited rather than assuming the message is empty."
                 .to_owned(),
@@ -223,11 +224,27 @@ fn body(message: &Message) -> String {
     } else {
         message.text.trim()
     };
-    let files = match message.files.len() {
-        0 => String::new(),
-        count => format!("\n({count} file(s) attached)"),
-    };
+    let files: String = message.files.iter().map(file_line).collect();
     format!("From {who}:\n{text}{files}")
+}
+
+/// One attached file, with what `read_file` needs to fetch it.
+fn file_line(file: &FileRef) -> String {
+    let name = file.name.as_deref().unwrap_or("unnamed file");
+    let mut about = Vec::new();
+    if let Some(mimetype) = file.mimetype.as_deref().filter(|m| !m.is_empty()) {
+        about.push(mimetype.to_owned());
+    }
+    if let Some(size) = file.size {
+        about.push(format!("{size} bytes"));
+    }
+    about.push(format!("id {}", file.id));
+    let link = file
+        .permalink
+        .as_deref()
+        .map(|link| format!(" {link}"))
+        .unwrap_or_default();
+    format!("\nAttached: {name} ({}){link}", about.join(", "))
 }
 
 #[cfg(test)]
@@ -316,6 +333,32 @@ mod tests {
         };
         let gone = vanished(&target);
         assert!(gone.contains("do not treat this as an empty message"));
+    }
+
+    #[test]
+    fn an_attached_file_is_listed_with_what_read_file_needs() {
+        let message = Message {
+            ts: "1700000000.000100".into(),
+            text: "the numbers".into(),
+            user: Some("U1".into()),
+            bot_id: None,
+            subtype: None,
+            thread_ts: None,
+            files: vec![FileRef {
+                id: "F0C3E7TQGQK".into(),
+                name: Some("Q3 report.pdf".into()),
+                mimetype: Some("application/pdf".into()),
+                size: Some(1200),
+                permalink: Some(
+                    "https://immersiveloop.slack.com/files/U1/F0C3E7TQGQK/q3_report.pdf".into(),
+                ),
+            }],
+        };
+        assert_eq!(
+            body(&message),
+            "From U1:\nthe numbers\nAttached: Q3 report.pdf (application/pdf, 1200 bytes, id \
+             F0C3E7TQGQK) https://immersiveloop.slack.com/files/U1/F0C3E7TQGQK/q3_report.pdf"
+        );
     }
 
     #[test]
