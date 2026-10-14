@@ -426,6 +426,7 @@ async fn lent_groups_are_suffixed_and_refused_to_every_other_session() {
         .answer_tool(ToolOutcome {
             content: "fn main() {}".into(),
             is_error: false,
+            resources: Vec::new(),
         })
         .await
         .unwrap();

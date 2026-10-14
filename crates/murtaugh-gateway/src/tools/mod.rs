@@ -8,11 +8,13 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use murtaugh_slack::FileRef;
 use murtaugh_store::{Conversation, Store};
+use rax::content::ContentBlock;
 use rax::id::{LocalFileId, RequestId, SessionId};
 use rax::local_file::{ReadLocalFile, takes_local_files};
 use rax::tool::{CallTool, ToolDef, ToolGroup, ToolOutcome};
-use rax::{Error, ErrorKind, NodeReply};
+use rax::{Error, ErrorKind, NodeReply, Open};
 use rax_tokio::gateway::{GatewayLink, LocalFile};
 use serde_json::Value;
 
@@ -22,7 +24,10 @@ pub mod replying;
 pub mod send_message;
 pub mod show_chart;
 pub mod show_table;
+pub mod slack_file;
 pub mod slack_message;
+
+use crate::files::Files;
 
 /// The group every Slack thread's session is lent, so the agent sees `mcp__slack__…`.
 pub const NAMESPACE: &str = "slack";
@@ -56,6 +61,44 @@ pub struct Context {
     pub conversation: Option<Conversation>,
     /// The calling node's files, for a tool with an argument marked as a local file.
     pub local_files: Option<Arc<dyn LocalFiles>>,
+    /// Where a tool lends Slack files for the node to fetch after the answer. `None` for a node
+    /// that did not declare `tool_resources`, which would drop them.
+    pub lending: Option<Lending>,
+}
+
+/// The Slack files one call lends its node, which go out as the reply's `resources`.
+pub struct Lending {
+    files: Files,
+    node: String,
+    lent: Mutex<Vec<Open<ContentBlock>>>,
+}
+
+impl Lending {
+    pub fn new(files: Files, node: &str) -> Self {
+        Self {
+            files,
+            node: node.to_owned(),
+            lent: Mutex::default(),
+        }
+    }
+
+    /// From now on the node may read `file`, and it fetches it before its agent hears the answer.
+    pub fn lend(&self, file: &FileRef) {
+        let link = self.files.offer(&self.node, file);
+        lock(&self.lent).push(link.into());
+    }
+
+    fn take(&self) -> Vec<Open<ContentBlock>> {
+        std::mem::take(&mut *lock(&self.lent))
+    }
+}
+
+/// What the calling node can take part in, from its capabilities.
+#[derive(Clone, Default)]
+pub struct Reach {
+    pub local_files: bool,
+    /// Present when the node declared `tool_resources`, so a tool may lend it files.
+    pub files: Option<Files>,
 }
 
 /// Reads what a node offered in place of a path. `Err` is worded for the agent.
@@ -164,10 +207,11 @@ impl Tools {
         link: &GatewayLink,
         lent: &Lent,
         node: &str,
-        local_files: bool,
+        reach: &Reach,
         id: RequestId,
         call: CallTool,
     ) {
+        let local_files = reach.local_files;
         let selector = &link.identity().0;
         let tool = match &call.namespace {
             Some(namespace) => {
@@ -203,18 +247,29 @@ impl Tools {
         let context = Context {
             conversation: lent.conversation(selector, &call.session_id).await,
             local_files: Some(Arc::new(NodeFiles { link: link.clone() })),
+            lending: reach
+                .files
+                .as_ref()
+                .map(|files| Lending::new(files.clone(), selector)),
         };
-        let outcome = match tool
+        let answer = tool
             .invoke_in(&context, call.arguments.unwrap_or(Value::Null))
-            .await
-        {
+            .await;
+        // A failed call lends nothing: the agent was told it did not get the file.
+        let resources = match (&answer, &context.lending) {
+            (Ok(_), Some(lending)) => lending.take(),
+            _ => Vec::new(),
+        };
+        let outcome = match answer {
             Ok(content) => ToolOutcome {
                 content,
                 is_error: false,
+                resources,
             },
             Err(content) => ToolOutcome {
                 content,
                 is_error: true,
+                resources,
             },
         };
         tracing::info!(node = %node, tool = %call.name, namespace = ?call.namespace, failed = outcome.is_error, "served a tool call");

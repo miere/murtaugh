@@ -55,6 +55,8 @@ pub struct FileRef {
     pub name: Option<String>,
     pub mimetype: Option<String>,
     pub size: Option<u64>,
+    /// The link a person would open, which is also what `read_file` takes.
+    pub permalink: Option<String>,
 }
 
 #[derive(Deserialize)]

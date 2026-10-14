@@ -92,6 +92,8 @@ enum Groups {
     Takes,
     /// Takes them, and hands a gateway tool its files by identifier.
     TakesFiles,
+    /// Takes them, and fetches the files a gateway tool answers with.
+    TakesResources,
     /// Declares the capability, then reports every group it is lent as unpublished.
     Refuses,
 }
@@ -486,6 +488,7 @@ async fn answer(script: Script, id: RequestId, call: GatewayCall) {
                     tool_gate: ToolGate::EveryCall,
                     tool_groups: groups != Groups::Ignores,
                     local_files: groups == Groups::TakesFiles,
+                    tool_resources: groups == Groups::TakesResources,
                     ..Default::default()
                 },
                 metadata,
@@ -3465,6 +3468,114 @@ async fn a_node_changes_who_it_lets_in_live_and_a_bad_change_ends_its_link() {
     rig.shutdown.cancel();
 }
 
+/// `read_file` lends the file instead of answering with its bytes: the reply links it, and from then
+/// on that node, and only it, may read it.
+#[tokio::test(flavor = "multi_thread")]
+async fn read_file_lends_the_file_to_the_calling_node() {
+    let rig = rig().await;
+    let mut laptop = rig.node_lent(ALICE, "laptop", Groups::TakesResources).await;
+    let desktop = rig.node(ADMIN, "desktop").await;
+    let report = b"quarterly numbers: up and to the right";
+    let (file_id, _) = rig
+        .sim
+        .upload(ALICE, GENERAL, "report.txt", "text/plain", report, None)
+        .await
+        .unwrap();
+    rig.sim
+        .mention(ALICE, GENERAL, "read it", None)
+        .await
+        .unwrap();
+    let (session, _) = laptop.next_opened().await;
+    laptop.next_prompt().await;
+
+    let link = format!("https://slacksim.slack.com/files/{ALICE}/{file_id}/report.txt");
+    let answered = laptop
+        .call_tool(
+            &session,
+            Some("slack"),
+            "read_file",
+            serde_json::json!({"file": link}),
+        )
+        .await
+        .unwrap();
+    let NodeReply::CallTool(outcome) = answered else {
+        panic!("expected a tool outcome, got {answered:?}")
+    };
+    assert!(!outcome.is_error, "{}", outcome.content);
+    assert!(
+        outcome.content.contains("report.txt"),
+        "{}",
+        outcome.content
+    );
+    let uri = format!("gateway://files/{file_id}");
+    let [Open::Known(ContentBlock::ResourceLink { uri: lent, .. })] = outcome.resources.as_slice()
+    else {
+        panic!("expected one lent file, got {:?}", outcome.resources)
+    };
+    assert_eq!(lent, &uri);
+    assert_eq!(laptop.read(&uri, None).await.unwrap().bytes, report);
+    assert_eq!(
+        fault_kind(desktop.read(&uri, None).await),
+        rax::ErrorKind::Forbidden
+    );
+
+    let missing = laptop
+        .call_tool(
+            &session,
+            Some("slack"),
+            "read_file",
+            serde_json::json!({"file": "F0SIM999999"}),
+        )
+        .await
+        .unwrap();
+    let NodeReply::CallTool(ToolOutcome {
+        content,
+        is_error,
+        resources,
+    }) = missing
+    else {
+        panic!("expected a tool outcome, got {missing:?}")
+    };
+    assert!(is_error);
+    assert!(content.contains("cannot see"), "{content}");
+    assert!(resources.is_empty());
+    rig.shutdown.cancel();
+}
+
+/// A node that cannot fetch what a tool lends is told to update rather than handed a link it drops.
+#[tokio::test(flavor = "multi_thread")]
+async fn read_file_tells_an_older_node_to_update() {
+    let rig = rig().await;
+    let mut laptop = rig.node_lent(ALICE, "laptop", Groups::Takes).await;
+    rig.sim
+        .mention(ALICE, GENERAL, "read it", None)
+        .await
+        .unwrap();
+    let (session, _) = laptop.next_opened().await;
+    laptop.next_prompt().await;
+    let answered = laptop
+        .call_tool(
+            &session,
+            Some("slack"),
+            "read_file",
+            serde_json::json!({"file": "F0SIM000001"}),
+        )
+        .await
+        .unwrap();
+    let NodeReply::CallTool(ToolOutcome {
+        content,
+        is_error,
+        resources,
+    }) = answered
+    else {
+        panic!("expected a tool outcome, got {answered:?}")
+    };
+    assert!(is_error);
+    assert!(content.contains("too old"), "{content}");
+    assert!(resources.is_empty());
+    rig.shutdown.cancel();
+}
+
 /// A node that takes tools per session is lent the `slack` group when the thread's session opens,
 /// and the gateway serves a call only for the group that session was lent.
 #[tokio::test(flavor = "multi_thread")]
@@ -3487,7 +3598,10 @@ async fn a_session_is_lent_the_slack_tools_and_nothing_else() {
         )
         .await
         .unwrap();
-    let NodeReply::CallTool(ToolOutcome { content, is_error }) = ran else {
+    let NodeReply::CallTool(ToolOutcome {
+        content, is_error, ..
+    }) = ran
+    else {
         panic!("expected a tool outcome, got {ran:?}")
     };
     assert!(is_error);
@@ -3699,7 +3813,10 @@ async fn attach_reads_the_nodes_file_and_posts_it_into_the_sessions_thread() {
     };
 
     let posted = attach(OFFERED_CHART).await.unwrap();
-    let NodeReply::CallTool(ToolOutcome { content, is_error }) = posted else {
+    let NodeReply::CallTool(ToolOutcome {
+        content, is_error, ..
+    }) = posted
+    else {
         panic!("expected a tool outcome, got {posted:?}")
     };
     assert!(!is_error, "{content}");
@@ -3735,7 +3852,10 @@ async fn attach_reads_the_nodes_file_and_posts_it_into_the_sessions_thread() {
             rig.sim.fail(method, "storage_limit_reached");
         }
         let refused = attach(path).await.unwrap();
-        let NodeReply::CallTool(ToolOutcome { content, is_error }) = refused else {
+        let NodeReply::CallTool(ToolOutcome {
+            content, is_error, ..
+        }) = refused
+        else {
             panic!("expected a tool outcome, got {refused:?}")
         };
         assert!(is_error, "{content}");
@@ -3794,7 +3914,10 @@ async fn send_message_refuses_the_thread_a_reply_is_being_written_into() {
         )
     };
     let refused = send("**Deploy** finished").await.unwrap();
-    let NodeReply::CallTool(ToolOutcome { content, is_error }) = refused else {
+    let NodeReply::CallTool(ToolOutcome {
+        content, is_error, ..
+    }) = refused
+    else {
         panic!("{refused:?}");
     };
     assert!(is_error, "{content}");
@@ -4210,7 +4333,10 @@ async fn a_table_shown_mid_reply_sits_above_the_words_that_follow_it() {
     let too_many: Vec<serde_json::Value> =
         (0..201).map(|n| serde_json::json!(["api", n])).collect();
     let refused = show(serde_json::json!(too_many)).await.unwrap();
-    let NodeReply::CallTool(ToolOutcome { content, is_error }) = refused else {
+    let NodeReply::CallTool(ToolOutcome {
+        content, is_error, ..
+    }) = refused
+    else {
         panic!("{refused:?}");
     };
     assert!(is_error, "{content}");
@@ -4220,7 +4346,10 @@ async fn a_table_shown_mid_reply_sits_above_the_words_that_follow_it() {
     let shown = show(serde_json::json!([["api", 14], ["web", 9]]))
         .await
         .unwrap();
-    let NodeReply::CallTool(ToolOutcome { content, is_error }) = shown else {
+    let NodeReply::CallTool(ToolOutcome {
+        content, is_error, ..
+    }) = shown
+    else {
         panic!("{shown:?}");
     };
     assert!(!is_error, "{content}");
@@ -4317,7 +4446,10 @@ async fn a_chart_shown_mid_reply_sits_above_the_words_that_follow_it() {
     let refused = show((0..21).map(|n| format!("W{n}")).collect())
         .await
         .unwrap();
-    let NodeReply::CallTool(ToolOutcome { content, is_error }) = refused else {
+    let NodeReply::CallTool(ToolOutcome {
+        content, is_error, ..
+    }) = refused
+    else {
         panic!("{refused:?}");
     };
     assert!(is_error, "{content}");
@@ -4328,7 +4460,10 @@ async fn a_chart_shown_mid_reply_sits_above_the_words_that_follow_it() {
     assert!(content.contains("Nothing was posted"), "{content}");
 
     let shown = show(vec!["W1".into(), "W2".into()]).await.unwrap();
-    let NodeReply::CallTool(ToolOutcome { content, is_error }) = shown else {
+    let NodeReply::CallTool(ToolOutcome {
+        content, is_error, ..
+    }) = shown
+    else {
         panic!("{shown:?}");
     };
     assert!(!is_error, "{content}");

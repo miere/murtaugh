@@ -95,7 +95,7 @@ pub(crate) fn canvas_id(link: &str) -> Result<String, String> {
 }
 
 /// Slack's file ids, which canvases share: `F` then at least eight capitals or digits.
-fn is_file_id(text: &str) -> bool {
+pub(crate) fn is_file_id(text: &str) -> bool {
     text.len() >= 9
         && text.starts_with('F')
         && text

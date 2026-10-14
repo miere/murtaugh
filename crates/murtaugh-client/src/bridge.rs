@@ -717,10 +717,12 @@ async fn tool(shared: &Shared, call: CallTool) -> Result<ToolOutcome, Error> {
                 Ok(content) => ToolOutcome {
                     content,
                     is_error: false,
+                    resources: Vec::new(),
                 },
                 Err(reason) => ToolOutcome {
                     content: reason,
                     is_error: true,
+                    resources: Vec::new(),
                 },
             }
         }
@@ -735,10 +737,12 @@ async fn tool(shared: &Shared, call: CallTool) -> Result<ToolOutcome, Error> {
                 Ok(()) => ToolOutcome {
                     content: format!("Wrote {path}."),
                     is_error: false,
+                    resources: Vec::new(),
                 },
                 Err(reason) => ToolOutcome {
                     content: reason,
                     is_error: true,
+                    resources: Vec::new(),
                 },
             }
         }

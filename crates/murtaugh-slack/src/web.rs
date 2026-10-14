@@ -110,6 +110,8 @@ pub struct FileInfo {
     pub size: u64,
     #[serde(default)]
     pub url_private_download: String,
+    #[serde(default)]
+    pub permalink: String,
 }
 
 /// The mimetype `files.info` gives a canvas.
