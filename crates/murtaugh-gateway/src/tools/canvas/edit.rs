@@ -432,6 +432,7 @@ mod tests {
                 mimetype: murtaugh_slack::CANVAS_MIMETYPE.into(),
                 size: 0,
                 url_private_download: String::new(),
+                permalink: String::new(),
             },
             document: Document::parse(html),
         }

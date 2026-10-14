@@ -361,6 +361,7 @@ impl Relay {
                 sessions: SessionDurability::Ephemeral,
                 tool_groups: true,
                 local_files: false,
+                tool_resources: false,
             },
             metadata: Default::default(),
         }

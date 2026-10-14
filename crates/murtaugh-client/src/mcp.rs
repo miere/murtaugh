@@ -202,11 +202,13 @@ pub async fn call(client: &Client, name: &str, arguments: Option<Value>) -> Tool
             ToolOutcome {
                 content,
                 is_error: result.is_error == Some(true),
+                resources: Vec::new(),
             }
         }
         Err(err) => ToolOutcome {
             content: format!("the MCP server failed the call: {err}"),
             is_error: true,
+            resources: Vec::new(),
         },
     }
 }

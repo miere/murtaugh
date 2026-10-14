@@ -234,7 +234,10 @@ async fn serve(link: GatewayLink, mut events: LinkEvents, serving: Serving) {
     };
     report_ignored(&link, &name, &read.ignored).await;
     let capabilities = initialized.capabilities;
-    let local_files = capabilities.local_files;
+    let reach = crate::tools::Reach {
+        local_files: capabilities.local_files,
+        files: capabilities.tool_resources.then(|| files.clone()),
+    };
     tracing::info!(node = %name, %owner, tool_gate = ?capabilities.tool_gate, access = ?read.access, "node attached");
     let attachment = fleet.attach(Node {
         selector: selector.clone(),
@@ -288,13 +291,16 @@ async fn serve(link: GatewayLink, mut events: LinkEvents, serving: Serving) {
                 id,
                 call: NodeCall::CallTool(call),
             } => {
-                let (tools, lent, link, name) =
-                    (tools.clone(), lent.clone(), link.clone(), name.clone());
-                tokio::spawn(async move {
-                    tools
-                        .serve(&link, &lent, &name, local_files, id, call)
-                        .await
-                });
+                let (tools, lent, link, name, reach) = (
+                    tools.clone(),
+                    lent.clone(),
+                    link.clone(),
+                    name.clone(),
+                    reach.clone(),
+                );
+                tokio::spawn(
+                    async move { tools.serve(&link, &lent, &name, &reach, id, call).await },
+                );
             }
             LinkEvent::Request {
                 id,

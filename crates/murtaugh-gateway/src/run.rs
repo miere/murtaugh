@@ -116,6 +116,7 @@ pub async fn serve(
         Box::new(crate::tools::slack_message::SlackReadMessage::new(Some(
             slack.clone(),
         ))),
+        Box::new(crate::tools::slack_file::ReadFile::new(Some(slack.clone()))),
         Box::new(crate::tools::canvas::read::ReadCanvas::new(Some(
             slack.clone(),
         ))),
