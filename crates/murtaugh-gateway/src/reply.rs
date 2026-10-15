@@ -61,6 +61,9 @@ enum Mode {
     Buffered {
         text: String,
         posted: Vec<(String, String)>,
+        /// Tools ran since the last words, which such a surface does not show; the next words
+        /// start a paragraph of their own so they do not run on from the ones before.
+        broken: bool,
     },
 }
 
@@ -180,8 +183,14 @@ impl Reply {
         self.leave_placed().await;
         match &mut self.mode {
             Mode::Streaming(_) => self.paint(&text).await,
-            Mode::Buffered { text: all, .. } => {
-                all.push_str(&text);
+            Mode::Buffered {
+                text: all, broken, ..
+            } => {
+                if std::mem::take(broken) && paragraph_break(all) {
+                    all.push_str(text.trim_start_matches('\n'));
+                } else {
+                    all.push_str(&text);
+                }
                 self.repost().await;
             }
         }
@@ -283,6 +292,7 @@ impl Reply {
                 self.mode = Mode::Buffered {
                     text,
                     posted: Vec::new(),
+                    broken: false,
                 };
                 self.repost().await;
                 true
@@ -323,7 +333,16 @@ impl Reply {
 
     /// Settled states always go out; a running beat is redrawn at most once a `TASK_INTERVAL`.
     pub async fn task(&mut self, id: &str, card: TaskCard<'_>, status: TaskStatus) {
-        if matches!(self.mode, Mode::Buffered { .. }) || self.quiet {
+        if self.quiet {
+            return;
+        }
+        if let Mode::Buffered { .. } = self.mode {
+            // Any words still pending belong before this tool.
+            let pending = self.pending.len();
+            self.emit(pending).await;
+            if let Mode::Buffered { broken, .. } = &mut self.mode {
+                *broken = true;
+            }
             return;
         }
         // Any words still pending belong before this tool, and close the beat it would join.
@@ -413,9 +432,14 @@ impl Reply {
         }
         match &mut self.mode {
             Mode::Streaming(_) => self.rollover().await,
-            Mode::Buffered { text, posted } => {
+            Mode::Buffered {
+                text,
+                posted,
+                broken,
+            } => {
                 text.clear();
                 posted.clear();
+                *broken = false;
             }
         }
     }
@@ -437,7 +461,7 @@ impl Reply {
     }
 
     async fn repost(&mut self) {
-        let Mode::Buffered { text, posted } = &mut self.mode else {
+        let Mode::Buffered { text, posted, .. } = &mut self.mode else {
             return;
         };
         let rendered = render::mrkdwn(text);
@@ -477,6 +501,17 @@ impl Reply {
             }
         }
     }
+}
+
+/// Ends `text` with a blank line, adding only the newlines it lacks, and says whether it did.
+/// With nothing to separate from, nothing is added.
+fn paragraph_break(text: &mut String) -> bool {
+    if text.trim().is_empty() {
+        return false;
+    }
+    let had = text.len() - text.trim_end_matches('\n').len();
+    text.push_str(&"\n".repeat(2usize.saturating_sub(had)));
+    true
 }
 
 /// The stream can take no more, though a new message would.

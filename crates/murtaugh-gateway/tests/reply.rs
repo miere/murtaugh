@@ -204,16 +204,36 @@ async fn a_tool_settles_on_its_own_beat_however_much_the_agent_says_after_it() {
 async fn a_surface_that_cannot_stream_gets_ordinary_messages_instead() {
     let (sim, mut reply, thread) = setup().await;
     sim.fail("chat.startStream", "channel_type_not_supported");
-    reply.text("**Hello** from a canvas").await;
+    reply.text("**Hello** from a canvas.").await;
     reply
         .task("t1", card("ignored"), TaskStatus::InProgress)
         .await;
-    reply.text(", still here.").await;
+    reply.text("Still here.").await;
     reply.finish().await;
     let answers = answers(&sim, &thread);
     assert_eq!(answers.len(), 1);
     assert!(answers[0].stream.is_none());
-    assert_eq!(answers[0].text, "*Hello* from a canvas, still here.");
+    assert_eq!(answers[0].text, "*Hello* from a canvas.\n\nStill here.");
+}
+
+/// A surface that cannot stream shows no task lists, so the words either side of a run of tools
+/// are kept apart as paragraphs instead, without piling up blank lines or leaving one at the end.
+#[tokio::test]
+async fn words_either_side_of_tools_are_paragraphs_where_tools_cannot_show() {
+    let (sim, mut reply, thread) = setup().await;
+    sim.fail("chat.startStream", "channel_type_not_supported");
+    reply.text("Let me look.").await;
+    reply.task("t1", card("Read"), TaskStatus::InProgress).await;
+    reply.task("t1", card("Read"), TaskStatus::Complete).await;
+    reply.task("t2", card("Grep"), TaskStatus::InProgress).await;
+    reply.text("Found it.\n").await;
+    reply.task("t3", card("Edit"), TaskStatus::Complete).await;
+    reply.text("\nFixed.").await;
+    reply.task("t4", card("Test"), TaskStatus::Complete).await;
+    reply.finish().await;
+    let answers = answers(&sim, &thread);
+    assert_eq!(answers.len(), 1);
+    assert_eq!(answers[0].text, "Let me look.\n\nFound it.\n\nFixed.");
 }
 
 /// A message placed mid-reply sits where the reply had got to: the tool that asked for it settles
