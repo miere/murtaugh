@@ -506,6 +506,7 @@ fn when(at: OffsetDateTime) -> String {
 fn audience(owner: &UserId, access: &NodeAccess) -> String {
     match access {
         NodeAccess::AlwaysAllow => "all gateway users".to_owned(),
+        NodeAccess::OwnerOnly => format!("only <@{owner}>, as its Claude credential requires"),
         NodeAccess::AllowList(people) => {
             let others = people.iter().filter(|person| *person != owner).count();
             match others {

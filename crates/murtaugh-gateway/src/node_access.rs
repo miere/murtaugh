@@ -18,6 +18,9 @@ pub const ACCESS: &str = "access";
 pub enum NodeAccess {
     AlwaysAllow,
     AllowList(HashSet<UserId>),
+    /// The node's credential may serve its owner alone, such as a Claude subscription, so it said
+    /// `owner_only` at `initialize`. Never read from metadata, and nothing in it widens this.
+    OwnerOnly,
 }
 
 /// A node that says nothing serves its owner alone. Anyone allowed on the gateway may be routed to
@@ -34,7 +37,13 @@ impl NodeAccess {
         match self {
             Self::AlwaysAllow => true,
             Self::AllowList(people) => user == owner || people.contains(user),
+            Self::OwnerOnly => user == owner,
         }
+    }
+
+    /// What the node's metadata lets in, unless its credential confines it to its owner.
+    pub fn confined(self, owner_only: bool) -> Self {
+        if owner_only { Self::OwnerOnly } else { self }
     }
 }
 
@@ -115,6 +124,16 @@ mod tests {
 
     fn metadata(value: Value) -> Metadata {
         Metadata::from([("murtaugh_access".to_owned(), value)])
+    }
+
+    #[test]
+    fn an_owner_only_node_admits_its_owner_alone_whatever_its_metadata_says() {
+        let owner = user("U0ALICE01");
+        let shared = read(&metadata(json!({"policy": "always_allow"}))).unwrap();
+        let confined = shared.access.clone().confined(true);
+        assert!(confined.admits(&owner, &owner));
+        assert!(!confined.admits(&owner, &user("U0BOB0001")));
+        assert_eq!(shared.access.confined(false), NodeAccess::AlwaysAllow);
     }
 
     #[test]
