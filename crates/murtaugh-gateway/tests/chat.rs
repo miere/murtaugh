@@ -311,8 +311,15 @@ impl Rig {
 
     /// A node that takes its gateway tools per session, or declares it does and refuses them.
     async fn node_lent(&self, owner: &str, name: &str, groups: Groups) -> FakeNode {
-        self.node_built(owner, name, &[self.listen], rax::Metadata::new(), groups)
-            .await
+        self.node_built(
+            owner,
+            name,
+            &[self.listen],
+            rax::Metadata::new(),
+            groups,
+            false,
+        )
+        .await
     }
 
     /// A node whose owner lets in everyone allowed on the gateway.
@@ -338,7 +345,15 @@ impl Rig {
         gateways: &[std::net::SocketAddr],
         metadata: rax::Metadata,
     ) -> FakeNode {
-        self.node_built(owner, name, gateways, metadata, Groups::Ignores)
+        self.node_built(owner, name, gateways, metadata, Groups::Ignores, false)
+            .await
+    }
+
+    /// A node whose owner lets everyone in, but whose credential serves its owner alone.
+    async fn node_confined(&self, owner: &str, name: &str) -> FakeNode {
+        let access = serde_json::json!({"policy": "always_allow"});
+        let metadata = rax::Metadata::from([("murtaugh_access".to_owned(), access)]);
+        self.node_built(owner, name, &[self.listen], metadata, Groups::Ignores, true)
             .await
     }
 
@@ -349,6 +364,7 @@ impl Rig {
         gateways: &[std::net::SocketAddr],
         metadata: rax::Metadata,
         groups: Groups,
+        owner_only: bool,
     ) -> FakeNode {
         let minted = token::mint(token::NODE_PREFIX);
         self.store
@@ -388,6 +404,7 @@ impl Rig {
             initialized,
             metadata,
             groups,
+            owner_only,
         };
         tokio::spawn(async move {
             while let Some(event) = events.recv().await {
@@ -464,6 +481,7 @@ struct Script {
     initialized: mpsc::Sender<()>,
     metadata: rax::Metadata,
     groups: Groups,
+    owner_only: bool,
 }
 
 async fn answer(script: Script, id: RequestId, call: GatewayCall) {
@@ -479,6 +497,7 @@ async fn answer(script: Script, id: RequestId, call: GatewayCall) {
         initialized,
         metadata,
         groups,
+        owner_only,
     } = script;
     match call {
         GatewayCall::Initialize(_) => {
@@ -489,6 +508,7 @@ async fn answer(script: Script, id: RequestId, call: GatewayCall) {
                     tool_groups: groups != Groups::Ignores,
                     local_files: groups == Groups::TakesFiles,
                     tool_resources: groups == Groups::TakesResources,
+                    owner_only,
                     ..Default::default()
                 },
                 metadata,
@@ -941,6 +961,22 @@ async fn an_allowed_person_uses_a_shared_node_and_hears_when_none_is_up() {
             .any(|m| m.text.contains("**desktop** says pong"))
     })
     .await;
+    rig.shutdown.cancel();
+}
+
+/// Its owner lets everyone in, but its credential, a Claude subscription, may serve nobody else.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_owner_only_node_serves_its_owner_alone_whatever_its_metadata_says() {
+    let rig = rig().await;
+    rig.store.set_allowed(&user(BOB), true).await.unwrap();
+    let mut desktop = rig.node_confined(ALICE, "desktop").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let ts = rig.sim.mention(BOB, GENERAL, "may I?", None).await.unwrap();
+    zipped(&rig, &ts).await;
+
+    rig.sim.mention(ALICE, GENERAL, "mine", None).await.unwrap();
+    assert_eq!(desktop.next_prompt().await.1, mentioned("mine"));
     rig.shutdown.cancel();
 }
 
@@ -3716,7 +3752,14 @@ async fn a_call_from_someone_elses_client_is_approved_by_the_node_owner_in_their
     let access = serde_json::json!({"policy": "always_allow"});
     let metadata = rax::Metadata::from([("murtaugh_access".to_owned(), access)]);
     let _laptop = rig
-        .node_built(ALICE, "laptop", &[rig.listen], metadata, Groups::Takes)
+        .node_built(
+            ALICE,
+            "laptop",
+            &[rig.listen],
+            metadata,
+            Groups::Takes,
+            false,
+        )
         .await;
     let minted = murtaugh_gateway::roles::mint_client(
         &*rig.store,

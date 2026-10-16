@@ -314,6 +314,8 @@ async fn initialize(shared: &Shared, link: &GatewayLink) -> Result<(), String> {
             resource_schemes: vec![],
             readable_schemes: if fs.read { vec!["file".into()] } else { vec![] },
             tools: None,
+            // The gateway it dials confines its own nodes; this side has no people to confine to.
+            owner_only: false,
         },
     });
     match call(link, offer).await {

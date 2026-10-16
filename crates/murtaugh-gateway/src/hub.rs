@@ -68,6 +68,7 @@ pub fn capabilities(tools: &Tools) -> GatewayCapabilities {
         resource_schemes: vec!["chat".into()],
         readable_schemes: vec![crate::files::SCHEME.into(), relay::SCHEME.into()],
         tools: tools.catalogue(),
+        owner_only: true,
     }
 }
 
@@ -234,11 +235,14 @@ async fn serve(link: GatewayLink, mut events: LinkEvents, serving: Serving) {
     };
     report_ignored(&link, &name, &read.ignored).await;
     let capabilities = initialized.capabilities;
+    // Read once: a node whose credential changes ends its link and declares it again.
+    let owner_only = capabilities.owner_only;
+    let access = read.access.confined(owner_only);
     let reach = crate::tools::Reach {
         local_files: capabilities.local_files,
         files: capabilities.tool_resources.then(|| files.clone()),
     };
-    tracing::info!(node = %name, %owner, tool_gate = ?capabilities.tool_gate, access = ?read.access, "node attached");
+    tracing::info!(node = %name, %owner, tool_gate = ?capabilities.tool_gate, ?access, "node attached");
     let attachment = fleet.attach(Node {
         selector: selector.clone(),
         owner: owner.clone(),
@@ -246,7 +250,7 @@ async fn serve(link: GatewayLink, mut events: LinkEvents, serving: Serving) {
         link: link.clone(),
         capabilities,
         connected: true,
-        access: read.access,
+        access,
     });
     let _ = changes
         .send(FleetChange::Attached {
@@ -350,8 +354,9 @@ async fn serve(link: GatewayLink, mut events: LinkEvents, serving: Serving) {
             } => match node_access::read(&update.metadata) {
                 Ok(read) => {
                     report_ignored(&link, &name, &read.ignored).await;
-                    tracing::info!(node = %name, access = ?read.access, "node updated its metadata");
-                    fleet.set_access(&selector, attachment, read.access);
+                    let access = read.access.confined(owner_only);
+                    tracing::info!(node = %name, ?access, "node updated its metadata");
+                    fleet.set_access(&selector, attachment, access);
                     if let Err(err) = link.reply(id, NodeReply::UpdateMetadata).await {
                         tracing::debug!(node = %name, error = %err, "could not answer a node call");
                     }

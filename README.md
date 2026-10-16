@@ -178,7 +178,9 @@ node admin.
 Which nodes an allowed person may use is up to each node's owner, through the `murtaugh_access`
 metadata their node sends: `{"policy": "always_allow"}` shares it with everyone allowed on the
 gateway, and `{"policy": "allow_list", "people": [...]}` with the people listed. A node that says
-nothing serves its owner alone.
+nothing serves its owner alone. So does a node that declares `owner_only` at `initialize`, whatever
+its metadata says: its agent's credential, such as a Claude subscription, may serve nobody else.
+Murtaugh offers `owner_only`, so such a node can connect at all.
 
 A conversation is a Slack thread. It goes to the person's own node with the fewest live sessions,
 or, if none of theirs is connected, to the least busy node whose owner lets them in. If that node

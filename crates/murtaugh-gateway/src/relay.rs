@@ -362,6 +362,9 @@ impl Relay {
                 tool_groups: true,
                 local_files: false,
                 tool_resources: false,
+                // Confinement is enforced here, on the nodes behind it, before a client is
+                // routed to one.
+                owner_only: false,
             },
             metadata: Default::default(),
         }
