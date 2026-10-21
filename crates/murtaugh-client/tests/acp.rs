@@ -15,6 +15,7 @@ use agent_client_protocol::schema::v1::{
 };
 use agent_client_protocol::{Agent, Channel, Client, ConnectionTo, Responder};
 use murtaugh_client::bridge::{self, Options};
+use murtaugh_client::local::Roots;
 use rax::content::ContentBlock;
 use rax::event::StopReason;
 use rax::id::{RequestId, SessionId};
@@ -426,7 +427,26 @@ fn options(url: String) -> Options {
         gateway: url,
         token: TOKEN.into(),
         name: "acp".into(),
+        roots: Roots::default(),
     }
+}
+
+fn context_text(request: &NewSession) -> String {
+    request
+        .context
+        .iter()
+        .filter_map(|block| match block {
+            rax::Open::Known(ContentBlock::Text { text }) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn outcome(reply: NodeReply) -> rax::tool::ToolOutcome {
+    let NodeReply::CallTool(outcome) = reply else {
+        panic!("expected a tool outcome")
+    };
+    outcome
 }
 
 async fn opened(
@@ -500,7 +520,10 @@ async fn a_write_is_applied_through_the_editors_file_system() {
         .iter()
         .map(|tool| tool.name.as_str())
         .collect();
-    assert_eq!(names, ["read_text_file", "write_text_file"]);
+    assert_eq!(
+        names,
+        ["read_text_file", "write_text_file", "edit_text_file"]
+    );
 
     let NodeReply::CallTool(outcome) = bridge
         .call_tool(
@@ -529,6 +552,126 @@ async fn a_write_is_applied_through_the_editors_file_system() {
         panic!("expected a tool outcome")
     };
     assert_eq!(read.content, "contents of /work/a.rs");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_root_lends_its_files_from_disk_when_the_editor_offers_none() {
+    let vault = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let mut murtaugh = Murtaugh::start().await;
+    let editor = editor(Options {
+        roots: Roots::new(&[vault.path().to_path_buf()]).unwrap(),
+        ..options(murtaugh.url(None))
+    });
+    editor.initialize(false).await;
+    let (bridge, request) = opened(&editor, &mut murtaugh, None).await;
+    let names: Vec<&str> = request.tool_groups[0]
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "read_text_file",
+            "write_text_file",
+            "edit_text_file",
+            "list_directory"
+        ]
+    );
+    let context = context_text(&request);
+    assert!(context.contains("`acp` namespace"), "{context}");
+    let real = std::fs::canonicalize(vault.path()).unwrap();
+    assert!(context.contains(&real.display().to_string()), "{context}");
+
+    let note = vault.path().join("daily/today.md").display().to_string();
+    let written = outcome(
+        bridge
+            .call_tool(
+                "s1",
+                "write_text_file",
+                json!({"path": note, "content": "# Today\n- [ ] buy milk\n"}),
+            )
+            .await,
+    );
+    assert!(!written.is_error, "{written:?}");
+    let edited = outcome(
+        bridge
+            .call_tool(
+                "s1",
+                "edit_text_file",
+                json!({"path": note, "old_string": "[ ] buy", "new_string": "[x] buy"}),
+            )
+            .await,
+    );
+    assert!(!edited.is_error, "{edited:?}");
+    assert_eq!(
+        std::fs::read_to_string(vault.path().join("daily/today.md")).unwrap(),
+        "# Today\n- [x] buy milk\n"
+    );
+    let read = outcome(
+        bridge
+            .call_tool("s1", "read_text_file", json!({"path": note, "line": 2}))
+            .await,
+    );
+    assert_eq!(read.content, "- [x] buy milk\n");
+    let listed = outcome(
+        bridge
+            .call_tool("s1", "list_directory", json!({"path": vault.path()}))
+            .await,
+    );
+    assert_eq!(listed.content, "daily/");
+
+    let escape = outside.path().join("x.md").display().to_string();
+    let refused = outcome(
+        bridge
+            .call_tool(
+                "s1",
+                "write_text_file",
+                json!({"path": escape, "content": "nope"}),
+            )
+            .await,
+    );
+    assert!(refused.is_error, "{refused:?}");
+    assert!(!outside.path().join("x.md").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_edit_goes_through_the_editor_when_it_offers_files() {
+    let mut murtaugh = Murtaugh::start().await;
+    let editor = editor(options(murtaugh.url(None)));
+    editor.initialize(true).await;
+    let (bridge, _) = opened(&editor, &mut murtaugh, None).await;
+    let edited = outcome(
+        bridge
+            .call_tool(
+                "s1",
+                "edit_text_file",
+                json!({"path": "/work/a.md", "old_string": "contents", "new_string": "body"}),
+            )
+            .await,
+    );
+    assert!(!edited.is_error, "{edited:?}");
+    assert_eq!(
+        editor
+            .writes
+            .lock()
+            .unwrap()
+            .get("/work/a.md")
+            .map(String::as_str),
+        Some("body of /work/a.md")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_agent_is_told_when_no_files_are_shared() {
+    let mut murtaugh = Murtaugh::start().await;
+    let editor = editor(options(murtaugh.url(None)));
+    editor.initialize(false).await;
+    let (_bridge, request) = opened(&editor, &mut murtaugh, None).await;
+    let context = context_text(&request);
+    assert!(context.contains("/work, on their machine"), "{context}");
+    assert!(context.contains("not shared with you"), "{context}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

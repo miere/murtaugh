@@ -5,6 +5,7 @@ use std::process::ExitCode;
 use agent_client_protocol::Stdio;
 use clap::{Args, Parser, Subcommand};
 use murtaugh_client::bridge::{self, Options};
+use murtaugh_client::local::Roots;
 use murtaugh_client::profile::{self, DEFAULT_PROFILE};
 use murtaugh_client::workload::{self, Target};
 use murtaugh_common::logging;
@@ -45,6 +46,10 @@ struct AcpArgs {
     /// The namespace the editor's tools are lent under: [a-z0-9_], at most 27 characters
     #[arg(long, default_value = "acp")]
     name: String,
+    /// A folder whose files the agent may read and write on this machine, such as a notes vault;
+    /// repeatable. Without one, files are reached only through the editor, if it offers them
+    #[arg(long = "root", value_name = "DIR")]
+    roots: Vec<PathBuf>,
     /// Which saved profile to read
     #[arg(long, default_value = DEFAULT_PROFILE, value_name = "ALIAS")]
     profile: String,
@@ -114,6 +119,7 @@ fn acp(args: AcpArgs) -> Result<(), String> {
             args.name
         ));
     }
+    let roots = Roots::new(&args.roots)?;
     let profile_path = profile::path(&args.profile).map_err(|err| err.to_string())?;
     let saved = profile::load(&profile_path).map_err(|err| err.to_string())?;
     let resolved = profile::resolve(&saved, &profile_path, args.gateway, args.token_file)
@@ -132,12 +138,13 @@ fn acp(args: AcpArgs) -> Result<(), String> {
         gateway: resolved.gateway,
         token,
         name: args.name,
+        roots,
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|err| format!("cannot start the async runtime: {err}"))?;
-    tracing::info!(gateway = %options.gateway, name = %options.name, "{BINARY} {VERSION} bridging an editor");
+    tracing::info!(gateway = %options.gateway, name = %options.name, roots = ?options.roots.dirs(), "{BINARY} {VERSION} bridging an editor");
     runtime
         .block_on(bridge::serve(options, Stdio::new()))
         .map_err(|err| err.to_string())

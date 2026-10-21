@@ -2,6 +2,7 @@
 //! editor's agent sessions on the machines of a Murtaugh fleet.
 
 pub mod bridge;
+pub mod local;
 pub mod mcp;
 pub mod profile;
 pub mod workload;
