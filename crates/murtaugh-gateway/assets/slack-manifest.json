@@ -35,6 +35,8 @@
         "files:write",
         "groups:history",
         "im:history",
+        "lists:read",
+        "lists:write",
         "mpim:history",
         "reactions:write",
         "users:read"

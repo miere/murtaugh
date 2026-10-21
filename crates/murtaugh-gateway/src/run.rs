@@ -123,6 +123,24 @@ pub async fn serve(
         Box::new(crate::tools::canvas::edit::EditCanvas::new(Some(
             slack.clone(),
         ))),
+        Box::new(crate::tools::lists::read::ReadList::new(Some(
+            slack.clone(),
+        ))),
+        Box::new(crate::tools::lists::read_item::ReadListItem::new(Some(
+            slack.clone(),
+        ))),
+        Box::new(crate::tools::lists::create::CreateList::new(Some(
+            slack.clone(),
+        ))),
+        Box::new(crate::tools::lists::add::AddListItems::new(Some(
+            slack.clone(),
+        ))),
+        Box::new(crate::tools::lists::update::UpdateListItems::new(Some(
+            slack.clone(),
+        ))),
+        Box::new(crate::tools::lists::delete::DeleteListItems::new(Some(
+            slack.clone(),
+        ))),
         Box::new(crate::tools::send_message::SendMessage::new(
             Some(slack.clone()),
             replying.clone(),

@@ -64,6 +64,9 @@ mod tests {
             "canvases:read",
             "canvases:write",
             "files:read",
+            // the Lists tools.
+            "lists:read",
+            "lists:write",
             // the names mentions are labelled with.
             "users:read",
         ] {
