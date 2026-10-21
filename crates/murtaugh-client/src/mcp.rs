@@ -1,6 +1,7 @@
 //! The tools a session lends the agent: every MCP server the editor named for it, connected here
-//! on the person's machine, and the editor's own file system when it offers one. The agent runs
-//! on a node; its calls come back over RAX and are answered from here.
+//! on the person's machine, and its files: through the editor's own file system when it offers
+//! one, and from this machine's disk under the folders `--root` shares. The agent runs on a node;
+//! its calls come back over RAX and are answered from here.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -14,6 +15,8 @@ use serde_json::{Value, json};
 
 pub const READ_TEXT_FILE: &str = "read_text_file";
 pub const WRITE_TEXT_FILE: &str = "write_text_file";
+pub const EDIT_TEXT_FILE: &str = "edit_text_file";
+pub const LIST_DIRECTORY: &str = "list_directory";
 
 type Client = RunningService<RoleClient, ()>;
 
@@ -23,6 +26,8 @@ pub enum Route {
     Mcp { client: Arc<Client>, name: String },
     ReadFile,
     WriteFile,
+    EditFile,
+    ListDirectory,
 }
 
 /// One session's tools, and the servers behind them, closed when the session is.
@@ -36,7 +41,7 @@ pub struct Lent {
 impl Lent {
     /// Connects each server in the editor's `mcpServers`. A server that cannot be reached is
     /// logged and left out: the session still opens with the rest.
-    pub async fn connect(servers: &[Value], fs: Fs) -> Self {
+    pub async fn connect(servers: &[Value], fs: Fs, local: bool) -> Self {
         let mut lent = Self::default();
         for server in servers {
             let name = server["name"].as_str().unwrap_or("mcp").to_owned();
@@ -47,12 +52,17 @@ impl Lent {
                 }
             }
         }
-        if fs.read {
+        let (read, write) = (fs.read || local, fs.write || local);
+        if read {
+            let description = if fs.read {
+                "Reads a text file on the person's machine as the editor has it, unsaved changes included."
+            } else {
+                "Reads a text file on the person's machine."
+            };
             lent.add(
                 ToolDef {
                     name: READ_TEXT_FILE.into(),
-                    description:
-                        "Reads a text file as the editor has it, unsaved changes included.".into(),
+                    description: description.into(),
                     input_schema: Some(json!({
                         "type": "object",
                         "properties": {
@@ -67,11 +77,13 @@ impl Lent {
                 Route::ReadFile,
             );
         }
-        if fs.write {
+        if write {
             lent.add(
                 ToolDef {
                     name: WRITE_TEXT_FILE.into(),
-                    description: "Writes a text file through the editor.".into(),
+                    description:
+                        "Writes a whole text file on the person's machine, creating it if needed."
+                            .into(),
                     input_schema: Some(json!({
                         "type": "object",
                         "properties": {
@@ -83,6 +95,44 @@ impl Lent {
                     kind: ToolKind::Edit,
                 },
                 Route::WriteFile,
+            );
+        }
+        if read && write {
+            lent.add(
+                ToolDef {
+                    name: EDIT_TEXT_FILE.into(),
+                    description: "Edits a text file on the person's machine by replacing old_string with new_string. old_string must appear exactly once unless replace_all is set.".into(),
+                    input_schema: Some(json!({
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "Absolute path"},
+                            "old_string": {"type": "string", "description": "The exact text to replace"},
+                            "new_string": {"type": "string", "description": "What replaces it"},
+                            "replace_all": {"type": "boolean", "description": "Replace every occurrence"},
+                        },
+                        "required": ["path", "old_string", "new_string"],
+                    })),
+                    kind: ToolKind::Edit,
+                },
+                Route::EditFile,
+            );
+        }
+        if local {
+            lent.add(
+                ToolDef {
+                    name: LIST_DIRECTORY.into(),
+                    description: "Lists a folder on the person's machine; folders end in `/`."
+                        .into(),
+                    input_schema: Some(json!({
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "Absolute path"},
+                        },
+                        "required": ["path"],
+                    })),
+                    kind: ToolKind::Read,
+                },
+                Route::ListDirectory,
             );
         }
         lent

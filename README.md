@@ -266,6 +266,13 @@ murtaugh-client acp --name openknowledge
 - The MCP servers the editor names for a session are connected here, on your machine, and lent to
   the session as one group; so are the editor's file reads and writes when it offers them. Files
   the editor links are read through the editor, unsaved changes included.
+- `--root <dir>`, repeatable, shares a folder from your disk, such as a notes vault, for editors
+  that offer no file system of their own (Obsidian's Agent Client plugin does not). The session
+  is lent `read_text_file`, `write_text_file`, `edit_text_file` and `list_directory`. A path that
+  resolves outside every root, through `..` or a link, is refused. When the editor does offer
+  reads or writes, those still go through it.
+- The agent is told the editor's files are on your machine, not the node's, and which tools reach
+  them, so it does not reach for its own file tools, which would act on the node.
 - A tool call your node's tool rules leave to a person is asked in the editor.
 - Logs go to `~/Library/Logs/murtaugh/client/<profile>.log`, never stdout, which carries ACP.
 

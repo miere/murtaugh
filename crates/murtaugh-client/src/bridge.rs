@@ -30,6 +30,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::sync::{OnceCell, watch};
 
+use crate::local::{self, Roots};
 use crate::mcp::{self, Fs, Lent, Route};
 
 /// How long a first dial may take before `session/new` gives up on Murtaugh.
@@ -46,6 +47,8 @@ pub struct Options {
     pub token: String,
     /// The namespace the editor's tools are lent under, such as `openknowledge`.
     pub name: String,
+    /// The folders whose files the agent may read and write from this machine's disk.
+    pub roots: Roots,
 }
 
 /// `[a-z0-9_]` and at most 27 characters, so Murtaugh's 5-character link suffix still fits a
@@ -312,7 +315,11 @@ async fn initialize(shared: &Shared, link: &GatewayLink) -> Result<(), String> {
             plan: false,
             sign_in: false,
             resource_schemes: vec![],
-            readable_schemes: if fs.read { vec!["file".into()] } else { vec![] },
+            readable_schemes: if fs.read || !shared.options.roots.is_empty() {
+                vec!["file".into()]
+            } else {
+                vec![]
+            },
             tools: None,
             // The gateway it dials confines its own nodes; this side has no people to confine to.
             owner_only: false,
@@ -356,7 +363,7 @@ async fn new_session(shared: &SharedRef, request: NewSessionRequest) -> Result<S
         .cloned()
         .unwrap_or_default();
     let fs = *lock(&shared.fs);
-    let lent = Lent::connect(&servers, fs).await;
+    let lent = Lent::connect(&servers, fs, !shared.options.roots.is_empty()).await;
     let tool_groups = if lent.tools.is_empty() {
         vec![]
     } else {
@@ -365,12 +372,11 @@ async fn new_session(shared: &SharedRef, request: NewSessionRequest) -> Result<S
             tools: lent.tools.clone(),
         }]
     };
-    let mut context = vec![];
-    if let Some(cwd) = request["cwd"].as_str() {
-        context.push(Open::Known(ContentBlock::text(format!(
-            "The editor's working directory is {cwd}."
-        ))));
-    }
+    let context = vec![Open::Known(ContentBlock::text(whereabouts(
+        &shared.options,
+        request["cwd"].as_str(),
+        &lent,
+    )))];
     let opening = GatewayCall::NewSession(NewSession {
         context,
         tool_groups,
@@ -399,6 +405,49 @@ async fn new_session(shared: &SharedRef, request: NewSessionRequest) -> Result<S
     );
     tracing::info!(session = %id, "session opened");
     Ok(id)
+}
+
+/// Tells the agent that the editor's files are not on the machine it runs on, so it reaches for
+/// the lent tools instead of its own, which would act on the node.
+fn whereabouts(options: &Options, cwd: Option<&str>, lent: &Lent) -> String {
+    let mut text = String::from(
+        "You are talking to a person through their editor, which runs on their own machine, not \
+         on the one you run on.",
+    );
+    if let Some(cwd) = cwd {
+        text.push_str(&format!(
+            " The editor's working directory is {cwd}, on their machine."
+        ));
+    }
+    let files = [mcp::READ_TEXT_FILE, mcp::WRITE_TEXT_FILE]
+        .iter()
+        .any(|name| lent.routes.contains_key(*name));
+    if files {
+        text.push_str(&format!(
+            " Your own file tools and shell cannot see their files: read, write and list them only \
+             with the tools lent under the `{}` namespace, followed by a short suffix (such as \
+             `{}_x7k2`).",
+            options.name, options.name
+        ));
+        if !options.roots.is_empty() {
+            let dirs: Vec<String> = options
+                .roots
+                .dirs()
+                .iter()
+                .map(|dir| dir.display().to_string())
+                .collect();
+            text.push_str(&format!(
+                " Their files are open to you under: {}.",
+                dirs.join(", ")
+            ));
+        }
+    } else {
+        text.push_str(
+            " Their files are not shared with you, and your own file tools and shell cannot see \
+             them: ask the person to paste what you need.",
+        );
+    }
+    text
 }
 
 async fn close_session(shared: &SharedRef, session_id: &str) {
@@ -709,47 +758,89 @@ async fn tool(shared: &Shared, call: CallTool) -> Result<ToolOutcome, Error> {
     let outcome = match route {
         Route::Mcp { client, name } => mcp::call(&client, &name, Some(arguments)).await,
         Route::ReadFile => {
-            let mut request = json!({"sessionId": call.session_id.0, "path": arguments["path"]});
-            for key in ["line", "limit"] {
-                if !arguments[key].is_null() {
-                    request[key] = arguments[key].clone();
-                }
-            }
-            match read_text(shared, request).await {
-                Ok(content) => ToolOutcome {
-                    content,
-                    is_error: false,
-                    resources: Vec::new(),
-                },
-                Err(reason) => ToolOutcome {
-                    content: reason,
-                    is_error: true,
-                    resources: Vec::new(),
-                },
-            }
+            let path = arguments["path"].as_str().unwrap_or_default();
+            let (line, limit) = (arguments["line"].as_u64(), arguments["limit"].as_u64());
+            answered(read_file(shared, &call.session_id.0, path, line, limit).await)
         }
         Route::WriteFile => {
-            let path = arguments["path"].as_str().unwrap_or_default().to_owned();
-            let request = json!({
-                "sessionId": call.session_id.0,
-                "path": path,
-                "content": arguments["content"],
-            });
-            match write_text(shared, request).await {
-                Ok(()) => ToolOutcome {
-                    content: format!("Wrote {path}."),
-                    is_error: false,
-                    resources: Vec::new(),
-                },
-                Err(reason) => ToolOutcome {
-                    content: reason,
-                    is_error: true,
-                    resources: Vec::new(),
-                },
-            }
+            let path = arguments["path"].as_str().unwrap_or_default();
+            let content = arguments["content"].as_str().unwrap_or_default();
+            let written = write_file(shared, &call.session_id.0, path, content).await;
+            answered(written.map(|()| format!("Wrote {path}.")))
+        }
+        Route::EditFile => {
+            let path = arguments["path"].as_str().unwrap_or_default();
+            answered(edit_file(shared, &call.session_id.0, path, &arguments).await)
+        }
+        Route::ListDirectory => {
+            let path = arguments["path"].as_str().unwrap_or_default();
+            answered(local::list(&shared.options.roots, path).await)
         }
     };
     Ok(outcome)
+}
+
+/// A file tool that ran: its text, or why it failed, which the agent hears as an error.
+fn answered(result: Result<String, String>) -> ToolOutcome {
+    let (content, is_error) = match result {
+        Ok(content) => (content, false),
+        Err(reason) => (reason, true),
+    };
+    ToolOutcome {
+        content,
+        is_error,
+        resources: Vec::new(),
+    }
+}
+
+/// Through the editor when it offers reads, so unsaved changes count; else from the disk.
+async fn read_file(
+    shared: &Shared,
+    session_id: &str,
+    path: &str,
+    line: Option<u64>,
+    limit: Option<u64>,
+) -> Result<String, String> {
+    if !lock(&shared.fs).read {
+        return local::read(&shared.options.roots, path, line, limit).await;
+    }
+    let mut request = json!({"sessionId": session_id, "path": path});
+    if let Some(line) = line {
+        request["line"] = json!(line);
+    }
+    if let Some(limit) = limit {
+        request["limit"] = json!(limit);
+    }
+    read_text(shared, request).await
+}
+
+/// Through the editor when it offers writes, so its open buffers follow; else to the disk.
+async fn write_file(
+    shared: &Shared,
+    session_id: &str,
+    path: &str,
+    content: &str,
+) -> Result<(), String> {
+    if !lock(&shared.fs).write {
+        return local::write(&shared.options.roots, path, content).await;
+    }
+    let request = json!({"sessionId": session_id, "path": path, "content": content});
+    write_text(shared, request).await
+}
+
+async fn edit_file(
+    shared: &Shared,
+    session_id: &str,
+    path: &str,
+    arguments: &Value,
+) -> Result<String, String> {
+    let old = arguments["old_string"].as_str().unwrap_or_default();
+    let new = arguments["new_string"].as_str().unwrap_or_default();
+    let all = arguments["replace_all"].as_bool() == Some(true);
+    let text = read_file(shared, session_id, path, None, None).await?;
+    let edited = local::replace(&text, old, new, all)?;
+    write_file(shared, session_id, path, &edited).await?;
+    Ok(format!("Edited {path}."))
 }
 
 async fn read_text(shared: &Shared, request: Value) -> Result<String, String> {
@@ -779,7 +870,8 @@ async fn write_text(shared: &Shared, request: Value) -> Result<(), String> {
     Ok(())
 }
 
-/// A `file://` link the editor sent, read as the editor has it open. Anything else is not found.
+/// A `file://` link the editor sent, read as the editor has it open, or from a root when it offers
+/// no reads. Anything else is not found.
 async fn file(shared: &Shared, read: &ReadResource) -> Result<String, Error> {
     let not_found = |why: &str| Error::new(ErrorKind::NotFound, format!("{}: {why}", read.uri));
     let path = url::Url::parse(&read.uri)
@@ -788,7 +880,13 @@ async fn file(shared: &Shared, read: &ReadResource) -> Result<String, Error> {
         .and_then(|url| url.to_file_path().ok())
         .ok_or_else(|| not_found("only file:// links are served"))?;
     if !lock(&shared.fs).read {
-        return Err(not_found("the editor offers no file system"));
+        if shared.options.roots.is_empty() {
+            return Err(not_found("the editor offers no file system"));
+        }
+        let path = path.display().to_string();
+        return local::read(&shared.options.roots, &path, None, None)
+            .await
+            .map_err(|reason| not_found(&reason));
     }
     let session = lock(&shared.sessions).keys().next().cloned();
     let session = session.ok_or_else(|| not_found("no session is open to read it through"))?;
