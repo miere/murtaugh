@@ -4,6 +4,7 @@
 mod blocks;
 mod error;
 mod events;
+mod lists;
 mod socket;
 mod stream;
 mod web;
@@ -11,6 +12,7 @@ mod web;
 pub use blocks::{Block, Button, ButtonStyle, Text, mrkdwn};
 pub use error::SlackError;
 pub use events::{Click, Event, EventEnvelope, FileRef, HomeClick, SocketEvent, ViewSubmission};
+pub use lists::{Access, CreateList, CreatedList, ItemInfo, ItemsPage, ListItems};
 pub use socket::SocketMode;
 pub use stream::{
     Chunk, Icon, PlanBlock, PlanTask, RichText, STREAM_FINALIZED, STREAMING_UNSUPPORTED,

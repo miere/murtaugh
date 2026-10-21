@@ -63,6 +63,9 @@ pub struct Identity {
     /// The bot's handle. `auth.test` gives it with no scope, unlike `users.info`.
     #[serde(default)]
     pub user: String,
+    /// The workspace's address, such as `https://acme.slack.com/`.
+    #[serde(default)]
+    pub url: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -175,7 +178,7 @@ pub(crate) enum Token {
     Bot,
 }
 
-enum Body {
+pub(crate) enum Body {
     Json(Value),
     Form(Vec<(&'static str, String)>),
 }
@@ -667,7 +670,7 @@ impl SlackClient {
         Ok(opened.url)
     }
 
-    async fn call<T: DeserializeOwned>(
+    pub(crate) async fn call<T: DeserializeOwned>(
         &self,
         method: &'static str,
         token: Token,

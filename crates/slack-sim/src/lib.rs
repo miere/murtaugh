@@ -4,6 +4,7 @@
 mod api;
 mod blocks;
 mod canvas;
+mod lists;
 mod render;
 mod socket;
 mod state;
@@ -167,6 +168,8 @@ pub enum SimError {
         action_id: String,
         value: String,
     },
+    #[error("the List {0} could not be made from that schema")]
+    InvalidList(String),
     #[error("{0} has no modal open")]
     NoModal(String),
     #[error("no {method} call matched within {waited:?}; calls that did arrive: {arrived:#?}")]
@@ -509,6 +512,69 @@ impl SlackSim {
             },
         );
         Ok(id)
+    }
+
+    /// A List owned by `owner` with these columns, as `slackLists.create` takes them; returns its
+    /// id. Nobody else sees it, the bot included, until [`SlackSim::share_list`].
+    pub fn add_list(&self, owner: &str, name: &str, schema: Value) -> Result<String, SimError> {
+        let mut st = self.inner.lock();
+        let params = serde_json::json!({"name": name, "schema": schema});
+        let Value::Object(params) = params else {
+            unreachable!("a json object");
+        };
+        let created =
+            lists::create(&mut st, &params).map_err(|_| SimError::InvalidList(name.to_owned()))?;
+        let id = created["list_id"].as_str().unwrap_or_default().to_owned();
+        if let Some(list) = st.lists.get_mut(&id) {
+            list.users =
+                std::collections::BTreeMap::from([(owner.to_owned(), lists::Level::Owner)]);
+        }
+        Ok(id)
+    }
+
+    /// Shares a List with a user or a channel at `level`: `read`, `write` or `owner`.
+    pub fn share_list(&self, id: &str, with: &str, level: &str) {
+        let mut st = self.inner.lock();
+        let is_channel = st.channels.contains_key(with);
+        let level = match level {
+            "owner" => lists::Level::Owner,
+            "write" => lists::Level::Write,
+            _ => lists::Level::Read,
+        };
+        if let Some(list) = st.lists.get_mut(id) {
+            match is_channel {
+                true => list.channels.insert(with.to_owned(), level),
+                false => list.users.insert(with.to_owned(), level),
+            };
+        }
+    }
+
+    /// Who a List is shared with, users and channels, and at which level.
+    pub fn list_access(&self, id: &str) -> Vec<(String, String)> {
+        let st = self.inner.lock();
+        let Some(list) = st.lists.get(id) else {
+            return Vec::new();
+        };
+        let name = |level: &lists::Level| format!("{level:?}").to_lowercase();
+        list.users
+            .iter()
+            .chain(list.channels.iter())
+            .map(|(who, level)| (who.clone(), name(level)))
+            .collect()
+    }
+
+    /// A List's columns, ids included, and its rows as `slackLists.items.list` answers them.
+    pub fn list(&self, id: &str) -> Option<(Vec<Value>, Vec<Value>)> {
+        let st = self.inner.lock();
+        let list = st.lists.get(id)?;
+        let rows = list.rows.iter().map(|row| list.row_json(row)).collect();
+        Some((list.columns.clone(), rows))
+    }
+
+    /// Whether whoever hands a List's ownership over keeps write access; on by default. Slack's
+    /// own behaviour here is not documented.
+    pub fn set_list_owner_keeps_access(&self, keeps: bool) {
+        self.inner.lock().list_owner_keeps_access = keeps;
     }
 
     /// A canvas's content as its download serves it.
