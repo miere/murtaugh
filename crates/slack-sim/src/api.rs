@@ -33,6 +33,13 @@ const METHODS: &[&str] = &[
     "files.getUploadURLExternal",
     "files.completeUploadExternal",
     "canvases.edit",
+    "slackLists.create",
+    "slackLists.access.set",
+    "slackLists.items.list",
+    "slackLists.items.info",
+    "slackLists.items.create",
+    "slackLists.items.update",
+    "slackLists.items.deleteMultiple",
 ];
 const JSON_METHODS: &[&str] = &[
     "canvases.edit",
@@ -43,6 +50,13 @@ const JSON_METHODS: &[&str] = &[
     "views.publish",
     "views.open",
     "reactions.add",
+    "slackLists.create",
+    "slackLists.access.set",
+    "slackLists.items.list",
+    "slackLists.items.info",
+    "slackLists.items.create",
+    "slackLists.items.update",
+    "slackLists.items.deleteMultiple",
 ];
 const MAX_TEXT: usize = 40_000;
 
@@ -292,6 +306,13 @@ fn dispatch(
         "files.getUploadURLExternal" => crate::upload::reserve(st, params),
         "files.completeUploadExternal" => crate::upload::complete(st, params),
         "canvases.edit" => crate::canvas::edit(st, params),
+        "slackLists.create" => crate::lists::create(st, params),
+        "slackLists.access.set" => crate::lists::set_access(st, params),
+        "slackLists.items.list" => crate::lists::items(st, params),
+        "slackLists.items.info" => crate::lists::info(st, params),
+        "slackLists.items.create" => crate::lists::create_item(st, params),
+        "slackLists.items.update" => crate::lists::update_items(st, params),
+        "slackLists.items.deleteMultiple" => crate::lists::delete_items(st, params),
         _ => file_info(st, params),
     }
 }

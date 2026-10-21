@@ -104,6 +104,9 @@ pub(crate) struct State {
     pub channels: BTreeMap<String, Channel>,
     pub files: BTreeMap<String, File>,
     pub canvases: BTreeMap<String, crate::canvas::Canvas>,
+    pub lists: BTreeMap<String, crate::lists::List>,
+    /// Whether whoever hands a List's ownership over keeps write access to it.
+    pub list_owner_keeps_access: bool,
     pub calls: Vec<Call>,
     pub violations: Vec<Violation>,
     pub faults: HashMap<String, VecDeque<Fault>>,
@@ -134,6 +137,8 @@ impl State {
             channels: BTreeMap::new(),
             files: BTreeMap::new(),
             canvases: BTreeMap::new(),
+            lists: BTreeMap::new(),
+            list_owner_keeps_access: true,
             calls: Vec::new(),
             violations: Vec::new(),
             faults: HashMap::new(),
