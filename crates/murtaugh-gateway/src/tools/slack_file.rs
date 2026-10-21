@@ -94,7 +94,7 @@ impl Tool for ReadFile {
 /// The file id, from the bare id, Slack's `<url|label>` markup or any link Slack makes for a file:
 /// its permalink (`/files/U…/F…/name`), its download link (`/files-pri/T…-F…/name`) or a canvas
 /// link (`/docs/T…/F…`).
-fn file_id(file: &str) -> Result<String, String> {
+pub(crate) fn file_id(file: &str) -> Result<String, String> {
     let file = file.trim();
     let file = file
         .strip_prefix('<')

@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use murtaugh_slack::FileRef;
-use murtaugh_store::{Conversation, Store};
+use murtaugh_store::{Conversation, Pin, Store, UserId};
 use rax::content::ContentBlock;
 use rax::id::{LocalFileId, RequestId, SessionId};
 use rax::local_file::{ReadLocalFile, takes_local_files};
@@ -20,6 +20,7 @@ use serde_json::Value;
 
 pub mod attach;
 pub mod canvas;
+pub mod lists;
 pub mod replying;
 pub mod send_message;
 pub mod show_chart;
@@ -59,6 +60,8 @@ pub trait Tool: Send + Sync {
 pub struct Context {
     /// The Slack thread the calling session is pinned to, if any.
     pub conversation: Option<Conversation>,
+    /// Whose conversation that thread is: who asked for what the call does.
+    pub user: Option<UserId>,
     /// The calling node's files, for a tool with an argument marked as a local file.
     pub local_files: Option<Arc<dyn LocalFiles>>,
     /// Where a tool lends Slack files for the node to fetch after the answer. `None` for a node
@@ -244,8 +247,10 @@ impl Tools {
             }
             return;
         };
+        let pin = lent.pin(selector, &call.session_id).await;
         let context = Context {
-            conversation: lent.conversation(selector, &call.session_id).await,
+            user: pin.as_ref().map(|pin| pin.user.clone()),
+            conversation: pin.map(|pin| pin.conversation),
             local_files: Some(Arc::new(NodeFiles { link: link.clone() })),
             lending: reach
                 .files
@@ -315,13 +320,12 @@ impl Lent {
         lock(&self.sessions).retain(|(node, _), _| node != selector);
     }
 
-    /// The Slack thread a session is pinned to.
-    pub async fn conversation(&self, selector: &str, session: &SessionId) -> Option<Conversation> {
+    /// The Slack thread a session is pinned to, and whose conversation it is.
+    pub async fn pin(&self, selector: &str, session: &SessionId) -> Option<Pin> {
         match self.store.pins().await {
             Ok(pins) => pins
                 .into_iter()
-                .find(|pin| pin.node == selector && pin.session_id == session.0)
-                .map(|pin| pin.conversation),
+                .find(|pin| pin.node == selector && pin.session_id == session.0),
             Err(err) => {
                 tracing::warn!(error = %err, "could not read the pins to find a session's thread");
                 None

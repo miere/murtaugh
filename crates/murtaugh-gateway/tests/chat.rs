@@ -3504,6 +3504,65 @@ async fn a_node_changes_who_it_lets_in_live_and_a_bad_change_ends_its_link() {
     rig.shutdown.cancel();
 }
 
+/// A List the agent creates goes to whoever started the conversation, found from the thread's
+/// pin and never from the node, while the bot keeps writing to it.
+#[tokio::test(flavor = "multi_thread")]
+async fn create_list_hands_the_list_to_whoever_started_the_conversation() {
+    let rig = rig().await;
+    let mut laptop = rig.node_lent(ALICE, "laptop", Groups::Takes).await;
+    rig.sim
+        .mention(ALICE, GENERAL, "make me a list", None)
+        .await
+        .unwrap();
+    let (session, _) = laptop.next_opened().await;
+    laptop.next_prompt().await;
+
+    let answered = laptop
+        .call_tool(
+            &session,
+            Some("slack"),
+            "create_list",
+            serde_json::json!({"name": "Groceries", "columns": [{"name": "Item", "type": "text"}]}),
+        )
+        .await
+        .unwrap();
+    let NodeReply::CallTool(outcome) = answered else {
+        panic!("expected a tool outcome, got {answered:?}")
+    };
+    assert!(!outcome.is_error, "{}", outcome.content);
+    let created: serde_json::Value = serde_json::from_str(&outcome.content).unwrap();
+    let list = created["list"].as_str().unwrap();
+    let mut access = rig.sim.list_access(list);
+    access.sort();
+    assert_eq!(
+        access,
+        [
+            (ALICE.to_owned(), "owner".to_owned()),
+            (BOT_USER_ID.to_owned(), "write".to_owned()),
+        ]
+    );
+
+    let added = laptop
+        .call_tool(
+            &session,
+            Some("slack"),
+            "add_list_items",
+            serde_json::json!({"list": list, "items": [{"Item": "Milk"}]}),
+        )
+        .await
+        .unwrap();
+    let NodeReply::CallTool(outcome) = added else {
+        panic!("expected a tool outcome, got {added:?}")
+    };
+    assert!(!outcome.is_error, "{}", outcome.content);
+    assert!(
+        rig.sim.violations().is_empty(),
+        "{:?}",
+        rig.sim.violations()
+    );
+    rig.shutdown.cancel();
+}
+
 /// `read_file` lends the file instead of answering with its bytes: the reply links it, and from then
 /// on that node, and only it, may read it.
 #[tokio::test(flavor = "multi_thread")]
