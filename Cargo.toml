@@ -17,10 +17,10 @@ expect_used = "deny"
 panic = "deny"
 
 [workspace.dependencies]
-rax = { path = "../rax-rs/crates/rax" }
-rax-tokio = { path = "../rax-rs/crates/rax-tokio" }
-rax-sim = { path = "../rax-rs/crates/rax-sim" }
-rax-gateway = { path = "../rax-rs/crates/rax-gateway" }
+rax = { git = "https://github.com/miere/rax-rs", tag = "0.13.0" }
+rax-tokio = { git = "https://github.com/miere/rax-rs", tag = "0.13.0" }
+rax-sim = { git = "https://github.com/miere/rax-rs", tag = "0.13.0" }
+rax-gateway = { git = "https://github.com/miere/rax-rs", tag = "0.13.0" }
 murtaugh-common = { path = "crates/murtaugh-common" }
 murtaugh-slack = { path = "crates/murtaugh-slack" }
 murtaugh-store = { path = "crates/murtaugh-store" }
