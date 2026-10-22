@@ -6,7 +6,7 @@ use murtaugh_store::{
 use time::OffsetDateTime;
 
 pub fn user(raw: &str) -> UserId {
-    UserId::parse(raw).unwrap()
+    murtaugh_store::slack_user(raw).unwrap()
 }
 
 fn thread(ts: &str) -> Conversation {

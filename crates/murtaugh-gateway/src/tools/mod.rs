@@ -3,7 +3,6 @@
 //! what any of them do, so adding one here reaches every node without any of them shipping a
 //! release.
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -15,6 +14,8 @@ use rax::id::{LocalFileId, RequestId, SessionId};
 use rax::local_file::{ReadLocalFile, takes_local_files};
 use rax::tool::{CallTool, ToolDef, ToolGroup, ToolOutcome};
 use rax::{Error, ErrorKind, NodeReply, Open};
+use rax_gateway::fleet::Node;
+use rax_gateway::lent::Recall;
 use rax_tokio::gateway::{GatewayLink, LocalFile};
 use serde_json::Value;
 
@@ -284,40 +285,99 @@ impl Tools {
     }
 }
 
-/// Which groups each session was opened with, so a call for any other is refused whatever the
-/// node sends. Sessions are recorded when they open; one this process did not open — a node that
-/// stayed up across a gateway restart — is resolved from the pins instead: a session pinned to a
-/// Slack thread was opened with the `slack` group.
-#[derive(Clone)]
-pub struct Lent {
-    store: Arc<dyn Store>,
-    sessions: Arc<Mutex<HashMap<NodeSession, Vec<String>>>>,
-}
-
-/// A session id is the node's own, so it is only unique beside the node's selector.
-type NodeSession = (String, SessionId);
-
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Murtaugh's tools as `rax-gateway` lends them: the `slack` group in a Slack thread's session,
+/// and the deprecated catalogue to a node too old for groups.
+pub struct SlackTools {
+    tools: Tools,
+    lent: Lent,
+    files: Files,
+}
+
+impl SlackTools {
+    pub fn new(tools: Tools, lent: Lent, files: Files) -> Self {
+        Self { tools, lent, files }
+    }
+}
+
+#[async_trait]
+impl rax_gateway::Tools for SlackTools {
+    fn catalogue(&self) -> Option<ToolGroup> {
+        self.tools.catalogue()
+    }
+
+    async fn serve(&self, link: &GatewayLink, node: &Node, id: RequestId, call: CallTool) {
+        let reach = Reach {
+            local_files: node.capabilities.local_files,
+            files: node.capabilities.tool_resources.then(|| self.files.clone()),
+        };
+        self.tools
+            .serve(link, &self.lent, &node.name, &reach, id, call)
+            .await;
+    }
+}
+
+/// Which groups each session was opened with, as `rax-gateway` keeps them. A session this process
+/// did not open — a node that stayed up across a gateway restart — is resolved from the pins: a
+/// session pinned to a Slack thread was opened with the `slack` group.
+#[derive(Clone)]
+pub struct Lent {
+    store: Arc<dyn Store>,
+    lent: rax_gateway::lent::Lent,
+}
+
+/// Finds a session's groups through the thread pinned to it.
+struct Pinned {
+    store: Arc<dyn Store>,
+}
+
+#[async_trait]
+impl Recall for Pinned {
+    async fn groups(&self, selector: &str, session: &SessionId) -> Vec<String> {
+        let pins = match self.store.pins().await {
+            Ok(pins) => pins,
+            Err(err) => {
+                tracing::warn!(error = %err, "could not read the pins to place a tool call");
+                return Vec::new();
+            }
+        };
+        let pinned = pins
+            .iter()
+            .any(|pin| pin.node == selector && pin.session_id == session.0);
+        match pinned {
+            true => vec![NAMESPACE.to_owned()],
+            false => Vec::new(),
+        }
+    }
+}
+
 impl Lent {
     pub fn new(store: Arc<dyn Store>) -> Self {
+        let pinned = Pinned {
+            store: store.clone(),
+        };
         Self {
             store,
-            sessions: Arc::default(),
+            lent: rax_gateway::lent::Lent::recalling(Arc::new(pinned)),
         }
     }
 
+    /// The same sessions, as the hub and the relay keep them.
+    pub fn gateway(&self) -> rax_gateway::lent::Lent {
+        self.lent.clone()
+    }
+
     pub fn opened(&self, selector: &str, session: &SessionId, groups: &[ToolGroup]) {
-        let namespaces = groups.iter().map(|group| group.namespace.clone()).collect();
-        lock(&self.sessions).insert((selector.to_owned(), session.clone()), namespaces);
+        self.lent.opened(selector, session, groups);
     }
 
     /// Forgets every session of a node whose link ended. A durable session that comes back is
     /// found through its pin.
     pub fn detached(&self, selector: &str) {
-        lock(&self.sessions).retain(|(node, _), _| node != selector);
+        self.lent.detached(selector);
     }
 
     /// The Slack thread a session is pinned to, and whose conversation it is.
@@ -334,24 +394,7 @@ impl Lent {
     }
 
     pub async fn groups(&self, selector: &str, session: &SessionId) -> Vec<String> {
-        let key = (selector.to_owned(), session.clone());
-        if let Some(groups) = lock(&self.sessions).get(&key) {
-            return groups.clone();
-        }
-        let pins = match self.store.pins().await {
-            Ok(pins) => pins,
-            Err(err) => {
-                tracing::warn!(error = %err, "could not read the pins to place a tool call");
-                return Vec::new();
-            }
-        };
-        let pinned = pins
-            .iter()
-            .any(|pin| pin.node == selector && pin.session_id == session.0);
-        match pinned {
-            true => vec![NAMESPACE.to_owned()],
-            false => Vec::new(),
-        }
+        self.lent.groups(selector, session).await
     }
 }
 
@@ -384,7 +427,7 @@ mod tests {
     /// `slack` group is found through the thread's pin; a session nothing records was lent nothing.
     #[tokio::test]
     async fn a_session_this_process_did_not_open_is_lent_slack_if_a_thread_is_pinned_to_it() {
-        use murtaugh_store::{Conversation, Pin, SqliteStore, UserId};
+        use murtaugh_store::{Conversation, Pin, SqliteStore, slack_user};
 
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn Store> =
@@ -397,7 +440,7 @@ mod tests {
                 },
                 node: "node-a".into(),
                 session_id: "s1".into(),
-                user: UserId::parse("U0ALICE01").unwrap(),
+                user: slack_user("U0ALICE01").unwrap(),
                 pinned_at: time::OffsetDateTime::now_utc(),
             })
             .await

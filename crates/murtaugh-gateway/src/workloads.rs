@@ -16,7 +16,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use murtaugh_slack::{SlackClient, SlackError};
-use murtaugh_store::{Scope, UserId, UserToken};
+use murtaugh_store::{Scope, UserToken};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -292,7 +292,8 @@ async fn target(
     let (channel, thread_ts) = match target {
         Target::Dm { dm } => {
             // `me` is the token's owner, for a caller that knows its token but not its Slack id.
-            let is_owner = dm == "me" || UserId::parse(&dm).ok().as_ref() == Some(&token.owner);
+            let is_owner =
+                dm == "me" || murtaugh_store::slack_user(&dm).ok().as_ref() == Some(&token.owner);
             if !is_owner {
                 return Err(Refusal::new(
                     StatusCode::FORBIDDEN,

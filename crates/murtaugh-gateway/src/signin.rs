@@ -7,7 +7,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use murtaugh_slack::{Block, Click, PostMessage, Posted, SlackClient, UpdateMessage};
-use murtaugh_store::UserId;
 use rax::interaction::{DisplayAnswer, DisplayOutcome, SignInRequest, SignInSettled, SignInState};
 use rax::{Error, ErrorKind};
 use rax_tokio::gateway::GatewayLink;
@@ -24,13 +23,7 @@ const CODE_ACTION: &str = "signin_code_value";
 const ICON: &str = "https://img.icons8.com/stickers/100/palm-scan.png";
 
 /// The node a sign-in belongs to.
-#[derive(Clone)]
-pub struct Node {
-    pub selector: String,
-    pub name: String,
-    pub owner: UserId,
-    pub link: GatewayLink,
-}
+pub type Node = rax_gateway::embed::NodeRef;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {

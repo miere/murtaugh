@@ -13,7 +13,6 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::access::{Access, Snapshot};
 use crate::approval;
 use crate::chat::{self, Chat};
 use crate::config;
@@ -100,7 +99,7 @@ pub async fn serve(
             "brought access into line: node admins are allowed, and tokens without a grant are revoked"
         );
     }
-    let snapshot = Snapshot::load(&*store)
+    let snapshot = crate::access::load(&*store)
         .await
         .map_err(|err| err.to_string())?;
     if snapshot.admin().is_none() {
@@ -108,7 +107,7 @@ pub async fn serve(
             "this gateway has no admin yet; run `murtaugh-gateway admin set <slack user id>`"
         );
     }
-    let access = Access::reloading(snapshot, store.clone());
+    let access = crate::access::reloading(snapshot, store.clone());
     let fleet = Fleet::default();
     let files = Files::new(slack.clone());
     let replying = crate::tools::replying::Replying::default();
@@ -158,14 +157,14 @@ pub async fn serve(
     let lent = crate::tools::Lent::new(store.clone());
     let sign_ins = crate::signin::SignIns::new(Some(slack.clone()), access.clone());
     let approvals = crate::approval::Approvals::default();
-    let relay = crate::relay::Relay::new(
+    let relay = crate::relay::new(
         access.clone(),
         fleet.clone(),
         store.clone(),
         lent.clone(),
         files.clone(),
         sign_ins.clone(),
-        Some(crate::relay::OwnerApproval {
+        Some(crate::owner::OwnerApproval {
             slack: slack.clone(),
             approvals: approvals.clone(),
             timeout: options.approval_timeout,

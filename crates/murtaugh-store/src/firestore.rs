@@ -6,10 +6,9 @@ use serde_json::{Map, Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::leader::{Leader, Lease};
 use crate::{
-    Conversation, Grant, NodeToken, Pin, Result, Scope, Store, StoreError, ToolMode, UserConfig,
-    UserId, UserToken,
+    Conversation, GatewayStore, Grant, Leader, Lease, NodeToken, Pin, Result, Scope, Store,
+    StoreError, ToolMode, UserConfig, UserId, UserToken, slack_user,
 };
 
 const SCOPE: &str = "https://www.googleapis.com/auth/datastore";
@@ -91,7 +90,7 @@ impl FirestoreStore {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
-            .map_err(|err| StoreError::Firestore(err.to_string()))?;
+            .map_err(|err| firestore(err.to_string()))?;
         let database = format!("projects/{project}/databases/{database_id}");
         Ok(Self {
             inner: Arc::new(Inner {
@@ -133,7 +132,7 @@ impl FirestoreStore {
         let response = request
             .send()
             .await
-            .map_err(|err| StoreError::Firestore(err.to_string()))?;
+            .map_err(|err| firestore(err.to_string()))?;
         let status = response.status();
         if status == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
@@ -141,7 +140,7 @@ impl FirestoreStore {
         let text = response
             .text()
             .await
-            .map_err(|err| StoreError::Firestore(err.to_string()))?;
+            .map_err(|err| firestore(err.to_string()))?;
         if !status.is_success() {
             let reason = serde_json::from_str::<Value>(&text)
                 .ok()
@@ -154,14 +153,14 @@ impl FirestoreStore {
             {
                 return Err(StoreError::Conflict(format!("{status} {reason}")));
             }
-            return Err(StoreError::Firestore(format!("{status}: {text}")));
+            return Err(firestore(format!("{status}: {text}")));
         }
         if text.trim().is_empty() {
             return Ok(Some(Value::Null));
         }
         serde_json::from_str(&text)
             .map(Some)
-            .map_err(|err| StoreError::Firestore(format!("undecodable reply: {err}")))
+            .map_err(|err| firestore(format!("undecodable reply: {err}")))
     }
 
     async fn get(&self, relative: &str) -> Result<Option<Doc>> {
@@ -213,7 +212,7 @@ impl FirestoreStore {
             Some(json!({ "writes": writes })),
         )
         .await?
-        .ok_or_else(|| StoreError::Firestore("commit answered 404".into()))
+        .ok_or_else(|| firestore("commit answered 404"))
     }
 
     fn update(&self, relative: &str, fields: Value) -> Value {
@@ -301,13 +300,17 @@ impl FirestoreStore {
         let read_time = row["readTime"]
             .as_str()
             .and_then(|raw| OffsetDateTime::parse(raw, &Rfc3339).ok())
-            .ok_or_else(|| StoreError::Firestore("batchGet gave no read time".into()))?;
+            .ok_or_else(|| firestore("batchGet gave no read time"))?;
         Ok((row.get("found").cloned().map(doc), read_time))
     }
 }
 
+fn firestore(message: impl std::fmt::Display) -> StoreError {
+    StoreError::Backend(format!("firestore: {message}"))
+}
+
 fn auth_error(err: gcp_auth::Error) -> StoreError {
-    StoreError::Firestore(format!("Google credentials: {err}"))
+    firestore(format!("Google credentials: {err}"))
 }
 
 fn doc(document: Value) -> Doc {
@@ -370,7 +373,7 @@ impl Doc {
     }
 
     fn user(&self, field: &str) -> Result<UserId> {
-        UserId::parse(&self.string(field)?).map_err(|err| StoreError::Corrupt(err.to_string()))
+        slack_user(&self.string(field)?).map_err(|err| StoreError::Corrupt(err.to_string()))
     }
 
     fn bool(&self, field: &str) -> bool {
@@ -473,7 +476,7 @@ fn grant_of(doc: &Doc) -> Result<Grant> {
 }
 
 #[async_trait]
-impl Store for FirestoreStore {
+impl GatewayStore for FirestoreStore {
     async fn admin(&self) -> Result<Option<UserId>> {
         match self.get("").await? {
             Some(doc) if doc.fields.contains_key("admin") => Ok(Some(doc.user("admin")?)),
@@ -692,7 +695,10 @@ impl Store for FirestoreStore {
             Err(err) => Err(err),
         }
     }
+}
 
+#[async_trait]
+impl Store for FirestoreStore {
     async fn pin(&self, conversation: &Conversation) -> Result<Option<Pin>> {
         self.get(&pin_id(conversation))
             .await?

@@ -364,8 +364,8 @@ impl Chat {
         } else if click.action_id.starts_with("tool_approval") {
             self.approvals.click(&click)
         } else {
-            let may_answer =
-                UserId::parse(&click.user).is_ok_and(|user| self.access.snapshot().may_chat(&user));
+            let may_answer = murtaugh_store::slack_user(&click.user)
+                .is_ok_and(|user| self.access.snapshot().may_chat(&user));
             self.prompts.click(&click, may_answer)
         };
         let Some(note) = note else {
@@ -418,7 +418,7 @@ impl Chat {
     /// click is answered in seconds and a turn is not.
     fn send_again(self: &Arc<Self>, click: &Click) -> Option<String> {
         let lapsed = "That message is no longer on offer. Send it again in the thread.";
-        let Ok(user) = UserId::parse(&click.user) else {
+        let Ok(user) = murtaugh_store::slack_user(&click.user) else {
             return None;
         };
         if !self.access.snapshot().may_chat(&user) {
@@ -450,7 +450,7 @@ impl Chat {
     /// Someone picked the machine a thread should run on. The turn in flight is stopped rather
     /// than carried across: its answer would land in a thread the new machine knows nothing about.
     async fn move_thread(&self, click: &Click) -> Option<String> {
-        let Ok(user) = UserId::parse(&click.user) else {
+        let Ok(user) = murtaugh_store::slack_user(&click.user) else {
             return None;
         };
         let snapshot = self.access.snapshot();
@@ -548,7 +548,7 @@ impl Chat {
     }
 
     async fn show_home(&self, viewer: &str) {
-        if let Ok(viewer) = UserId::parse(viewer) {
+        if let Ok(viewer) = murtaugh_store::slack_user(viewer) {
             self.panel.show(&viewer).await;
         }
     }
@@ -810,7 +810,7 @@ impl Chat {
     }
 
     async fn message(&self, incoming: Incoming, received: Instant) {
-        let Ok(user) = UserId::parse(&incoming.user) else {
+        let Ok(user) = murtaugh_store::slack_user(&incoming.user) else {
             return;
         };
         let snapshot = self.access.snapshot();
@@ -898,7 +898,7 @@ impl Chat {
             let Some(last) = queued.last() else {
                 return;
             };
-            let Ok(next_user) = UserId::parse(&last.user) else {
+            let Ok(next_user) = murtaugh_store::slack_user(&last.user) else {
                 lock(&self.turns).remove(&conversation);
                 return;
             };
@@ -927,7 +927,8 @@ impl Chat {
     async fn admitted(&self, node: &Node, batch: &[Incoming]) -> Option<Incoming> {
         let mut kept = Vec::with_capacity(batch.len());
         for message in batch {
-            if UserId::parse(&message.user).is_ok_and(|speaker| node.admits(&speaker)) {
+            if murtaugh_store::slack_user(&message.user).is_ok_and(|speaker| node.admits(&speaker))
+            {
                 kept.push(message.clone());
             } else {
                 self.react(&message.channel, &message.ts, UNAUTHORISED_REACTION)
@@ -1007,7 +1008,7 @@ impl Chat {
     /// Only the machines this person would be assigned anyway, so the menu cannot offer one the
     /// choice would then refuse.
     fn picker(&self, user: &str, conversation: &Conversation) -> (String, Vec<Block>) {
-        let Ok(user) = UserId::parse(user) else {
+        let Ok(user) = murtaugh_store::slack_user(user) else {
             return ("I could not tell who you are.".to_owned(), Vec::new());
         };
         let choices = self.fleet.choices(&user, &self.access.snapshot());
@@ -1049,7 +1050,7 @@ impl Chat {
                 .next()
                 .is_some_and(|word| word.eq_ignore_ascii_case("stop"));
         let (user, channel) = (text("user_id"), text("channel_id"));
-        let Ok(user_id) = UserId::parse(&user) else {
+        let Ok(user_id) = murtaugh_store::slack_user(&user) else {
             return;
         };
         if !stop || !self.access.snapshot().may_chat(&user_id) {
@@ -1251,7 +1252,7 @@ impl Chat {
             // outage, and says so the way every refusal does.
             if self.fleet.shuts_out(user, &snapshot) {
                 for message in batch {
-                    let shut_out = UserId::parse(&message.user)
+                    let shut_out = murtaugh_store::slack_user(&message.user)
                         .is_ok_and(|speaker| self.fleet.shuts_out(&speaker, &snapshot));
                     if shut_out {
                         self.react(&message.channel, &message.ts, UNAUTHORISED_REACTION)
@@ -1387,7 +1388,7 @@ impl Chat {
             .filter(|message| !message.text.trim().is_empty())
             .filter(|message| match (&message.user, &message.bot_id) {
                 (Some(user), None) if *user != self.bot_user => {
-                    UserId::parse(user).is_ok_and(|speaker| node.admits(&speaker))
+                    murtaugh_store::slack_user(user).is_ok_and(|speaker| node.admits(&speaker))
                 }
                 _ => true,
             })
@@ -1547,7 +1548,7 @@ impl Chat {
                 .await;
         }
         if let Some(reported) = &failure {
-            match UserId::parse(&incoming.user) {
+            match murtaugh_store::slack_user(&incoming.user) {
                 Ok(user) => {
                     self.faulted(
                         conversation,

@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use murtaugh_gateway::run::{self, Options};
 use murtaugh_gateway::token;
-use murtaugh_store::{NodeToken, SqliteStore, Store, ToolMode, UserId};
+use murtaugh_store::{GatewayStore, NodeToken, SqliteStore, ToolMode, UserId};
 use slack_sim::{BOT_USER_ID, GENERAL, SlackSim};
 use time::OffsetDateTime;
 use tokio_util::sync::CancellationToken;
@@ -28,7 +28,7 @@ impl Drop for Killed {
 }
 
 fn user(raw: &str) -> UserId {
-    UserId::parse(raw).unwrap()
+    murtaugh_store::slack_user(raw).unwrap()
 }
 
 /// A gateway, a Slack workspace and a real Riggs node running `script` through fake-claude.

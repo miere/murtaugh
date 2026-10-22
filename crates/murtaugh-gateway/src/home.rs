@@ -670,8 +670,8 @@ mod tests {
     #[test]
     #[allow(clippy::unwrap_used)]
     fn a_person_sees_their_live_client_sessions_and_the_admin_sees_everyones() {
-        let bob = UserId::parse("U0BOB0001").unwrap();
-        let alice = UserId::parse("U0ALICE01").unwrap();
+        let bob = murtaugh_store::slack_user("U0BOB0001").unwrap();
+        let alice = murtaugh_store::slack_user("U0ALICE01").unwrap();
         let snapshot = Snapshot::default();
         let bridged = vec![
             relay::Summary {
@@ -701,7 +701,7 @@ mod tests {
     fn node(connected: bool, activity: Option<(u32, u32)>) -> Summary {
         Summary {
             selector: "abc123".into(),
-            owner: UserId::parse("U0ALICE01").unwrap(),
+            owner: murtaugh_store::slack_user("U0ALICE01").unwrap(),
             name: "laptop".into(),
             sessions: 3,
             connected,

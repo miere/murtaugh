@@ -3,7 +3,7 @@
 mod contract;
 
 use contract::*;
-use murtaugh_store::{Leader, SqliteLeader, SqliteStore, Store, StoreError, UserId};
+use murtaugh_store::{GatewayStore, Leader, SqliteLeader, SqliteStore, StoreError, slack_user};
 
 fn open() -> (tempfile::TempDir, SqliteStore) {
     let dir = tempfile::tempdir().unwrap();
@@ -33,8 +33,8 @@ contract!(
 
 #[test]
 fn only_slack_user_ids_parse() {
-    assert!(UserId::parse("U0123ABCD").is_ok());
-    assert!(UserId::parse("W0123ABCD").is_ok());
+    assert!(slack_user("U0123ABCD").is_ok());
+    assert!(slack_user("W0123ABCD").is_ok());
     for bad in [
         "C0123ABCD",
         "B0123ABCD",
@@ -43,7 +43,7 @@ fn only_slack_user_ids_parse() {
         "",
         "U0123 ABCD",
     ] {
-        assert!(UserId::parse(bad).is_err(), "{bad} parsed");
+        assert!(slack_user(bad).is_err(), "{bad} parsed");
     }
 }
 
@@ -80,4 +80,25 @@ async fn one_sqlite_leader_per_machine_until_it_releases() {
     assert!(first.renew(&lease).await.unwrap().is_some());
     first.release(lease).await.unwrap();
     assert!(second.acquire("b").await.unwrap().is_some());
+}
+
+/// As Firestore does: a stored id that is not a Slack user's is corrupt, not a person.
+#[tokio::test]
+async fn a_stored_id_that_is_not_a_slack_users_is_corrupt() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.db");
+    let loose = rax_gateway::store::SqliteStore::open(&path).unwrap();
+    rax_gateway::store::Store::set_admin(
+        &loose,
+        &rax_gateway::store::UserId::parse("C0123ABCD").unwrap(),
+    )
+    .await
+    .unwrap();
+    let store = SqliteStore::open(&path).unwrap();
+    match store.admin().await.unwrap_err() {
+        StoreError::Corrupt(message) => {
+            assert_eq!(message, slack_user("C0123ABCD").unwrap_err().to_string())
+        }
+        other => panic!("not corrupt: {other}"),
+    }
 }

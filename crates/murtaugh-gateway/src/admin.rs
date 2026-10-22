@@ -14,7 +14,7 @@ use crate::cli::{
 use crate::roles;
 
 fn user(raw: &str) -> Result<UserId, String> {
-    UserId::parse(raw).map_err(|err| err.to_string())
+    murtaugh_store::slack_user(raw).map_err(|err| err.to_string())
 }
 
 async fn admin_of(store: &dyn Store) -> Result<UserId, String> {

@@ -195,7 +195,7 @@ impl Prompts {
         let Some(card) = waiting.get(&click.value) else {
             return Some("That's already been answered.".into());
         };
-        let admitted = UserId::parse(&click.user)
+        let admitted = murtaugh_store::slack_user(&click.user)
             .is_ok_and(|user| card.admits.access.admits(&card.admits.owner, &user));
         if !may_answer || !admitted {
             return Some("You can't answer this one.".into());
