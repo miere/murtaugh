@@ -10,7 +10,7 @@ use std::sync::Arc;
 use murtaugh_slack::{HomeClick, PostMessage, SlackClient, Upload, ViewSubmission};
 use murtaugh_store::{Scope, Store, ToolMode, UserId};
 
-use crate::access::{Access, Snapshot};
+use crate::access::Access;
 use crate::fleet::Fleet;
 use crate::home::{self, MenuAction};
 use crate::hub;
@@ -51,7 +51,7 @@ impl Panel {
     /// Reads the store back into the live rules, closing the links it no longer admits, then
     /// shows each touched person their Home tab as it now stands.
     async fn settle(&self, touched: impl IntoIterator<Item = UserId>) {
-        match Snapshot::load(&*self.store).await {
+        match crate::access::load(&*self.store).await {
             Ok(fresh) => hub::apply(&self.access, &self.fleet, &self.relay, fresh).await,
             Err(err) => {
                 tracing::warn!(error = %err, "could not reload access after a Home tab change")
@@ -67,12 +67,12 @@ impl Panel {
     fn people(&self, raw: &[String]) -> BTreeSet<UserId> {
         raw.iter()
             .filter(|id| **id != self.bot_user)
-            .filter_map(|id| UserId::parse(id).ok())
+            .filter_map(|id| murtaugh_store::slack_user(id).ok())
             .collect()
     }
 
     pub async fn click(&self, click: HomeClick) {
-        let Ok(user) = UserId::parse(&click.user) else {
+        let Ok(user) = murtaugh_store::slack_user(&click.user) else {
             return;
         };
         let snapshot = self.access.snapshot();
@@ -210,7 +210,7 @@ impl Panel {
     }
 
     pub async fn submit(&self, submission: ViewSubmission) {
-        let Ok(user) = UserId::parse(&submission.user) else {
+        let Ok(user) = murtaugh_store::slack_user(&submission.user) else {
             return;
         };
         match submission.callback_id.as_str() {

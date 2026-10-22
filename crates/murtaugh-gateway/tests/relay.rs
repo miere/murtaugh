@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use murtaugh_gateway::access::{Access, Snapshot};
+use murtaugh_gateway::access::Access;
 use murtaugh_gateway::fleet::Fleet;
 use murtaugh_gateway::hub;
 use murtaugh_gateway::relay::Relay;
@@ -37,7 +37,7 @@ const ADMIN: &str = "U0ADMIN01";
 const GUEST: &str = "U0GUEST01";
 
 fn user(raw: &str) -> UserId {
-    UserId::parse(raw).unwrap()
+    murtaugh_store::slack_user(raw).unwrap()
 }
 
 async fn within<F: std::future::Future>(future: F) -> F::Output {
@@ -63,12 +63,15 @@ async fn rig(retain_for: Duration) -> Rig {
     roles::grant(&*store, &user(OWNER), &user(ADMIN))
         .await
         .unwrap();
-    let access = Access::reloading(Snapshot::load(&*store).await.unwrap(), store.clone());
+    let access = murtaugh_gateway::access::reloading(
+        murtaugh_gateway::access::load(&*store).await.unwrap(),
+        store.clone(),
+    );
     let fleet = Fleet::default();
     let lent = murtaugh_gateway::tools::Lent::new(store.clone());
     let files = murtaugh_gateway::files::Files::default();
     let sign_ins = murtaugh_gateway::signin::SignIns::new(None, access.clone());
-    let relay = Relay::new(
+    let relay = murtaugh_gateway::relay::new(
         access.clone(),
         fleet.clone(),
         store.clone(),
@@ -122,7 +125,7 @@ impl Rig {
             &self.access,
             &self.fleet,
             &self.relay,
-            Snapshot::load(&*self.store).await.unwrap(),
+            murtaugh_gateway::access::load(&*self.store).await.unwrap(),
         )
         .await;
     }

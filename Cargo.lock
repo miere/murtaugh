@@ -1730,14 +1730,9 @@ dependencies = [
 name = "murtaugh-common"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
- "hex",
- "rand 0.10.2",
  "rustls",
  "semver",
  "serde",
- "sha2",
- "subtle",
  "tempfile",
  "thiserror",
  "tracing",
@@ -1751,7 +1746,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
- "base64 0.22.1",
  "clap",
  "dotenvy",
  "hex",
@@ -1760,6 +1754,7 @@ dependencies = [
  "murtaugh-store",
  "rand 0.10.2",
  "rax",
+ "rax-gateway",
  "rax-sim",
  "rax-tokio",
  "reqwest",
@@ -1767,9 +1762,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
- "sha2",
  "slack-sim",
- "subtle",
  "tempfile",
  "thiserror",
  "time",
@@ -1807,6 +1800,7 @@ dependencies = [
  "futures-util",
  "gcp_auth",
  "rand 0.10.2",
+ "rax-gateway",
  "reqwest",
  "rusqlite",
  "serde",
@@ -2134,8 +2128,7 @@ dependencies = [
 
 [[package]]
 name = "rax"
-version = "0.11.0"
-source = "git+https://github.com/miere/rax-rs?rev=d5b0fd27e223593bdcb03a0cc4eaca95684f7070#d5b0fd27e223593bdcb03a0cc4eaca95684f7070"
+version = "0.13.0"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -2146,9 +2139,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "rax-gateway"
+version = "0.13.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "hex",
+ "rand 0.10.2",
+ "rax",
+ "rax-tokio",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "thiserror",
+ "time",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "rax-sim"
-version = "0.11.0"
-source = "git+https://github.com/miere/rax-rs?rev=d5b0fd27e223593bdcb03a0cc4eaca95684f7070#d5b0fd27e223593bdcb03a0cc4eaca95684f7070"
+version = "0.13.0"
 dependencies = [
  "rax",
  "rax-tokio",
@@ -2162,8 +2177,7 @@ dependencies = [
 
 [[package]]
 name = "rax-tokio"
-version = "0.11.0"
-source = "git+https://github.com/miere/rax-rs?rev=d5b0fd27e223593bdcb03a0cc4eaca95684f7070#d5b0fd27e223593bdcb03a0cc4eaca95684f7070"
+version = "0.13.0"
 dependencies = [
  "futures-util",
  "rand 0.10.2",

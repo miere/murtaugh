@@ -68,7 +68,6 @@ pub fn chosen(value: &str) -> Option<(Conversation, String)> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use murtaugh_store::UserId;
 
     fn conversation() -> Conversation {
         Conversation {
@@ -80,7 +79,7 @@ mod tests {
     fn summary(name: &str, selector: &str) -> Summary {
         Summary {
             selector: selector.into(),
-            owner: UserId::parse("U0ALICE01").unwrap(),
+            owner: murtaugh_store::slack_user("U0ALICE01").unwrap(),
             name: name.into(),
             sessions: 0,
             connected: true,

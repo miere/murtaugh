@@ -9,17 +9,16 @@ pub mod cli;
 pub mod config;
 pub mod faults;
 pub mod files;
-pub mod fleet;
 pub mod home;
 pub mod hub;
 pub mod logging;
 pub mod manifest;
 pub mod mentions;
 pub mod node_access;
+pub mod owner;
 pub mod panel;
 pub mod picker;
 pub mod policy;
-pub mod port;
 pub mod prompts;
 pub mod relay;
 pub mod render;
@@ -31,10 +30,30 @@ pub mod thread_commands;
 pub mod tools;
 pub mod workloads;
 
-pub use murtaugh_common::{launchd, tls, token, version};
+pub use murtaugh_common::{launchd, tls, version};
+pub use rax_gateway::{fleet, port};
 
-use std::sync::Arc;
+/// Credentials as `rax-gateway` mints and checks them, with Murtaugh's `mrtg_` prefixes.
+pub mod token {
+    pub use murtaugh_common::token::{NODE_PREFIX, USER_PREFIX};
+    pub use rax_gateway::token::*;
+}
+
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
+
+/// What Murtaugh calls things, for every part of `rax-gateway` it runs.
+pub fn settings() -> &'static rax_gateway::Settings {
+    static SETTINGS: LazyLock<rax_gateway::Settings> = LazyLock::new(|| rax_gateway::Settings {
+        name: node_access::GATEWAY.to_owned(),
+        node_prefix: token::NODE_PREFIX.to_owned(),
+        user_prefix: token::USER_PREFIX.to_owned(),
+        principals: murtaugh_store::slack_ids(),
+        talking_tools: vec![format!("mcp__{}__attach", tools::NAMESPACE)],
+        resource_schemes: vec!["chat".to_owned()],
+    });
+    &SETTINGS
+}
 
 use murtaugh_store::{
     FirestoreLeader, FirestoreOptions, FirestoreStore, Leader, SqliteLeader, SqliteStore, Store,

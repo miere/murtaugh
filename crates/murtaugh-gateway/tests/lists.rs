@@ -11,7 +11,6 @@ use murtaugh_gateway::tools::lists::read_item::ReadListItem;
 use murtaugh_gateway::tools::lists::update::UpdateListItems;
 use murtaugh_gateway::tools::{Context, Tool};
 use murtaugh_slack::{SlackClient, Tokens};
-use murtaugh_store::UserId;
 use serde_json::{Value, json};
 use slack_sim::{BOT_USER_ID, GENERAL, SECRET, SlackSim};
 
@@ -53,7 +52,7 @@ async fn fixture() -> Fixture {
 
 fn asked_by(user: &str) -> Context {
     Context {
-        user: Some(UserId::parse(user).unwrap()),
+        user: Some(murtaugh_store::slack_user(user).unwrap()),
         ..Context::default()
     }
 }

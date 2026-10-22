@@ -52,7 +52,7 @@ async fn eventually<T>(what: &str, mut check: impl FnMut() -> Option<T>) -> T {
 }
 
 fn user(raw: &str) -> UserId {
-    UserId::parse(raw).unwrap()
+    murtaugh_store::slack_user(raw).unwrap()
 }
 
 /// `text` as a node reads it once somebody has sent it with a mention of the bot.

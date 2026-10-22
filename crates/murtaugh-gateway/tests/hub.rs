@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use murtaugh_gateway::access::{Access, Snapshot};
+use murtaugh_gateway::access::Access;
 use murtaugh_gateway::fleet::Fleet;
 use murtaugh_gateway::hub::{self, FleetChange};
 use murtaugh_gateway::token;
@@ -15,7 +15,7 @@ use time::OffsetDateTime;
 use tokio_util::sync::CancellationToken;
 
 fn user(raw: &str) -> UserId {
-    UserId::parse(raw).unwrap()
+    murtaugh_store::slack_user(raw).unwrap()
 }
 
 async fn within<F: std::future::Future>(future: F) -> F::Output {
@@ -42,10 +42,13 @@ async fn rig() -> Rig {
         .approve(&user("U0PERSON1"), &user("U0ADMIN01"))
         .await
         .unwrap();
-    let access = Access::reloading(Snapshot::load(&*store).await.unwrap(), store.clone());
+    let access = murtaugh_gateway::access::reloading(
+        murtaugh_gateway::access::load(&*store).await.unwrap(),
+        store.clone(),
+    );
     let fleet = Fleet::default();
     let shutdown = CancellationToken::new();
-    let relay = murtaugh_gateway::relay::Relay::new(
+    let relay = murtaugh_gateway::relay::new(
         access.clone(),
         fleet.clone(),
         store.clone(),
@@ -84,7 +87,7 @@ impl Rig {
     async fn mint(&self, owner: &str) -> (String, String) {
         let minted = self.mint_quietly(owner).await;
         self.access
-            .replace(Snapshot::load(&*self.store).await.unwrap());
+            .replace(murtaugh_gateway::access::load(&*self.store).await.unwrap());
         minted
     }
 

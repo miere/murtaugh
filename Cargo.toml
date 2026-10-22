@@ -17,9 +17,10 @@ expect_used = "deny"
 panic = "deny"
 
 [workspace.dependencies]
-rax = { git = "https://github.com/miere/rax-rs", rev = "d5b0fd27e223593bdcb03a0cc4eaca95684f7070" }
-rax-tokio = { git = "https://github.com/miere/rax-rs", rev = "d5b0fd27e223593bdcb03a0cc4eaca95684f7070" }
-rax-sim = { git = "https://github.com/miere/rax-rs", rev = "d5b0fd27e223593bdcb03a0cc4eaca95684f7070" }
+rax = { path = "../rax-rs/crates/rax" }
+rax-tokio = { path = "../rax-rs/crates/rax-tokio" }
+rax-sim = { path = "../rax-rs/crates/rax-sim" }
+rax-gateway = { path = "../rax-rs/crates/rax-gateway" }
 murtaugh-common = { path = "crates/murtaugh-common" }
 murtaugh-slack = { path = "crates/murtaugh-slack" }
 murtaugh-store = { path = "crates/murtaugh-store" }
@@ -39,8 +40,6 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 semver = "1"
-sha2 = "0.10"
-subtle = "2"
 tempfile = "3"
 toml = "1"
 thiserror = "2"
