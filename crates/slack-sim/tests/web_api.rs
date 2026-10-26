@@ -458,6 +458,107 @@ async fn reactions_validate_names_and_tolerate_repeats() {
 }
 
 #[tokio::test]
+async fn reactions_can_be_taken_back() {
+    let sim = sim().await;
+    let ts = post(&sim, GENERAL, "react to me").await;
+    let call = |method: &'static str, name: &'static str| {
+        let (sim, ts) = (&sim, ts.clone());
+        async move {
+            bot(
+                sim,
+                method,
+                json!({"channel": GENERAL, "timestamp": ts, "name": name}),
+            )
+            .await
+        }
+    };
+    assert_eq!(call("reactions.add", "eyes").await["ok"], true);
+    assert_eq!(call("reactions.add", "tada").await["ok"], true);
+    assert_eq!(call("reactions.remove", "eyes").await["ok"], true);
+    assert_eq!(
+        call("reactions.remove", "eyes").await["error"],
+        "no_reaction"
+    );
+    assert_eq!(sim.reactions(GENERAL, &ts), ["tada"]);
+    assert!(sim.violations().is_empty(), "{:?}", sim.violations());
+}
+
+#[tokio::test]
+async fn delete_removes_only_the_bots_own_messages() {
+    let sim = sim().await;
+    let ts = post(&sim, GENERAL, "short-lived").await;
+    let theirs = sim.say(ALICE, GENERAL, "keep me", None).await.unwrap();
+    let delete = |ts: String| {
+        let sim = &sim;
+        async move { bot(sim, "chat.delete", json!({"channel": GENERAL, "ts": ts})).await }
+    };
+    let deleted = delete(ts.clone()).await;
+    assert_eq!(deleted["ok"], true, "{deleted}");
+    assert_eq!(deleted["ts"], ts.as_str());
+    assert_eq!(delete(ts).await["error"], "message_not_found");
+    assert_eq!(delete(theirs).await["error"], "cant_delete_message");
+    let texts: Vec<String> = sim.messages(GENERAL).into_iter().map(|m| m.text).collect();
+    assert_eq!(texts, ["keep me"]);
+}
+
+#[tokio::test]
+async fn cards_are_validated_and_their_buttons_clicked() {
+    let sim = sim().await;
+    let icon =
+        json!({"type": "image", "image_url": "https://example.com/i.png", "alt_text": "GitHub"});
+    let card = json!({
+        "type": "card",
+        "icon": icon,
+        "title": {"type": "mrkdwn", "text": "GitHub - Pull Requests", "verbatim": false},
+        "subtitle": {"type": "mrkdwn", "text": "You have been assigned some reviews."},
+        "actions": [
+            {"type": "button", "text": {"type": "plain_text", "text": "Open"}, "action_id": "open"}
+        ],
+    });
+    let posted = bot(
+        &sim,
+        "chat.postMessage",
+        json!({"channel": GENERAL, "text": "reviews", "blocks": [card.clone()]}),
+    )
+    .await;
+    assert_eq!(posted["ok"], true, "{posted}");
+    let ts = posted["ts"].as_str().unwrap();
+    sim.click(ALICE, GENERAL, ts, "open").await.unwrap();
+
+    let with = |key: &str, value: Value| {
+        let mut card = card.clone();
+        card[key] = value;
+        json!([card])
+    };
+    let button =
+        json!({"type": "button", "text": {"type": "plain_text", "text": "Go"}, "action_id": "go"});
+    let cases = [
+        json!([{"type": "card", "icon": icon}]),
+        with(
+            "title",
+            json!({"type": "plain_text", "text": "x".repeat(151)}),
+        ),
+        with("body", json!("bare string")),
+        with("actions", json!([button, button, button, button])),
+        with(
+            "actions",
+            json!([{"type": "overflow", "action_id": "o", "options": []}]),
+        ),
+        with("icon", button.clone()),
+        with("stray", json!(true)),
+    ];
+    for blocks in cases {
+        let res = bot(
+            &sim,
+            "chat.postMessage",
+            json!({"channel": GENERAL, "text": "x", "blocks": blocks}),
+        )
+        .await;
+        assert_eq!(res["error"], "invalid_blocks", "{blocks}");
+    }
+}
+
+#[tokio::test]
 async fn threads_must_exist() {
     let sim = sim().await;
     let bot_token = sim.tokens().bot;

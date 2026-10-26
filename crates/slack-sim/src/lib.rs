@@ -1022,7 +1022,11 @@ fn find_button(msg: &SimMessage, action_id: &str) -> Option<(String, Value)> {
         .flatten();
     let blocks: Vec<&Value> = top.iter().chain(nested).collect();
     blocks.iter().enumerate().find_map(|(i, block)| {
-        let elements = block.get("elements")?.as_array()?;
+        // A card keeps its buttons in `actions`; every other block in `elements`.
+        let elements = block
+            .get("elements")
+            .or_else(|| block.get("actions"))?
+            .as_array()?;
         let button = elements.iter().find(|e| {
             e.get("type").and_then(Value::as_str) == Some("button")
                 && e.get("action_id").and_then(Value::as_str) == Some(action_id)
