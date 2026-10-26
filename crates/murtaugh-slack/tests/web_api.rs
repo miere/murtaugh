@@ -122,6 +122,38 @@ async fn add_reaction_treats_already_reacted_as_success() {
 }
 
 #[tokio::test]
+async fn remove_reaction_treats_a_missing_reaction_as_removed() {
+    let (sim, client) = setup().await;
+    let ts = sim.say(ALICE, GENERAL, "look", None).await.unwrap();
+    client.add_reaction(GENERAL, &ts, "eyes").await.unwrap();
+    client.remove_reaction(GENERAL, &ts, "eyes").await.unwrap();
+    client.remove_reaction(GENERAL, &ts, "eyes").await.unwrap();
+    assert!(sim.reactions(GENERAL, &ts).is_empty());
+    assert!(sim.violations().is_empty(), "{:?}", sim.violations());
+}
+
+#[tokio::test]
+async fn delete_message_treats_a_missing_message_as_deleted() {
+    let (sim, client) = setup().await;
+    let posted = client.post_message(&post(GENERAL, "bye")).await.unwrap();
+    client.delete_message(GENERAL, &posted.ts).await.unwrap();
+    client.delete_message(GENERAL, &posted.ts).await.unwrap();
+    assert!(sim.messages(GENERAL).iter().all(|m| m.ts != posted.ts));
+    assert!(sim.violations().is_empty(), "{:?}", sim.violations());
+}
+
+#[tokio::test]
+async fn delete_message_refuses_someone_elses_message() {
+    let (sim, client) = setup().await;
+    let ts = sim.say(ALICE, GENERAL, "mine", None).await.unwrap();
+    match client.delete_message(GENERAL, &ts).await {
+        Err(SlackError::Api { error, .. }) => assert_eq!(error, "cant_delete_message"),
+        other => panic!("expected cant_delete_message, got {other:?}"),
+    }
+    assert_eq!(sim.messages(GENERAL).len(), 1);
+}
+
+#[tokio::test]
 async fn replies_follows_the_cursor_and_returns_the_thread_once() {
     let (sim, client) = setup().await;
     let root = sim.say(ALICE, GENERAL, "root", None).await.unwrap();

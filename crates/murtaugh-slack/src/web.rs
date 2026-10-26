@@ -265,6 +265,18 @@ impl SlackClient {
             .map(drop)
     }
 
+    /// Deletes one of the bot's own messages. One already gone counts as deleted.
+    pub async fn delete_message(&self, channel: &str, ts: &str) -> Result<(), SlackError> {
+        let body = json!({"channel": channel, "ts": ts});
+        match self
+            .call::<Value>("chat.delete", Token::Bot, Body::Json(body))
+            .await
+        {
+            Err(SlackError::Api { error, .. }) if error == "message_not_found" => Ok(()),
+            other => other.map(drop),
+        }
+    }
+
     /// Shown to `user` alone, in `channel` (and `thread_ts`, when given).
     pub async fn post_ephemeral(
         &self,
@@ -328,6 +340,23 @@ impl SlackClient {
             .await
         {
             Err(SlackError::Api { error, .. }) if error == "already_reacted" => Ok(()),
+            other => other.map(drop),
+        }
+    }
+
+    /// Takes the bot's reaction off. A reaction it never left counts as removed.
+    pub async fn remove_reaction(
+        &self,
+        channel: &str,
+        ts: &str,
+        name: &str,
+    ) -> Result<(), SlackError> {
+        let body = json!({"channel": channel, "timestamp": ts, "name": name});
+        match self
+            .call::<Value>("reactions.remove", Token::Bot, Body::Json(body))
+            .await
+        {
+            Err(SlackError::Api { error, .. }) if error == "no_reaction" => Ok(()),
             other => other.map(drop),
         }
     }

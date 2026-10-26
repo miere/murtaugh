@@ -17,6 +17,7 @@ const METHODS: &[&str] = &[
     "apps.connections.open",
     "chat.postMessage",
     "chat.update",
+    "chat.delete",
     "chat.postEphemeral",
     "views.publish",
     "views.open",
@@ -25,6 +26,7 @@ const METHODS: &[&str] = &[
     "chat.stopStream",
     "assistant.threads.setStatus",
     "reactions.add",
+    "reactions.remove",
     "conversations.replies",
     "conversations.info",
     "conversations.open",
@@ -46,10 +48,12 @@ const JSON_METHODS: &[&str] = &[
     "auth.test",
     "chat.postMessage",
     "chat.update",
+    "chat.delete",
     "chat.postEphemeral",
     "views.publish",
     "views.open",
     "reactions.add",
+    "reactions.remove",
     "slackLists.create",
     "slackLists.access.set",
     "slackLists.items.list",
@@ -291,6 +295,7 @@ fn dispatch(
         }
         "chat.postMessage" => post_message(st, params),
         "chat.update" => update_message(st, params),
+        "chat.delete" => delete_message(st, params),
         "chat.startStream" => crate::stream::start(st, params),
         "chat.appendStream" => crate::stream::append(st, params),
         "chat.stopStream" => crate::stream::stop(st, params),
@@ -299,6 +304,7 @@ fn dispatch(
         "views.publish" => publish_view(st, params),
         "views.open" => open_view(st, params),
         "reactions.add" => add_reaction(st, params),
+        "reactions.remove" => remove_reaction(st, params),
         "conversations.replies" => replies(st, params),
         "conversations.info" => conversation_info(st, params),
         "conversations.open" => open_conversation(st, params),
@@ -571,6 +577,55 @@ fn update_message(st: &mut State, params: &Map<String, Value>) -> Result<Value, 
         "text": msg.text,
         "message": render::message(st, chan, &msg),
     }))
+}
+
+/// Removes the message. Slack leaves a tombstone where a parent with replies was; the simulator
+/// drops the parent alone, and its replies stay where they were.
+fn delete_message(st: &mut State, params: &Map<String, Value>) -> Result<Value, ApiError> {
+    let id = channel(st, arg(params, "channel")?, true)?;
+    let ts = arg(params, "ts")?.ok_or_else(|| err("message_not_found", "no ts was given"))?;
+    let chan = st
+        .channels
+        .get_mut(&id)
+        .ok_or_else(|| err("channel_not_found", id.clone()))?;
+    // Deleting what is already gone is a race a client cannot always avoid, not a mistake.
+    let msg = chan
+        .find_mut(&ts)
+        .ok_or_else(|| benign("message_not_found"))?;
+    if msg.bot_id.as_deref() != Some(BOT_ID) {
+        return Err(err(
+            "cant_delete_message",
+            format!("{ts} was not posted by the bot"),
+        ));
+    }
+    chan.messages.retain(|m| m.ts != ts);
+    Ok(json!({"channel": id, "ts": ts}))
+}
+
+fn remove_reaction(st: &mut State, params: &Map<String, Value>) -> Result<Value, ApiError> {
+    let id = channel(st, arg(params, "channel")?, true)?;
+    let ts = arg(params, "timestamp")?
+        .ok_or_else(|| err("no_item_specified", "no `timestamp` was given"))?;
+    let name = arg(params, "name")?.unwrap_or_default();
+    let chan = st
+        .channels
+        .get_mut(&id)
+        .ok_or_else(|| err("channel_not_found", id.clone()))?;
+    let msg = chan
+        .find_mut(&ts)
+        .ok_or_else(|| err("message_not_found", format!("no message {ts} in {id}")))?;
+    let Some(at) = msg
+        .reactions
+        .iter()
+        .position(|r| r.name == name && r.users.iter().any(|u| u == BOT_USER_ID))
+    else {
+        return Err(benign("no_reaction"));
+    };
+    msg.reactions[at].users.retain(|u| u != BOT_USER_ID);
+    if msg.reactions[at].users.is_empty() {
+        msg.reactions.remove(at);
+    }
+    Ok(json!({}))
 }
 
 fn add_reaction(st: &mut State, params: &Map<String, Value>) -> Result<Value, ApiError> {

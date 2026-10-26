@@ -134,6 +134,7 @@ fn validate_block(block: &Value, at: &str) -> Result<(), Invalid> {
         "context" => context(obj, at),
         "actions" => actions(obj, at),
         "container" => container(obj, at),
+        "card" => card(obj, at),
         "input" => input(obj, at),
         "header" => {
             only_keys(obj, &["type", "block_id", "text", "level"], at)?;
@@ -540,6 +541,77 @@ fn container(obj: &Map<String, Value>, at: &str) -> Result<(), Invalid> {
         })?;
     for (i, child) in children.iter().enumerate() {
         validate_block(child, &format!("{at}/child_blocks/{i}"))?;
+    }
+    Ok(())
+}
+
+/// Its texts are text objects, and its actions up to three buttons. It needs at least one of a
+/// hero image, a title, a body or actions.
+fn card(obj: &Map<String, Value>, at: &str) -> Result<(), Invalid> {
+    only_keys(
+        obj,
+        &[
+            "type",
+            "block_id",
+            "hero_image",
+            "icon",
+            "slack_icon",
+            "title",
+            "subtitle",
+            "body",
+            "subtext",
+            "actions",
+        ],
+        at,
+    )?;
+    if !["hero_image", "title", "body", "actions"]
+        .iter()
+        .any(|key| obj.contains_key(*key))
+    {
+        return Err(invalid(format!(
+            "must provide one of hero_image, title, body or actions [json-pointer:{at}]"
+        )));
+    }
+    for (key, max) in [
+        ("title", 150),
+        ("subtitle", 150),
+        ("body", 200),
+        ("subtext", 200),
+    ] {
+        if let Some(text) = obj.get(key) {
+            text_object(text, &["plain_text", "mrkdwn"], max, &format!("{at}/{key}"))?;
+        }
+    }
+    for key in ["hero_image", "icon"] {
+        if let Some(image) = obj.get(key) {
+            let here = format!("{at}/{key}");
+            if string(object(image, &here)?, "type", &here)? != "image" {
+                return Err(invalid(format!(
+                    "must be an image [json-pointer:{here}/type]"
+                )));
+            }
+            element(image, &here)?;
+        }
+    }
+    if let Some(actions) = obj.get("actions") {
+        let here = format!("{at}/actions");
+        let buttons = actions
+            .as_array()
+            .ok_or_else(|| invalid(format!("must provide an array [json-pointer:{here}]")))?;
+        if buttons.is_empty() || buttons.len() > 3 {
+            return Err(invalid(format!(
+                "must provide between 1 and 3 items [json-pointer:{here}]"
+            )));
+        }
+        for (i, button) in buttons.iter().enumerate() {
+            let here = format!("{here}/{i}");
+            if string(object(button, &here)?, "type", &here)? != "button" {
+                return Err(invalid(format!(
+                    "must be a button [json-pointer:{here}/type]"
+                )));
+            }
+            element(button, &here)?;
+        }
     }
     Ok(())
 }
