@@ -7,7 +7,7 @@ use std::time::Duration;
 use serde_json::json;
 use slack_sim::{ALICE, BOT_USER_ID, GENERAL, RANDOM, SlackSim};
 use support::{
-    ack, assert_shape, bot, connect, connect_raw, fixture, form_call, recv, recv_within,
+    ack, answer, assert_shape, bot, connect, connect_raw, fixture, form_call, recv, recv_within,
 };
 
 async fn sim() -> SlackSim {
@@ -250,4 +250,103 @@ async fn a_dropped_socket_closes_without_a_close_frame() {
     let mut fresh = connect(&sim).await;
     let event = recv(&mut fresh).await;
     assert_eq!(event["payload"]["event"]["type"], "app_mention");
+}
+
+/// Opens a modal for Alice from a click on her Home tab and submits it, returning the submission's
+/// envelope, not yet acked.
+async fn submitted(sim: &SlackSim, ws: &mut support::Ws) -> serde_json::Value {
+    let home = json!({"type": "home", "blocks": [{
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": "GitHub"},
+        "accessory": {"type": "button", "text": {"type": "plain_text", "text": "Edit"}, "action_id": "edit", "value": "x"},
+    }]});
+    let published = bot(
+        sim,
+        "views.publish",
+        json!({"user_id": ALICE, "view": home}),
+    )
+    .await;
+    assert_eq!(published["ok"], true, "{published}");
+    sim.click_home(ALICE, "edit", "x").await.unwrap();
+    let click = recv(ws).await;
+    ack(ws, &click).await;
+    let modal = json!({
+        "type": "modal",
+        "title": {"type": "plain_text", "text": "Token"},
+        "submit": {"type": "plain_text", "text": "Save"},
+        "blocks": [{
+            "type": "input",
+            "block_id": "token",
+            "label": {"type": "plain_text", "text": "Token"},
+            "element": {"type": "plain_text_input", "action_id": "value"},
+        }],
+    });
+    let opened = bot(
+        sim,
+        "views.open",
+        json!({"trigger_id": click["payload"]["trigger_id"], "view": modal}),
+    )
+    .await;
+    assert_eq!(opened["ok"], true, "{opened}");
+    sim.submit_modal(ALICE, json!({})).await.unwrap();
+    let envelope = recv(ws).await;
+    assert_eq!(envelope["payload"]["type"], "view_submission");
+    assert_eq!(envelope["accepts_response_payload"], true);
+    envelope
+}
+
+#[tokio::test]
+async fn field_errors_in_the_ack_keep_the_modal_open() {
+    let sim = sim().await;
+    let mut ws = connect(&sim).await;
+    let envelope = submitted(&sim, &mut ws).await;
+    let errors = json!({"token": "That token did not work"});
+    answer(
+        &mut ws,
+        &envelope,
+        json!({"response_action": "errors", "errors": errors}),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(sim.modal_errors(ALICE), Some(errors));
+    assert_eq!(sim.modal(ALICE).unwrap()["blocks"][0]["block_id"], "token");
+    assert!(sim.violations().is_empty(), "{:?}", sim.violations());
+}
+
+#[tokio::test]
+async fn an_update_in_the_ack_replaces_the_modal() {
+    let sim = sim().await;
+    let mut ws = connect(&sim).await;
+    let envelope = submitted(&sim, &mut ws).await;
+    let done = json!({
+        "type": "modal",
+        "title": {"type": "plain_text", "text": "Connected"},
+        "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": "All set"}}],
+    });
+    answer(
+        &mut ws,
+        &envelope,
+        json!({"response_action": "update", "view": done}),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let modal = sim.modal(ALICE).unwrap();
+    assert_eq!(modal["title"]["text"], "Connected");
+    assert_eq!(modal["id"], envelope["payload"]["view"]["id"]);
+    assert!(sim.violations().is_empty(), "{:?}", sim.violations());
+}
+
+#[tokio::test]
+async fn an_answer_slack_would_not_read_is_a_violation() {
+    let sim = sim().await;
+    let mut ws = connect(&sim).await;
+    let envelope = submitted(&sim, &mut ws).await;
+    answer(&mut ws, &envelope, json!({"response_action": "shout"})).await;
+    sim.mention(ALICE, GENERAL, "hi", None).await.unwrap();
+    let mention = recv(&mut ws).await;
+    answer(&mut ws, &mention, json!({"text": "hello"})).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let errors: Vec<_> = sim.violations().into_iter().map(|v| v.error).collect();
+    assert_eq!(errors, ["invalid_response_action", "unexpected_payload"]);
+    assert_eq!(sim.modal(ALICE), None);
 }

@@ -13,7 +13,7 @@ pub use blocks::{Block, Button, ButtonStyle, Text, mrkdwn};
 pub use error::SlackError;
 pub use events::{Click, Event, EventEnvelope, FileRef, HomeClick, SocketEvent, ViewSubmission};
 pub use lists::{Access, CreateList, CreatedList, ItemInfo, ItemsPage, ListItems};
-pub use socket::SocketMode;
+pub use socket::{SocketMode, ViewAck};
 pub use stream::{
     Chunk, Icon, PlanBlock, PlanTask, RichText, STREAM_FINALIZED, STREAMING_UNSUPPORTED,
     StartStream, TaskDisplayMode, TaskStatus,

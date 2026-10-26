@@ -125,6 +125,8 @@ pub(crate) struct State {
     pub triggers: HashMap<String, String>,
     /// The modal each person has open, as `views.open` was given it.
     pub modals: HashMap<String, Value>,
+    /// The field errors the bot last answered each person's submission with, by block id.
+    pub modal_errors: HashMap<String, Value>,
     clock: u64,
     seq: u64,
 }
@@ -155,6 +157,7 @@ impl State {
             homes: HashMap::new(),
             triggers: HashMap::new(),
             modals: HashMap::new(),
+            modal_errors: HashMap::new(),
             clock: 0,
             seq: 0,
         };

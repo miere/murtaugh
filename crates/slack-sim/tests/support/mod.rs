@@ -134,6 +134,14 @@ pub async fn recv_within(ws: &mut Ws, wait: Duration) -> Option<Value> {
     }
 }
 
+/// Acks with a payload, as an app answering a modal's submission does.
+pub async fn answer(ws: &mut Ws, envelope: &Value, payload: Value) {
+    let ack = json!({"envelope_id": envelope["envelope_id"], "payload": payload});
+    ws.send(Message::Text(ack.to_string().into()))
+        .await
+        .unwrap();
+}
+
 pub async fn ack(ws: &mut Ws, envelope: &Value) {
     let ack = json!({"envelope_id": envelope["envelope_id"]});
     ws.send(Message::Text(ack.to_string().into()))

@@ -9,6 +9,13 @@ pub enum SocketEvent {
     Interactive(Value),
     /// The slash command payload, without the envelope.
     SlashCommand(Value),
+    /// A modal's submission, still unacked, from a socket opened with
+    /// [`SocketMode::connect_answering_views`](crate::SocketMode::connect_answering_views). Any
+    /// other socket delivers submissions as [`SocketEvent::Interactive`], already acked.
+    Submission {
+        payload: Value,
+        ack: crate::socket::ViewAck,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

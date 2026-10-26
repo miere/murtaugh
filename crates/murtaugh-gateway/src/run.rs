@@ -308,6 +308,13 @@ async fn serve_as_leader(
                 Some(SocketEvent::SlashCommand(payload)) => {
                     tokio::spawn(chat.clone().on_slash(payload));
                 }
+                // Only a socket opened to answer views delivers these; this one acks them all.
+                Some(SocketEvent::Submission { payload, ack }) => {
+                    drop(ack);
+                    if let Some(submission) = ViewSubmission::from_interactive(&payload) {
+                        tokio::spawn(chat.clone().on_view_submission(submission));
+                    }
+                }
                 Some(SocketEvent::Interactive(payload)) => {
                     if let Some(click) = Click::from_interactive(&payload) {
                         tokio::spawn(chat.clone().on_click(click));
