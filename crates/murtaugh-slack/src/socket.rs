@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -23,8 +24,69 @@ const BACKOFF_BASE: Duration = Duration::from_millis(250);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
 const SHORT_LIVED: Duration = Duration::from_secs(10);
 
+/// The ack a modal's submission waits for. Slack shows field errors, or another view, only when the
+/// ack itself carries them, and gives up three seconds after the submission arrived. The first
+/// answer counts; when the last clone is dropped unanswered, it acks with nothing, which closes the
+/// modal.
+#[derive(Clone)]
+pub struct ViewAck {
+    inner: Arc<Pending>,
+}
+
+struct Pending {
+    envelope_id: String,
+    answered: Mutex<bool>,
+    answers: mpsc::UnboundedSender<String>,
+}
+
+impl ViewAck {
+    /// `None` closes the modal. `Some` is what Slack acts on, such as
+    /// `{"response_action": "errors", "errors": {block_id: message}}`.
+    pub fn answer(&self, response: Option<Value>) {
+        self.inner.send(response);
+    }
+}
+
+impl Pending {
+    fn send(&self, response: Option<Value>) {
+        let mut answered = self.answered.lock().unwrap_or_else(PoisonError::into_inner);
+        if *answered {
+            return;
+        }
+        *answered = true;
+        let mut frame = json!({"envelope_id": self.envelope_id});
+        if let Some(response) = response {
+            frame["payload"] = response;
+        }
+        // Gone only once the socket is closed, when nobody is left to show it to.
+        let _ = self.answers.send(frame.to_string());
+    }
+}
+
+impl Drop for Pending {
+    fn drop(&mut self) {
+        self.send(None);
+    }
+}
+
+impl std::fmt::Debug for ViewAck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ViewAck")
+            .field("envelope_id", &self.inner.envelope_id)
+            .finish()
+    }
+}
+
+/// Two are equal when they answer the same submission.
+impl PartialEq for ViewAck {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+}
+
 /// A Socket Mode stream that survives `disconnect` and socket loss. A background task reads and
 /// acks every envelope as it arrives, so a consumer slow to call `next` never causes redelivery.
+/// The one exception is opt-in: see [`SocketMode::connect_answering_views`].
 pub struct SocketMode {
     rx: mpsc::UnboundedReceiver<Result<SocketEvent, SlackError>>,
     stop: oneshot::Sender<()>,
@@ -35,7 +97,19 @@ pub struct SocketMode {
 impl SocketMode {
     /// Fails if the first connection cannot be made, so a bad app token surfaces at startup.
     pub async fn connect(client: SlackClient) -> Result<SocketMode, SlackError> {
+        SocketMode::open(client, false).await
+    }
+
+    /// Like [`SocketMode::connect`], except that a modal's submission is not acked on arrival: it
+    /// comes as [`SocketEvent::Submission`] with the [`ViewAck`] to answer, so the app can keep the
+    /// modal open with field errors. Answer within three seconds.
+    pub async fn connect_answering_views(client: SlackClient) -> Result<SocketMode, SlackError> {
+        SocketMode::open(client, true).await
+    }
+
+    async fn open(client: SlackClient, answer_views: bool) -> Result<SocketMode, SlackError> {
         let (ws, backlog) = dial(&client).await?;
+        let (answers_tx, answers) = mpsc::unbounded_channel();
         let mut reader = Reader {
             client,
             ws: Some(ws),
@@ -44,6 +118,9 @@ impl SocketMode {
             failures: 0,
             ping_sent: false,
             fatal: None,
+            answer_views,
+            answers_tx,
+            answers,
         };
         let (tx, rx) = mpsc::unbounded_channel();
         let (stop, mut stopped) = oneshot::channel();
@@ -110,6 +187,18 @@ struct Reader {
     failures: u32,
     ping_sent: bool,
     fatal: Option<SlackError>,
+    /// Whether a modal's submission waits for its [`ViewAck`].
+    answer_views: bool,
+    answers_tx: mpsc::UnboundedSender<String>,
+    /// Acks the app answered. Shared by every connection: an answer outliving the socket its
+    /// submission came on goes out on the one that replaced it.
+    answers: mpsc::UnboundedReceiver<String>,
+}
+
+enum Read {
+    Frame(Option<Result<Message, tungstenite::Error>>),
+    Silent,
+    Answer(String),
 }
 
 impl Reader {
@@ -128,14 +217,28 @@ impl Reader {
                 self.redial().await;
                 continue;
             };
-            let frame = match timeout(IDLE_BEFORE_PING, ws.next()).await {
-                Ok(frame) => frame,
-                Err(_) if self.ping_sent => {
+            let read = tokio::select! {
+                Some(answer) = self.answers.recv() => Read::Answer(answer),
+                frame = timeout(IDLE_BEFORE_PING, ws.next()) => match frame {
+                    Ok(frame) => Read::Frame(frame),
+                    Err(_) => Read::Silent,
+                },
+            };
+            let frame = match read {
+                Read::Frame(frame) => frame,
+                Read::Answer(answer) => {
+                    if let Err(error) = ws.send(Message::Text(answer.into())).await {
+                        tracing::warn!(%error, "could not answer a view submission");
+                        self.lost();
+                    }
+                    continue;
+                }
+                Read::Silent if self.ping_sent => {
                     tracing::warn!("Socket Mode connection went silent; redialling");
                     self.lost();
                     continue;
                 }
-                Err(_) => {
+                Read::Silent => {
                     self.ping_sent = true;
                     if ws.send(Message::Ping(Vec::new().into())).await.is_err() {
                         self.lost();
@@ -186,8 +289,23 @@ impl Reader {
             tracing::warn!(kind, "Socket Mode frame has no envelope_id");
             return None;
         };
-        self.ack(envelope_id).await;
         let payload = || frame.get("payload").cloned().unwrap_or(Value::Null);
+        let submission = kind == "interactive"
+            && frame.pointer("/payload/type").and_then(Value::as_str) == Some("view_submission");
+        if submission && self.answer_views {
+            let ack = ViewAck {
+                inner: Arc::new(Pending {
+                    envelope_id: envelope_id.to_owned(),
+                    answered: Mutex::new(false),
+                    answers: self.answers_tx.clone(),
+                }),
+            };
+            return Some(SocketEvent::Submission {
+                payload: payload(),
+                ack,
+            });
+        }
+        self.ack(envelope_id).await;
         match kind {
             "events_api" => EventEnvelope::decode(&frame).map(SocketEvent::Event),
             "interactive" => Some(SocketEvent::Interactive(payload())),

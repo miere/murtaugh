@@ -112,14 +112,63 @@ fn on_frame(inner: &Inner, text: &str) {
         );
         return;
     };
-    if st.pending.remove(&envelope_id).is_none() && !st.acked.contains(&envelope_id) {
+    let pending = st.pending.remove(&envelope_id);
+    if pending.is_none() && !st.acked.contains(&envelope_id) {
         st.violation(
             "socket_mode",
             "unknown_envelope",
             format!("ack for envelope {envelope_id}, which was never sent"),
         );
     }
+    let answer = serde_json::from_str::<Value>(text)
+        .ok()
+        .and_then(|mut v| v.get_mut("payload").map(Value::take));
+    if let (Some(pending), Some(answer)) = (pending, answer) {
+        answered(&mut st, &pending.envelope, answer);
+    }
     st.acked.push(envelope_id);
+}
+
+/// An ack that carries a payload. Slack reads one only from an envelope that
+/// `accepts_response_payload`; for a modal's submission it is the `response_action` Slack acts
+/// on: field errors keep the modal open, `update` and `push` show another view, `clear` closes it.
+fn answered(st: &mut State, envelope: &Value, answer: Value) {
+    if envelope["accepts_response_payload"] != true {
+        st.violation(
+            "socket_mode",
+            "unexpected_payload",
+            format!("ack carries a payload Slack ignores for this envelope: {answer}"),
+        );
+        return;
+    }
+    let submission = &envelope["payload"];
+    if submission["type"] != "view_submission" {
+        return;
+    }
+    let Some(user) = submission["user"]["id"].as_str().map(str::to_owned) else {
+        return;
+    };
+    let mut view = submission["view"].clone();
+    if let Some(view) = view.as_object_mut() {
+        view.remove("state");
+    }
+    match answer["response_action"].as_str() {
+        Some("errors") if answer["errors"].as_object().is_some_and(|e| !e.is_empty()) => {
+            st.modals.insert(user.clone(), view);
+            st.modal_errors.insert(user, answer["errors"].clone());
+        }
+        Some("update" | "push") if answer["view"].is_object() => {
+            let mut next = answer["view"].clone();
+            next["id"] = view["id"].clone();
+            st.modals.insert(user, next);
+        }
+        Some("clear") => {}
+        _ => st.violation(
+            "socket_mode",
+            "invalid_response_action",
+            format!("not a response_action Slack accepts for a view submission: {answer}"),
+        ),
+    }
 }
 
 pub(crate) fn dispatch(st: &mut State, envelope: Value) -> Option<(String, u64)> {

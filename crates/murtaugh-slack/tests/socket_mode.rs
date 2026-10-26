@@ -356,3 +356,132 @@ async fn a_bad_app_token_fails_at_connect() {
         Err(other) => panic!("expected invalid_auth, got {other:?}"),
     }
 }
+
+/// Opens a modal for Alice the way an app does: from the trigger of a click on her Home tab.
+async fn open_modal(sim: &SlackSim, client: &SlackClient, socket: &mut SocketMode) {
+    let edit = json!({
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": "GitHub"},
+        "accessory": {
+            "type": "button",
+            "text": {"type": "plain_text", "text": "Edit"},
+            "action_id": "edit",
+            "value": "x",
+        },
+    });
+    client
+        .publish_home(ALICE, &[Block::Raw(edit)])
+        .await
+        .unwrap();
+    sim.click_home(ALICE, "edit", "x").await.unwrap();
+    let SocketEvent::Interactive(click) = next(socket).await else {
+        panic!("expected the click");
+    };
+    let view = json!({
+        "type": "modal",
+        "callback_id": "token",
+        "title": {"type": "plain_text", "text": "Token"},
+        "submit": {"type": "plain_text", "text": "Save"},
+        "blocks": [{
+            "type": "input",
+            "block_id": "token",
+            "label": {"type": "plain_text", "text": "Token"},
+            "element": {"type": "plain_text_input", "action_id": "value"},
+        }],
+    });
+    client
+        .open_view(click["trigger_id"].as_str().unwrap(), &view)
+        .await
+        .unwrap();
+}
+
+async fn answering() -> (SlackSim, SlackClient, SocketMode) {
+    let (sim, client, socket) = setup().await;
+    socket.close().await;
+    let socket = SocketMode::connect_answering_views(client.clone())
+        .await
+        .unwrap();
+    (sim, client, socket)
+}
+
+fn token(value: &str) -> serde_json::Value {
+    json!({"token": {"value": {"type": "plain_text_input", "value": value}}})
+}
+
+#[tokio::test]
+async fn a_submission_waits_for_its_answer_when_the_socket_answers_views() {
+    let (sim, client, mut socket) = answering().await;
+    open_modal(&sim, &client, &mut socket).await;
+    sim.submit_modal(ALICE, token("nope")).await.unwrap();
+
+    let SocketEvent::Submission { payload, ack } = next(&mut socket).await else {
+        panic!("expected a submission");
+    };
+    assert_eq!(payload["type"], "view_submission");
+    assert_eq!(
+        payload["view"]["state"]["values"]["token"]["value"]["value"],
+        "nope"
+    );
+    let acked = sim.acks().len();
+    ack.answer(Some(json!({
+        "response_action": "errors",
+        "errors": {"token": "GitHub did not accept that token"},
+    })));
+    ack.answer(None);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    assert_eq!(sim.acks().len(), acked + 1);
+    assert_eq!(
+        sim.modal_errors(ALICE),
+        Some(json!({"token": "GitHub did not accept that token"}))
+    );
+    assert_eq!(sim.modal(ALICE).unwrap()["callback_id"], "token");
+    assert!(sim.violations().is_empty(), "{:?}", sim.violations());
+
+    sim.submit_modal(ALICE, token("ghp_good")).await.unwrap();
+    let SocketEvent::Submission { ack, .. } = next(&mut socket).await else {
+        panic!("expected the second submission");
+    };
+    assert_eq!(sim.modal_errors(ALICE), None);
+    ack.answer(None);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(sim.modal(ALICE), None);
+    assert!(sim.violations().is_empty(), "{:?}", sim.violations());
+}
+
+#[tokio::test]
+async fn a_dropped_answer_acks_with_nothing_once_every_clone_is_gone() {
+    let (sim, client, mut socket) = answering().await;
+    open_modal(&sim, &client, &mut socket).await;
+    sim.submit_modal(ALICE, token("x")).await.unwrap();
+    let SocketEvent::Submission { ack, .. } = next(&mut socket).await else {
+        panic!("expected a submission");
+    };
+    let acked = sim.acks().len();
+    let clone = ack.clone();
+    assert_eq!(clone, ack);
+    drop(ack);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(sim.acks().len(), acked);
+
+    drop(clone);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(sim.acks().len(), acked + 1);
+    assert_eq!(sim.modal(ALICE), None);
+    assert!(sim.violations().is_empty(), "{:?}", sim.violations());
+}
+
+#[tokio::test]
+async fn a_plain_socket_still_acks_a_submission_on_arrival() {
+    let (sim, client, mut socket) = setup().await;
+    open_modal(&sim, &client, &mut socket).await;
+    sim.submit_modal(ALICE, token("x")).await.unwrap();
+    match next(&mut socket).await {
+        SocketEvent::Interactive(payload) => assert_eq!(payload["type"], "view_submission"),
+        other => panic!("{other:?}"),
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(sim.acks().len(), 2);
+    assert_eq!(sim.modal(ALICE), None);
+    assert!(sim.violations().is_empty(), "{:?}", sim.violations());
+}

@@ -825,11 +825,18 @@ impl SlackSim {
         self.inner.lock().modals.get(user).cloned()
     }
 
-    /// Submits the modal `user` has open, closing it. `values` is the view's `state.values`,
-    /// keyed by block id, then action id.
+    /// The field errors the bot answered `user`'s last submission with, by block id, while the
+    /// modal stays open for them to correct.
+    pub fn modal_errors(&self, user: &str) -> Option<Value> {
+        self.inner.lock().modal_errors.get(user).cloned()
+    }
+
+    /// Submits the modal `user` has open, closing it unless the bot's ack answers with field errors
+    /// or another view. `values` is the view's `state.values`, keyed by block id, then action id.
     pub async fn submit_modal(&self, user: &str, values: Value) -> Result<(), SimError> {
         let envelope = {
             let mut st = self.inner.lock();
+            st.modal_errors.remove(user);
             let view = st
                 .modals
                 .remove(user)
