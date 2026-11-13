@@ -24,6 +24,7 @@ impl ReadListItem {
 impl Tool for ReadListItem {
     fn def(&self) -> ToolDef {
         ToolDef {
+            meta: None,
             name: NAME.to_owned(),
             description: "Read one row of a Slack List, with its subtasks and the List's \
                  columns. Cells come by column name, in the shape update_list_items takes."

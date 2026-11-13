@@ -57,7 +57,8 @@ pub async fn a_node_owners_tool_rules_are_kept_apart_from_the_rest_of_their_sett
 ) {
     let owner = user("U0PERSON1");
     let fresh = store.user(&owner).await.unwrap();
-    assert_eq!(fresh.tool_mode, ToolMode::AlwaysAllowed);
+    assert_eq!(fresh.tool_mode, ToolMode::AllowedWhitelist);
+    assert!(!store.has_tool_rules(&owner).await.unwrap());
     assert!(fresh.whitelist.is_empty());
 
     store
@@ -87,11 +88,25 @@ pub async fn a_node_owners_tool_rules_are_kept_apart_from_the_rest_of_their_sett
     );
     assert!(store.unwhitelist_tool(&owner, "Bash").await.unwrap());
     assert!(!store.unwhitelist_tool(&owner, "Bash").await.unwrap());
+    assert!(store.has_tool_rules(&owner).await.unwrap());
+    assert!(store.deny_tool(&owner, "Bash(rm .*)").await.unwrap());
+    assert!(!store.deny_tool(&owner, "Bash(rm .*)").await.unwrap());
+    assert!(store.deny_tool(&owner, "WebFetch").await.unwrap());
+    assert!(store.undeny_tool(&owner, "WebFetch").await.unwrap());
+    assert!(!store.undeny_tool(&owner, "WebFetch").await.unwrap());
     store.set_tool_mode(&owner, ToolMode::Denied).await.unwrap();
     let users = store.users().await.unwrap();
     assert_eq!(users.len(), 1);
     assert_eq!(users[0].tool_mode, ToolMode::Denied);
     assert_eq!(users[0].whitelist.len(), 1);
+    assert_eq!(
+        users[0]
+            .denylist
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["Bash(rm .*)"]
+    );
     assert_eq!(
         store.user(&user("U0SOMEONE")).await.unwrap(),
         UserConfig::new(user("U0SOMEONE"))

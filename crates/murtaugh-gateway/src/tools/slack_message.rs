@@ -36,6 +36,7 @@ impl Tool for SlackReadMessage {
 
     fn def(&self) -> ToolDef {
         ToolDef {
+            meta: None,
             name: NAME.to_owned(),
             description: "Read a Slack message from its link, and optionally the thread under it. \
                  Use it whenever someone shares a Slack link and you need what it says. \

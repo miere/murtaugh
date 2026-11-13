@@ -37,6 +37,7 @@ fn text<'a>(arguments: &'a Value, name: &str) -> Option<&'a str> {
 impl Tool for Attach {
     fn def(&self) -> ToolDef {
         ToolDef {
+            meta: None,
             name: NAME.to_owned(),
             description: "Post a file from your machine into this conversation's Slack thread, \
                  so the people in it receive the file itself. The machine you run on decides \

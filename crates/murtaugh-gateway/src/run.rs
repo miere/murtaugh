@@ -99,6 +99,15 @@ pub async fn serve(
             "brought access into line: node admins are allowed, and tokens without a grant are revoked"
         );
     }
+    let seeded = crate::roles::seed_owners(&*store)
+        .await
+        .map_err(|err| err.to_string())?;
+    if !seeded.is_empty() {
+        tracing::info!(
+            ?seeded,
+            "started node owners without tool rules on the read-only whitelist"
+        );
+    }
     let snapshot = crate::access::load(&*store)
         .await
         .map_err(|err| err.to_string())?;

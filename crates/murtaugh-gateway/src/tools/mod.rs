@@ -184,6 +184,7 @@ impl Tools {
         let tools: Vec<ToolDef> = self
             .legacy()
             .map(|tool| ToolDef {
+                meta: None,
                 name: tool.legacy_name(),
                 ..tool.def()
             })

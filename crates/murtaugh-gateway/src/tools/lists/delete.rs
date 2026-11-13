@@ -25,6 +25,7 @@ impl DeleteListItems {
 impl Tool for DeleteListItems {
     fn def(&self) -> ToolDef {
         ToolDef {
+            meta: None,
             name: NAME.to_owned(),
             description: format!(
                 "Delete rows of a Slack List, with their subtasks, up to {MAX_ROWS} per call. \

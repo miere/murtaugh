@@ -26,6 +26,7 @@ impl ReadList {
 impl Tool for ReadList {
     fn def(&self) -> ToolDef {
         ToolDef {
+            meta: None,
             name: NAME.to_owned(),
             description: "Read a Slack List from its id or link: its title, its columns (with \
                  each select column's options) and a page of its rows. Each row has an id, \

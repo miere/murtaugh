@@ -61,6 +61,7 @@ impl Lent {
             };
             lent.add(
                 ToolDef {
+                    meta: None,
                     name: READ_TEXT_FILE.into(),
                     description: description.into(),
                     input_schema: Some(json!({
@@ -80,6 +81,7 @@ impl Lent {
         if write {
             lent.add(
                 ToolDef {
+                    meta: None,
                     name: WRITE_TEXT_FILE.into(),
                     description:
                         "Writes a whole text file on the person's machine, creating it if needed."
@@ -100,6 +102,7 @@ impl Lent {
         if read && write {
             lent.add(
                 ToolDef {
+                    meta: None,
                     name: EDIT_TEXT_FILE.into(),
                     description: "Edits a text file on the person's machine by replacing old_string with new_string. old_string must appear exactly once unless replace_all is set.".into(),
                     input_schema: Some(json!({
@@ -120,6 +123,7 @@ impl Lent {
         if local {
             lent.add(
                 ToolDef {
+                    meta: None,
                     name: LIST_DIRECTORY.into(),
                     description: "Lists a folder on the person's machine; folders end in `/`."
                         .into(),
@@ -157,6 +161,7 @@ impl Lent {
                 ToolKind::Other
             };
             let def = ToolDef {
+                meta: None,
                 name: tool.name.to_string(),
                 description: tool
                     .description

@@ -95,6 +95,7 @@ impl<'a> Target<'a> {
 impl Tool for EditCanvas {
     fn def(&self) -> ToolDef {
         ToolDef {
+            meta: None,
             name: NAME.to_owned(),
             description: "Change a Slack canvas with Markdown. `section` is a heading anchor from \
                  read_canvas; a section is its heading and everything under it, subsections \

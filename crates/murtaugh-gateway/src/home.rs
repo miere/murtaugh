@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use murtaugh_slack::{Block, Text};
-use murtaugh_store::{Scope, ToolMode, UserId};
+use murtaugh_store::{Scope, ToolMode, UserConfig, UserId};
 use rax::Activity;
 use serde_json::{Value, json};
 use time::OffsetDateTime;
@@ -20,9 +20,11 @@ use crate::render;
 use crate::version::VERSION;
 
 /// Home views hold at most 100 blocks; the panel above the nodes and the footer take a dozen.
-const MAX_NODES: usize = 85;
+const MAX_NODES: usize = 84;
 
 pub const TOOL_MODE: &str = "tool_mode";
+/// Opens the modal that edits the viewer's tool rules.
+pub const TOOL_RULES_EDIT: &str = "tool_rules_edit";
 pub const ADMIN_SET: &str = "admin_set";
 pub const NODE_ADMINS_SET: &str = "node_admins_set";
 pub const ALLOWED_USERS_SET: &str = "allowed_users_set";
@@ -37,6 +39,13 @@ pub const CLIENT_REVOKE: &str = "client_revoke";
 pub const NODE_NEW_SUBMIT: &str = "node_new_submit";
 pub const NODE_REVOKE_SUBMIT: &str = "node_revoke_submit";
 pub const CLIENT_NEW_SUBMIT: &str = "client_new_submit";
+pub const TOOL_RULES_SUBMIT: &str = "tool_rules_submit";
+
+/// Where the tool rules modal keeps its two lists, one rule a line, as block id and action id.
+pub const TOOL_ALLOW: (&str, &str) = ("tool_allow", "rules");
+pub const TOOL_DENY: (&str, &str) = ("tool_deny", "rules");
+/// A section's text holds at most 3000 characters.
+const RULES_SUMMARY_CHARS: usize = 1_200;
 
 /// Where the new node modal keeps its inputs, as block id and action id.
 pub const NODE_NAME: (&str, &str) = ("node_name", "name");
@@ -75,7 +84,7 @@ pub fn parse_menu(value: &str) -> Option<(String, MenuAction)> {
 
 pub fn view(
     viewer: &UserId,
-    tool_mode: ToolMode,
+    rules: &UserConfig,
     snapshot: &Snapshot,
     attached: &[Summary],
     bridged: &[relay::Summary],
@@ -89,7 +98,8 @@ pub fn view(
             "level": 1,
         })));
         blocks.push(Block::Divider);
-        blocks.push(tool_mode_block(tool_mode));
+        blocks.push(tool_mode_block(rules.tool_mode));
+        blocks.push(tool_rules_block(rules));
         if admin {
             blocks.extend(admin_blocks(snapshot));
         }
@@ -173,6 +183,78 @@ fn tool_mode_block(mode: ToolMode) -> Block {
             "options": options,
         },
     }))
+}
+
+/// The viewer's rules at a glance, and the button that edits them.
+fn tool_rules_block(rules: &UserConfig) -> Block {
+    let list = |rules: &std::collections::BTreeSet<String>| match rules.is_empty() {
+        true => "none".to_owned(),
+        false => rules
+            .iter()
+            .map(|rule| format!("`{}`", rule.replace('`', "'")))
+            .collect::<Vec<_>>()
+            .join(", "),
+    };
+    let text = format!(
+        "*Tool Rules*\n_Calls these match run or are refused without asking you; deny wins._\nAllowed: {}\nDenied: {}",
+        list(&rules.whitelist),
+        list(&rules.denylist)
+    );
+    let mut text: String = text.chars().take(RULES_SUMMARY_CHARS).collect();
+    if text.chars().count() == RULES_SUMMARY_CHARS {
+        text.push('…');
+    }
+    Block::Raw(json!({
+        "type": "section",
+        "block_id": "home_tool_rules",
+        "text": {"type": "mrkdwn", "text": text},
+        "accessory": {
+            "type": "button",
+            "action_id": TOOL_RULES_EDIT,
+            "text": plain("Manage rules"),
+        },
+    }))
+}
+
+/// The modal behind *Manage rules*: both lists, one rule a line.
+pub fn tool_rules_modal(rules: &UserConfig) -> Value {
+    let input = |(block, action): (&str, &str),
+                 label: &str,
+                 hint: &str,
+                 rules: &std::collections::BTreeSet<String>| {
+        let mut element = json!({
+            "type": "plain_text_input",
+            "action_id": action,
+            "multiline": true,
+            "placeholder": plain("Bash(git (status|diff).*)"),
+        });
+        if !rules.is_empty() {
+            element["initial_value"] = json!(rules.iter().cloned().collect::<Vec<_>>().join("\n"));
+        }
+        json!({
+            "type": "input",
+            "block_id": block,
+            "optional": true,
+            "label": plain(label),
+            "hint": plain(hint),
+            "element": element,
+        })
+    };
+    json!({
+        "type": "modal",
+        "callback_id": TOOL_RULES_SUBMIT,
+        "title": plain("Tool rules"),
+        "submit": plain("Save"),
+        "close": plain("Cancel"),
+        "blocks": [
+            {
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": "A rule is a tool's name, or a name and a pattern its call must match whole: the command for `Bash`, the path for `Read` and `Edit`, the URL for `WebFetch`. A pattern never allows a command chained with `;`, `&&`, `|` or the like. A bare `Bash` allows every shell command."}],
+            },
+            input(TOOL_ALLOW, "Allowed without asking", "One rule a line.", &rules.whitelist),
+            input(TOOL_DENY, "Denied without asking", "One rule a line. A deny rule wins over an allow rule.", &rules.denylist),
+        ],
+    })
 }
 
 fn sorted<'a>(users: impl Iterator<Item = &'a UserId>) -> Vec<String> {

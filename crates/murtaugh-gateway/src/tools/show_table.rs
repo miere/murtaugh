@@ -44,6 +44,7 @@ impl ShowTable {
 impl Tool for ShowTable {
     fn def(&self) -> ToolDef {
         ToolDef {
+            meta: None,
             name: NAME.to_owned(),
             description: format!(
                 "Show a table in this conversation's Slack thread, which people can sort and page \

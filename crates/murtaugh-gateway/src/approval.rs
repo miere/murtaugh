@@ -1,6 +1,7 @@
 //! Tool approval for owners in `allowed-whitelist` mode: a card in the thread, a decision only the
 //! node's owner can make, and a denial once the timeout passes. Ported from the Go gateway's
-//! approval card; approving with "Always allow" puts the tool on the owner's whitelist.
+//! approval card. Ticking "Remember my decision" keeps the decision as a rule on the owner's
+//! whitelist or denylist: the exact command for a shell call, the whole tool for the rest.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -9,6 +10,7 @@ use std::time::Duration;
 use murtaugh_slack::{Block, Click, SlackClient, UpdateMessage};
 use murtaugh_store::{Store, UserId};
 use rax::tool::{Decision, DeniedBy, ToolCall, ToolKind, ToolVerdict};
+use rax_gateway::rules::ToolRule;
 use rax_tokio::gateway::GatewayLink;
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
@@ -16,28 +18,34 @@ use tokio_util::sync::CancellationToken;
 
 pub const TIMEOUT: Duration = Duration::from_secs(30 * 60);
 pub const ALLOW_ONCE: &str = "tool_approval_once";
-pub const ALLOW_ALWAYS: &str = "tool_approval_always";
 pub const DENY: &str = "tool_approval_deny";
+/// The checkbox; ticking it is a click of its own, which nothing waits on.
+pub const REMEMBER: &str = "tool_approval_remember";
 const BLOCK_ID: &str = "murtaugh_approval_card";
 const ACTIONS_BLOCK_ID: &str = "murtaugh_approval_actions";
 const DETAIL_LINES: usize = 20;
 const DETAIL_CHARS: usize = 2_500;
-const BUTTON_CHARS: usize = 75;
+const RULE_CHARS: usize = 300;
 const ICON_PENDING: &str = "https://img.icons8.com/external-flaticons-lineal-color-flat-icons/64/external-protocols-back-to-work-flaticons-lineal-color-flat-icons.png";
 const ICON_REFUSED: &str = "https://img.icons8.com/external-flaticons-lineal-color-flat-icons/64/external-warning-winter-season-flaticons-lineal-color-flat-icons-2.png";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Choice {
-    Once,
-    Always,
-    Deny,
+pub struct Choice {
+    pub allow: bool,
+    pub remember: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Outcome {
-    Approved { by: String },
-    AlwaysAllowed { by: String },
-    Denied { by: String },
+    /// `remembered` is the rule the decision was kept as, when it was.
+    Approved {
+        by: String,
+        remembered: Option<String>,
+    },
+    Denied {
+        by: String,
+        remembered: Option<String>,
+    },
     TimedOut,
     Dismissed,
 }
@@ -107,9 +115,16 @@ impl Approvals {
             }
             Ok(_) => Some(tokio::select! {
                 decided = decided => match decided {
-                    Ok((Choice::Once, by)) => Outcome::Approved { by },
-                    Ok((Choice::Always, by)) => Outcome::AlwaysAllowed { by },
-                    Ok((Choice::Deny, by)) => Outcome::Denied { by },
+                    Ok((choice, by)) => {
+                        let remembered = match choice.remember {
+                            true => remember(&ask, choice.allow).await,
+                            false => None,
+                        };
+                        match choice.allow {
+                            true => Outcome::Approved { by, remembered },
+                            false => Outcome::Denied { by, remembered },
+                        }
+                    }
                     Err(_) => Outcome::Dismissed,
                 },
                 () = tokio::time::sleep(ask.timeout) => Outcome::TimedOut,
@@ -118,7 +133,7 @@ impl Approvals {
         };
         self.waiting().remove(&id);
         let decision = match &outcome {
-            Some(Outcome::Approved { .. } | Outcome::AlwaysAllowed { .. }) => Decision::Allow,
+            Some(Outcome::Approved { .. }) => Decision::Allow,
             Some(Outcome::Denied { .. }) => denied(DeniedBy::User, "The node's owner denied it."),
             Some(Outcome::TimedOut) => denied(
                 DeniedBy::Timeout,
@@ -129,11 +144,6 @@ impl Approvals {
                 "It could not be put to the node's owner.",
             ),
         };
-        if let Some(Outcome::AlwaysAllowed { .. }) = &outcome
-            && let Err(err) = ask.store.whitelist_tool(&ask.owner, &ask.tool.name).await
-        {
-            tracing::warn!(error = %err, tool = %ask.tool.name, "could not whitelist a tool");
-        }
         let verdict = ToolVerdict {
             id: ask.tool.id.clone(),
             decision,
@@ -156,12 +166,15 @@ impl Approvals {
 
     /// A click on one of the cards' buttons. Returns the note to show the clicker alone, if any.
     pub fn click(&self, click: &Click) -> Option<String> {
-        let choice = match click.action_id.as_str() {
-            ALLOW_ONCE => Choice::Once,
-            ALLOW_ALWAYS => Choice::Always,
-            DENY => Choice::Deny,
+        let allow = match click.action_id.as_str() {
+            ALLOW_ONCE => true,
+            DENY => false,
             _ => return None,
         };
+        let remember = click.values[ACTIONS_BLOCK_ID][REMEMBER]["selected_options"]
+            .as_array()
+            .is_some_and(|options| !options.is_empty());
+        let choice = Choice { allow, remember };
         let mut waiting = self.waiting();
         let Some(card) = waiting.get(&click.value) else {
             return Some("That approval is already settled.".into());
@@ -173,6 +186,22 @@ impl Approvals {
             let _ = card.decide.send((choice, click.user.clone()));
         }
         None
+    }
+}
+
+/// Keeps the decision on the owner's list, and returns the rule it was kept as.
+async fn remember(ask: &Ask, allow: bool) -> Option<String> {
+    let rule = ToolRule::remembering(&ask.tool).to_string();
+    let kept = match allow {
+        true => ask.store.whitelist_tool(&ask.owner, &rule).await,
+        false => ask.store.deny_tool(&ask.owner, &rule).await,
+    };
+    match kept {
+        Ok(_) => Some(rule),
+        Err(err) => {
+            tracing::warn!(error = %err, %rule, "could not remember a tool decision");
+            None
+        }
     }
 }
 
@@ -226,14 +255,21 @@ impl Card {
     }
 
     fn pending(&self, id: &str, owner: &UserId, timeout: Duration) -> Block {
-        let always = clip_to(&format!("Always allow {}", self.tool), BUTTON_CHARS);
         let buttons = json!({
             "type": "actions",
             "block_id": ACTIONS_BLOCK_ID,
             "elements": [
                 button(ALLOW_ONCE, id, "Approve", Some("primary")),
-                button(ALLOW_ALWAYS, id, &always, None),
                 button(DENY, id, "Deny", Some("danger")),
+                {
+                    "type": "checkboxes",
+                    "action_id": REMEMBER,
+                    "options": [{
+                        "text": {"type": "plain_text", "text": "Remember my decision for this tool"},
+                        "description": {"type": "plain_text", "text": "You can edit this on Murtaugh's Home tab."},
+                        "value": "remember",
+                    }],
+                },
             ],
         });
         let footer = format!(
@@ -261,24 +297,28 @@ impl Card {
     fn settled(&self, outcome: &Outcome, owner: &UserId, timeout: Duration) -> Block {
         let tool = &self.tool;
         let (title, subtitle, footer, icon) = match outcome {
-            Outcome::Approved { by } => (
+            Outcome::Approved { by, remembered } => (
                 "Approved",
                 format!("The agent ran the '{tool}' tool"),
-                format!("Approved by <@{by}>."),
+                match remembered {
+                    Some(rule) => format!(
+                        "Approved by <@{by}>, who remembered it as `{}`. It won't ask again.",
+                        clip_to(rule, RULE_CHARS)
+                    ),
+                    None => format!("Approved by <@{by}>."),
+                },
                 ICON_PENDING,
             ),
-            Outcome::AlwaysAllowed { by } => (
-                "Always Allowed",
-                format!("The agent ran the '{tool}' tool"),
-                format!(
-                    "Approved by <@{by}>, who added *{tool}* to their whitelist. It won't ask again."
-                ),
-                ICON_PENDING,
-            ),
-            Outcome::Denied { by } => (
+            Outcome::Denied { by, remembered } => (
                 "Denied",
                 format!("The agent was not allowed to use the '{tool}' tool"),
-                format!("Denied by <@{by}>."),
+                match remembered {
+                    Some(rule) => format!(
+                        "Denied by <@{by}>, who remembered it as `{}`. It won't ask again.",
+                        clip_to(rule, RULE_CHARS)
+                    ),
+                    None => format!("Denied by <@{by}>."),
+                },
                 ICON_REFUSED,
             ),
             Outcome::TimedOut => (

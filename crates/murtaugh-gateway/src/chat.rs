@@ -1669,7 +1669,7 @@ impl Chat {
     /// Allows, denies, or puts the call to the node's owner, as their tool mode says.
     async fn rule(&self, target: &Target, node: &Node, tool: ToolCall, turn: &Turn) {
         let config = policy::rules(&*self.store, &node.owner).await;
-        let decision = match policy::rule(&config, &tool.name) {
+        let decision = match policy::rule(&config, &tool) {
             Ruling::Decided(decision) => decision,
             Ruling::Ask => {
                 let ask = approval::Ask {

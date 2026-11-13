@@ -24,6 +24,7 @@ impl ReadCanvas {
 impl Tool for ReadCanvas {
     fn def(&self) -> ToolDef {
         ToolDef {
+            meta: None,
             name: NAME.to_owned(),
             description: "Read a Slack canvas as Markdown. Each heading ends with an anchor such \
                  as {#a1b2}: pass it as `section` here to read only that section, or to \

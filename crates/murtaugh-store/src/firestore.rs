@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -229,15 +230,21 @@ impl FirestoreStore {
         self.commit(vec![write]).await.map(drop)
     }
 
-    /// An array transform, so two approvals landing together cannot drop each other's tool.
-    async fn change_whitelist(&self, user: &UserId, tool: &str, transform: &str) -> Result<()> {
+    /// An array transform, so two approvals landing together cannot drop each other's rule.
+    async fn change_rules(
+        &self,
+        user: &UserId,
+        field: &str,
+        tool: &str,
+        transform: &str,
+    ) -> Result<()> {
         let mut write = self.update(
             &format!("users/{user}"),
             json!({"user_id": string(user.as_str())}),
         );
         write["updateMask"] = json!({"fieldPaths": ["user_id"]});
         write["updateTransforms"] = json!([{
-            "fieldPath": "tool_whitelist",
+            "fieldPath": field,
             transform: {"values": [string(tool)]},
         }]);
         self.commit(vec![write]).await.map(drop)
@@ -334,9 +341,18 @@ fn user_of(user: UserId, doc: &Doc) -> Result<UserConfig> {
             .map_err(|err: crate::ToolModeError| StoreError::Corrupt(err.to_string()))?,
         None => ToolMode::default(),
     };
-    let whitelist = doc
-        .fields
-        .get("tool_whitelist")
+    Ok(UserConfig {
+        user,
+        allowed: doc.bool("allowed"),
+        tool_mode,
+        whitelist: rules(doc, "tool_whitelist"),
+        denylist: rules(doc, "tool_denylist"),
+    })
+}
+
+fn rules(doc: &Doc, field: &str) -> BTreeSet<String> {
+    doc.fields
+        .get(field)
         .and_then(|v| v["arrayValue"]["values"].as_array())
         .map(|values| {
             values
@@ -344,13 +360,7 @@ fn user_of(user: UserId, doc: &Doc) -> Result<UserConfig> {
                 .filter_map(|v| v["stringValue"].as_str().map(str::to_owned))
                 .collect()
         })
-        .unwrap_or_default();
-    Ok(UserConfig {
-        user,
-        allowed: doc.bool("allowed"),
-        tool_mode,
-        whitelist,
-    })
+        .unwrap_or_default()
 }
 
 fn string(value: &str) -> Value {
@@ -567,16 +577,42 @@ impl GatewayStore for FirestoreStore {
 
     async fn whitelist_tool(&self, user: &UserId, tool: &str) -> Result<bool> {
         let before = self.user(user).await?.whitelist.contains(tool);
-        self.change_whitelist(user, tool, "appendMissingElements")
+        self.change_rules(user, "tool_whitelist", tool, "appendMissingElements")
             .await?;
         Ok(!before)
     }
 
     async fn unwhitelist_tool(&self, user: &UserId, tool: &str) -> Result<bool> {
         let before = self.user(user).await?.whitelist.contains(tool);
-        self.change_whitelist(user, tool, "removeAllFromArray")
+        self.change_rules(user, "tool_whitelist", tool, "removeAllFromArray")
             .await?;
         Ok(before)
+    }
+
+    async fn deny_tool(&self, user: &UserId, tool: &str) -> Result<bool> {
+        let before = self.user(user).await?.denylist.contains(tool);
+        self.change_rules(user, "tool_denylist", tool, "appendMissingElements")
+            .await?;
+        Ok(!before)
+    }
+
+    async fn undeny_tool(&self, user: &UserId, tool: &str) -> Result<bool> {
+        let before = self.user(user).await?.denylist.contains(tool);
+        self.change_rules(user, "tool_denylist", tool, "removeAllFromArray")
+            .await?;
+        Ok(before)
+    }
+
+    /// A mode, or a rule list that was ever written, even one emptied since.
+    async fn has_tool_rules(&self, user: &UserId) -> Result<bool> {
+        Ok(self
+            .get(&format!("users/{user}"))
+            .await?
+            .is_some_and(|doc| {
+                ["tool_mode", "tool_whitelist", "tool_denylist"]
+                    .iter()
+                    .any(|field| doc.fields.contains_key(*field))
+            }))
     }
 
     async fn node_tokens(&self) -> Result<Vec<NodeToken>> {

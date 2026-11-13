@@ -38,6 +38,7 @@ impl SendMessage {
 impl Tool for SendMessage {
     fn def(&self) -> ToolDef {
         ToolDef {
+            meta: None,
             name: NAME.to_owned(),
             description: "Post a message into this conversation's Slack thread, in Markdown. \
                  It is only for when your reply is not shown in the thread, such as a quiet \

@@ -187,7 +187,7 @@ fn a_node_owners_tool_mode_and_whitelist_are_set_from_the_cli() {
     let (_dir, config) = setup();
     assert_eq!(
         ok(gateway(&config, &["tools", "show", "U0PERSON1"])).trim(),
-        "mode\talways-allowed"
+        "mode\tallowed-whitelist"
     );
     let stderr = failed(gateway(
         &config,
@@ -209,8 +209,22 @@ fn a_node_owners_tool_mode_and_whitelist_are_set_from_the_cli() {
         ))
         .contains("is off")
     );
+    assert!(
+        failed(gateway(
+            &config,
+            &["tools", "allow", "U0PERSON1", "Bash(a(b)"]
+        ))
+        .contains("not a regular expression")
+    );
+    assert!(
+        ok(gateway(
+            &config,
+            &["tools", "deny", "U0PERSON1", "Bash(rm .*)"]
+        ))
+        .contains("is on")
+    );
     assert_eq!(
         ok(gateway(&config, &["tools", "show", "U0PERSON1"])).trim(),
-        "mode\tallowed-whitelist\nallowed\tBash"
+        "mode\tallowed-whitelist\nallowed\tBash\ndenied\tBash(rm .*)"
     );
 }

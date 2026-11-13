@@ -29,16 +29,16 @@ pub struct Panel {
 
 impl Panel {
     pub async fn show(&self, viewer: &UserId) {
-        let tool_mode = match self.store.user(viewer).await {
-            Ok(config) => config.tool_mode,
+        let rules = match self.store.user(viewer).await {
+            Ok(config) => config,
             Err(err) => {
-                tracing::warn!(error = %err, "could not read the viewer's tool mode for the Home tab");
-                ToolMode::default()
+                tracing::warn!(error = %err, "could not read the viewer's tool rules for the Home tab");
+                murtaugh_store::UserConfig::new(viewer.clone())
             }
         };
         let blocks = home::view(
             viewer,
-            tool_mode,
+            &rules,
             &self.access.snapshot(),
             &self.fleet.summaries(),
             &self.relay.summaries(),
@@ -90,6 +90,19 @@ impl Panel {
                     tracing::warn!(error = %err, "could not set a tool mode from the Home tab");
                 }
                 self.settle([user]).await;
+            }
+            home::TOOL_RULES_EDIT if node_admin => {
+                let rules = match self.store.user(&user).await {
+                    Ok(rules) => rules,
+                    Err(err) => {
+                        tracing::warn!(error = %err, "could not read tool rules to edit");
+                        return;
+                    }
+                };
+                let modal = home::tool_rules_modal(&rules);
+                if let Err(err) = self.slack.open_view(&click.trigger_id, &modal).await {
+                    tracing::warn!(error = %err, "could not open the tool rules modal");
+                }
             }
             home::ADMIN_SET if admin => {
                 let Some(next) = self.people(std::slice::from_ref(&click.value)).pop_first() else {
@@ -217,8 +230,76 @@ impl Panel {
             home::NODE_NEW_SUBMIT => self.mint(&user, &submission).await,
             home::NODE_REVOKE_SUBMIT => self.revoke(&user, &submission.private_metadata).await,
             home::CLIENT_NEW_SUBMIT => self.mint_client(&user, &submission).await,
+            home::TOOL_RULES_SUBMIT => self.save_tool_rules(&user, &submission).await,
             _ => {}
         }
+    }
+
+    /// Makes the owner's lists what the modal held. A line that is not a rule is left out, and
+    /// the owner hears which in a DM.
+    async fn save_tool_rules(&self, user: &UserId, submission: &ViewSubmission) {
+        if !self.access.snapshot().may_run_nodes(user) {
+            tracing::info!(%user, "denied tool rules to someone who may not run nodes");
+            return;
+        }
+        if let Err(err) = crate::policy::seed(&*self.store, user).await {
+            tracing::warn!(error = %err, "could not seed tool rules before editing them");
+            return;
+        }
+        let current = match self.store.user(user).await {
+            Ok(rules) => rules,
+            Err(err) => {
+                tracing::warn!(error = %err, "could not read tool rules to save");
+                return;
+            }
+        };
+        let mut refused = Vec::new();
+        let mut wanted = |(block, action): (&str, &str)| -> BTreeSet<String> {
+            submission
+                .value(block, action)
+                .unwrap_or_default()
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .filter_map(|line| match line.parse::<rax_gateway::rules::ToolRule>() {
+                    Ok(rule) => Some(rule.to_string()),
+                    Err(err) => {
+                        refused.push(format!("`{}`: {err}", line.replace('`', "'")));
+                        None
+                    }
+                })
+                .collect()
+        };
+        let (allow, deny) = (wanted(home::TOOL_ALLOW), wanted(home::TOOL_DENY));
+        let store = &*self.store;
+        let changes = async {
+            for rule in allow.difference(&current.whitelist) {
+                store.whitelist_tool(user, rule).await?;
+            }
+            for rule in current.whitelist.difference(&allow) {
+                store.unwhitelist_tool(user, rule).await?;
+            }
+            for rule in deny.difference(&current.denylist) {
+                store.deny_tool(user, rule).await?;
+            }
+            for rule in current.denylist.difference(&deny) {
+                store.undeny_tool(user, rule).await?;
+            }
+            murtaugh_store::Result::Ok(())
+        };
+        if let Err(err) = changes.await {
+            tracing::warn!(error = %err, "could not save tool rules");
+        }
+        if !refused.is_empty() {
+            let note = format!(
+                "I left these out of your tool rules:\n{}",
+                refused.join("\n")
+            );
+            if let Err(err) = self.slack.post_message(&dm(user, note)).await {
+                tracing::warn!(error = %err, "could not say which tool rules were left out");
+            }
+        }
+        self.settle([user.clone()]).await;
     }
 
     async fn mint(&self, user: &UserId, submission: &ViewSubmission) {

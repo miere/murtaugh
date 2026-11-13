@@ -28,6 +28,7 @@ impl ReadFile {
 impl Tool for ReadFile {
     fn def(&self) -> ToolDef {
         ToolDef {
+            meta: None,
             name: NAME.to_owned(),
             description: "Read a file shared in Slack, from its id or its link. The file is saved \
                  on your machine and the answer gives its local path; open it from there with \

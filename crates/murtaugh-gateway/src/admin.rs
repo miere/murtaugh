@@ -209,15 +209,15 @@ pub async fn tools(store: &dyn Store, command: ToolsCommand) -> Result<String, S
             Ok(format!("Tools on {owner}'s nodes are now {mode}."))
         }
         ToolsCommand::Allow { user: raw, tool } => {
-            let owner = user(&raw)?;
+            let (owner, rule) = (user(&raw)?, tool_rule(&tool)?);
             let added = store
-                .whitelist_tool(&owner, tool.trim())
+                .whitelist_tool(&owner, &rule)
                 .await
                 .map_err(|err| err.to_string())?;
             Ok(if added {
-                format!("{} is on {owner}'s whitelist.", tool.trim())
+                format!("{rule} is on {owner}'s whitelist.")
             } else {
-                format!("{} was already on {owner}'s whitelist.", tool.trim())
+                format!("{rule} was already on {owner}'s whitelist.")
             })
         }
         ToolsCommand::Disallow { user: raw, tool } => {
@@ -232,6 +232,30 @@ pub async fn tools(store: &dyn Store, command: ToolsCommand) -> Result<String, S
                 format!("{} was not on {owner}'s whitelist.", tool.trim())
             })
         }
+        ToolsCommand::Deny { user: raw, tool } => {
+            let (owner, rule) = (user(&raw)?, tool_rule(&tool)?);
+            let added = store
+                .deny_tool(&owner, &rule)
+                .await
+                .map_err(|err| err.to_string())?;
+            Ok(if added {
+                format!("{rule} is on {owner}'s denylist.")
+            } else {
+                format!("{rule} was already on {owner}'s denylist.")
+            })
+        }
+        ToolsCommand::Undeny { user: raw, tool } => {
+            let owner = user(&raw)?;
+            let removed = store
+                .undeny_tool(&owner, tool.trim())
+                .await
+                .map_err(|err| err.to_string())?;
+            Ok(if removed {
+                format!("{} is off {owner}'s denylist.", tool.trim())
+            } else {
+                format!("{} was not on {owner}'s denylist.", tool.trim())
+            })
+        }
         ToolsCommand::Show { user: raw } => {
             let config = store
                 .user(&user(&raw)?)
@@ -244,9 +268,17 @@ pub async fn tools(store: &dyn Store, command: ToolsCommand) -> Result<String, S
                     .iter()
                     .map(|tool| format!("allowed\t{tool}")),
             );
+            lines.extend(config.denylist.iter().map(|tool| format!("denied\t{tool}")));
             Ok(lines.join("\n"))
         }
     }
+}
+
+/// A rule as it is kept: checked, and written the one way it reads back.
+fn tool_rule(raw: &str) -> Result<String, String> {
+    raw.parse::<rax_gateway::rules::ToolRule>()
+        .map(|rule| rule.to_string())
+        .map_err(|err| err.to_string())
 }
 
 pub async fn node(store: &dyn Store, command: NodeCommand) -> Result<String, String> {
