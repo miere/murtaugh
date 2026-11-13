@@ -302,6 +302,7 @@ fn editor_group() -> ToolGroup {
     ToolGroup {
         namespace: "editor".into(),
         tools: vec![ToolDef {
+            meta: None,
             name: "read".into(),
             description: "Reads an open document".into(),
             input_schema: Some(serde_json::json!({"type": "object"})),
@@ -558,6 +559,10 @@ async fn the_owners_rules_decide_at_once_and_only_a_person_is_asked_through_the_
     let session = within(opening).await.unwrap().unwrap().session_id;
 
     // Always allowed: decided here, and the client only draws it.
+    rig.store
+        .set_tool_mode(&user(OWNER), ToolMode::AlwaysAllowed)
+        .await
+        .unwrap();
     let prompting = tokio::spawn({
         let (client, session) = (client.clone(), session.clone());
         async move {

@@ -118,6 +118,18 @@ impl GatewayStore for SqliteStore {
         self.inner.unwhitelist_tool(user, tool).await
     }
 
+    async fn deny_tool(&self, user: &UserId, tool: &str) -> Result<bool> {
+        self.inner.deny_tool(user, tool).await
+    }
+
+    async fn undeny_tool(&self, user: &UserId, tool: &str) -> Result<bool> {
+        self.inner.undeny_tool(user, tool).await
+    }
+
+    async fn has_tool_rules(&self, user: &UserId) -> Result<bool> {
+        self.inner.has_tool_rules(user).await
+    }
+
     async fn node_tokens(&self) -> Result<Vec<NodeToken>> {
         self.inner.node_tokens().await
     }

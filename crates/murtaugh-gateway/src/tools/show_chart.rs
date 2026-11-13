@@ -41,6 +41,7 @@ impl ShowChart {
 impl Tool for ShowChart {
     fn def(&self) -> ToolDef {
         ToolDef {
+            meta: None,
             name: NAME.to_owned(),
             description: format!(
                 "Show a line, bar, area or pie chart in this conversation's Slack thread. It \

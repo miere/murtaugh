@@ -26,6 +26,7 @@ impl UpdateListItems {
 impl Tool for UpdateListItems {
     fn def(&self) -> ToolDef {
         ToolDef {
+            meta: None,
             name: NAME.to_owned(),
             description: format!(
                 "Change cells of a Slack List's rows, up to {MAX_CELLS} cells per call, all \

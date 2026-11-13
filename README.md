@@ -170,6 +170,30 @@ as soon as its owner is no longer allowed. Each token carries one or more scopes
 entry points it may open; each entry point checks only for its own. Today there is one, `rax`, the
 RAX API below (`--scope`, repeatable, on the CLI; checkboxes on the Home tab).
 
+### Tool approvals
+
+Each node owner's tool mode decides how the calls agents make on their nodes are ruled on.
+`allowed-whitelist`, the default, runs or refuses a call that one of their rules matches, and puts
+any other to them as an approval card. `always-allowed` runs everything, and `denied` refuses every
+tool but the ones that only talk to people. Every node owner starts on a read-only whitelist
+(`Read`, `Glob`, `Grep` and the like), given at startup to owners without rules and when a node is
+minted.
+
+A rule is a tool's name, or a name and a regular expression its call must match whole: the
+command for `Bash`, the path for `Read`, `Write` and `Edit`, the URL for `WebFetch`, the input as
+JSON for the rest. `Bash(git (status|diff).*)` allows those commands only, and a pattern never
+allows a command chained with `;`, `&&`, `|`, backticks, `$(` or a redirect. Deny rules win over
+allow rules. Ticking "Remember my decision" on an approval card keeps it as a rule: the exact
+command for a shell call, the whole tool for the rest. The Home tab sets the mode and edits both
+lists under *Manage rules*; the CLI does the same:
+
+```sh
+murtaugh-gateway tools mode U0456ALICE allowed-whitelist
+murtaugh-gateway tools allow U0456ALICE 'Bash(git (status|diff).*)'
+murtaugh-gateway tools deny U0456ALICE WebFetch
+murtaugh-gateway tools show U0456ALICE
+```
+
 A node can dial as soon as its token is minted: the gateway checks the store for a token it has
 not seen yet. The gateway never shows a token twice. Someone who isn't allowed gets a 🤐 reaction
 and nothing else. When the admin hands the gateway over, the old admin keeps their machines as a
@@ -196,7 +220,7 @@ the fleet. That is how `murtaugh-client acp` puts an editor's agent sessions on 
 - The tools a client lends a session reach the node suffixed with the client's link id, such as
   `openknowledge_x7k2`, and only that session may call them. Files the client links reach the node
   as `bridge://<link id>/<uri>`, and only a node holding one of the client's sessions may read them.
-- Tool calls are ruled by the node owner's tool mode and whitelist first. When those leave a call
+- Tool calls are ruled by the node owner's tool mode and rules first. When those leave a call
   to a person, that person is the node's owner, since the tool runs on their machine: a client of
   their own asks them in the editor, and anyone else's client waits while the owner gets an
   approval card in their Slack DM. Sign-ins still go to the node's owner in Slack.

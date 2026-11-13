@@ -46,6 +46,7 @@ impl CreateList {
 impl Tool for CreateList {
     fn def(&self) -> ToolDef {
         ToolDef {
+            meta: None,
             name: NAME.to_owned(),
             description: format!(
                 "Create a Slack List for the person in this conversation, who becomes its \

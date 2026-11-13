@@ -366,6 +366,13 @@ impl Rig {
         groups: Groups,
         owner_only: bool,
     ) -> FakeNode {
+        // These tests are about chat, not approvals: an owner who set no rules lets tools run.
+        if !self.store.has_tool_rules(&user(owner)).await.unwrap() {
+            self.store
+                .set_tool_mode(&user(owner), murtaugh_store::ToolMode::AlwaysAllowed)
+                .await
+                .unwrap();
+        }
         let minted = token::mint(token::NODE_PREFIX);
         self.store
             .add_node_token(&NodeToken {
@@ -773,6 +780,7 @@ async fn answer(script: Script, id: RequestId, call: GatewayCall) {
                         id: PromptId("p1".into()),
                         title: None,
                         plan: "1. Drop the table\n2. Rebuild it".into(),
+                        steps: Vec::new(),
                     },
                 })
             } else {
@@ -1722,7 +1730,7 @@ async fn the_nodes_own_talking_tools_never_wait_for_approval() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn always_allow_whitelists_the_tool_so_the_next_call_runs_unasked() {
+async fn remembering_an_approval_keeps_it_as_a_rule_so_the_next_call_runs_unasked() {
     let rig = rig().await;
     rig.store
         .set_tool_mode(&user(ALICE), murtaugh_store::ToolMode::AllowedWhitelist)
@@ -1736,27 +1744,31 @@ async fn always_allow_whitelists_the_tool_so_the_next_call_runs_unasked() {
         .unwrap();
     laptop.next_prompt().await;
     let card = eventually("the approval card", || approval_card(&rig, &ts)).await;
+    assert!(card_says(&card, "Remember my decision for this tool"));
     rig.sim
-        .click(
+        .click_with_state(
             ALICE,
             GENERAL,
             &card.ts,
-            murtaugh_gateway::approval::ALLOW_ALWAYS,
+            murtaugh_gateway::approval::ALLOW_ONCE,
+            serde_json::json!({"murtaugh_approval_actions": {
+                murtaugh_gateway::approval::REMEMBER: {
+                    "type": "checkboxes",
+                    "selected_options": [{"value": "remember"}],
+                },
+            }}),
         )
         .await
         .unwrap();
     wait_for_turn_end(&rig, GENERAL, &ts, "pong to: first (tool ran)").await;
     assert!(card_says(
         &approval_card(&rig, &ts).unwrap(),
-        "added *Bash* to their whitelist"
+        "who remembered it as"
     ));
+    let rules = rig.store.user(&user(ALICE)).await.unwrap().whitelist;
     assert!(
-        rig.store
-            .user(&user(ALICE))
-            .await
-            .unwrap()
-            .whitelist
-            .contains("Bash")
+        rules.iter().any(|rule| rule.starts_with("Bash")),
+        "{rules:?}"
     );
 
     let second = rig
@@ -2548,6 +2560,64 @@ async fn a_node_admin_sets_their_tool_mode_from_the_home_tab() {
         (select["initial_option"]["value"] == "denied").then_some(())
     });
     home.await;
+    rig.shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_admin_edits_their_tool_rules_from_the_home_tab() {
+    let rig = rig().await;
+    let home = home_of(&rig, ALICE).await;
+    assert!(home.contains("Manage rules"), "{home}");
+    rig.sim
+        .click_home(ALICE, murtaugh_gateway::home::TOOL_RULES_EDIT, "")
+        .await
+        .unwrap();
+    eventually("the tool rules modal", || rig.sim.modal(ALICE)).await;
+    let text = |value: &str| serde_json::json!({"type": "plain_text_input", "value": value});
+    rig.sim
+        .submit_modal(
+            ALICE,
+            serde_json::json!({
+                "tool_allow": {"rules": text("Read\n Bash(git status) \nBash(a(b)\n")},
+                "tool_deny": {"rules": text("WebFetch")},
+            }),
+        )
+        .await
+        .unwrap();
+    settled("Alice's rules saved", async || {
+        let rules = rig.store.user(&user(ALICE)).await.unwrap();
+        rules.denylist.contains("WebFetch")
+    })
+    .await;
+    let rules = rig.store.user(&user(ALICE)).await.unwrap();
+    assert_eq!(
+        rules
+            .whitelist
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["Bash(git status)", "Read"],
+        "the seeded rules not kept in the modal are dropped"
+    );
+    assert_eq!(rules.tool_mode, murtaugh_store::ToolMode::AllowedWhitelist);
+    eventually("a note about the rule left out", || {
+        let channel = rig.sim.im_channel(ALICE)?;
+        rig.sim
+            .messages(&channel)
+            .iter()
+            .any(|m| m.text.contains("Bash(a(b)"))
+            .then_some(())
+    })
+    .await;
+    eventually("the new rules shown", || {
+        rig.sim
+            .home(ALICE)?
+            .to_string()
+            .contains("`Bash(git status)`")
+            .then_some(())
+    })
+    .await;
+    assert_eq!(rig.sim.violations(), vec![]);
     rig.shutdown.cancel();
 }
 

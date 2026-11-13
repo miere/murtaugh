@@ -168,14 +168,19 @@ pub struct UserTokenMintArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum ToolsCommand {
-    /// always-allowed (the default), allowed-whitelist (ask the owner for anything off the
-    /// whitelist) or denied
+    /// allowed-whitelist (the default: ask the owner about anything the rules don't decide),
+    /// always-allowed or denied
     Mode { user: String, mode: String },
-    /// Put a tool on the owner's whitelist; the name is the one the approval card shows
+    /// Put a rule on the owner's whitelist: a tool's name, as the approval card shows it, or a
+    /// name and a pattern its call must match whole, as in 'Bash(git (status|diff))'
     Allow { user: String, tool: String },
-    /// Take a tool off the owner's whitelist
+    /// Take a rule off the owner's whitelist
     Disallow { user: String, tool: String },
-    /// The owner's mode and whitelist
+    /// Put a rule on the owner's denylist, which wins over the whitelist
+    Deny { user: String, tool: String },
+    /// Take a rule off the owner's denylist
+    Undeny { user: String, tool: String },
+    /// The owner's mode and rules
     Show { user: String },
 }
 

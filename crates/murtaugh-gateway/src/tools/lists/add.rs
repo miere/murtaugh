@@ -26,6 +26,7 @@ impl AddListItems {
 impl Tool for AddListItems {
     fn def(&self) -> ToolDef {
         ToolDef {
+            meta: None,
             name: NAME.to_owned(),
             description: format!(
                 "Add rows to a Slack List, up to {MAX_ROWS} per call. Each row is an object of \
