@@ -7,17 +7,24 @@ mod contract;
 
 use std::time::Duration;
 
-use murtaugh_store::{FirestoreLeader, FirestoreOptions, FirestoreStore, Leader};
+use murtaugh_store::{
+    Conversation, FirestoreOptions, FirestoreStore, GatewayStore, Leader, Pin, Store, StoreError,
+    slack_user,
+};
+use rax_gateway::store::firestore::FirestoreStore as LooseStore;
+use serde_json::json;
+use time::OffsetDateTime;
+
+fn options() -> Option<FirestoreOptions> {
+    let host = std::env::var("FIRESTORE_EMULATOR_HOST").ok()?;
+    let mut options = FirestoreOptions::new(format!("test-{:016x}", rand::random::<u64>()));
+    options.project_id = Some("demo-murtaugh".into());
+    options.emulator_host = Some(host);
+    Some(options)
+}
 
 async fn open() -> Option<FirestoreStore> {
-    let host = std::env::var("FIRESTORE_EMULATOR_HOST").ok()?;
-    let options = FirestoreOptions {
-        project_id: Some("demo-murtaugh".into()),
-        collection: Some(format!("test-{:016x}", rand::random::<u64>())),
-        emulator_host: Some(host),
-        ..Default::default()
-    };
-    Some(FirestoreStore::open(options).await.unwrap())
+    Some(FirestoreStore::open(options()?).await.unwrap())
 }
 
 macro_rules! contract {
@@ -49,10 +56,7 @@ async fn one_gateway_leads_and_a_release_hands_over_at_once() {
         return;
     };
     let ttl = Duration::from_secs(30);
-    let (first, second) = (
-        FirestoreLeader::new(store.clone(), ttl),
-        FirestoreLeader::new(store, ttl),
-    );
+    let (first, second) = (store.leader(ttl), store.leader(ttl));
     let lease = first.acquire("gateway-a").await.unwrap().unwrap();
     assert_eq!(second.acquire("gateway-b").await.unwrap(), None);
     let renewed = first.renew(&lease).await.unwrap().unwrap();
@@ -67,10 +71,7 @@ async fn an_expired_lease_is_taken_over_and_its_old_holder_learns_on_renewal() {
         return;
     };
     let ttl = Duration::from_secs(1);
-    let (first, second) = (
-        FirestoreLeader::new(store.clone(), ttl),
-        FirestoreLeader::new(store, ttl),
-    );
+    let (first, second) = (store.leader(ttl), store.leader(ttl));
     let stale = first.acquire("gateway-a").await.unwrap().unwrap();
     tokio::time::sleep(Duration::from_millis(1_500)).await;
     let taken = second.acquire("gateway-b").await.unwrap();
@@ -84,9 +85,7 @@ async fn two_gateways_racing_for_a_free_lease_never_both_win() {
         return;
     };
     let ttl = Duration::from_secs(30);
-    let leaders: Vec<_> = (0..6)
-        .map(|_| FirestoreLeader::new(store.clone(), ttl))
-        .collect();
+    let leaders: Vec<_> = (0..6).map(|_| store.leader(ttl)).collect();
     let attempts = leaders
         .iter()
         .enumerate()
@@ -97,4 +96,65 @@ async fn two_gateways_racing_for_a_free_lease_never_both_win() {
         .filter(|result| matches!(result, Ok(Some(_))))
         .count();
     assert_eq!(won, 1);
+}
+
+/// Where every deployed gateway already keeps its pins; moving them strands the threads.
+#[tokio::test]
+async fn a_pin_keeps_its_document_and_fields() {
+    let Some(options) = options() else {
+        return;
+    };
+    let store = FirestoreStore::open(options.clone()).await.unwrap();
+    store
+        .set_pin(&Pin {
+            conversation: Conversation {
+                channel: "C0123ABCD".into(),
+                thread_ts: "1712345678.000100".into(),
+            },
+            node: "n1".into(),
+            session_id: "s1".into(),
+            user: slack_user("U0PERSON1").unwrap(),
+            pinned_at: OffsetDateTime::from_unix_timestamp(1_789_000_000).unwrap(),
+        })
+        .await
+        .unwrap();
+    let raw = LooseStore::open(options).await.unwrap();
+    let doc = raw
+        .get("pins/C0123ABCD-1712345678.000100")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::Value::Object(doc.fields().clone()),
+        json!({
+            "channel": {"stringValue": "C0123ABCD"},
+            "thread_ts": {"stringValue": "1712345678.000100"},
+            "node": {"stringValue": "n1"},
+            "session_id": {"stringValue": "s1"},
+            "user_id": {"stringValue": "U0PERSON1"},
+            "pinned_at": {"timestampValue": "2026-09-10T00:26:40Z"},
+        })
+    );
+}
+
+/// As SQLite does: a stored id that is not a Slack user's is corrupt, not a person.
+#[tokio::test]
+async fn a_stored_id_that_is_not_a_slack_users_is_corrupt() {
+    let Some(options) = options() else {
+        return;
+    };
+    let loose = LooseStore::open(options.clone()).await.unwrap();
+    rax_gateway::store::Store::set_admin(
+        &loose,
+        &rax_gateway::store::UserId::parse("C0123ABCD").unwrap(),
+    )
+    .await
+    .unwrap();
+    let store = FirestoreStore::open(options).await.unwrap();
+    match store.admin().await.unwrap_err() {
+        StoreError::Corrupt(message) => {
+            assert_eq!(message, slack_user("C0123ABCD").unwrap_err().to_string())
+        }
+        other => panic!("not corrupt: {other}"),
+    }
 }

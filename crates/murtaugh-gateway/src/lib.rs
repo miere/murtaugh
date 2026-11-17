@@ -56,7 +56,7 @@ pub fn settings() -> &'static rax_gateway::Settings {
 }
 
 use murtaugh_store::{
-    FirestoreLeader, FirestoreOptions, FirestoreStore, Leader, SqliteLeader, SqliteStore, Store,
+    DEFAULT_COLLECTION, FirestoreOptions, FirestoreStore, Leader, SqliteLeader, SqliteStore, Store,
 };
 
 use crate::config::{Database, FirestoreConfig};
@@ -67,7 +67,10 @@ fn firestore_options(config: &FirestoreConfig) -> FirestoreOptions {
     FirestoreOptions {
         project_id: config.project_id.clone(),
         database_id: config.database_id.clone(),
-        collection: config.collection.clone(),
+        collection: config
+            .collection
+            .clone()
+            .unwrap_or_else(|| DEFAULT_COLLECTION.to_owned()),
         credentials_file: config.credentials_file.clone(),
         emulator_host: None,
     }
@@ -87,7 +90,7 @@ pub async fn open_leader(database: &Database) -> Result<(Arc<dyn Store>, Arc<dyn
             let store = FirestoreStore::open(firestore_options(config))
                 .await
                 .map_err(|err| err.to_string())?;
-            let leader = FirestoreLeader::new(store.clone(), LEASE_TTL);
+            let leader = store.leader(LEASE_TTL);
             Ok((Arc::new(store), Arc::new(leader)))
         }
     }
