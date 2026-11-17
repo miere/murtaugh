@@ -65,6 +65,8 @@ struct Session {
     lent: Lent,
     /// Tool calls the editor has been shown, so an update for one it never saw draws it first.
     shown: HashSet<String>,
+    /// The editor's files this session's prompts linked, by the name a node saves its copy under.
+    linked: HashMap<String, String>,
 }
 
 struct Shared {
@@ -401,6 +403,7 @@ async fn new_session(shared: &SharedRef, request: NewSessionRequest) -> Result<S
         Session {
             lent,
             shown: HashSet::new(),
+            linked: HashMap::new(),
         },
     );
     tracing::info!(session = %id, "session opened");
@@ -476,6 +479,7 @@ async fn prompt(shared: &SharedRef, request: PromptRequest) -> Result<String, St
         .flatten()
         .filter_map(|block| serde_json::from_value(block.clone()).ok())
         .collect();
+    remember_links(shared, &session_id, &content);
     let pending = link
         .call(GatewayCall::Prompt(Prompt {
             session_id: SessionId(session_id.clone()),
@@ -490,6 +494,71 @@ async fn prompt(shared: &SharedRef, request: PromptRequest) -> Result<String, St
         Err(_) => return Err("Murtaugh did not take the prompt in time".to_owned()),
     }
     turn(shared, &link, &session_id, pending.events).await
+}
+
+/// Notes the editor's files a prompt links. A node saves its own copy of each and hands the agent
+/// that path, which the editor has never heard of; `linked` turns it back into the editor's.
+fn remember_links(shared: &Shared, session_id: &str, content: &[Open<ContentBlock>]) {
+    let mut sessions = lock(&shared.sessions);
+    let Some(session) = sessions.get_mut(session_id) else {
+        return;
+    };
+    for block in content {
+        let Open::Known(ContentBlock::ResourceLink { uri, name, .. }) = block else {
+            continue;
+        };
+        let Some(path) = url::Url::parse(uri)
+            .ok()
+            .filter(|url| url.scheme() == "file")
+            .and_then(|url| url.to_file_path().ok())
+        else {
+            continue;
+        };
+        session
+            .linked
+            .insert(saved_name(name), path.display().to_string());
+    }
+}
+
+/// The editor's path for a node's copy of a file a prompt linked; any other path as it came.
+/// The editor still decides whether it may be read, so this only undoes the node's renaming.
+fn linked(shared: &Shared, session_id: &str, path: &str) -> String {
+    let copy = std::path::Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.split_once('-'))
+        .filter(|(transfer, _)| is_transfer_id(transfer));
+    let original = copy.and_then(|(_, name)| {
+        lock(&shared.sessions)
+            .get(session_id)
+            .and_then(|session| session.linked.get(name).cloned())
+    });
+    original.unwrap_or_else(|| path.to_owned())
+}
+
+/// RAX's transfer ids: `t` and sixteen hex digits.
+fn is_transfer_id(text: &str) -> bool {
+    text.strip_prefix('t')
+        .is_some_and(|hex| hex.len() == 16 && hex.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// The name a node saves a linked file under, after its transfer id, as Riggs names it.
+fn saved_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(100)
+        .collect();
+    match cleaned.trim_start_matches('.') {
+        "" => "file".to_owned(),
+        trimmed => trimmed.to_owned(),
+    }
 }
 
 async fn turn(
@@ -801,6 +870,7 @@ async fn read_file(
     line: Option<u64>,
     limit: Option<u64>,
 ) -> Result<String, String> {
+    let path = &linked(shared, session_id, path);
     if !lock(&shared.fs).read {
         return local::read(&shared.options.roots, path, line, limit).await;
     }
@@ -821,6 +891,7 @@ async fn write_file(
     path: &str,
     content: &str,
 ) -> Result<(), String> {
+    let path = &linked(shared, session_id, path);
     if !lock(&shared.fs).write {
         return local::write(&shared.options.roots, path, content).await;
     }

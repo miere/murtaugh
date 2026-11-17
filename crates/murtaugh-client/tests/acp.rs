@@ -411,8 +411,16 @@ impl Editor {
         session: &str,
         text: &str,
     ) -> tokio::sync::oneshot::Receiver<Result<Value, String>> {
+        self.prompt_blocks(session, json!([{"type": "text", "text": text}]))
+    }
+
+    fn prompt_blocks(
+        &self,
+        session: &str,
+        blocks: Value,
+    ) -> tokio::sync::oneshot::Receiver<Result<Value, String>> {
         let (reply, answer) = tokio::sync::oneshot::channel();
-        let body = json!({"sessionId": session, "prompt": [{"type": "text", "text": text}]});
+        let body = json!({"sessionId": session, "prompt": blocks});
         self.requests.send(Request::Prompt(body, reply)).unwrap();
         answer
     }
@@ -552,6 +560,65 @@ async fn a_write_is_applied_through_the_editors_file_system() {
         panic!("expected a tool outcome")
     };
     assert_eq!(read.content, "contents of /work/a.rs");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_nodes_copy_of_a_linked_file_is_read_as_the_editors_original() {
+    let mut murtaugh = Murtaugh::start().await;
+    let editor = editor(options(murtaugh.url(None)));
+    editor.initialize(true).await;
+    let (mut bridge, _) = opened(&editor, &mut murtaugh, None).await;
+
+    let answer = editor.prompt_blocks(
+        "s1",
+        json!([
+            {"type": "text", "text": "can you see my file?"},
+            {"type": "resource_link", "uri": "file:///vault/My%20Tasks.md", "name": "My Tasks"},
+        ]),
+    );
+    let (stream, _) = bridge.prompted().await;
+    bridge.say_and_finish(&stream, "let me look").await;
+    within(answer).await.unwrap().unwrap();
+
+    let copy = "/node/files/d5c3b164/t5afd5d45acdf5301-My_Tasks";
+    let read = outcome(
+        bridge
+            .call_tool("s1", "read_text_file", json!({"path": copy}))
+            .await,
+    );
+    assert_eq!(read.content, "contents of /vault/My Tasks.md", "{read:?}");
+
+    let written = outcome(
+        bridge
+            .call_tool(
+                "s1",
+                "write_text_file",
+                json!({"path": copy, "content": "- [x] done"}),
+            )
+            .await,
+    );
+    assert!(!written.is_error, "{written:?}");
+    assert_eq!(
+        editor
+            .writes
+            .lock()
+            .unwrap()
+            .get("/vault/My Tasks.md")
+            .map(String::as_str),
+        Some("- [x] done")
+    );
+
+    for path in [
+        "/node/files/d5c3b164/t5afd5d45acdf5301-Other",
+        "/node/files/d5c3b164/notatransfer-My_Tasks",
+    ] {
+        let read = outcome(
+            bridge
+                .call_tool("s1", "read_text_file", json!({"path": path}))
+                .await,
+        );
+        assert_eq!(read.content, format!("contents of {path}"), "{read:?}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
