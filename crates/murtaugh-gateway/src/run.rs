@@ -368,7 +368,10 @@ pub fn banner(config: &config::Config) -> String {
         config::Database::Sqlite { path } => format!("sqlite {}", path.display()),
         config::Database::Firestore(firestore) => format!(
             "firestore {}",
-            firestore.collection.as_deref().unwrap_or("murtaugh")
+            firestore
+                .collection
+                .as_deref()
+                .unwrap_or(murtaugh_store::DEFAULT_COLLECTION)
         ),
     };
     format!(

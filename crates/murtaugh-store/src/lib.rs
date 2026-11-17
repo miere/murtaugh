@@ -8,12 +8,13 @@ mod sqlite;
 
 use async_trait::async_trait;
 
-pub use firestore::{FirestoreLeader, FirestoreOptions, FirestoreStore};
+pub use firestore::{DEFAULT_COLLECTION, FirestoreStore};
 pub use model::{Conversation, Pin, SlackIds, slack_ids, slack_user};
 pub use rax_gateway::store::Store as GatewayStore;
 pub use rax_gateway::store::{
-    Grant, Leader, LeaderLock, Lease, NodeToken, Result, Scope, ScopeError, SqliteLeader,
-    StoreError, ToolMode, ToolModeError, UserConfig, UserId, UserIdError, UserToken,
+    FirestoreLeader, FirestoreOptions, Grant, Leader, LeaderLock, Lease, NodeToken, Result, Scope,
+    ScopeError, SqliteLeader, StoreError, ToolMode, ToolModeError, UserConfig, UserId, UserIdError,
+    UserToken,
 };
 pub use sqlite::SqliteStore;
 

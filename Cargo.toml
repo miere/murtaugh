@@ -17,10 +17,10 @@ expect_used = "deny"
 panic = "deny"
 
 [workspace.dependencies]
-rax = { git = "https://github.com/miere/rax-rs", tag = "0.16.0" }
-rax-tokio = { git = "https://github.com/miere/rax-rs", tag = "0.16.0" }
-rax-sim = { git = "https://github.com/miere/rax-rs", tag = "0.16.0" }
-rax-gateway = { git = "https://github.com/miere/rax-rs", tag = "0.16.0" }
+rax = { git = "https://github.com/miere/rax-rs", tag = "0.17.0" }
+rax-tokio = { git = "https://github.com/miere/rax-rs", tag = "0.17.0" }
+rax-sim = { git = "https://github.com/miere/rax-rs", tag = "0.17.0" }
+rax-gateway = { git = "https://github.com/miere/rax-rs", tag = "0.17.0" }
 murtaugh-common = { path = "crates/murtaugh-common" }
 murtaugh-slack = { path = "crates/murtaugh-slack" }
 murtaugh-store = { path = "crates/murtaugh-store" }
@@ -30,7 +30,6 @@ axum = { version = "0.8", default-features = false, features = ["http1", "tokio"
 base64 = "0.22"
 dotenvy = "0.15"
 clap = { version = "4", features = ["derive"] }
-gcp_auth = "0.12"
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 hex = "0.4"
 rand = "0.10"
